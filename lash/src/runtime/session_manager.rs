@@ -13,7 +13,7 @@ enum CurrentSnapshot {
 }
 
 impl CurrentSnapshot {
-    fn into_snapshot(&self) -> SessionSnapshot {
+    fn to_snapshot(&self) -> SessionSnapshot {
         match self {
             Self::Owned(snapshot) => snapshot.clone(),
             Self::Projection {
@@ -37,6 +37,7 @@ pub(super) struct ManagedSessionTurn {
 
 #[derive(Clone)]
 pub(super) struct RuntimeSessionManager {
+    runtime_scope_id: Arc<str>,
     current_session_id: String,
     current_snapshot: CurrentSnapshot,
     current_policy: SessionPolicy,
@@ -155,6 +156,7 @@ impl RuntimeSessionManager {
             return Err(ExternalInvokeError::Unknown("session_manager".to_string()));
         };
         Ok(Self {
+            runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
             current_session_id: runtime.state.session_id.clone(),
             current_snapshot: if persist_usage_to_store {
                 CurrentSnapshot::Owned(runtime.export_graph_first_state())
@@ -219,8 +221,12 @@ impl RuntimeSessionManager {
         true
     }
 
+    fn background_scope_key(&self, session_id: &str) -> String {
+        format!("{}:{session_id}", self.runtime_scope_id)
+    }
+
     async fn current_snapshot_for_store_write(&self) -> SessionSnapshot {
-        let mut state = self.current_snapshot.into_snapshot();
+        let mut state = self.current_snapshot.to_snapshot();
         if let Some(store) = &self.current_store
             && let Some(head) = store.load_session_head().await
         {
@@ -273,7 +279,7 @@ impl RuntimeSessionManager {
         session_id: &str,
     ) -> Result<SessionSnapshot, crate::PluginError> {
         if session_id == self.current_session_id {
-            let mut snapshot = self.current_snapshot.into_snapshot();
+            let mut snapshot = self.current_snapshot.to_snapshot();
             super::normalize_session_graph(&mut snapshot);
             return Ok(snapshot);
         }
@@ -283,7 +289,7 @@ impl RuntimeSessionManager {
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
         let runtime = runtime.lock().await;
-        Ok(runtime.export_state())
+        Ok(runtime.export_persisted_state())
     }
 
     async fn tool_catalog_by_id(
@@ -310,7 +316,7 @@ impl RuntimeSessionManager {
 #[async_trait::async_trait]
 impl SessionManager for RuntimeSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, crate::PluginError> {
-        let mut snapshot = self.current_snapshot.into_snapshot();
+        let mut snapshot = self.current_snapshot.to_snapshot();
         super::normalize_session_graph(&mut snapshot);
         Ok(snapshot)
     }
@@ -338,12 +344,19 @@ impl SessionManager for RuntimeSessionManager {
             .clone()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if session_id == self.current_session_id
+            || self.registry.lock().await.contains_key(&session_id)
+        {
+            return Err(crate::PluginError::Session(format!(
+                "session `{session_id}` already exists"
+            )));
+        }
         let snapshot = match &request.start {
             SessionStartPoint::Empty => SessionSnapshot {
                 session_id: session_id.clone(),
                 ..Default::default()
             },
-            SessionStartPoint::CurrentSession => self.current_snapshot.into_snapshot(),
+            SessionStartPoint::CurrentSession => self.current_snapshot.to_snapshot(),
             SessionStartPoint::ExistingSession { session_id } => {
                 self.snapshot_by_id(session_id).await?
             }
@@ -392,12 +405,8 @@ impl SessionManager for RuntimeSessionManager {
             ),
             None => None,
         };
-        let services = match &session_store {
-            Some(store) => RuntimeServices::new(plugins).with_store(Arc::clone(store)),
-            None => RuntimeServices::new(plugins),
-        };
-        let mut runtime = match &self.current_host.background_executor {
-            Some(executor) => {
+        let mut runtime = match (&self.current_host.background_executor, &session_store) {
+            (Some(executor), Some(store)) => {
                 let host = BackgroundRuntimeHost::new(
                     EmbeddedRuntimeHost {
                         core: self.current_host.core.clone(),
@@ -405,14 +414,55 @@ impl SessionManager for RuntimeSessionManager {
                     },
                     Arc::clone(executor),
                 );
-                LashRuntime::from_background_state(policy.clone(), host, services, state).await
+                LashRuntime::from_persistent_background_state(
+                    policy.clone(),
+                    host,
+                    crate::PersistentRuntimeServices::new(plugins, Arc::clone(store)),
+                    state,
+                )
+                .await
             }
-            None => {
+            (Some(executor), None) => {
+                let host = BackgroundRuntimeHost::new(
+                    EmbeddedRuntimeHost {
+                        core: self.current_host.core.clone(),
+                        session_store_factory: self.current_host.session_store_factory.clone(),
+                    },
+                    Arc::clone(executor),
+                );
+                LashRuntime::from_background_state(
+                    policy.clone(),
+                    host,
+                    RuntimeServices::new(plugins),
+                    state,
+                )
+                .await
+            }
+            (None, Some(store)) => {
                 let host = EmbeddedRuntimeHost {
                     core: self.current_host.core.clone(),
                     session_store_factory: self.current_host.session_store_factory.clone(),
                 };
-                LashRuntime::from_embedded_state(policy.clone(), host, services, state).await
+                LashRuntime::from_persistent_embedded_state(
+                    policy.clone(),
+                    host,
+                    crate::PersistentRuntimeServices::new(plugins, Arc::clone(store)),
+                    state,
+                )
+                .await
+            }
+            (None, None) => {
+                let host = EmbeddedRuntimeHost {
+                    core: self.current_host.core.clone(),
+                    session_store_factory: self.current_host.session_store_factory.clone(),
+                };
+                LashRuntime::from_embedded_state(
+                    policy.clone(),
+                    host,
+                    RuntimeServices::new(plugins),
+                    state,
+                )
+                .await
             }
         }
         .map_err(|err| crate::PluginError::Session(err.to_string()))?;
@@ -431,34 +481,17 @@ impl SessionManager for RuntimeSessionManager {
         if let Some(store) = &session_store {
             let mut persisted_state = runtime.export_persisted_state();
             super::normalize_session_graph(&mut persisted_state);
-            let stored_checkpoint = crate::store::put_checkpoint(
-                store.as_ref(),
-                &crate::store::HydratedSessionCheckpoint {
-                    turn_state: crate::PersistedTurnState {
-                        iteration: persisted_state.iteration,
-                        token_usage: persisted_state.token_usage.clone(),
-                        last_prompt_usage: persisted_state.last_prompt_usage.clone(),
-                    },
-                    dynamic_state_ref: None,
-                    dynamic_state: persisted_state.dynamic_state_snapshot.clone(),
-                    plugin_snapshot_ref: None,
-                    plugin_snapshot_revision: persisted_state.plugin_snapshot_revision,
-                    plugin_snapshot: persisted_state.plugin_snapshot.clone(),
-                },
-            )
-            .await;
-            persisted_state.checkpoint_ref = Some(stored_checkpoint.checkpoint_ref);
-            persisted_state.dynamic_state_ref = stored_checkpoint.manifest.dynamic_state_ref;
-            persisted_state.dynamic_state_generation = persisted_state
-                .dynamic_state_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.base_generation);
-            persisted_state.plugin_snapshot_ref = stored_checkpoint.manifest.plugin_snapshot_ref;
-            persisted_state.plugin_snapshot_revision =
-                stored_checkpoint.manifest.plugin_snapshot_revision;
-            persisted_state.execution_state_snapshot = None;
-            super::persist_session_graph_and_head(store.as_ref(), &mut persisted_state).await;
-            store.clear_live_resume().await;
+            let crate::store::RuntimeCommitResult::PersistedState(result) = store
+                .apply_runtime_commit(crate::store::RuntimeCommit::persisted_state(
+                    &persisted_state,
+                    &[],
+                ))
+                .await
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?
+            else {
+                unreachable!("persisted state commit should return persisted result");
+            };
+            persisted_state.apply_persisted_commit_result(result);
         }
         self.registry
             .lock()
@@ -612,14 +645,18 @@ impl SessionManager for RuntimeSessionManager {
         if session_id == self.current_session_id {
             self.background_sync_needed.store(true, Ordering::Release);
         }
-        executor.spawn(session_id, label, job).await
+        executor
+            .spawn(&self.background_scope_key(session_id), label, job)
+            .await
     }
 
     async fn await_background_jobs(&self, session_id: &str) -> Result<(), crate::PluginError> {
         let Some(executor) = &self.current_host.background_executor else {
             return Ok(());
         };
-        executor.await_all(session_id).await
+        executor
+            .await_all(&self.background_scope_key(session_id))
+            .await
     }
 
     async fn prompt_user(
@@ -665,7 +702,7 @@ impl SessionManager for RuntimeSessionManager {
         let mut state = if self.persist_usage_to_store {
             self.current_snapshot_for_store_write().await
         } else {
-            let mut state = self.current_snapshot.into_snapshot();
+            let mut state = self.current_snapshot.to_snapshot();
             super::normalize_session_graph(&mut state);
             state
         };
@@ -681,27 +718,14 @@ impl SessionManager for RuntimeSessionManager {
         }
         let node_ids = append_session_nodes_to_state(&mut state, &request.nodes);
         let leaf_node_id = state.session_graph.leaf_node_id.clone().unwrap_or_default();
-        let stored_checkpoint = crate::store::put_checkpoint(
-            store.as_ref(),
-            &crate::store::HydratedSessionCheckpoint {
-                turn_state: crate::PersistedTurnState {
-                    iteration: state.iteration,
-                    token_usage: state.token_usage.clone(),
-                    last_prompt_usage: state.last_prompt_usage.clone(),
-                },
-                dynamic_state_ref: state.dynamic_state_ref.clone(),
-                dynamic_state: state.dynamic_state_snapshot.clone(),
-                plugin_snapshot_ref: state.plugin_snapshot_ref.clone(),
-                plugin_snapshot_revision: state.plugin_snapshot_revision,
-                plugin_snapshot: state.plugin_snapshot.clone(),
-            },
-        )
-        .await;
-        state.checkpoint_ref = Some(stored_checkpoint.checkpoint_ref);
-        state.dynamic_state_ref = stored_checkpoint.manifest.dynamic_state_ref;
-        state.plugin_snapshot_ref = stored_checkpoint.manifest.plugin_snapshot_ref;
-        state.execution_state_snapshot = None;
-        super::persist_session_graph_and_head(store.as_ref(), &mut state).await;
+        let crate::store::RuntimeCommitResult::PersistedState(result) = store
+            .apply_runtime_commit(crate::store::RuntimeCommit::persisted_state(&state, &[]))
+            .await
+            .map_err(|err| crate::PluginError::Session(err.to_string()))?
+        else {
+            unreachable!("persisted state commit should return persisted result");
+        };
+        state.apply_persisted_commit_result(result);
         self.background_sync_needed.store(true, Ordering::Release);
         Ok(crate::AppendSessionNodesResult::Appended {
             node_ids,

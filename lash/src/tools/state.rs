@@ -1,5 +1,6 @@
 #[cfg(feature = "sqlite-store")]
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde_json::json;
@@ -255,10 +256,35 @@ fn rlm_bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<Prom
     ];
     let mut entries = globals.iter().collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut registry = SchemaRegistry::default();
+    let mut variable_types = Vec::new();
     for (name, value) in entries {
-        let ty = json_value_type_label(value);
-        let preview = preview_value(value, 200);
-        lines.push(format!("- `{name}`: {ty} = {preview}"));
+        let shape = infer_json_shape(value);
+        registry.register_root(name, &shape);
+        variable_types.push((name.as_str(), shape));
+    }
+
+    lines.push(String::new());
+    lines.push("Variables:".to_string());
+    for (name, shape) in &variable_types {
+        lines.push(format!(
+            "- `{name}`: `{}`",
+            render_shape_inline(shape, &registry)
+        ));
+    }
+
+    if !registry.definitions.is_empty() {
+        lines.push(String::new());
+        lines.push("Schema:".to_string());
+        lines.push("```text".to_string());
+        for (idx, (name, shape)) in registry.definitions.iter().enumerate() {
+            if idx > 0 {
+                lines.push(String::new());
+            }
+            lines.extend(render_type_definition(name, shape, &registry));
+        }
+        lines.push("```".to_string());
     }
 
     vec![PromptContribution::guidance(
@@ -268,35 +294,304 @@ fn rlm_bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<Prom
     )]
 }
 
-fn json_value_type_label(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(n) => {
-            if n.is_f64() && n.as_f64().is_some_and(|v| v.fract() != 0.0) {
-                "float"
-            } else {
-                "int"
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum JsonShape {
+    Any,
+    Null,
+    Bool,
+    Int,
+    Float,
+    Str,
+    List(Box<JsonShape>),
+    Record(BTreeMap<String, JsonShape>),
+    Union(Vec<JsonShape>),
+}
+
+#[derive(Default)]
+struct SchemaRegistry {
+    names_by_key: BTreeMap<String, String>,
+    definitions: Vec<(String, JsonShape)>,
+    used_names: BTreeSet<String>,
+}
+
+impl SchemaRegistry {
+    fn register_root(&mut self, root_name: &str, shape: &JsonShape) {
+        self.register_shape(shape, &[root_name.to_string()]);
+    }
+
+    fn register_shape(&mut self, shape: &JsonShape, hint_segments: &[String]) {
+        match shape {
+            JsonShape::Record(fields) => {
+                let key = canonical_shape_key(shape);
+                if self.names_by_key.contains_key(&key) {
+                    return;
+                }
+                for (field, child) in fields {
+                    let child_segments = vec![singularize_segment(field)];
+                    self.register_nested_shape(child, &child_segments);
+                }
+                let name = self.allocate_name(type_name_from_segments(hint_segments));
+                self.names_by_key.insert(key, name.clone());
+                self.definitions.push((name, shape.clone()));
             }
+            JsonShape::List(item) => self.register_nested_list_item(item, hint_segments),
+            JsonShape::Union(items) => {
+                for item in items {
+                    self.register_shape(item, hint_segments);
+                }
+            }
+            JsonShape::Any
+            | JsonShape::Null
+            | JsonShape::Bool
+            | JsonShape::Int
+            | JsonShape::Float
+            | JsonShape::Str => {}
         }
-        serde_json::Value::String(_) => "str",
-        serde_json::Value::Array(_) => "list",
-        serde_json::Value::Object(_) => "record",
+    }
+
+    fn register_nested_shape(&mut self, shape: &JsonShape, hint_segments: &[String]) {
+        match shape {
+            JsonShape::Record(_) => self.register_shape(shape, hint_segments),
+            JsonShape::List(item) => self.register_nested_list_item(item, hint_segments),
+            JsonShape::Union(items) => {
+                for item in items {
+                    self.register_nested_shape(item, hint_segments);
+                }
+            }
+            JsonShape::Any
+            | JsonShape::Null
+            | JsonShape::Bool
+            | JsonShape::Int
+            | JsonShape::Float
+            | JsonShape::Str => {}
+        }
+    }
+
+    fn register_nested_list_item(&mut self, item: &JsonShape, hint_segments: &[String]) {
+        match item {
+            JsonShape::Record(_) => {
+                let mut item_segments = hint_segments.to_vec();
+                item_segments.push("item".to_string());
+                self.register_shape(item, &item_segments);
+            }
+            JsonShape::List(inner) => self.register_nested_list_item(inner, hint_segments),
+            JsonShape::Union(items) => {
+                for item in items {
+                    self.register_nested_list_item(item, hint_segments);
+                }
+            }
+            JsonShape::Any
+            | JsonShape::Null
+            | JsonShape::Bool
+            | JsonShape::Int
+            | JsonShape::Float
+            | JsonShape::Str => {}
+        }
+    }
+
+    fn allocate_name(&mut self, base: String) -> String {
+        let base = if base.is_empty() {
+            "Value".to_string()
+        } else {
+            base
+        };
+        if self.used_names.insert(base.clone()) {
+            return base;
+        }
+        let mut suffix = 2usize;
+        loop {
+            let candidate = format!("{base}{suffix}");
+            if self.used_names.insert(candidate.clone()) {
+                return candidate;
+            }
+            suffix += 1;
+        }
     }
 }
 
-fn preview_value(value: &serde_json::Value, max_chars: usize) -> String {
-    let serialized = match value {
-        serde_json::Value::String(s) => format!("{s:?}"),
-        other => other.to_string(),
-    };
-    let mut chars = serialized.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        serialized
+fn infer_json_shape(value: &serde_json::Value) -> JsonShape {
+    match value {
+        serde_json::Value::Null => JsonShape::Null,
+        serde_json::Value::Bool(_) => JsonShape::Bool,
+        serde_json::Value::Number(n) => {
+            if n.is_f64() && n.as_f64().is_some_and(|v| v.fract() != 0.0) {
+                JsonShape::Float
+            } else {
+                JsonShape::Int
+            }
+        }
+        serde_json::Value::String(_) => JsonShape::Str,
+        serde_json::Value::Array(values) => {
+            let item_shape = values
+                .iter()
+                .map(infer_json_shape)
+                .reduce(merge_shapes)
+                .unwrap_or(JsonShape::Any);
+            JsonShape::List(Box::new(item_shape))
+        }
+        serde_json::Value::Object(map) => JsonShape::Record(
+            map.iter()
+                .map(|(key, value)| (key.clone(), infer_json_shape(value)))
+                .collect(),
+        ),
     }
+}
+
+fn merge_shapes(left: JsonShape, right: JsonShape) -> JsonShape {
+    use JsonShape as Shape;
+    match (left, right) {
+        (Shape::Any, _) | (_, Shape::Any) => Shape::Any,
+        (left, right) if left == right => left,
+        (Shape::Int, Shape::Float) | (Shape::Float, Shape::Int) => Shape::Float,
+        (Shape::List(left), Shape::List(right)) => {
+            Shape::List(Box::new(merge_shapes(*left, *right)))
+        }
+        (Shape::Record(left), Shape::Record(right)) if left.keys().eq(right.keys()) => {
+            let merged = left
+                .into_iter()
+                .map(|(key, left_shape)| {
+                    let right_shape = right.get(&key).cloned().unwrap_or(JsonShape::Any);
+                    (key, merge_shapes(left_shape, right_shape))
+                })
+                .collect();
+            Shape::Record(merged)
+        }
+        (Shape::Union(left), Shape::Union(right)) => {
+            flatten_union(left.into_iter().chain(right).collect())
+        }
+        (Shape::Union(mut union), other) | (other, Shape::Union(mut union)) => {
+            union.push(other);
+            flatten_union(union)
+        }
+        (left, right) => flatten_union(vec![left, right]),
+    }
+}
+
+fn flatten_union(shapes: Vec<JsonShape>) -> JsonShape {
+    let mut flattened = Vec::new();
+    for shape in shapes {
+        match shape {
+            JsonShape::Union(items) => flattened.extend(items),
+            other => flattened.push(other),
+        }
+    }
+    let mut by_key = BTreeMap::new();
+    for shape in flattened {
+        by_key.insert(canonical_shape_key(&shape), shape);
+    }
+    let deduped = by_key.into_values().collect::<Vec<_>>();
+    if deduped.len() == 1 {
+        deduped.into_iter().next().unwrap_or(JsonShape::Any)
+    } else {
+        JsonShape::Union(deduped)
+    }
+}
+
+fn canonical_shape_key(shape: &JsonShape) -> String {
+    match shape {
+        JsonShape::Any => "any".to_string(),
+        JsonShape::Null => "null".to_string(),
+        JsonShape::Bool => "bool".to_string(),
+        JsonShape::Int => "int".to_string(),
+        JsonShape::Float => "float".to_string(),
+        JsonShape::Str => "str".to_string(),
+        JsonShape::List(item) => format!("list[{}]", canonical_shape_key(item)),
+        JsonShape::Record(fields) => {
+            let body = fields
+                .iter()
+                .map(|(field, shape)| format!("{field}:{}", canonical_shape_key(shape)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{body}}}")
+        }
+        JsonShape::Union(items) => {
+            let mut parts = items.iter().map(canonical_shape_key).collect::<Vec<_>>();
+            parts.sort();
+            format!("union({})", parts.join("|"))
+        }
+    }
+}
+
+fn render_shape_inline(shape: &JsonShape, registry: &SchemaRegistry) -> String {
+    match shape {
+        JsonShape::Any => "any".to_string(),
+        JsonShape::Null => "null".to_string(),
+        JsonShape::Bool => "bool".to_string(),
+        JsonShape::Int => "int".to_string(),
+        JsonShape::Float => "float".to_string(),
+        JsonShape::Str => "str".to_string(),
+        JsonShape::List(item) => format!("list[{}]", render_shape_inline(item, registry)),
+        JsonShape::Record(_) => registry
+            .names_by_key
+            .get(&canonical_shape_key(shape))
+            .cloned()
+            .unwrap_or_else(|| "record".to_string()),
+        JsonShape::Union(items) => items
+            .iter()
+            .map(|item| render_shape_inline(item, registry))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    }
+}
+
+fn render_type_definition(name: &str, shape: &JsonShape, registry: &SchemaRegistry) -> Vec<String> {
+    match shape {
+        JsonShape::Record(fields) => {
+            let mut lines = vec![format!("type {name} = {{")];
+            for (field, shape) in fields {
+                lines.push(format!(
+                    "  {field}: {},",
+                    render_shape_inline(shape, registry)
+                ));
+            }
+            lines.push("}".to_string());
+            lines
+        }
+        _ => vec![format!(
+            "type {name} = {}",
+            render_shape_inline(shape, registry)
+        )],
+    }
+}
+
+fn type_name_from_segments(segments: &[String]) -> String {
+    let joined = segments
+        .iter()
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.trim_matches('_'))
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    let mut out = String::new();
+    for part in joined
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.chars()
+                .filter(|ch| ch.is_ascii_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|part| !part.is_empty())
+    {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.push(first.to_ascii_uppercase());
+            for ch in chars {
+                out.push(ch.to_ascii_lowercase());
+            }
+        }
+    }
+    out
+}
+
+fn singularize_segment(segment: &str) -> String {
+    if let Some(prefix) = segment.strip_suffix("ies") {
+        return format!("{prefix}y");
+    }
+    if segment.len() > 1 && segment.ends_with('s') && !segment.ends_with("ss") {
+        return segment[..segment.len() - 1].to_string();
+    }
+    segment.to_string()
 }
 
 impl SessionPlugin for RlmStateToolsPlugin {
@@ -421,6 +716,8 @@ mod tests {
                 json!({"name":"read_file","description":"Read files","enabled":true,"injected":true,"examples":[]}),
                 json!({"name":"apply_patch","description":"Apply patches","enabled":true,"injected":true,"examples":[]}),
             ])),
+            cancellation_token: None,
+            async_task_id: None,
         };
 
         let result = store
@@ -448,6 +745,8 @@ mod tests {
             host: Arc::new(MockSessionManager::default().with_tool_catalog(vec![
                 json!({"name":"ask","description":"Pause and ask the user a targeted question.","enabled":true,"injected":true,"examples":[]}),
             ])),
+            cancellation_token: None,
+            async_task_id: None,
         };
 
         let result = store
@@ -482,7 +781,14 @@ mod tests {
             crate::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
             serde_json::to_value(crate::RlmGlobalsPatchPluginBody {
                 set: serde_json::Map::from_iter([
-                    ("input".to_string(), json!({"path":"src/main.rs"})),
+                    (
+                        "input".to_string(),
+                        json!({
+                            "haystack_sessions": [[{"role":"user","content":"hello"}]],
+                            "haystack_dates": ["2023/04/02 (Sun) 01:09"],
+                            "question": "When did I graduate?",
+                        }),
+                    ),
                     ("limit".to_string(), json!(200)),
                 ]),
                 unset: Vec::new(),
@@ -499,8 +805,22 @@ mod tests {
         let contributions = rlm_bound_variables_prompt_contributions(&ctx);
         assert_eq!(contributions.len(), 1);
         assert_eq!(contributions[0].title.as_deref(), Some("Bound Variables"));
-        assert!(contributions[0].content.contains("`input`: record"));
-        assert!(contributions[0].content.contains("`limit`: int"));
+        assert!(contributions[0].content.contains("Variables:"));
+        assert!(contributions[0].content.contains("- `input`: `Input`"));
+        assert!(contributions[0].content.contains("- `limit`: `int`"));
+        assert!(contributions[0].content.contains("type Input = {"));
+        assert!(
+            contributions[0]
+                .content
+                .contains("haystack_sessions: list[list[HaystackSessionItem]]")
+        );
+        assert!(
+            contributions[0]
+                .content
+                .contains("type HaystackSessionItem = {")
+        );
+        assert!(contributions[0].content.contains("role: str"));
+        assert!(contributions[0].content.contains("content: str"));
     }
 
     #[test]

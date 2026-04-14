@@ -232,12 +232,11 @@ pub(super) fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "search_web" => tool_arg_str(args, "query")
             .map(|query| format!("web \"{}\"", inline_text(query)))
             .unwrap_or_else(|| "search web".to_string()),
-        "agent_call" => tool_arg_str(args, "task")
-            .or_else(|| tool_arg_str(args, "prompt"))
+        "delegate" => tool_arg_str(args, "task")
             .map(|task| format!("delegate · {}", inline_text(task)))
             .unwrap_or_else(|| "delegate task".to_string()),
-        "agent_result" => "delegate done".to_string(),
-        "agent_kill" => "delegate stopped".to_string(),
+        "delegate_result" => "delegate done".to_string(),
+        "delegate_kill" => "delegate stopped".to_string(),
         "show_snippet_to_user" => tool_arg_str(args, "path")
             .map(|path| {
                 let start = args

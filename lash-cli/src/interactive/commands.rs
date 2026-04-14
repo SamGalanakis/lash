@@ -185,7 +185,8 @@ pub(super) async fn dispatch_next_queued_turn(
             active_stream_id,
             app_tx,
             &current_dynamic_state,
-        );
+        )
+        .await;
         *last_turn = Some(TurnReplayPayload {
             prepared_turn: queued,
             turn_input,
@@ -313,20 +314,9 @@ async fn handle_slash_command(
                     iteration: *turn_counter,
                     token_usage: app.token_usage.clone(),
                     last_prompt_usage: None,
-                    dynamic_state_ref: None,
-                    dynamic_state_generation: None,
-                    dynamic_state_snapshot: None,
-                    plugin_snapshot_ref: None,
-                    plugin_snapshot_revision: None,
-                    plugin_snapshot: None,
-                    execution_state_snapshot: None,
-                    token_ledger: Vec::new(),
-                    checkpoint_ref: None,
-                    persisted_graph_node_count: 0,
-                    graph_replace_required: false,
                 };
                 state.replace_projection(history, &[]);
-                rt.set_state(state);
+                rt.set_persisted_state(lash::PersistedSessionState::from_state(state));
                 match rt.session_manager() {
                     Ok(manager) => *session_manager = manager,
                     Err(err) => push_system_message(
@@ -754,7 +744,8 @@ async fn handle_slash_command(
                     active_stream_id,
                     app_tx,
                     &current_dynamic_state,
-                );
+                )
+                .await;
             } else {
                 push_system_message(app, "No previous turn payload to retry yet.");
             }

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState, fresh_message_id};
 use lash::{
     CachedModelCatalog, DynamicStateSnapshot, DynamicToolProvider, ExecutionMode, LashRuntime,
-    PersistedSessionConfig, PersistedTurnState, PromptUsage, Provider, SessionStateEnvelope, Store,
-    TokenUsage,
+    PersistedSessionConfig, PersistedSessionState, PersistedTurnState, PromptUsage, Provider,
+    Store, TokenUsage,
 };
 
 use crate::app::{App, DisplayBlock, projected_blocks_from_state};
@@ -262,7 +262,7 @@ async fn apply_graph_resume_state(
             restored_policy.max_context_tokens = Some(context_window as usize);
         }
         let persisted_graph_node_count = graph.nodes.len();
-        let mut restored_state = SessionStateEnvelope {
+        let mut restored_state = PersistedSessionState {
             session_id: crate::ROOT_SESSION_ID.to_string(),
             policy: restored_policy,
             session_graph: graph,
@@ -293,7 +293,7 @@ async fn apply_graph_resume_state(
             graph_replace_required: false,
         };
         restored_state.replace_projection(&messages, &tool_calls);
-        rt.set_state(restored_state);
+        rt.set_persisted_state(restored_state);
     }
 
     Ok(())
@@ -498,8 +498,8 @@ mod tests {
     use crate::ui_resume;
 
     use lash::{
-        EmbeddedRuntimeHost, MemoryModelCatalogStore, PluginHost, PluginSpecFactory,
-        RuntimeCoreConfig, RuntimeServices, ToolProvider,
+        EmbeddedRuntimeHost, MemoryModelCatalogStore, PersistedSessionState, PluginHost,
+        PluginSpecFactory, RuntimeCoreConfig, RuntimeServices, SessionStateEnvelope, ToolProvider,
     };
 
     fn persist_session_head(
@@ -511,6 +511,7 @@ mod tests {
         ui_resume::save_ui_resume_state(store, &ui_state);
         let checkpoint_ref = store.put_checkpoint(&checkpoint).checkpoint_ref;
         store.save_session_head(lash::SessionHead {
+            session_id: "root".to_string(),
             graph,
             config: lash::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
@@ -617,7 +618,7 @@ mod tests {
             },
             EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
             runtime_services,
-            SessionStateEnvelope::default(),
+            PersistedSessionState::default(),
         )
         .await
         .expect("runtime");
@@ -759,6 +760,7 @@ mod tests {
                 enabled_tools: std::collections::BTreeSet::new(),
             },
         )
+        .await
         .expect("live snapshot");
 
         let provider = Provider::OpenAiGeneric {

@@ -103,12 +103,8 @@ fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
         .join(format!("{run_session_id}.md")))
 }
 
-fn effective_run_session_id(state: &crate::SessionStateEnvelope) -> &str {
-    state
-        .policy
-        .session_id
-        .as_deref()
-        .unwrap_or(&state.session_id)
+fn effective_run_session_id<'a>(session_id: &'a str, policy: &'a crate::SessionPolicy) -> &'a str {
+    policy.session_id.as_deref().unwrap_or(session_id)
 }
 
 fn seed_plan_template(path: &Path) -> Result<bool, String> {
@@ -312,8 +308,8 @@ impl PlanModeState {
         if let Some(path) = self.plan_path() {
             return Ok(path);
         }
-        let path =
-            resolve_plan_path(effective_run_session_id(state)).map_err(PluginError::Session)?;
+        let path = resolve_plan_path(effective_run_session_id(&state.session_id, &state.policy))
+            .map_err(PluginError::Session)?;
         self.plan_path = Some(path.clone());
         Ok(path)
     }
@@ -344,7 +340,8 @@ async fn ensure_plan_path(
     }
 
     let snapshot = host.snapshot_session(session_id).await?;
-    let run_session_id = effective_run_session_id(&snapshot).to_string();
+    let run_session_id =
+        effective_run_session_id(&snapshot.session_id, &snapshot.policy).to_string();
     let path = resolve_plan_path(&run_session_id).map_err(PluginError::Session)?;
     state
         .lock()

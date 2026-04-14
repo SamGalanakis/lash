@@ -233,7 +233,7 @@ pub(super) async fn apply_pending_reconfigure(
 
 /// Send a user message to the runtime: push display block and spawn turn run.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn send_user_message(
+pub(super) async fn send_user_message(
     prepared_turn: PreparedTurn,
     turn_input: TurnInput,
     app: &mut App,
@@ -245,7 +245,7 @@ pub(super) fn send_user_message(
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
-    dynamic_state: &DynamicStateSnapshot,
+    _dynamic_state: &DynamicStateSnapshot,
 ) {
     let mut ui_trace = ui_trace;
     if !prepared_turn.display_text.is_empty() {
@@ -279,8 +279,8 @@ pub(super) fn send_user_message(
         &rt,
         &turn_input,
         &app.ui_resume_state(),
-        dynamic_state,
-    );
+    )
+    .await;
     tracing::info!(
         mode = ?turn_input.mode,
         items = turn_input.items.len(),

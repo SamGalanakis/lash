@@ -105,7 +105,7 @@ pub enum SessionEvent {
     /// Emitted when a typed RLM session terminates via `finish <expr>`.
     /// The `value` is the captured (and schema-validated) result.
     /// Hosts that want the typed shape back (e.g. the parent of a
-    /// `predict` call) listen for this event on the child's stream;
+    /// `delegate` call) listen for this event on the child's stream;
     /// it is also stamped onto `AssembledTurn::typed_finish` for
     /// non-streaming consumers.
     #[serde(rename = "typed_finish")]

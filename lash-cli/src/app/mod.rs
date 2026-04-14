@@ -1077,7 +1077,7 @@ impl App {
             } => {
                 self.finalize_live_assistant();
                 self.clear_live_tool_output();
-                if matches!(name.as_str(), "agent_result" | "agent_kill") {
+                if matches!(name.as_str(), "delegate_result" | "delegate_kill") {
                     self.active_delegate = None;
                 }
                 let plan_content = if success && name == "update_plan" {

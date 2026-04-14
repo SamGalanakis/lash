@@ -535,7 +535,8 @@ pub(crate) async fn run_app(
                     &mut active_stream_id,
                     &app_tx,
                     &current_dynamic_state,
-                );
+                )
+                .await;
                 last_turn = Some(TurnReplayPayload {
                     prepared_turn: prepared,
                     turn_input,
@@ -625,7 +626,9 @@ pub(crate) async fn run_app(
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.export_state().policy;
                             let _ = rt.reset_session().await;
-                            rt.set_state(cleared_session_state(preserved_policy));
+                            rt.set_persisted_state(lash::PersistedSessionState::from_state(
+                                cleared_session_state(preserved_policy),
+                            ));
                         }
                         history.clear();
                         turn_counter = 0;
@@ -697,8 +700,6 @@ pub(crate) async fn run_app(
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
-                    let persisted_dynamic_state = dynamic_tools.export_state();
-
                     if interrupted {
                         let had_manual_interrupt_message = matches!(
                             app.blocks.last(),
@@ -713,7 +714,6 @@ pub(crate) async fn run_app(
                                 true,
                                 &store,
                                 &ui_resume_state,
-                                &persisted_dynamic_state,
                             )
                             .await;
                         }
@@ -783,15 +783,8 @@ pub(crate) async fn run_app(
                     let ui_resume_state =
                         app.finish_turn_for_resume_with_output(final_output.as_deref());
                     if let Some(rt) = runtime.as_mut() {
-                        persist_runtime_turn_state(
-                            rt,
-                            &mut state,
-                            false,
-                            &store,
-                            &ui_resume_state,
-                            &persisted_dynamic_state,
-                        )
-                        .await;
+                        persist_runtime_turn_state(rt, &mut state, false, &store, &ui_resume_state)
+                            .await;
                     }
                     runtime_return_rx = None;
                     cancel_token = None;
@@ -1754,7 +1747,8 @@ pub(crate) async fn run_app(
                             &mut active_stream_id,
                             &app_tx,
                             &current_dynamic_state,
-                        );
+                        )
+                        .await;
                         last_turn = Some(TurnReplayPayload {
                             prepared_turn: queued,
                             turn_input,
@@ -2041,7 +2035,8 @@ pub(crate) async fn run_app(
                             &mut active_stream_id,
                             &app_tx,
                             &current_dynamic_state,
-                        );
+                        )
+                        .await;
                         last_turn = Some(TurnReplayPayload {
                             prepared_turn: queued,
                             turn_input,

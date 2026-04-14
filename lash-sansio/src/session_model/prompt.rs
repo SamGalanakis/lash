@@ -420,6 +420,9 @@ observe files
 - If the prompt includes a **Bound Variables** section, those names are already in scope. Access them directly in lashlang instead of rebuilding them from prose.
 - Bare expressions are valid statements. In `parallel { ... }`, a bare-expression branch contributes that value to the result list.
 - Call tools with `call tool_name { arg: expr }`.
+- Start any tool call in the background with `start call tool_name { arg: expr }`. This returns a handle value.
+- Resolve a background handle with `await handle`.
+- Stop a background handle with `cancel handle`. Cancellation is best-effort: Lash always stops waiting locally, and cooperative tools are also asked to stop their underlying work.
 - Use `parallel { ... }` only for independent tool calls. If one call needs another call's output, do not put them in the same `parallel { ... }`.
 - `parallel { ... }` returns a list of branch results in order.
 - Use ternary expressions for inline branching: `cond ? yes : no`. There is no expression-form `if`.
@@ -427,7 +430,15 @@ observe files
 - Boolean negation supports both `!cond` and `not cond`.
 - Use `observe expr` to inspect a value and continue execution.
 - `observe` output and tool results are fed back into the next iteration (your context), so inspect first and refine on the next step if needed.
-- You must explicitly use `observe` to inspect values and make progress based on them. Do not rely on implicit inspection through tool results or execution errors."#;
+- You must explicitly use `observe` to inspect values and make progress based on them. Do not rely on implicit inspection through tool results or execution errors.
+
+### Decomposition
+
+- Break large tasks into smaller, self-contained steps.
+- Prefer narrow checks over brute-force scanning when the input is large.
+- Use focused intermediate observations to verify subquestions before finalizing.
+- Keep each step concrete and bounded instead of attempting the whole task at once.
+- Use `start`/`await` when a long-running tool can make progress in the background while you do other work. This is especially useful for `delegate`."#;
 
 const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution is needed.
 
@@ -548,6 +559,21 @@ mod tests {
         assert!(intro_idx < guidance_idx);
         assert!(guidance_idx < env_idx);
         assert!(text.contains("### Available Tools"));
+    }
+
+    #[test]
+    fn rlm_execution_prompt_documents_decomposition_guidance() {
+        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Rlm), &[]);
+        assert!(text.contains("### Decomposition"));
+        assert!(text.contains("Prefer narrow checks over brute-force scanning"));
+    }
+
+    #[test]
+    fn rlm_execution_prompt_mentions_async_tool_handles() {
+        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Rlm), &[]);
+        assert!(text.contains("start call tool_name"));
+        assert!(text.contains("await handle"));
+        assert!(text.contains("cancel handle"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::Mutex;
 
@@ -72,8 +72,11 @@ pub trait BackgroundExecutor: Send + Sync {
 /// Tokio-backed background executor shared across runtime sessions.
 #[derive(Default)]
 pub struct TokioBackgroundExecutor {
-    jobs: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<Result<(), PluginError>>>>>,
+    jobs: Mutex<BackgroundJobMap>,
 }
+
+type BackgroundJobHandle = tokio::task::JoinHandle<Result<(), PluginError>>;
+type BackgroundJobMap = HashMap<String, Vec<BackgroundJobHandle>>;
 
 #[async_trait::async_trait]
 impl BackgroundExecutor for TokioBackgroundExecutor {
@@ -127,6 +130,7 @@ pub struct RuntimeCoreConfig {
     pub prompt_renderer: Arc<dyn crate::PromptRenderer>,
     pub prompt_overrides: Vec<crate::PromptSectionOverride>,
     pub llm_log_path: Option<PathBuf>,
+    pub(crate) llm_log_lock: Arc<StdMutex<()>>,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
     pub(crate) llm_factory: LlmFactory,
@@ -140,6 +144,7 @@ impl Default for RuntimeCoreConfig {
             prompt_renderer: crate::default_prompt_renderer(),
             prompt_overrides: Vec::new(),
             llm_log_path: None,
+            llm_log_lock: Arc::new(StdMutex::new(())),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
             llm_factory: default_llm_factory(),

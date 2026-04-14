@@ -18,7 +18,6 @@ pub(crate) mod edit;
 pub(crate) mod exploration;
 pub(crate) mod generic;
 pub(crate) mod lashlang;
-pub(crate) mod predict;
 pub(crate) mod shell;
 pub(crate) mod snippet;
 pub(crate) mod web;
@@ -36,7 +35,6 @@ pub(super) fn register_builtins(state: &mut ActivityState) {
     state.register(exploration::ExplorationProjector);
     state.register(generic::GenericProjector);
     state.register(lashlang::LashlangProjector);
-    state.register(predict::PredictProjector);
     state.register(shell::ShellProjector);
     state.register(snippet::SnippetProjector);
     state.register(web::WebProjector);

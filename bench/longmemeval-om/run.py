@@ -21,7 +21,23 @@ DEFAULT_DATASET_URL = (
     "longmemeval_s_cleaned.json"
 )
 DEFAULT_DATASET_PATH = DATA_DIR / "longmemeval_s_cleaned.json"
-DEFAULT_MODEL = "gpt-5.4-mini"
+DEFAULT_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_PROVIDER_ID = "openai-compatible"
+LONGMEMEVAL_EXECUTION_OVERRIDE = textwrap.dedent(
+    """\
+    This benchmark turn is not an agentic coding task.
+
+    Do not write `lashlang`.
+    Do not call tools.
+    Do not inspect the filesystem.
+    Do not create helper files or external memory stores.
+    Use only the currently available conversation and memory context.
+
+    Response contract:
+    - For ingestion turns, reply with exactly `stored` and nothing else.
+    - For answer turns, reply in plain prose only, using remembered benchmark context.
+    """
+).strip()
 
 LONGMEMEVAL_GUIDANCE = textwrap.dedent(
     """\
@@ -223,7 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Model name passed to lash.")
     parser.add_argument(
         "--provider-id",
-        default="codex",
+        default=DEFAULT_PROVIDER_ID,
         help="Provider id to activate inside the isolated LASH_HOME for the benchmark run.",
     )
     parser.add_argument("--variant", help="Provider-native model variant passed to lash.")
@@ -444,6 +460,10 @@ def build_lash_command(
         "--context-approach",
         "observational_memory",
         "--await-background-work",
+        "--prompt-replace",
+        f"execution={LONGMEMEVAL_EXECUTION_OVERRIDE}",
+        "--prompt-disable",
+        "execution.available_tools",
         "--prompt-append",
         f"guidance={LONGMEMEVAL_GUIDANCE}",
         "--print",
@@ -484,6 +504,7 @@ def run_lash_turn(
     turn_dir: Path,
     phase: str,
     globals_payload: dict | None = None,
+    expected_output: str | None = None,
 ) -> dict:
     turn_dir.mkdir(parents=True, exist_ok=True)
     usage_json_path = turn_dir / "usage.json"
@@ -510,15 +531,21 @@ def run_lash_turn(
         )
     stdout_text = stdout_path.read_text()
     stderr_text = stderr_path.read_text()
+    output_text = stdout_text.strip()
     (turn_dir / "returncode.txt").write_text(f"{result.returncode}\n")
     if result.returncode != 0:
         raise RuntimeError(
             f"lash turn failed for {session_filename}: rc={result.returncode}\n{stderr_text.strip()}"
         )
+    if expected_output is not None and output_text != expected_output:
+        raise RuntimeError(
+            f"lash turn returned unexpected output for {session_filename}: "
+            f"expected {expected_output!r}, got {output_text!r}"
+        )
     usage_artifact = json.loads(usage_json_path.read_text())
     delta_entries = usage_artifact.get("delta_entries", [])
     return {
-        "output": stdout_text.strip(),
+        "output": output_text,
         "usage_entries": delta_entries,
         "usage_artifact": usage_artifact,
     }
@@ -596,6 +623,7 @@ def main() -> int:
                         session_date,
                         session_turns,
                     ),
+                    expected_output="stored",
                 )
                 question_entries.extend(result["usage_entries"])
                 question_phase_entries["ingest"].extend(result["usage_entries"])

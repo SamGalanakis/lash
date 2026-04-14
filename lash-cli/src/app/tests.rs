@@ -414,7 +414,7 @@ fn late_text_deltas_after_authoritative_final_output_are_ignored() {
 }
 
 #[test]
-fn delegate_start_enables_streaming_output_until_agent_result_arrives() {
+fn delegate_start_enables_streaming_output_until_delegate_result_arrives() {
     let mut app = App::new("test-model".into(), "test".into());
     app.handle_session_event(SessionEvent::Message {
         text: serde_json::json!({
@@ -446,7 +446,7 @@ fn delegate_start_enables_streaming_output_until_agent_result_arrives() {
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc-delegate".into()),
-        name: "agent_result".into(),
+        name: "delegate_result".into(),
         args: serde_json::json!({"id":"child-1"}),
         result: serde_json::json!({
             "result":"done",

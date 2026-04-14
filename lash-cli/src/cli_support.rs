@@ -340,7 +340,7 @@ pub(crate) fn apply_context_approach_overrides(
                 .to_string(),
         );
     }
-    if config.observation_activation_tokens() == 0 {
+    if config.observation_buffer_interval_tokens() >= config.observation_message_tokens {
         return Err(
             "`--om-observation-buffer-tokens` must be smaller than `--om-observation-message-tokens`."
                 .to_string(),

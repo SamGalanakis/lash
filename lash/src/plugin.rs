@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use crate::llm::types::LlmResponse;
-use crate::runtime::AssembledTurn;
+use crate::runtime::{AssembledTurn, PersistedSessionState};
 use crate::{
     ContextApproachKind, ExecutionMode, MessageRole, SessionPolicy, SessionStateEnvelope,
     ToolDefinition, ToolProvider, ToolResult, TurnInput,
@@ -112,10 +112,6 @@ struct SessionReadMeta {
     iteration: usize,
     token_usage: crate::TokenUsage,
     last_prompt_usage: Option<crate::runtime::PromptUsage>,
-    dynamic_state_ref: Option<crate::store::BlobRef>,
-    dynamic_state_generation: Option<u64>,
-    checkpoint_ref: Option<crate::store::BlobRef>,
-    token_ledger: Arc<Vec<crate::runtime::TokenLedgerEntry>>,
 }
 
 impl SessionReadMeta {
@@ -126,10 +122,6 @@ impl SessionReadMeta {
             iteration: state.iteration,
             token_usage: state.token_usage.clone(),
             last_prompt_usage: state.last_prompt_usage.clone(),
-            dynamic_state_ref: state.dynamic_state_ref.clone(),
-            dynamic_state_generation: state.dynamic_state_generation,
-            checkpoint_ref: state.checkpoint_ref.clone(),
-            token_ledger: Arc::new(state.token_ledger.clone()),
         }
     }
 
@@ -140,10 +132,6 @@ impl SessionReadMeta {
             iteration: state.iteration,
             token_usage: state.token_usage,
             last_prompt_usage: state.last_prompt_usage,
-            dynamic_state_ref: state.dynamic_state_ref,
-            dynamic_state_generation: state.dynamic_state_generation,
-            checkpoint_ref: state.checkpoint_ref,
-            token_ledger: Arc::new(state.token_ledger),
         }
     }
 
@@ -155,17 +143,6 @@ impl SessionReadMeta {
             iteration: self.iteration,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
-            dynamic_state_ref: self.dynamic_state_ref.clone(),
-            dynamic_state_generation: self.dynamic_state_generation,
-            dynamic_state_snapshot: None,
-            plugin_snapshot_ref: None,
-            plugin_snapshot_revision: None,
-            plugin_snapshot: None,
-            execution_state_snapshot: None,
-            token_ledger: self.token_ledger.as_ref().clone(),
-            checkpoint_ref: self.checkpoint_ref.clone(),
-            persisted_graph_node_count: 0,
-            graph_replace_required: false,
         }
     }
 }
@@ -238,7 +215,7 @@ impl SessionReadView {
         }))
     }
 
-    pub fn from_runtime_state(state: &SessionStateEnvelope) -> Self {
+    pub fn from_state(state: &SessionStateEnvelope) -> Self {
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Owned(Arc::new(state.session_graph.clone())),
@@ -246,6 +223,10 @@ impl SessionReadView {
             tool_calls: state.session_graph.shared_projected_tool_calls(),
             projected_rlm_globals: state.session_graph.shared_projected_rlm_globals(),
         }))
+    }
+
+    pub fn from_persisted_state(state: &PersistedSessionState) -> Self {
+        Self::from_state(&state.export_state())
     }
 
     fn graph_arc(&self) -> &Arc<crate::SessionGraph> {
@@ -313,26 +294,6 @@ impl SessionReadView {
 
     pub fn last_prompt_usage(&self) -> Option<&crate::runtime::PromptUsage> {
         self.0.meta.last_prompt_usage.as_ref()
-    }
-
-    pub fn dynamic_state_ref(&self) -> Option<&crate::store::BlobRef> {
-        self.0.meta.dynamic_state_ref.as_ref()
-    }
-
-    pub fn dynamic_state_generation(&self) -> Option<u64> {
-        self.0.meta.dynamic_state_generation
-    }
-
-    pub fn checkpoint_ref(&self) -> Option<&crate::store::BlobRef> {
-        self.0.meta.checkpoint_ref.as_ref()
-    }
-
-    pub fn token_ledger(&self) -> &[crate::runtime::TokenLedgerEntry] {
-        self.0.meta.token_ledger.as_slice()
-    }
-
-    pub fn usage_report(&self) -> crate::runtime::SessionUsageReport {
-        crate::runtime::SessionUsageReport::from_entries(self.token_ledger())
     }
 
     pub fn to_owned_state(&self) -> SessionStateEnvelope {
@@ -426,7 +387,7 @@ pub struct SessionTurnHandle {
     pub events: mpsc::Receiver<crate::SessionEvent>,
 }
 
-pub type SessionSnapshot = SessionStateEnvelope;
+pub type SessionSnapshot = PersistedSessionState;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -506,8 +467,8 @@ pub struct SessionCreateRequest {
     pub mode_extras: ModeExtras,
     /// Label for the token-cost ledger. When this session's turns
     /// complete, their token usage is accumulated under this label on
-    /// the parent session's `token_ledger`. Examples: `"predict"`,
-    /// `"agent_call"`. Defaults to `"child"` if unset.
+    /// the parent session's `token_ledger`. Examples: `"delegate"`,
+    /// `"delegate"`. Defaults to `"child"` if unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
 }
@@ -569,7 +530,7 @@ impl SessionAppendNode {
 
 /// How a RLM session ends. Top-level chat sessions use
 /// `ProseWithoutFence` (today's behavior); typed sub-sessions spawned
-/// via `predict` use `Finish` so the captured value is the terminal
+/// via `delegate` use `Finish` so the captured value is the terminal
 /// result.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -909,7 +870,7 @@ pub enum PluginRuntimeEvent {
     TurnCommitted(Arc<AssembledTurn>),
     TurnPersisted(SessionStateChangedContext),
     SessionRestored(SessionReadView),
-    SessionConfigChanged(SessionConfigChangedContext),
+    SessionConfigChanged(Box<SessionConfigChangedContext>),
 }
 
 #[derive(Clone, Debug)]
@@ -1494,9 +1455,9 @@ pub use rolling_history::RollingHistoryPluginFactory;
 
 pub use runtime_impl::{
     CommandRegistrations, ExternalInvokeError, ExternalRegistrations, HistoryRegistrations,
-    OutputRegistrations, PluginHost, PluginRegistrar, PluginSession, PromptRegistrations,
-    RuntimeServices, SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations,
-    ToolRegistrations, ToolResultRegistrations, TurnRegistrations,
+    OutputRegistrations, PersistentRuntimeServices, PluginHost, PluginRegistrar, PluginSession,
+    PromptRegistrations, RuntimeServices, SessionRegistrations, SurfaceRegistrations,
+    ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations, TurnRegistrations,
 };
 pub use tool_result_projection_builtin::{
     BuiltinToolResultProjectionPluginFactory, ToolResultProjectionMode,

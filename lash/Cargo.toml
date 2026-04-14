@@ -7,10 +7,17 @@ license.workspace = true
 [features]
 # Keep core portable by default. The lashlang-backed `rlm` runtime is always on.
 default = []
-sqlite-store = ["dep:rusqlite"]
-fff-zlob = ["fff-search/zlob"]
+sqlite-store = ["dep:rusqlite", "dep:flate2"]
+tool-impls = [
+    "dep:fff-search",
+    "dep:globset",
+    "dep:ignore",
+    "dep:pdf-extract",
+    "dep:portable-pty",
+]
+fff-zlob = ["tool-impls", "fff-search/zlob"]
 # Convenience umbrella for first-party consumers (e.g. lash-cli).
-full = ["sqlite-store"]
+full = ["sqlite-store", "tool-impls"]
 
 [dependencies]
 lash-sansio = { path = "../lash-sansio" }
@@ -25,17 +32,18 @@ tempfile = "3"
 tracing = "0.1"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
-globset = "0.4"
-ignore = "0.4"
+globset = { version = "0.4", optional = true }
+ignore = { version = "0.4", optional = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 base64 = "0.22"
 sha2 = "0.10"
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
+flate2 = { version = "1", optional = true }
 lashlang = { path = "../lashlang" }
 dirs = "6"
 chrono = "0.4"
 similar = "2"
-pdf-extract = "0.7"
-portable-pty = "0.9"
+pdf-extract = { version = "0.7", optional = true }
+portable-pty = { version = "0.9", optional = true }
 futures-util = "0.3"
-fff-search = { version = "0.5.2", default-features = false }
+fff-search = { version = "0.5.2", default-features = false, optional = true }

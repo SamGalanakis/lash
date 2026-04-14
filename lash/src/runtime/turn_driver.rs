@@ -277,17 +277,6 @@ impl RuntimeTurnDriver {
             iteration,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
-            dynamic_state_ref: None,
-            dynamic_state_generation: None,
-            dynamic_state_snapshot: None,
-            plugin_snapshot_ref: None,
-            plugin_snapshot_revision: None,
-            plugin_snapshot: None,
-            execution_state_snapshot: None,
-            token_ledger: Vec::new(),
-            checkpoint_ref: None,
-            persisted_graph_node_count: 0,
-            graph_replace_required: false,
         };
         crate::SessionReadView::from_graph_projection(
             &state,
@@ -805,6 +794,7 @@ impl RuntimeTurnDriver {
                 session_id,
                 iteration,
                 usage,
+                provider_usage,
                 request_body,
                 response_text,
                 response_parts,
@@ -823,6 +813,11 @@ impl RuntimeTurnDriver {
                         "reasoning_tokens": usage.reasoning_tokens,
                     }
                 });
+                if let Some(provider_usage) = provider_usage
+                    && let Some(object) = entry.as_object_mut()
+                {
+                    object.insert("provider_usage".to_string(), provider_usage);
+                }
                 if let Some(parts) = response_parts
                     && let Some(object) = entry.as_object_mut()
                 {
@@ -840,6 +835,7 @@ impl RuntimeTurnDriver {
                 {
                     Ok(mut file) => {
                         use std::io::Write;
+                        let _log_guard = self.host.core.llm_log_lock.lock().ok();
                         if let Err(err) = writeln!(file, "{}", entry) {
                             tracing::warn!(error = %err, path = %path.display(), "failed to append llm debug log");
                         }
@@ -864,6 +860,7 @@ impl RuntimeTurnDriver {
         {
             Ok(mut file) => {
                 use std::io::Write;
+                let _log_guard = self.host.core.llm_log_lock.lock().ok();
                 if let Err(err) = writeln!(file, "{}", entry) {
                     tracing::warn!(
                         error = %err,

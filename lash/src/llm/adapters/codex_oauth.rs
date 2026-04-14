@@ -525,6 +525,7 @@ impl CodexOAuthAdapter {
             full_text,
             parts,
             usage: state.usage,
+            provider_usage: None,
             request_body,
             http_summary: Some(http_summary),
         }
@@ -959,6 +960,7 @@ impl LlmTransport for CodexOAuthAdapter {
                 full_text: content,
                 parts,
                 usage,
+                provider_usage: None,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", Self::CODEX_RESPONSES_URL)),
             });

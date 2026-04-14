@@ -94,12 +94,14 @@ impl SharedJsonValue {
         Self(Arc::new(value))
     }
 
-    pub fn as_ref(&self) -> &serde_json::Value {
-        self.0.as_ref()
-    }
-
     pub fn to_owned(&self) -> serde_json::Value {
         self.0.as_ref().clone()
+    }
+}
+
+impl AsRef<serde_json::Value> for SharedJsonValue {
+    fn as_ref(&self) -> &serde_json::Value {
+        self.0.as_ref()
     }
 }
 
@@ -352,6 +354,14 @@ impl SessionNodeRecord {
                 Some((plugin_type.as_str(), body.as_ref()))
             }
         }
+    }
+
+    pub fn plugin_body<T>(&self) -> Option<T>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let (_, body) = self.plugin()?;
+        T::deserialize(body).ok()
     }
 }
 

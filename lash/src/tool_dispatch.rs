@@ -26,6 +26,7 @@ pub(crate) struct ToolDispatchContext {
     pub turn_injection_bridge: TurnInjectionBridge,
 }
 
+#[derive(Clone)]
 pub(crate) struct ToolDispatchOutcome {
     pub record: ToolCallRecord,
     pub images: Vec<ToolImage>,
@@ -38,6 +39,23 @@ pub(crate) async fn dispatch_tool_call(
     tool_name: String,
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
+) -> ToolDispatchOutcome {
+    let tool_context = ToolExecutionContext {
+        session_id: context.session_id.clone(),
+        host: Arc::clone(&context.host),
+        cancellation_token: None,
+        async_task_id: None,
+    };
+    dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
+        .await
+}
+
+pub(crate) async fn dispatch_tool_call_with_execution_context(
+    context: &ToolDispatchContext,
+    tool_name: String,
+    args: serde_json::Value,
+    progress: Option<&ProgressSender>,
+    tool_context: ToolExecutionContext,
 ) -> ToolDispatchOutcome {
     let enabled_tools = context.surface.enabled_tools();
     if !enabled_tools.iter().any(|tool| tool.name == tool_name) {
@@ -105,10 +123,6 @@ pub(crate) async fn dispatch_tool_call(
     }
 
     let tool_start = Instant::now();
-    let tool_context = ToolExecutionContext {
-        session_id: context.session_id.clone(),
-        host: Arc::clone(&context.host),
-    };
     let result = match find_native_tool(context.execution_mode, &tool_name) {
         Some(NativeTool::Batch) => execute_batch_tool_call(context, &args, progress).await,
         None => {

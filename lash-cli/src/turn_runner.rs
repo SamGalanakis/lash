@@ -126,12 +126,11 @@ pub(crate) fn pending_turn_graph(graph: &SessionGraph, turn_input: &TurnInput) -
     graph
 }
 
-pub(crate) fn persist_pending_turn(
+pub(crate) async fn persist_pending_turn(
     store: &Store,
     runtime: &LashRuntime,
     turn_input: &TurnInput,
     ui_state: &UiResumeState,
-    dynamic_state: &DynamicStateSnapshot,
 ) {
     let persistence_state = runtime.export_persistence_state();
     persist_live_runtime_state(
@@ -140,8 +139,8 @@ pub(crate) fn persist_pending_turn(
         pending_turn_graph(persistence_state.session_graph(), turn_input),
         ui_state,
         &persistence_state,
-        dynamic_state,
-    );
+    )
+    .await;
 }
 
 pub(crate) async fn persist_runtime_turn_state(
@@ -150,9 +149,8 @@ pub(crate) async fn persist_runtime_turn_state(
     interrupted: bool,
     store: &Store,
     ui_state: &UiResumeState,
-    dynamic_state: &DynamicStateSnapshot,
 ) {
-    let mut persistence_state = RuntimePersistenceState::from_state(state.clone());
+    let mut persistence_state = runtime.export_persisted_state();
     if let Err(err) = snapshot_execution_state(runtime, &mut persistence_state).await {
         tracing::warn!("{err:#}");
     }
@@ -163,14 +161,14 @@ pub(crate) async fn persist_runtime_turn_state(
             live_resume_graph_from_state(persistence_state.session_graph()),
             ui_state,
             &persistence_state,
-            dynamic_state,
-        );
+        )
+        .await;
     } else {
-        store.refresh_runtime_persistence_state(&mut persistence_state);
-        persist_committed_runtime_state(store, &mut persistence_state, ui_state, dynamic_state);
+        lash::RuntimeStore::refresh_persisted_session_state(store, &mut persistence_state).await;
+        persist_committed_runtime_state(store, &mut persistence_state, ui_state).await;
     }
     runtime.apply_persistence_state(persistence_state.clone());
-    *state = persistence_state.into_state();
+    *state = persistence_state.export_state();
 }
 
 pub(crate) fn spawn_runtime_turn<S>(
@@ -230,8 +228,8 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn refresh_runtime_persistence_state_recovers_latest_token_ledger() {
+    #[tokio::test]
+    async fn refresh_runtime_persistence_state_recovers_latest_token_ledger() {
         let store = Store::memory().expect("store");
         let mut graph = SessionGraph::default();
         graph.append_message(Message {
@@ -278,7 +276,9 @@ mod tests {
                 plugin_snapshot: None,
             })
             .checkpoint_ref;
+        store.append_usage_deltas(&ledger);
         store.save_session_head(lash::SessionHead {
+            session_id: "root".to_string(),
             graph: graph.clone(),
             config: PersistedSessionConfig {
                 provider_id: "openai-compatible".into(),
@@ -292,14 +292,15 @@ mod tests {
             token_ledger: ledger,
         });
 
-        let stale_state = SessionStateEnvelope {
+        let mut persistence_state = lash::PersistedSessionState {
             session_graph: SessionGraph::default(),
             token_ledger: Vec::new(),
-            ..SessionStateEnvelope::default()
+            ..lash::PersistedSessionState::default()
         };
-        let mut persistence_state = RuntimePersistenceState::from_state(stale_state);
-        store.refresh_runtime_persistence_state(&mut persistence_state);
-        let stale_state = persistence_state.into_state();
+        store
+            .refresh_persisted_session_state(&mut persistence_state)
+            .await;
+        let stale_state = persistence_state;
 
         assert_eq!(stale_state.iteration, 2);
         assert_eq!(stale_state.projected_messages().len(), 1);

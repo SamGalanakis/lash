@@ -3,10 +3,15 @@ mod ask;
 mod batch;
 mod composite;
 mod fetch_url;
+#[cfg(feature = "tool-impls")]
 mod glob;
+#[cfg(feature = "tool-impls")]
 mod grep;
+#[cfg(feature = "tool-impls")]
 mod ls;
+#[cfg(feature = "tool-impls")]
 mod read_file;
+#[cfg(feature = "tool-impls")]
 mod shell;
 mod show_snippet_to_user;
 mod state;
@@ -20,11 +25,17 @@ pub(crate) use apply_patch::{PatchAction, inspect_patch_ops};
 pub use ask::AskTool;
 pub(crate) use composite::CompositeToolProvider;
 pub use fetch_url::FetchUrl;
+#[cfg(feature = "tool-impls")]
 pub use glob::Glob;
+#[cfg(feature = "tool-impls")]
 pub use grep::Grep;
+#[cfg(feature = "tool-impls")]
 pub use ls::Ls;
+#[cfg(feature = "tool-impls")]
 pub use read_file::{ReadFile, ReadFilePluginFactory};
+#[cfg(feature = "tool-impls")]
 pub use shell::StandardShell;
+#[cfg(feature = "tool-impls")]
 pub use shell::shell_prompt_contributions;
 pub use show_snippet_to_user::ShowSnippetToUser;
 pub use state::{StateStore, StateToolsPluginFactory};
@@ -33,8 +44,11 @@ pub use wait::WaitTool;
 pub use web_search::WebSearch;
 
 use crate::ToolResult;
+#[cfg(feature = "tool-impls")]
 use std::io::{BufRead, BufReader};
+#[cfg(feature = "tool-impls")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "tool-impls")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +91,7 @@ pub(crate) fn find_native_tool(mode: crate::ExecutionMode, name: &str) -> Option
         .find(|tool| tool.name() == name)
 }
 
+#[cfg(feature = "tool-impls")]
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct PathEntry {
     pub path: String,
@@ -86,6 +101,7 @@ pub(crate) struct PathEntry {
     pub modified_at: String,
 }
 
+#[cfg(feature = "tool-impls")]
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct TruncationMeta {
     pub shown: usize,
@@ -105,6 +121,7 @@ pub(crate) fn require_str<'a>(
 }
 
 /// Parse optional bool arg with a default.
+#[cfg(feature = "tool-impls")]
 pub(crate) fn parse_optional_bool(
     args: &serde_json::Value,
     key: &str,
@@ -124,6 +141,7 @@ pub(crate) fn parse_optional_bool(
 
 /// Parse an optional positive integer arg.
 /// Accepts `null` or `"none"` when `allow_none` is true.
+#[cfg(feature = "tool-impls")]
 pub(crate) fn parse_optional_usize_arg(
     args: &serde_json::Value,
     key: &str,
@@ -214,6 +232,7 @@ where
 
 /// Build a normalized filesystem entry for tool output.
 /// Returns the entry plus raw mtime for optional sorting.
+#[cfg(feature = "tool-impls")]
 pub(crate) fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, SystemTime) {
     let fallback_mtime = UNIX_EPOCH;
     let path_str = path.to_string_lossy().to_string();
@@ -260,6 +279,7 @@ pub(crate) fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, Sys
     (entry, mtime)
 }
 
+#[cfg(feature = "tool-impls")]
 pub(crate) fn rg_file_list(
     base: &Path,
     include_hidden: bool,
@@ -313,6 +333,7 @@ pub(crate) fn rg_file_list(
 }
 
 /// Build the standard result envelope returned by filesystem listing tools.
+#[cfg(feature = "tool-impls")]
 pub(crate) fn filesystem_entries_result(
     items: Vec<PathEntry>,
     total_count: usize,
@@ -333,6 +354,7 @@ pub(crate) fn filesystem_entries_result(
     })
 }
 
+#[cfg(feature = "tool-impls")]
 fn count_text_lines(path: &Path) -> Option<u64> {
     let file = std::fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
@@ -346,6 +368,7 @@ fn count_text_lines(path: &Path) -> Option<u64> {
     Some(count)
 }
 
+#[cfg(feature = "tool-impls")]
 fn format_time_rfc3339(ts: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(ts).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

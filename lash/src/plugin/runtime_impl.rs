@@ -638,6 +638,14 @@ impl PluginHost {
         self
     }
 
+    pub fn isolated_registry(&self) -> Self {
+        Self {
+            factories: Arc::clone(&self.factories),
+            dynamic_tools_enabled: self.dynamic_tools_enabled,
+            sessions: Arc::new(StdMutex::new(BTreeMap::new())),
+        }
+    }
+
     pub fn factories(&self) -> &[Arc<dyn PluginFactory>] {
         self.factories.as_ref().as_slice()
     }
@@ -804,7 +812,10 @@ impl PluginHost {
         name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, PluginError> {
-        let session = self.build_standard_session("__external__", None)?;
+        let session = self.build_standard_session(
+            format!("__external__-{}", uuid::Uuid::new_v4().simple()),
+            None,
+        )?;
         session
             .invoke_external(name, args, None, false, Arc::new(NoopSessionManager))
             .await
@@ -819,6 +830,14 @@ impl PluginHost {
         let mut sessions = self.sessions.lock().map_err(|_| {
             PluginError::Session("plugin host session registry poisoned".to_string())
         })?;
+        if let Some(existing) = sessions.get(session_id).and_then(Weak::upgrade) {
+            if !Arc::ptr_eq(&existing, session) {
+                return Err(PluginError::Session(format!(
+                    "session `{session_id}` is already registered on this plugin host"
+                )));
+            }
+            return Ok(());
+        }
         sessions.insert(session_id.to_string(), Arc::downgrade(session));
         Ok(())
     }
@@ -1611,7 +1630,18 @@ pub enum ExternalInvokeError {
 pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
-    pub store: Option<Arc<dyn crate::store::RuntimeStore>>,
+    pub(crate) store: Option<Arc<dyn crate::store::RuntimeStore>>,
+}
+
+#[derive(Clone)]
+pub struct PersistentRuntimeServices(RuntimeServices);
+
+impl std::ops::Deref for PersistentRuntimeServices {
+    type Target = RuntimeServices;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 struct EmptySnapshotReader;
@@ -1697,9 +1727,34 @@ impl RuntimeServices {
             store: None,
         }
     }
+}
 
-    pub fn with_store(mut self, store: Arc<dyn crate::store::RuntimeStore>) -> Self {
-        self.store = Some(store);
-        self
+impl PersistentRuntimeServices {
+    pub fn new(plugins: Arc<PluginSession>, store: Arc<dyn crate::store::RuntimeStore>) -> Self {
+        Self::new_with_bridges(plugins, crate::session::TurnInjectionBridge::new(), store)
+    }
+
+    pub fn new_with_bridges(
+        plugins: Arc<PluginSession>,
+        turn_injection_bridge: crate::session::TurnInjectionBridge,
+        store: Arc<dyn crate::store::RuntimeStore>,
+    ) -> Self {
+        Self(RuntimeServices {
+            plugins,
+            turn_injection_bridge,
+            store: Some(store),
+        })
+    }
+
+    pub(crate) fn into_runtime_services(self) -> RuntimeServices {
+        self.0
+    }
+
+    pub fn store(&self) -> Arc<dyn crate::store::RuntimeStore> {
+        self.0
+            .store
+            .as_ref()
+            .expect("persistent runtime services must carry a store")
+            .clone()
     }
 }

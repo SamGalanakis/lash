@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -10,13 +11,13 @@ use lash::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, L
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
 use lash::*;
 use lash_default_tools::{
-    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+    DefaultToolPluginOptions, DefaultToolSurfaceProfile, EmbeddedRuntimeBuilderExt,
 };
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio_util::sync::CancellationToken;
 
-const OM_REFLECTION_PLUGIN_TYPE: &str = "lash.context.observational_memory.reflection";
+const OM_ACTIVE_STATE_PLUGIN_TYPE: &str = "lash.context.observational_memory.state";
 const DEFAULT_PROMPT: &str =
     "Inspect the current state and reply with exactly: runtime perf benchmark ok";
 const HISTORY_EXCHANGES: usize = 18;
@@ -254,6 +255,110 @@ struct BenchmarkTransport {
     scenario: RuntimePerfScenario,
 }
 
+#[derive(Default)]
+struct RuntimePerfStore {
+    next_blob_id: AtomicU64,
+    blobs: Mutex<HashMap<String, Vec<u8>>>,
+    session_head_meta: Mutex<Option<SessionHeadMeta>>,
+    session_graph: Mutex<SessionGraph>,
+    live_resume: Mutex<Option<LiveResumeSnapshot>>,
+    usage_deltas: Mutex<Vec<TokenLedgerEntry>>,
+    session_meta: Mutex<Option<store::SessionMeta>>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeStore for RuntimePerfStore {
+    async fn put_blob(&self, content: &[u8]) -> BlobRef {
+        let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
+        let key = format!("perf-blob-{id}");
+        self.blobs
+            .lock()
+            .expect("lock perf blobs")
+            .insert(key.clone(), content.to_vec());
+        BlobRef(key)
+    }
+
+    async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>> {
+        self.blobs
+            .lock()
+            .expect("lock perf blobs")
+            .get(blob_ref.as_str())
+            .cloned()
+    }
+
+    async fn append_usage_deltas(&self, entries: &[TokenLedgerEntry]) {
+        self.usage_deltas
+            .lock()
+            .expect("lock perf usage deltas")
+            .extend(entries.iter().cloned());
+    }
+
+    async fn load_usage_deltas(&self) -> Vec<TokenLedgerEntry> {
+        self.usage_deltas
+            .lock()
+            .expect("lock perf usage deltas")
+            .clone()
+    }
+
+    async fn save_session_head_meta(&self, meta: SessionHeadMeta) {
+        *self
+            .session_head_meta
+            .lock()
+            .expect("lock perf session head meta") = Some(meta);
+    }
+
+    async fn load_session_head_meta(&self) -> Option<SessionHeadMeta> {
+        self.session_head_meta
+            .lock()
+            .expect("lock perf session head meta")
+            .clone()
+    }
+
+    async fn replace_session_graph(&self, graph: &SessionGraph) {
+        *self.session_graph.lock().expect("lock perf graph") = graph.clone();
+    }
+
+    async fn append_session_graph_nodes(&self, nodes: &[SessionNodeRecord]) {
+        self.session_graph
+            .lock()
+            .expect("lock perf graph")
+            .extend_node_records(nodes.iter().cloned());
+    }
+
+    async fn load_session_graph(&self) -> SessionGraph {
+        self.session_graph.lock().expect("lock perf graph").clone()
+    }
+
+    async fn save_live_resume(&self, snapshot: LiveResumeSnapshot) {
+        *self.live_resume.lock().expect("lock perf live resume") = Some(snapshot);
+    }
+
+    async fn load_live_resume(&self) -> Option<LiveResumeSnapshot> {
+        self.live_resume
+            .lock()
+            .expect("lock perf live resume")
+            .clone()
+    }
+
+    async fn clear_live_resume(&self) {
+        self.live_resume
+            .lock()
+            .expect("lock perf live resume")
+            .take();
+    }
+
+    async fn save_session_meta(&self, meta: store::SessionMeta) {
+        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
+    }
+
+    async fn load_session_meta(&self) -> Option<store::SessionMeta> {
+        self.session_meta
+            .lock()
+            .expect("lock perf session meta")
+            .clone()
+    }
+}
+
 impl BenchmarkTransport {
     fn new(scenario: RuntimePerfScenario) -> Self {
         Self { scenario }
@@ -363,6 +468,7 @@ impl LlmTransport for BenchmarkTransport {
             deltas: vec![text.clone()],
             parts: vec![LlmOutputPart::Text { text }],
             usage,
+            provider_usage: None,
             request_body: None,
             http_summary: None,
         })
@@ -638,7 +744,7 @@ async fn run_once(
     let export_before_alloc = allocator_stats();
     let export_started = Instant::now();
     let state = runtime.export_state();
-    let cumulative_usage = state.usage_report();
+    let cumulative_usage = runtime.usage_report();
     let export_state_ms = elapsed_ms(export_started);
     let export_state_alloc = alloc_delta(export_before_alloc, allocator_stats());
     let after_export_memory = process_memory_sample();
@@ -706,36 +812,21 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<LashRunt
 
     let profile =
         DefaultToolSurfaceProfile::for_runtime(execution_mode, &context_approach, false, false);
-    let plugin_host = PluginHost::new(tool_plugin_factories(DefaultToolPluginOptions {
-        execution_mode,
-        context_approach: context_approach.clone(),
-        bundles: profile.bundles,
-        tavily_api_key: None,
-        instruction_source: None,
-    }))
-    .with_dynamic_tools();
-    let root_plugins = plugin_host.build_session("root", execution_mode, context_approach, None)?;
-    let store = Arc::new(Store::memory().map_err(|err| anyhow::anyhow!(err.to_string()))?);
-    let services = RuntimeServices::new_with_bridges(root_plugins, TurnInjectionBridge::new())
-        .with_store(store as Arc<dyn RuntimeStore>);
-    let host = BackgroundRuntimeHost::new(
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::default()
-                .with_llm_factory(move |_| Box::new(BenchmarkTransport::new(scenario))),
-        ),
-        Arc::new(TokioBackgroundExecutor::default()),
-    );
-    let runtime = LashRuntime::from_background_state(
-        policy.clone(),
-        host,
-        services,
-        SessionStateEnvelope {
-            session_id: "root".to_string(),
-            policy,
-            ..SessionStateEnvelope::default()
-        },
-    )
-    .await?;
+    let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimeStore>;
+    let runtime = LashRuntime::builder()
+        .with_policy(policy.clone())
+        .with_store(Arc::clone(&store))
+        .with_background_executor(Arc::new(TokioBackgroundExecutor::default()))
+        .with_llm_factory(move |_| Box::new(BenchmarkTransport::new(scenario)))
+        .with_default_tool_bundles(DefaultToolPluginOptions {
+            execution_mode,
+            context_approach,
+            bundles: profile.bundles,
+            tavily_api_key: None,
+            instruction_source: None,
+        })
+        .build()
+        .await?;
     Ok(runtime)
 }
 
@@ -808,7 +899,7 @@ async fn seed_runtime_state(
         runtime
             .append_session_nodes(AppendSessionNodesRequest {
                 nodes: vec![SessionAppendNode::plugin(
-                    OM_REFLECTION_PLUGIN_TYPE,
+                    OM_ACTIVE_STATE_PLUGIN_TYPE,
                     serde_json::json!({
                         "observed_through_message_id": observed_through_message_id,
                         "observations": "Date: Apr 13, 2026\n* 🔴 User is evaluating Lash runtime performance without model inference.\n* 🟡 Historical inspection focused on runtime, token ledger export, and tool initialization overhead.\n* ✅ Shared process-wide search cache was added for indexed grep state.",

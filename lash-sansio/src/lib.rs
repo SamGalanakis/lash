@@ -240,6 +240,7 @@ impl ToolDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::ser::{Error as _, Serializer};
 
     #[test]
     fn tool_definition_uses_schema_overrides_for_model_tools() {
@@ -278,6 +279,43 @@ mod tests {
         assert_eq!(
             model_tool.output_schema["properties"]["hits"]["type"],
             serde_json::json!("array")
+        );
+    }
+
+    #[test]
+    fn tool_result_from_result_serializes_success_values() {
+        let result: ToolResult = Result::<_, std::io::Error>::Ok(vec!["alpha", "beta"]).into();
+        assert!(result.success);
+        assert_eq!(result.result, serde_json::json!(["alpha", "beta"]));
+        assert!(result.images.is_empty());
+    }
+
+    #[test]
+    fn tool_result_from_result_formats_errors() {
+        let result: ToolResult =
+            Result::<serde_json::Value, _>::Err(std::io::Error::other("nope")).into();
+        assert!(!result.success);
+        assert_eq!(result.result, serde_json::json!("nope"));
+    }
+
+    #[test]
+    fn tool_result_from_result_reports_serialize_failures() {
+        struct BrokenValue;
+
+        impl serde::Serialize for BrokenValue {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                Err(S::Error::custom("boom"))
+            }
+        }
+
+        let result: ToolResult = Result::<BrokenValue, std::io::Error>::Ok(BrokenValue).into();
+        assert!(!result.success);
+        assert_eq!(
+            result.result,
+            serde_json::json!("Failed to serialize tool result: boom")
         );
     }
 }
@@ -351,6 +389,22 @@ impl ToolResult {
             success,
             result,
             images,
+        }
+    }
+}
+
+impl<T, E> From<Result<T, E>> for ToolResult
+where
+    T: serde::Serialize,
+    E: std::fmt::Display,
+{
+    fn from(result: Result<T, E>) -> Self {
+        match result {
+            Ok(value) => match serde_json::to_value(value) {
+                Ok(value) => Self::ok(value),
+                Err(err) => Self::err_fmt(format_args!("Failed to serialize tool result: {err}")),
+            },
+            Err(err) => Self::err_fmt(err),
         }
     }
 }

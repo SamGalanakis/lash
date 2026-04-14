@@ -5,11 +5,11 @@ use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
+use lash_delegate_tools::{DelegateToolConfig, DelegateToolsPluginFactory};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
-use crate::delegate_tools::{DelegateToolConfig, DelegateToolsPluginFactory};
 use crate::interactive::{generate_session_name, run_app};
 use crate::session_log::{self, DbSessionStoreFactory, SessionLogger};
 use crate::{Args, setup};
@@ -505,17 +505,20 @@ pub(crate) async fn run(
     } else {
         lash::SessionGraph::default()
     };
-    let services = RuntimeServices::new_with_bridges(root_plugins, turn_injection_bridge.clone())
-        .with_store(store.clone() as Arc<dyn RuntimeStore>);
-    let state = SessionStateEnvelope {
+    let services = lash::PersistentRuntimeServices::new_with_bridges(
+        root_plugins,
+        turn_injection_bridge.clone(),
+        store.clone() as Arc<dyn RuntimeStore>,
+    );
+    let state = PersistedSessionState {
         session_id: "root".to_string(),
         policy: session_policy.clone(),
         session_graph: initial_graph,
-        ..SessionStateEnvelope::default()
+        ..PersistedSessionState::default()
     };
     let embedded_host = EmbeddedRuntimeHost::new(host_core)
         .with_session_store_factory(Arc::new(DbSessionStoreFactory::new(sessions_dir.clone())));
-    let mut runtime = LashRuntime::from_background_state(
+    let mut runtime = LashRuntime::from_persistent_background_state(
         session_policy.clone(),
         BackgroundRuntimeHost::new(embedded_host, Arc::new(TokioBackgroundExecutor::default())),
         services,
@@ -543,7 +546,6 @@ pub(crate) async fn run(
             SkillCatalog::load(),
             AutonomousPersistenceContext {
                 store: Arc::clone(&store),
-                dynamic_state: dynamic_tools.export_state(),
                 await_background_work: args.await_background_work,
                 turn_usage_json: args.turn_usage_json.clone(),
             },

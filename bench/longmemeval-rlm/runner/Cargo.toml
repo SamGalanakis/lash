@@ -1,0 +1,27 @@
+[package]
+name = "bench-longmemeval-rlm"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[[bin]]
+name = "bench-longmemeval-rlm"
+path = "src/main.rs"
+
+[dependencies]
+lash = { path = "../../../lash", default-features = false, features = ["full"] }
+lash-delegate-tools = { path = "../../../lash-delegate-tools" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+regex = "1"
+async-trait = "0.1"
+dotenvy = "0.15"
+
+[dev-dependencies]
+tempfile = "3"

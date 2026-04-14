@@ -726,18 +726,18 @@ mod tests {
     }
 
     #[test]
-    fn agent_result_uses_child_status_and_token_usage() {
+    fn delegate_result_uses_child_status_and_token_usage() {
         let mut state = ActivityState::default();
         state.blocks_for_tool_call(
-            "agent_call",
-            json!({"prompt":"inspect queue rendering"}),
+            "delegate",
+            json!({"task":"inspect queue rendering"}),
             json!({"id":"child-1","model":"gpt-5.4","model_variant":"high"}),
             true,
             3,
         );
 
         let blocks = state.blocks_for_tool_call(
-            "agent_result",
+            "delegate_result",
             json!({"id":"child-1"}),
             json!({
                 "result":"delegate result",
@@ -783,18 +783,18 @@ mod tests {
     }
 
     #[test]
-    fn agent_result_surfaces_child_error_details() {
+    fn delegate_result_surfaces_child_error_details() {
         let mut state = ActivityState::default();
         state.blocks_for_tool_call(
-            "agent_call",
-            json!({"prompt":"inspect queue rendering"}),
+            "delegate",
+            json!({"task":"inspect queue rendering"}),
             json!({"id":"child-1","model":"gpt-5.4-mini","model_variant":"low"}),
             true,
             3,
         );
 
         let blocks = state.blocks_for_tool_call(
-            "agent_result",
+            "delegate_result",
             json!({"id":"child-1"}),
             json!({
                 "result":"",

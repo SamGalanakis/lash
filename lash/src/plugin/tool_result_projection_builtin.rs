@@ -378,8 +378,7 @@ fn tool_projection_direction(tool_name: &str) -> ProjectionDirection {
 }
 
 fn truncation_hint(ctx: Option<&ToolResultProjectionContext>, text: &str) -> String {
-    let output_path =
-        ctx.and_then(|ctx| spill_tool_output(&ctx.session_id, &ctx.tool_name, &ctx.args, text));
+    let output_path = ctx.and_then(|ctx| spill_tool_output(&ctx.tool_name, &ctx.args, text));
     match output_path {
         Some(path) => format!(
             "The tool output was truncated. Full output saved to: {}\nUse `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.",
@@ -390,12 +389,11 @@ fn truncation_hint(ctx: Option<&ToolResultProjectionContext>, text: &str) -> Str
 }
 
 fn spill_tool_output(
-    session_id: &str,
     tool_name: &str,
     args: &serde_json::Value,
     full_output: &str,
 ) -> Option<PathBuf> {
-    let dir = lash_cache_dir().join("tool-output").join(session_id);
+    let dir = lash_cache_dir().join("tool-output");
     if fs::create_dir_all(&dir).is_err() {
         return None;
     }

@@ -191,6 +191,52 @@ pub fn plugin_host_with_bundles(options: DefaultToolPluginOptions) -> PluginHost
     PluginHost::new(tool_plugin_factories(options))
 }
 
+pub trait EmbeddedRuntimeBuilderExt {
+    fn with_default_tool_bundles(self, options: DefaultToolPluginOptions) -> Self;
+    fn with_default_tool_surface_profile(
+        self,
+        interactive: bool,
+        web_enabled: bool,
+        tavily_api_key: Option<String>,
+        instruction_source: Option<Arc<dyn InstructionSource>>,
+    ) -> Self;
+}
+
+impl EmbeddedRuntimeBuilderExt for lash::EmbeddedRuntimeBuilder {
+    fn with_default_tool_bundles(self, mut options: DefaultToolPluginOptions) -> Self {
+        if options.bundles.is_empty()
+            && let Some(policy) = self.policy()
+        {
+            options.execution_mode = policy.execution_mode;
+            options.context_approach = policy.context_approach.clone();
+        }
+        self.with_plugin_host(plugin_host_with_bundles(options).with_dynamic_tools())
+    }
+
+    fn with_default_tool_surface_profile(
+        self,
+        interactive: bool,
+        web_enabled: bool,
+        tavily_api_key: Option<String>,
+        instruction_source: Option<Arc<dyn InstructionSource>>,
+    ) -> Self {
+        let policy = self.policy().cloned().unwrap_or_default();
+        let profile = DefaultToolSurfaceProfile::for_runtime(
+            policy.execution_mode,
+            &policy.context_approach,
+            interactive,
+            web_enabled,
+        );
+        self.with_default_tool_bundles(DefaultToolPluginOptions {
+            execution_mode: policy.execution_mode,
+            context_approach: policy.context_approach,
+            bundles: profile.bundles,
+            tavily_api_key,
+            instruction_source,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,7 +252,11 @@ mod tests {
         assert!(profile.bundles.contains(&DefaultToolBundle::UserPrompts));
         assert!(profile.bundles.contains(&DefaultToolBundle::RlmState));
         assert!(profile.bundles.contains(&DefaultToolBundle::RollingHistory));
-        assert!(!profile.bundles.contains(&DefaultToolBundle::ObservationalMemory));
+        assert!(
+            !profile
+                .bundles
+                .contains(&DefaultToolBundle::ObservationalMemory)
+        );
     }
 
     #[test]
@@ -217,7 +267,11 @@ mod tests {
             false,
             false,
         );
-        assert!(profile.bundles.contains(&DefaultToolBundle::ObservationalMemory));
+        assert!(
+            profile
+                .bundles
+                .contains(&DefaultToolBundle::ObservationalMemory)
+        );
         assert!(!profile.bundles.contains(&DefaultToolBundle::RollingHistory));
     }
 

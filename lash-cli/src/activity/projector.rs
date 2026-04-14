@@ -47,7 +47,7 @@ pub struct ProjectCtx<'a> {
     /// (remove on exit, or_insert if still running).
     pub shell_handles: &'a mut HashMap<String, String>,
     /// Delegate handles: delegate_id → task description. Used by
-    /// `agent_call` (insert on success) and `agent_result` / `agent_kill`
+    /// `delegate` (insert on success) and `delegate_result` / `delegate_kill`
     /// (remove to recover the task label).
     pub delegate_handles: &'a mut HashMap<String, String>,
 }
