@@ -85,6 +85,24 @@ where
     Ok(())
 }
 
+fn register_singleton_hook<H>(
+    slot: &mut Option<RegisteredExclusiveHook<H>>,
+    registering_plugin_id: &Option<String>,
+    hook_kind: &str,
+    hook_name: &str,
+    hook: H,
+) -> Result<(), PluginError> {
+    let plugin_id = exclusive_hook_owner(
+        slot.as_ref()
+            .map(|registered| registered.plugin_id.as_str()),
+        registering_plugin_id,
+        hook_kind,
+        hook_name,
+    )?;
+    *slot = Some(RegisteredExclusiveHook { plugin_id, hook });
+    Ok(())
+}
+
 async fn collect_owned_async<C, O, H, F>(
     hooks: &[RegisteredHook<H>],
     ctx: C,
@@ -243,6 +261,9 @@ pub struct PluginRegistrar {
     commands: BTreeMap<String, RegisteredCommand>,
     turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
+    mode_execution: Option<RegisteredExclusiveHook<Arc<dyn ModeExecutionPlugin>>>,
+    mode_session: Option<RegisteredExclusiveHook<Arc<dyn ModeSessionPlugin>>>,
+    mode_native_tools: Option<RegisteredExclusiveHook<Arc<dyn ModeNativeToolsPlugin>>>,
     registering_plugin_id: Option<String>,
 }
 
@@ -390,12 +411,34 @@ impl HistoryRegistrations<'_> {
     }
 }
 
+pub(crate) struct ModeRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl ModeRegistrations<'_> {
+    pub(crate) fn execution(
+        self,
+        provider: Arc<dyn ModeExecutionPlugin>,
+    ) -> Result<(), PluginError> {
+        self.reg.add_mode_execution(provider)
+    }
+
+    pub(crate) fn session(self, provider: Arc<dyn ModeSessionPlugin>) -> Result<(), PluginError> {
+        self.reg.add_mode_session(provider)
+    }
+
+    pub(crate) fn native_tools(
+        self,
+        provider: Arc<dyn ModeNativeToolsPlugin>,
+    ) -> Result<(), PluginError> {
+        self.reg.add_mode_native_tools(provider)
+    }
+}
+
 impl PluginRegistrar {
     fn new() -> Self {
         Self {
-            tool_names: crate::tools::all_native_tool_names()
-                .map(str::to_string)
-                .collect(),
+            tool_names: BTreeSet::new(),
             tool_providers: Vec::new(),
             prompt_contributors: Vec::new(),
             prompt_request_hooks: Vec::new(),
@@ -414,6 +457,9 @@ impl PluginRegistrar {
             commands: BTreeMap::new(),
             turn_context_transforms: Vec::new(),
             history_rewriters: Vec::new(),
+            mode_execution: None,
+            mode_session: None,
+            mode_native_tools: None,
             registering_plugin_id: None,
         }
     }
@@ -460,6 +506,10 @@ impl PluginRegistrar {
 
     pub fn history(&mut self) -> HistoryRegistrations<'_> {
         HistoryRegistrations { reg: self }
+    }
+
+    pub(crate) fn mode(&mut self) -> ModeRegistrations<'_> {
+        ModeRegistrations { reg: self }
     }
 
     fn add_tool_provider(&mut self, provider: Arc<dyn ToolProvider>) -> Result<(), PluginError> {
@@ -607,6 +657,45 @@ impl PluginRegistrar {
         );
         Ok(())
     }
+
+    fn add_mode_execution(
+        &mut self,
+        provider: Arc<dyn ModeExecutionPlugin>,
+    ) -> Result<(), PluginError> {
+        register_singleton_hook(
+            &mut self.mode_execution,
+            &self.registering_plugin_id,
+            "mode execution capability",
+            "mode_execution",
+            provider,
+        )
+    }
+
+    fn add_mode_session(
+        &mut self,
+        provider: Arc<dyn ModeSessionPlugin>,
+    ) -> Result<(), PluginError> {
+        register_singleton_hook(
+            &mut self.mode_session,
+            &self.registering_plugin_id,
+            "mode session capability",
+            "mode_session",
+            provider,
+        )
+    }
+
+    fn add_mode_native_tools(
+        &mut self,
+        provider: Arc<dyn ModeNativeToolsPlugin>,
+    ) -> Result<(), PluginError> {
+        register_singleton_hook(
+            &mut self.mode_native_tools,
+            &self.registering_plugin_id,
+            "mode native tool capability",
+            "mode_native_tools",
+            provider,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -618,16 +707,14 @@ pub struct PluginHost {
 
 impl PluginHost {
     pub fn empty() -> Self {
-        Self {
-            factories: Arc::new(Vec::new()),
-            dynamic_tools_enabled: false,
-            sessions: Arc::new(StdMutex::new(BTreeMap::new())),
-        }
+        Self::new(Vec::new())
     }
 
     pub fn new(factories: Vec<Arc<dyn PluginFactory>>) -> Self {
+        let mut all_factories = super::builtin_mode_plugin_factories();
+        all_factories.extend(factories);
         Self {
-            factories: Arc::new(factories),
+            factories: Arc::new(all_factories),
             dynamic_tools_enabled: false,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
@@ -636,6 +723,14 @@ impl PluginHost {
     pub fn with_dynamic_tools(mut self) -> Self {
         self.dynamic_tools_enabled = true;
         self
+    }
+
+    pub fn isolated_registry(&self) -> Self {
+        Self {
+            factories: Arc::clone(&self.factories),
+            dynamic_tools_enabled: self.dynamic_tools_enabled,
+            sessions: Arc::new(StdMutex::new(BTreeMap::new())),
+        }
     }
 
     pub fn factories(&self) -> &[Arc<dyn PluginFactory>] {
@@ -713,6 +808,44 @@ impl PluginHost {
             reg.registering_plugin_id = None;
             plugins.push(plugin);
         }
+        let mode_execution = reg
+            .mode_execution
+            .take()
+            .ok_or_else(|| {
+                PluginError::Registration(format!(
+                    "missing mode execution capability for {:?}",
+                    execution_mode
+                ))
+            })?
+            .hook;
+        let mode_session = reg
+            .mode_session
+            .take()
+            .ok_or_else(|| {
+                PluginError::Registration(format!(
+                    "missing mode session capability for {:?}",
+                    execution_mode
+                ))
+            })?
+            .hook;
+        let mode_native_tools = reg
+            .mode_native_tools
+            .take()
+            .ok_or_else(|| {
+                PluginError::Registration(format!(
+                    "missing mode native tool capability for {:?}",
+                    execution_mode
+                ))
+            })?
+            .hook;
+        for def in mode_native_tools.definitions() {
+            if !reg.tool_names.insert(def.name.clone()) {
+                return Err(PluginError::Registration(format!(
+                    "duplicate mode native tool name `{}`",
+                    def.name
+                )));
+            }
+        }
         let base_tools: Arc<dyn ToolProvider> = Arc::new(
             crate::tools::CompositeToolProvider::from_providers(reg.tool_providers.clone()),
         );
@@ -782,6 +915,9 @@ impl PluginHost {
                 list.sort_by(|a, b| b.0.cmp(&a.0));
                 list.into_iter().map(|(_, r)| r).collect()
             },
+            mode_execution,
+            mode_session,
+            mode_native_tools,
         });
         self.register_session(&session_id, &session)?;
         let ready = SessionReadyContext {
@@ -804,7 +940,10 @@ impl PluginHost {
         name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, PluginError> {
-        let session = self.build_standard_session("__external__", None)?;
+        let session = self.build_standard_session(
+            format!("__external__-{}", uuid::Uuid::new_v4().simple()),
+            None,
+        )?;
         session
             .invoke_external(name, args, None, false, Arc::new(NoopSessionManager))
             .await
@@ -819,6 +958,14 @@ impl PluginHost {
         let mut sessions = self.sessions.lock().map_err(|_| {
             PluginError::Session("plugin host session registry poisoned".to_string())
         })?;
+        if let Some(existing) = sessions.get(session_id).and_then(Weak::upgrade) {
+            if !Arc::ptr_eq(&existing, session) {
+                return Err(PluginError::Session(format!(
+                    "session `{session_id}` is already registered on this plugin host"
+                )));
+            }
+            return Ok(());
+        }
         sessions.insert(session_id.to_string(), Arc::downgrade(session));
         Ok(())
     }
@@ -888,6 +1035,9 @@ pub struct PluginSession {
     commands: BTreeMap<String, RegisteredCommand>,
     turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
     history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
+    mode_execution: Arc<dyn ModeExecutionPlugin>,
+    mode_session: Arc<dyn ModeSessionPlugin>,
+    mode_native_tools: Arc<dyn ModeNativeToolsPlugin>,
 }
 
 impl PluginSession {
@@ -911,14 +1061,23 @@ impl PluginSession {
         self.dynamic_tools.clone()
     }
 
+    pub(crate) fn mode_execution(&self) -> &Arc<dyn ModeExecutionPlugin> {
+        &self.mode_execution
+    }
+
+    pub(crate) fn mode_session(&self) -> &Arc<dyn ModeSessionPlugin> {
+        &self.mode_session
+    }
+
+    pub(crate) fn mode_native_tools(&self) -> &Arc<dyn ModeNativeToolsPlugin> {
+        &self.mode_native_tools
+    }
+
     pub fn execution_surface(&self, session_id: &str, mode: ExecutionMode) -> ExecutionSurface {
         let mut tools = self.tools.definitions();
-        tools.extend(
-            crate::tools::native_tools(mode)
-                .iter()
-                .copied()
-                .map(crate::tools::NativeTool::definition),
-        );
+        if mode == self.execution_mode {
+            tools.extend(self.mode_native_tools.definitions());
+        }
         self.resolve_tool_surface(ToolSurfaceContext {
             session_id: session_id.to_string(),
             mode,
@@ -1611,7 +1770,18 @@ pub enum ExternalInvokeError {
 pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
-    pub store: Option<Arc<dyn crate::store::RuntimeStore>>,
+    pub(crate) store: Option<Arc<dyn crate::store::RuntimeStore>>,
+}
+
+#[derive(Clone)]
+pub struct PersistentRuntimeServices(RuntimeServices);
+
+impl std::ops::Deref for PersistentRuntimeServices {
+    type Target = RuntimeServices;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 struct EmptySnapshotReader;
@@ -1697,9 +1867,34 @@ impl RuntimeServices {
             store: None,
         }
     }
+}
 
-    pub fn with_store(mut self, store: Arc<dyn crate::store::RuntimeStore>) -> Self {
-        self.store = Some(store);
-        self
+impl PersistentRuntimeServices {
+    pub fn new(plugins: Arc<PluginSession>, store: Arc<dyn crate::store::RuntimeStore>) -> Self {
+        Self::new_with_bridges(plugins, crate::session::TurnInjectionBridge::new(), store)
+    }
+
+    pub fn new_with_bridges(
+        plugins: Arc<PluginSession>,
+        turn_injection_bridge: crate::session::TurnInjectionBridge,
+        store: Arc<dyn crate::store::RuntimeStore>,
+    ) -> Self {
+        Self(RuntimeServices {
+            plugins,
+            turn_injection_bridge,
+            store: Some(store),
+        })
+    }
+
+    pub(crate) fn into_runtime_services(self) -> RuntimeServices {
+        self.0
+    }
+
+    pub fn store(&self) -> Arc<dyn crate::store::RuntimeStore> {
+        self.0
+            .store
+            .as_ref()
+            .expect("persistent runtime services must carry a store")
+            .clone()
     }
 }

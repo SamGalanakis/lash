@@ -50,6 +50,7 @@ impl Parser {
             TokenKind::For => self.parse_for(),
             TokenKind::Parallel => self.parse_parallel(),
             TokenKind::Finish => self.parse_finish(),
+            TokenKind::Cancel => self.parse_cancel(),
             TokenKind::Observe => self.parse_observe(),
             TokenKind::Call => Ok(Stmt::Call(self.parse_call_expr()?)),
             TokenKind::Ident(_) if self.peek_assign() => self.parse_assign(),
@@ -121,6 +122,11 @@ impl Parser {
     fn parse_observe(&mut self) -> Result<Stmt, ParseError> {
         self.bump();
         Ok(Stmt::Observe(self.parse_expr()?))
+    }
+
+    fn parse_cancel(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        Ok(Stmt::Cancel(self.parse_expr()?))
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -266,6 +272,10 @@ impl Parser {
                     expr: Box::new(self.parse_unary()?),
                 })
             }
+            TokenKind::Await => {
+                self.bump();
+                Ok(Expr::Await(Box::new(self.parse_unary()?)))
+            }
             _ => self.parse_postfix(),
         }
     }
@@ -352,6 +362,10 @@ impl Parser {
             TokenKind::LBracket => self.parse_list(),
             TokenKind::LBrace => self.parse_record(),
             TokenKind::Call => Ok(Expr::ToolCall(self.parse_call_expr()?)),
+            TokenKind::Start => {
+                self.bump();
+                Ok(Expr::StartToolCall(self.parse_call_expr()?))
+            }
             TokenKind::Parallel => {
                 self.bump();
                 let branches = self.parse_parallel_branches()?;
@@ -516,6 +530,9 @@ fn render_kind(kind: &TokenKind) -> String {
         TokenKind::For => "`for`".to_string(),
         TokenKind::In => "`in`".to_string(),
         TokenKind::Parallel => "`parallel`".to_string(),
+        TokenKind::Start => "`start`".to_string(),
+        TokenKind::Await => "`await`".to_string(),
+        TokenKind::Cancel => "`cancel`".to_string(),
         TokenKind::Finish => "`finish`".to_string(),
         TokenKind::Observe => "`observe`".to_string(),
         TokenKind::Call => "`call`".to_string(),
@@ -684,6 +701,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_async_tool_syntax() {
+        let program = parse(
+            r#"
+            handle = start call delegate { task: "inspect" }
+            result = await handle
+            cancel handle
+            finish result
+            "#,
+        )
+        .expect("program should parse");
+
+        assert!(matches!(
+            &program.statements[0],
+            Stmt::Assign {
+                expr: Expr::StartToolCall(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &program.statements[1],
+            Stmt::Assign {
+                expr: Expr::Await(_),
+                ..
+            }
+        ));
+        assert!(matches!(&program.statements[2], Stmt::Cancel(_)));
+    }
+
+    #[test]
     fn parse_errors_cover_expected_and_unexpected_paths() {
         let err = parse("{").expect_err("parse should fail");
         assert!(matches!(
@@ -805,6 +851,9 @@ mod tests {
             TokenKind::For,
             TokenKind::In,
             TokenKind::Parallel,
+            TokenKind::Start,
+            TokenKind::Await,
+            TokenKind::Cancel,
             TokenKind::Finish,
             TokenKind::Observe,
             TokenKind::Call,

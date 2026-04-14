@@ -117,13 +117,13 @@ pub use plugin::{
     CommandInvocation, CommandOutcome, CommandRegistrations, DirectCompletion,
     ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, HistoryError,
     HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState, ModeExtras,
-    PluginDirective, PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar,
-    PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession, PluginSessionContext,
-    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
-    PluginSpec, PluginSpecFactory, PromptHookContext, PromptRequestHookContext, RewriteContext,
-    RewriteTrigger, RlmCreateExtras, RlmTermination, RuntimeServices, SessionAppendNode,
-    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
-    SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
+    PersistentRuntimeServices, PluginDirective, PluginError, PluginFactory, PluginHost,
+    PluginOwned, PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession,
+    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
+    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext, PromptRequestHookContext,
+    RewriteContext, RewriteTrigger, RlmCreateExtras, RlmTermination, RuntimeServices,
+    SessionAppendNode, SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest,
+    SessionHandle, SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
     SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionTurnHandle,
     SnapshotReader, SnapshotWriter, StandardCreateExtras, ToolResultProjectionContext,
     ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
@@ -139,12 +139,12 @@ pub use plugin::{
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundExecutor, BackgroundRuntimeHost, CodeOutputRecord,
-    DefaultPathResolver, DoneReason, EmbeddedRuntimeHost, EventSink, ExecutionSummary, InputItem,
-    LashRuntime, NoopEventSink, OutputState, PathResolver, PromptUsage, RunMode, RuntimeCoreConfig,
-    RuntimeError, RuntimePersistenceState, SanitizerPolicy, SessionStateEnvelope,
-    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, TerminationPolicy,
-    TokenLedgerEntry, TokioBackgroundExecutor, TurnInput, TurnIssue, TurnStatus, UsageReportRow,
-    UsageTotals, diff_token_ledger, diff_usage_reports,
+    DefaultPathResolver, DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink,
+    ExecutionSummary, InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver,
+    PersistedSessionState, PromptUsage, RunMode, RuntimeCoreConfig, RuntimeError, SanitizerPolicy,
+    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
+    TerminationPolicy, TokenLedgerEntry, TokioBackgroundExecutor, TurnInput, TurnIssue, TurnStatus,
+    UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use session::{Session, SessionError, TurnInjectionBridge};
 pub use session_graph::{
@@ -159,12 +159,14 @@ pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
 pub use store::{
-    BlobRef, HydratedSessionCheckpoint, LiveResumeDelta, LiveResumeSnapshot, RuntimeStore,
-    SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo,
-    materialize_live_resume_graph,
+    BlobArtifactDescriptor, BlobCompression, BlobRef, BlobStorageHint, GcReport,
+    HydratedSessionCheckpoint, LiveResumeCommit, LiveResumeDelta, LiveResumeSnapshot,
+    PersistedArtifactKind, PersistedStateCommit, PersistedStateCommitResult, RetainedArtifactRef,
+    RuntimeCommit, RuntimeCommitResult, RuntimeStore, SessionCheckpoint, SessionGraphCommit,
+    SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo, materialize_live_resume_graph,
 };
 #[cfg(feature = "sqlite-store")]
-pub use store::{SqliteStore, Store};
+pub use store::{BuiltinBlobProfile, SqliteStore, Store, StoreGcPolicy, StoreOptions};
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
@@ -181,6 +183,20 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 pub struct ToolExecutionContext {
     pub session_id: String,
     pub host: std::sync::Arc<dyn crate::plugin::SessionManager>,
+    pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    pub async_task_id: Option<String>,
+}
+
+impl ToolExecutionContext {
+    pub fn with_async_task(
+        mut self,
+        task_id: impl Into<String>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.async_task_id = Some(task_id.into());
+        self.cancellation_token = Some(cancellation_token);
+        self
+    }
 }
 
 /// Trait for providing tools to the sandbox. Implement this per-project.

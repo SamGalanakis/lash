@@ -929,12 +929,14 @@ mod tests {
     #[tokio::test]
     async fn write_stdin_reuses_running_exec_handle() {
         let shell = StandardShell::default();
+        let cmd = "python3 -u -c 'import sys; line = sys.stdin.readline(); print(\"got:\" + line.strip())'";
         let open = shell
             .execute(
                 "exec_command",
-                &json!({"cmd": "read line; echo got:$line", "yield_time_ms": 10, "login": false}),
+                &json!({"cmd": cmd, "yield_time_ms": 10, "login": false}),
             )
             .await;
+        assert!(open.success, "{}", open.result);
         let session_id = open.result["session_id"].as_i64().unwrap();
 
         let result = shell
@@ -957,13 +959,14 @@ mod tests {
     #[tokio::test]
     async fn write_stdin_prefers_completed_state_for_short_lived_commands() {
         let shell = StandardShell::default();
+        let cmd = "python3 -u -c 'import sys; line = sys.stdin.readline(); print(\"got:\" + line.strip())'";
         for _ in 0..16 {
             let open = shell
-                    .execute(
-                        "exec_command",
-                    &json!({"cmd": "read line; echo got:$line", "yield_time_ms": 10, "login": false}),
-                    )
-                    .await;
+                .execute(
+                    "exec_command",
+                    &json!({"cmd": cmd, "yield_time_ms": 10, "login": false}),
+                )
+                .await;
             assert!(open.success);
             let session_id = open.result["session_id"].as_i64().unwrap();
 

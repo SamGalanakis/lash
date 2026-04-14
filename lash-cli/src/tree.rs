@@ -16,7 +16,7 @@ pub async fn switch_to_tree_selection(
     app: &mut App,
     history: &mut Vec<Message>,
     selection: TreeSelection,
-    dynamic_state: &DynamicStateSnapshot,
+    _dynamic_state: &DynamicStateSnapshot,
 ) -> Result<(), String> {
     let target_leaf = if matches!(selection.message.role, MessageRole::User) {
         selection.parent_node_id.clone()
@@ -73,13 +73,13 @@ pub async fn switch_to_tree_selection(
     app.invalidate_height_cache();
     app.scroll_to_bottom();
 
-    let mut persistence_state = lash::RuntimePersistenceState::from_state(state);
+    let mut persistence_state = lash::PersistedSessionState::from_state(state);
     persist_committed_runtime_state(
         logger.store().as_ref(),
         &mut persistence_state,
         &app.ui_resume_state(),
-        dynamic_state,
-    );
+    )
+    .await;
 
     Ok(())
 }

@@ -344,6 +344,18 @@ pub struct Snapshot {
 pub trait ToolHost: Sync {
     fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError>;
 
+    fn start_call(&self, _name: &str, _args: &Record) -> Result<Value, ToolHostError> {
+        Err(ToolHostError::new("async tool starts are unavailable"))
+    }
+
+    fn await_handle(&self, _handle: &Value) -> Result<Value, ToolHostError> {
+        Err(ToolHostError::new("async tool handles are unavailable"))
+    }
+
+    fn cancel_handle(&self, _handle: &Value) -> Result<Value, ToolHostError> {
+        Err(ToolHostError::new("async tool handles are unavailable"))
+    }
+
     fn observe(&self, _value: &Value) -> Result<(), ToolHostError> {
         Ok(())
     }
@@ -518,6 +530,9 @@ enum Instruction {
     JumpIfFalse(usize),
     JumpIfTrue(usize),
     CallTool { name: usize, keys: usize },
+    StartCallTool { name: usize, keys: usize },
+    AwaitHandle,
+    CancelHandle,
     CallBuiltin { builtin: Builtin, argc: usize },
     AddAssign(usize),
     AppendAssign(usize),
@@ -571,6 +586,9 @@ impl Instruction {
             Instruction::JumpIfFalse(_) => InstructionProfileTag::JumpIfFalse,
             Instruction::JumpIfTrue(_) => InstructionProfileTag::JumpIfTrue,
             Instruction::CallTool { .. } => InstructionProfileTag::CallTool,
+            Instruction::StartCallTool { .. } => InstructionProfileTag::StartCallTool,
+            Instruction::AwaitHandle => InstructionProfileTag::AwaitHandle,
+            Instruction::CancelHandle => InstructionProfileTag::CancelHandle,
             Instruction::CallBuiltin { .. } => InstructionProfileTag::CallBuiltin,
             Instruction::AddAssign(_) => InstructionProfileTag::AddAssign,
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
@@ -629,6 +647,9 @@ enum InstructionProfileTag {
     JumpIfFalse,
     JumpIfTrue,
     CallTool,
+    StartCallTool,
+    AwaitHandle,
+    CancelHandle,
     CallBuiltin,
     AddAssign,
     AppendAssign,
@@ -707,6 +728,9 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "jump_if_false",
     "jump_if_true",
     "call_tool",
+    "start_call_tool",
+    "await_handle",
+    "cancel_handle",
     "call_builtin",
     "add_assign",
     "append_assign",
@@ -992,6 +1016,10 @@ impl Compiler {
                 self.compile_call_expr(call);
                 self.code.push(Instruction::Pop);
             }
+            Stmt::Cancel(handle) => {
+                self.compile_expr(handle);
+                self.code.push(Instruction::CancelHandle);
+            }
             Stmt::Observe(expr) => {
                 self.compile_expr(expr);
                 self.code.push(Instruction::Observe);
@@ -1098,8 +1126,14 @@ impl Compiler {
             Expr::ToolCall(_) => Err(RuntimeError::ValueError {
                 message: "tool calls are not allowed in pure expressions".to_string(),
             }),
+            Expr::StartToolCall(_) => Err(RuntimeError::ValueError {
+                message: "async tool starts are not allowed in pure expressions".to_string(),
+            }),
             Expr::Parallel { .. } => Err(RuntimeError::ValueError {
                 message: "`parallel` is not allowed in pure expressions".to_string(),
+            }),
+            Expr::Await(_) => Err(RuntimeError::ValueError {
+                message: "`await` is not allowed in pure expressions".to_string(),
             }),
             Expr::BuiltinCall { name, args } => Ok(PureExpr::Builtin {
                 builtin: self.resolve_builtin(name),
@@ -1174,7 +1208,12 @@ impl Compiler {
                 self.code.push(Instruction::BuildRecord(keys));
             }
             Expr::ToolCall(call) => self.compile_call_expr(call),
+            Expr::StartToolCall(call) => self.compile_start_call_expr(call),
             Expr::Parallel { branches } => self.compile_parallel(branches, true),
+            Expr::Await(handle) => {
+                self.compile_expr(handle);
+                self.code.push(Instruction::AwaitHandle);
+            }
             Expr::BuiltinCall { name, args } => {
                 for arg in args {
                     self.compile_expr(arg);
@@ -1251,6 +1290,15 @@ impl Compiler {
         let keys = self.push_key_list(call.args.iter().map(|(name, _)| name.as_str()));
         let name = self.push_name(&call.name);
         self.code.push(Instruction::CallTool { name, keys });
+    }
+
+    fn compile_start_call_expr(&mut self, call: &CallExpr) {
+        for (_, expr) in &call.args {
+            self.compile_expr(expr);
+        }
+        let keys = self.push_key_list(call.args.iter().map(|(name, _)| name.as_str()));
+        let name = self.push_name(&call.name);
+        self.code.push(Instruction::StartCallTool { name, keys });
     }
 
     fn compile_parallel(&mut self, branches: &[Stmt], want_value: bool) {
@@ -1506,6 +1554,40 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     Err(error) => error_value(error.to_string()),
                 };
                 self.stack.push(result);
+            }
+            Instruction::StartCallTool { name, keys } => {
+                let key_indices = &self.chunk.key_lists[keys];
+                let values = self.stack_tail(key_indices.len())?;
+                let mut args = record_with_capacity(key_indices.len());
+                for (key, value) in key_indices.iter().zip(values.iter()) {
+                    args.insert_symbol(self.chunk.names[*key].symbol, value.clone());
+                }
+                self.stack.truncate(self.stack.len() - key_indices.len());
+                let result = self
+                    .host
+                    .start_call(self.chunk.names[name].text.as_ref(), &args)
+                    .map_err(|err| RuntimeError::ValueError {
+                        message: format!("async start failed: {err}"),
+                    })?;
+                self.stack.push(result);
+            }
+            Instruction::AwaitHandle => {
+                let handle = self.pop_stack()?;
+                let result = match self.host.await_handle(&handle) {
+                    Ok(value) => success(value),
+                    Err(error) => error_value(error.to_string()),
+                };
+                self.stack.push(result);
+            }
+            Instruction::CancelHandle => {
+                let handle = self.pop_stack()?;
+                let value =
+                    self.host
+                        .cancel_handle(&handle)
+                        .map_err(|err| RuntimeError::ValueError {
+                            message: format!("cancel failed: {err}"),
+                        })?;
+                self.last_value = Some(value);
             }
             Instruction::CallBuiltin { builtin, argc } => {
                 let values = self.stack_tail(argc)?;
@@ -1974,7 +2056,9 @@ fn is_pure_expr(expr: &Expr) -> bool {
         Expr::List(items) => items.iter().all(is_pure_expr),
         Expr::Record(entries) => entries.iter().all(|(_, value)| is_pure_expr(value)),
         Expr::ToolCall(_) => false,
+        Expr::StartToolCall(_) => false,
         Expr::Parallel { .. } => false,
+        Expr::Await(_) => false,
         Expr::BuiltinCall { args, .. } => args.iter().all(is_pure_expr),
         Expr::Field { target, .. } => is_pure_expr(target),
         Expr::Index { target, index } => is_pure_expr(target) && is_pure_expr(index),

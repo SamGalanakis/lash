@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full"] }
 lash-default-tools = { path = "../lash-default-tools" }
+lash-delegate-tools = { path = "../lash-delegate-tools" }
 lash-ui = { path = "../lash-ui" }
 lash-tui = { path = "../lash-tui" }
 crossterm = "0.28"

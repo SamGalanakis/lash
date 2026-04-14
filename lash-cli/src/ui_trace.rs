@@ -261,6 +261,7 @@ impl TraceSessionEvent {
             SessionEvent::Prompt { .. }
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TokenUsage { .. }
+            | SessionEvent::ChildTokenUsage { .. }
             | SessionEvent::RetryStatus { .. }
             | SessionEvent::InjectedMessagesCommitted { .. }
             | SessionEvent::TypedFinish { .. } => None,

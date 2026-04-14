@@ -507,6 +507,10 @@ impl OpenAiGenericAdapter {
         })
     }
 
+    fn provider_usage_from_value(value: &Value) -> Option<Value> {
+        value.get("usage").cloned()
+    }
+
     fn extract_text_parts(value: &Value) -> Vec<String> {
         let mut out = Vec::new();
         let Some(choices) = value.get("choices").and_then(|v| v.as_array()) else {
@@ -587,7 +591,7 @@ impl OpenAiGenericAdapter {
         deltas: &mut Vec<String>,
         usage: &mut LlmUsage,
     ) -> Result<(), LlmTransportError> {
-        Self::process_sse_event_with_tools(raw, full, deltas, usage, None)
+        Self::process_sse_event_with_tools(raw, full, deltas, usage, None, None)
     }
 
     fn process_sse_event_with_tools(
@@ -596,6 +600,7 @@ impl OpenAiGenericAdapter {
         deltas: &mut Vec<String>,
         usage: &mut LlmUsage,
         tool_calls: Option<&mut Vec<StreamingToolCall>>,
+        provider_usage: Option<&mut Option<Value>>,
     ) -> Result<(), LlmTransportError> {
         let raw = raw.trim();
         if raw.is_empty() || raw == "[DONE]" {
@@ -605,9 +610,13 @@ impl OpenAiGenericAdapter {
             LlmTransportError::new(format!("Invalid SSE payload: {e}")).with_raw(raw)
         })?;
         if let Some(err) = event.get("error") {
-            return Err(
-                LlmTransportError::new("OpenAI-compatible stream error").with_raw(err.to_string())
-            );
+            let mut transport_error = LlmTransportError::new("OpenAI-compatible stream error")
+                .with_raw(err.to_string())
+                .retryable(Self::stream_error_is_retryable(err));
+            if let Some(code) = Self::stream_error_code(err) {
+                transport_error = transport_error.with_code(code);
+            }
+            return Err(transport_error);
         }
         if let Some(new_usage) = Self::usage_from_value(&event)
             && (new_usage.input_tokens > 0
@@ -616,6 +625,11 @@ impl OpenAiGenericAdapter {
                 || new_usage.reasoning_tokens > 0)
         {
             *usage = new_usage;
+        }
+        if let Some(dst) = provider_usage
+            && let Some(raw_usage) = Self::provider_usage_from_value(&event)
+        {
+            *dst = Some(raw_usage);
         }
         for piece in Self::extract_text_parts(&event) {
             Self::apply_stream_piece(full, deltas, &piece);
@@ -652,6 +666,36 @@ impl OpenAiGenericAdapter {
             }
         }
         Ok(())
+    }
+
+    fn stream_error_code(err: &Value) -> Option<String> {
+        err.get("code")
+            .or_else(|| err.get("status"))
+            .and_then(|value| match value {
+                Value::Number(number) => number.as_i64().map(|v| v.to_string()),
+                Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+                _ => None,
+            })
+    }
+
+    fn stream_error_is_retryable(err: &Value) -> bool {
+        let code = err
+            .get("code")
+            .or_else(|| err.get("status"))
+            .and_then(|value| match value {
+                Value::Number(number) => number.as_i64(),
+                Value::String(text) => text.trim().parse::<i64>().ok(),
+                _ => None,
+            });
+        if matches!(code, Some(429)) || matches!(code, Some(status) if status >= 500) {
+            return true;
+        }
+        matches!(
+            err.get("metadata")
+                .and_then(|meta| meta.get("error_type"))
+                .and_then(|value| value.as_str()),
+            Some("provider_unavailable")
+        )
     }
 
     fn parse_non_stream_response(raw: &str) -> Result<(String, LlmUsage), LlmTransportError> {
@@ -858,6 +902,7 @@ impl LlmTransport for OpenAiGenericAdapter {
             let value: Value = serde_json::from_str(&text).map_err(|e| {
                 LlmTransportError::new(format!("Invalid response JSON: {e}")).with_raw(text.clone())
             })?;
+            let provider_usage = Self::provider_usage_from_value(&value);
             let mut parts = Self::response_parts_from_value(&value);
             if parts.is_empty() && !content.is_empty() {
                 parts.push(LlmOutputPart::Text {
@@ -877,6 +922,7 @@ impl LlmTransport for OpenAiGenericAdapter {
                 full_text: content,
                 parts,
                 usage,
+                provider_usage,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", url)),
             });
@@ -885,6 +931,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         let mut full = String::new();
         let mut deltas = Vec::new();
         let mut usage = LlmUsage::default();
+        let mut provider_usage = None;
         let mut streaming_tool_calls: Vec<StreamingToolCall> = Vec::new();
         drive_sse_response(
             resp,
@@ -899,6 +946,7 @@ impl LlmTransport for OpenAiGenericAdapter {
                     &mut deltas,
                     &mut usage,
                     Some(&mut streaming_tool_calls),
+                    Some(&mut provider_usage),
                 )?;
                 emit_progress(
                     stream_events.as_ref(),
@@ -931,6 +979,7 @@ impl LlmTransport for OpenAiGenericAdapter {
             full_text: full,
             parts,
             usage,
+            provider_usage,
             request_body,
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
         })
@@ -984,6 +1033,52 @@ mod tests {
     }
 
     #[test]
+    fn captures_provider_usage_with_cost_from_stream_event() {
+        let mut full = String::new();
+        let mut deltas = Vec::new();
+        let mut usage = LlmUsage::default();
+        let mut provider_usage = None;
+
+        OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2},"cost":0.95,"cost_details":{"upstream_inference_cost":19}}}"#,
+            &mut full,
+            &mut deltas,
+            &mut usage,
+            None,
+            Some(&mut provider_usage),
+        )
+        .unwrap();
+
+        let provider_usage = provider_usage.expect("provider usage");
+        assert_eq!(provider_usage["cost"], json!(0.95));
+        assert_eq!(
+            provider_usage["cost_details"]["upstream_inference_cost"],
+            json!(19)
+        );
+        assert_eq!(usage.reasoning_tokens, 2);
+    }
+
+    #[test]
+    fn marks_retryable_provider_unavailable_stream_errors() {
+        let mut full = String::new();
+        let mut deltas = Vec::new();
+        let mut usage = LlmUsage::default();
+
+        let err = OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"error":{"code":502,"message":"JSON error injected into SSE stream","metadata":{"error_type":"provider_unavailable"}}}"#,
+            &mut full,
+            &mut deltas,
+            &mut usage,
+            None,
+            None,
+        )
+        .expect_err("stream error");
+
+        assert!(err.retryable);
+        assert_eq!(err.code.as_deref(), Some("502"));
+    }
+
+    #[test]
     fn streaming_accumulates_tool_calls() {
         let mut full = String::new();
         let mut deltas = Vec::new();
@@ -997,6 +1092,7 @@ mod tests {
             &mut deltas,
             &mut usage,
             Some(&mut tool_calls),
+            None,
         )
         .unwrap();
         assert_eq!(tool_calls.len(), 1);
@@ -1010,6 +1106,7 @@ mod tests {
             &mut deltas,
             &mut usage,
             Some(&mut tool_calls),
+            None,
         )
         .unwrap();
 
@@ -1020,6 +1117,7 @@ mod tests {
             &mut deltas,
             &mut usage,
             Some(&mut tool_calls),
+            None,
         )
         .unwrap();
 

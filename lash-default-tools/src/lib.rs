@@ -4,7 +4,7 @@ use lash::instructions::InstructionSource;
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::tools::{
     ApplyPatchTool, AskTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory, ShowSnippetToUser,
-    StandardShell, StateToolsPluginFactory, WaitTool, WebSearch, shell_prompt_contributions,
+    StandardShell, WaitTool, WebSearch, shell_prompt_contributions,
 };
 use lash::{
     BuiltinObservationalMemoryPluginFactory, BuiltinRollingHistoryPluginFactory,
@@ -23,7 +23,6 @@ pub enum DefaultToolBundle {
     Search,
     UserPrompts,
     Web,
-    RlmState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,7 +33,6 @@ pub struct DefaultToolSurfaceProfile {
 
 impl DefaultToolSurfaceProfile {
     pub fn for_runtime(
-        execution_mode: ExecutionMode,
         context_approach: &ContextApproach,
         interactive: bool,
         web_enabled: bool,
@@ -54,9 +52,6 @@ impl DefaultToolSurfaceProfile {
         ];
         if interactive {
             bundles.push(DefaultToolBundle::UserPrompts);
-        }
-        if matches!(execution_mode, ExecutionMode::Rlm) {
-            bundles.push(DefaultToolBundle::RlmState);
         }
         if web_enabled {
             bundles.push(DefaultToolBundle::Web);
@@ -84,7 +79,6 @@ fn shell_provider() -> Arc<dyn ToolProvider> {
 pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<dyn PluginFactory>> {
     if options.bundles.is_empty() {
         options.bundles = DefaultToolSurfaceProfile::for_runtime(
-            options.execution_mode,
             &options.context_approach,
             true,
             options.tavily_api_key.is_some(),
@@ -179,9 +173,6 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
                     )));
                 }
             }
-            DefaultToolBundle::RlmState => {
-                factories.push(Arc::new(StateToolsPluginFactory::new()));
-            }
         }
     }
     factories
@@ -191,33 +182,83 @@ pub fn plugin_host_with_bundles(options: DefaultToolPluginOptions) -> PluginHost
     PluginHost::new(tool_plugin_factories(options))
 }
 
+pub trait EmbeddedRuntimeBuilderExt {
+    fn with_default_tool_bundles(self, options: DefaultToolPluginOptions) -> Self;
+    fn with_default_tool_surface_profile(
+        self,
+        interactive: bool,
+        web_enabled: bool,
+        tavily_api_key: Option<String>,
+        instruction_source: Option<Arc<dyn InstructionSource>>,
+    ) -> Self;
+}
+
+impl EmbeddedRuntimeBuilderExt for lash::EmbeddedRuntimeBuilder {
+    fn with_default_tool_bundles(self, mut options: DefaultToolPluginOptions) -> Self {
+        if options.bundles.is_empty()
+            && let Some(policy) = self.policy()
+        {
+            options.execution_mode = policy.execution_mode;
+            options.context_approach = policy.context_approach.clone();
+        }
+        self.with_plugin_host(plugin_host_with_bundles(options).with_dynamic_tools())
+    }
+
+    fn with_default_tool_surface_profile(
+        self,
+        interactive: bool,
+        web_enabled: bool,
+        tavily_api_key: Option<String>,
+        instruction_source: Option<Arc<dyn InstructionSource>>,
+    ) -> Self {
+        let policy = self.policy().cloned().unwrap_or_default();
+        let profile = DefaultToolSurfaceProfile::for_runtime(
+            &policy.context_approach,
+            interactive,
+            web_enabled,
+        );
+        self.with_default_tool_bundles(DefaultToolPluginOptions {
+            execution_mode: policy.execution_mode,
+            context_approach: policy.context_approach,
+            bundles: profile.bundles,
+            tavily_api_key,
+            instruction_source,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn rolling_history_profile_for_interactive_rlm_includes_prompt_and_state_tools() {
+    fn rolling_history_profile_for_interactive_rlm_includes_prompt_tools() {
         let profile = DefaultToolSurfaceProfile::for_runtime(
-            ExecutionMode::Rlm,
             &ContextApproach::RollingHistory(Default::default()),
             true,
             false,
         );
         assert!(profile.bundles.contains(&DefaultToolBundle::UserPrompts));
-        assert!(profile.bundles.contains(&DefaultToolBundle::RlmState));
         assert!(profile.bundles.contains(&DefaultToolBundle::RollingHistory));
-        assert!(!profile.bundles.contains(&DefaultToolBundle::ObservationalMemory));
+        assert!(
+            !profile
+                .bundles
+                .contains(&DefaultToolBundle::ObservationalMemory)
+        );
     }
 
     #[test]
     fn observational_memory_profile_selects_om_bundle() {
         let profile = DefaultToolSurfaceProfile::for_runtime(
-            ExecutionMode::Standard,
             &ContextApproach::ObservationalMemory(Default::default()),
             false,
             false,
         );
-        assert!(profile.bundles.contains(&DefaultToolBundle::ObservationalMemory));
+        assert!(
+            profile
+                .bundles
+                .contains(&DefaultToolBundle::ObservationalMemory)
+        );
         assert!(!profile.bundles.contains(&DefaultToolBundle::RollingHistory));
     }
 

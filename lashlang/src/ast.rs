@@ -13,6 +13,7 @@ pub enum Stmt {
     },
     Expr(Expr),
     Call(CallExpr),
+    Cancel(Expr),
     Observe(Expr),
     If {
         condition: Expr,
@@ -40,9 +41,11 @@ pub enum Expr {
     List(Vec<Expr>),
     Record(Vec<(String, Expr)>),
     ToolCall(CallExpr),
+    StartToolCall(CallExpr),
     Parallel {
         branches: Vec<Stmt>,
     },
+    Await(Box<Expr>),
     BuiltinCall {
         name: String,
         args: Vec<Expr>,

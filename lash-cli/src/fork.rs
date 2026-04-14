@@ -14,13 +14,13 @@ async fn persist_parent_root_snapshot(
     runtime: &mut lash::LashRuntime,
     store: &lash::Store,
     ui_state: &UiResumeState,
-    dynamic_state: &DynamicStateSnapshot,
+    _dynamic_state: &DynamicStateSnapshot,
 ) -> Result<()> {
     let mut state = runtime.export_persistence_state();
     snapshot_execution_state(runtime, &mut state)
         .await
         .context("Failed to snapshot execution state for fork")?;
-    persist_committed_runtime_state(store, &mut state, ui_state, dynamic_state);
+    persist_committed_runtime_state(store, &mut state, ui_state).await;
     Ok(())
 }
 
@@ -570,6 +570,7 @@ fn materialize_child_from_graph(
             })
         });
     child_store.save_session_head(lash::SessionHead {
+        session_id: crate::ROOT_SESSION_ID.to_string(),
         graph: child_graph.clone(),
         config: config.clone(),
         checkpoint_ref: child_checkpoint_ref.clone(),
@@ -581,6 +582,7 @@ fn materialize_child_from_graph(
     crate::ui_resume::save_ui_resume_state(child_store, ui_state);
     if persist_live_graph {
         child_store.save_live_resume(lash::LiveResumeSnapshot {
+            session_id: crate::ROOT_SESSION_ID.to_string(),
             graph: child_graph,
             config: config.clone(),
             checkpoint_ref: child_checkpoint_ref,
@@ -631,6 +633,7 @@ pub async fn fork_current_session(
         .store()
         .load_session_head()
         .unwrap_or(lash::SessionHead {
+            session_id: crate::ROOT_SESSION_ID.to_string(),
             graph: lash::SessionGraph::default(),
             config: lash::PersistedSessionConfig {
                 provider_id: _provider.id().to_string(),
@@ -736,6 +739,7 @@ mod fork_tests {
             .put_checkpoint(&persisted_checkpoint(iteration))
             .checkpoint_ref;
         store.save_session_head(lash::SessionHead {
+            session_id: "root".to_string(),
             graph,
             config: lash::PersistedSessionConfig {
                 provider_id: dummy_provider().id().to_string(),
@@ -939,6 +943,7 @@ mod fork_tests {
             &UiResumeState::default(),
             &empty_dynamic_state(),
         )
+        .await
         .expect("live snapshot");
 
         let (child_filename, _child_session_name) = fork_current_session(
@@ -1007,6 +1012,7 @@ mod fork_tests {
             &[],
         );
         parent_store.save_live_resume(lash::LiveResumeSnapshot {
+            session_id: "root".to_string(),
             graph: live_graph,
             config: lash::PersistedSessionConfig {
                 provider_id: dummy_provider().id().to_string(),

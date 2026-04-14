@@ -1,17 +1,15 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::plugin::{
     ExecutionSurface, PluginDirective, PluginSession, SessionManager, ToolCallHookContext,
     ToolResultHookContext, emit_plugin_surface_events,
 };
-use crate::tools::{NativeTool, find_native_tool};
 use crate::{
-    ExecutionMode, ProgressSender, SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage,
-    ToolProvider, ToolResult, TurnInjectionBridge,
+    ProgressSender, SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider,
+    ToolResult, TurnInjectionBridge,
 };
 
 #[derive(Clone)]
@@ -21,23 +19,38 @@ pub(crate) struct ToolDispatchContext {
     pub surface: ExecutionSurface,
     pub host: Arc<dyn SessionManager>,
     pub session_id: String,
-    pub execution_mode: ExecutionMode,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub turn_injection_bridge: TurnInjectionBridge,
 }
 
+#[derive(Clone)]
 pub(crate) struct ToolDispatchOutcome {
     pub record: ToolCallRecord,
     pub images: Vec<ToolImage>,
 }
-
-const BATCH_MAX_TOOL_CALLS: usize = 25;
 
 pub(crate) async fn dispatch_tool_call(
     context: &ToolDispatchContext,
     tool_name: String,
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
+) -> ToolDispatchOutcome {
+    let tool_context = ToolExecutionContext {
+        session_id: context.session_id.clone(),
+        host: Arc::clone(&context.host),
+        cancellation_token: None,
+        async_task_id: None,
+    };
+    dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
+        .await
+}
+
+pub(crate) async fn dispatch_tool_call_with_execution_context(
+    context: &ToolDispatchContext,
+    tool_name: String,
+    args: serde_json::Value,
+    progress: Option<&ProgressSender>,
+    tool_context: ToolExecutionContext,
 ) -> ToolDispatchOutcome {
     let enabled_tools = context.surface.enabled_tools();
     if !enabled_tools.iter().any(|tool| tool.name == tool_name) {
@@ -105,18 +118,18 @@ pub(crate) async fn dispatch_tool_call(
     }
 
     let tool_start = Instant::now();
-    let tool_context = ToolExecutionContext {
-        session_id: context.session_id.clone(),
-        host: Arc::clone(&context.host),
-    };
-    let result = match find_native_tool(context.execution_mode, &tool_name) {
-        Some(NativeTool::Batch) => execute_batch_tool_call(context, &args, progress).await,
-        None => {
-            context
-                .tools
-                .execute_streaming_with_context(&tool_name, &args, &tool_context, progress)
-                .await
-        }
+    let result = if let Some(result) = context
+        .plugins
+        .mode_native_tools()
+        .execute(context, &tool_name, &args, progress)
+        .await
+    {
+        result
+    } else {
+        context
+            .tools
+            .execute_streaming_with_context(&tool_name, &args, &tool_context, progress)
+            .await
     };
     let duration_ms = tool_start.elapsed().as_millis() as u64;
 
@@ -177,200 +190,6 @@ pub(crate) async fn dispatch_tool_call(
 
     outcome(tool_name, args, result, duration_ms)
 }
-
-#[derive(Debug)]
-struct BatchCallSpec {
-    index: usize,
-    tool: String,
-    parameters: serde_json::Value,
-}
-
-struct BatchCallOutcome {
-    index: usize,
-    tool: String,
-    success: bool,
-    duration_ms: u64,
-    result: serde_json::Value,
-    images: Vec<ToolImage>,
-}
-
-async fn execute_batch_tool_call(
-    context: &ToolDispatchContext,
-    args: &serde_json::Value,
-    progress: Option<&ProgressSender>,
-) -> ToolResult {
-    let specs = match parse_batch_specs(args) {
-        Ok(specs) => specs,
-        Err(err) => return err,
-    };
-
-    let progress = progress.cloned();
-    let mut immediate_outcomes = Vec::new();
-    let mut pending = FuturesUnordered::new();
-
-    for spec in specs.into_iter().take(BATCH_MAX_TOOL_CALLS) {
-        if spec.tool == "batch" {
-            immediate_outcomes.push(BatchCallOutcome {
-                index: spec.index,
-                tool: spec.tool,
-                success: false,
-                duration_ms: 0,
-                result: serde_json::json!("Tool 'batch' is not allowed inside batch"),
-                images: Vec::new(),
-            });
-            continue;
-        }
-
-        let dispatch = context.clone();
-        let progress = progress.clone();
-        pending.push(async move {
-            let outcome = dispatch_tool_call(
-                &dispatch,
-                spec.tool.clone(),
-                spec.parameters,
-                progress.as_ref(),
-            )
-            .await;
-            BatchCallOutcome {
-                index: spec.index,
-                tool: outcome.record.tool,
-                success: outcome.record.success,
-                duration_ms: outcome.record.duration_ms,
-                result: outcome.record.result,
-                images: outcome.images,
-            }
-        });
-    }
-
-    while let Some(outcome) = pending.next().await {
-        immediate_outcomes.push(outcome);
-    }
-
-    for overflow_index in BATCH_MAX_TOOL_CALLS
-        ..args
-            .get("tool_calls")
-            .and_then(|value| value.as_array())
-            .map(|value| value.len())
-            .unwrap_or_default()
-    {
-        immediate_outcomes.push(BatchCallOutcome {
-            index: overflow_index,
-            tool: args
-                .get("tool_calls")
-                .and_then(|value| value.as_array())
-                .and_then(|items| items.get(overflow_index))
-                .and_then(|item| item.get("tool"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            success: false,
-            duration_ms: 0,
-            result: serde_json::json!("Maximum of 25 tool calls allowed in batch"),
-            images: Vec::new(),
-        });
-    }
-
-    immediate_outcomes.sort_by_key(|outcome| outcome.index);
-    let successful = immediate_outcomes
-        .iter()
-        .filter(|outcome| outcome.success)
-        .count();
-    let failed = immediate_outcomes.len().saturating_sub(successful);
-    let summary = if failed == 0 {
-        format!("All {successful} tools executed successfully.")
-    } else {
-        format!(
-            "Executed {successful}/{} tools successfully. {failed} failed.",
-            immediate_outcomes.len()
-        )
-    };
-
-    let mut images = Vec::new();
-    let results = immediate_outcomes
-        .into_iter()
-        .map(|mut outcome| {
-            images.append(&mut outcome.images);
-            let mut record = serde_json::Map::new();
-            record.insert("tool".to_string(), serde_json::json!(outcome.tool));
-            record.insert("success".to_string(), serde_json::json!(outcome.success));
-            record.insert(
-                "duration_ms".to_string(),
-                serde_json::json!(outcome.duration_ms),
-            );
-            record.insert(
-                if outcome.success {
-                    "result".to_string()
-                } else {
-                    "error".to_string()
-                },
-                outcome.result,
-            );
-            serde_json::Value::Object(record)
-        })
-        .collect::<Vec<_>>();
-
-    ToolResult::with_images(
-        true,
-        serde_json::json!({
-            "summary": summary,
-            "total": results.len(),
-            "successful": successful,
-            "failed": failed,
-            "results": results,
-        }),
-        images,
-    )
-}
-
-fn parse_batch_specs(args: &serde_json::Value) -> Result<Vec<BatchCallSpec>, ToolResult> {
-    let Some(items) = args.get("tool_calls").and_then(|value| value.as_array()) else {
-        return Err(ToolResult::err_fmt(
-            "Missing required parameter: tool_calls",
-        ));
-    };
-    if items.is_empty() {
-        return Err(ToolResult::err_fmt(
-            "Invalid tool_calls: provide at least one tool call",
-        ));
-    }
-
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let Some(object) = item.as_object() else {
-                return Err(ToolResult::err_fmt(format_args!(
-                    "Invalid tool_calls[{index}]: expected object with `tool` and `parameters`"
-                )));
-            };
-            let tool = object
-                .get("tool")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    ToolResult::err_fmt(format_args!(
-                        "Invalid tool_calls[{index}].tool: expected non-empty string"
-                    ))
-                })?;
-            let parameters = object.get("parameters").cloned().ok_or_else(|| {
-                ToolResult::err_fmt(format_args!(
-                    "Invalid tool_calls[{index}].parameters: expected object"
-                ))
-            })?;
-            if !parameters.is_object() {
-                return Err(ToolResult::err_fmt(format_args!(
-                    "Invalid tool_calls[{index}].parameters: expected object"
-                )));
-            }
-            Ok(BatchCallSpec {
-                index,
-                tool: tool.to_string(),
-                parameters,
-            })
-        })
-        .collect()
-}
-
 fn outcome(
     tool_name: String,
     args: serde_json::Value,
@@ -511,7 +330,6 @@ mod tests {
             surface,
             host: Arc::new(MockSessionManager::default()),
             session_id: "session".to_string(),
-            execution_mode: ExecutionMode::Standard,
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
         }
@@ -531,7 +349,6 @@ mod tests {
             surface,
             host: Arc::new(MockSessionManager::default()),
             session_id: "session".to_string(),
-            execution_mode: ExecutionMode::Standard,
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
         }

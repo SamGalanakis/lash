@@ -235,11 +235,10 @@ fn tool_output_file_name(record: &ToolCallRecord) -> String {
 
 fn spill_tool_output_to_dir(
     base_dir: &Path,
-    session_id: &str,
     record: &ToolCallRecord,
     full_output: &str,
 ) -> Option<PathBuf> {
-    let dir = base_dir.join("tool-output").join(session_id);
+    let dir = base_dir.join("tool-output");
     if fs::create_dir_all(&dir).is_err() {
         return None;
     }
@@ -263,10 +262,10 @@ fn render_tool_result_preview(record: &ToolCallRecord) -> String {
     )
 }
 
-fn render_tool_result_preview_for_session(session_id: &str, record: &ToolCallRecord) -> String {
+fn render_tool_result_preview_for_session(record: &ToolCallRecord) -> String {
     let normalized = normalize_tool_result_content(record);
     let output_path = if tool_result_needs_truncation(&normalized) {
-        spill_tool_output_to_dir(&lash_cache_dir(), session_id, record, &normalized)
+        spill_tool_output_to_dir(&lash_cache_dir(), record, &normalized)
     } else {
         None
     };
@@ -290,7 +289,6 @@ fn tool_record_map(tool_calls: &[ToolCallRecord]) -> HashMap<String, ToolCallRec
 }
 
 fn hydrate_tool_result_parts(
-    session_id: &str,
     messages: &mut [Message],
     tool_calls: &HashMap<String, ToolCallRecord>,
 ) {
@@ -311,7 +309,7 @@ fn hydrate_tool_result_parts(
             let Some(record) = tool_calls.get(call_id) else {
                 continue;
             };
-            part.content = render_tool_result_preview_for_session(session_id, record);
+            part.content = render_tool_result_preview_for_session(record);
         }
     }
 }
@@ -515,7 +513,7 @@ async fn summarize_compaction_prefix(
         return Ok(None);
     }
 
-    let mut snapshot = state.clone();
+    let mut snapshot = crate::PersistedSessionState::from_state(state.clone());
     snapshot.policy.execution_mode = ExecutionMode::Standard;
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;
@@ -752,7 +750,7 @@ impl TurnContextTransform for RollingTurnTransform {
         }
 
         let messages = input.messages.make_mut();
-        hydrate_tool_result_parts(&ctx.session_id, messages, &tool_calls);
+        hydrate_tool_result_parts(messages, &tool_calls);
 
         if needs_pruning {
             prune_old_tool_results(messages, &tool_calls);
@@ -914,7 +912,7 @@ async fn handle_compact_command(
         .snapshot_session(&session_id)
         .await
         .map_err(|err| PluginError::Session(format!("compact: snapshot failed: {err}")))?;
-    let input = HistoryState::from_state(&state);
+    let input = HistoryState::from_state(&state.export_state());
     let ctx = RewriteContext {
         session_id: session_id.clone(),
         trigger: RewriteTrigger::Manual {
@@ -1010,8 +1008,7 @@ mod tests {
         };
 
         let normalized = normalize_tool_result_content(&record);
-        let path = spill_tool_output_to_dir(temp.path(), "root", &record, &normalized)
-            .expect("spill path");
+        let path = spill_tool_output_to_dir(temp.path(), &record, &normalized).expect("spill path");
         let preview = truncate_tool_result_preview(
             &normalized,
             tool_result_truncation_direction(&record.tool),

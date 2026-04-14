@@ -1,3 +1,4 @@
+mod builder;
 mod host;
 mod session_manager;
 #[cfg(test)]
@@ -28,15 +29,17 @@ use crate::session_model::{
 };
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
-    CheckpointKind, ExecutionMode, ExternalInvokeError, PersistedTurnState, PromptHookContext,
-    RuntimeServices, SandboxMessage, Session, SessionCreateRequest, SessionError, SessionHandle,
-    SessionManager, SessionSnapshot, SessionStartPoint, ToolCallRecord,
+    CheckpointKind, ExecutionMode, ExternalInvokeError, PersistedTurnState,
+    PersistentRuntimeServices, PromptHookContext, RuntimeServices, SandboxMessage, Session,
+    SessionCreateRequest, SessionError, SessionHandle, SessionManager, SessionSnapshot,
+    SessionStartPoint, ToolCallRecord,
 };
 
 use host::*;
 use session_manager::*;
 use turn_driver::*;
 
+pub use builder::EmbeddedRuntimeBuilder;
 pub use host::{
     BackgroundExecutor, BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost,
     RuntimeCoreConfig, TokioBackgroundExecutor,
@@ -107,8 +110,8 @@ pub struct PromptUsage {
 /// `(source, model)` pair — accumulated, not per-call.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenLedgerEntry {
-    /// Caller-supplied label: `"turn"`, `"predict"`, `"compaction"`,
-    /// `"observer"`, `"reflector"`, `"agent_call"`, or any plugin-defined
+    /// Caller-supplied label: `"turn"`, `"delegate"`, `"compaction"`,
+    /// `"observer"`, `"reflector"`, `"delegate"`, or any plugin-defined
     /// string. Core doesn't interpret the value; the UI uses it for
     /// grouping and display.
     pub source: String,
@@ -295,9 +298,74 @@ pub fn diff_usage_reports(
     diff_token_ledger(&before_entries, &after_entries)
 }
 
-/// Serializable host-owned session envelope.
+/// Serializable session read-model exported to hosts and plugins.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionStateEnvelope {
+    pub session_id: String,
+    #[serde(default)]
+    pub policy: SessionPolicy,
+    #[serde(default)]
+    pub session_graph: crate::SessionGraph,
+    #[serde(default)]
+    pub iteration: usize,
+    #[serde(default)]
+    pub token_usage: TokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_usage: Option<PromptUsage>,
+}
+
+impl SessionStateEnvelope {
+    pub fn projected_messages(&self) -> &[Message] {
+        self.session_graph.projected_messages()
+    }
+
+    pub fn project_messages(&self) -> Vec<Message> {
+        self.session_graph.project_messages()
+    }
+
+    pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
+        self.session_graph.projected_tool_calls()
+    }
+
+    pub fn project_tool_calls(&self) -> Vec<ToolCallRecord> {
+        self.session_graph.project_tool_calls()
+    }
+
+    pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+        self.session_graph
+            .merge_active_projection(messages, tool_calls);
+    }
+
+    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
+        self.session_graph.replace_tool_call_projection(tool_calls);
+    }
+
+    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+        self.session_graph
+            .append_projection_delta(messages, tool_calls);
+    }
+
+    pub fn read_view(&self) -> crate::SessionReadView {
+        crate::SessionReadView::from_state(self)
+    }
+}
+
+impl Default for SessionStateEnvelope {
+    fn default() -> Self {
+        Self {
+            session_id: "root".to_string(),
+            policy: SessionPolicy::default(),
+            session_graph: crate::SessionGraph::default(),
+            iteration: 0,
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: None,
+        }
+    }
+}
+
+/// Serializable persistence snapshot used by stores, resume, and child session snapshots.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PersistedSessionState {
     pub session_id: String,
     #[serde(default)]
     pub policy: SessionPolicy,
@@ -323,8 +391,8 @@ pub struct SessionStateEnvelope {
     pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_state_snapshot: Option<Vec<u8>>,
-    /// Cost-accounting ledger. Every LLM call (parent turns, predict
-    /// children, compaction, observers, agent_call) contributes an
+    /// Cost-accounting ledger. Every LLM call (parent turns, delegate
+    /// children, compaction, observers, delegate) contributes an
     /// entry keyed by `(source, model)`. Separate from `token_usage`
     /// which tracks context-window accounting only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -337,7 +405,49 @@ pub struct SessionStateEnvelope {
     pub graph_replace_required: bool,
 }
 
-impl SessionStateEnvelope {
+impl PersistedSessionState {
+    pub fn from_state(state: SessionStateEnvelope) -> Self {
+        Self {
+            session_id: state.session_id,
+            policy: state.policy,
+            session_graph: state.session_graph,
+            iteration: state.iteration,
+            token_usage: state.token_usage,
+            last_prompt_usage: state.last_prompt_usage,
+            dynamic_state_ref: None,
+            dynamic_state_generation: None,
+            dynamic_state_snapshot: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: None,
+            execution_state_snapshot: None,
+            token_ledger: Vec::new(),
+            checkpoint_ref: None,
+            persisted_graph_node_count: 0,
+            graph_replace_required: false,
+        }
+    }
+
+    pub fn export_state(&self) -> SessionStateEnvelope {
+        SessionStateEnvelope {
+            session_id: self.session_id.clone(),
+            policy: self.policy.clone(),
+            session_graph: self.session_graph.clone(),
+            iteration: self.iteration,
+            token_usage: self.token_usage.clone(),
+            last_prompt_usage: self.last_prompt_usage.clone(),
+        }
+    }
+
+    pub fn apply_exported_state(&mut self, state: &SessionStateEnvelope) {
+        self.session_id = state.session_id.clone();
+        self.policy = state.policy.clone();
+        self.session_graph = state.session_graph.clone();
+        self.iteration = state.iteration;
+        self.token_usage = state.token_usage.clone();
+        self.last_prompt_usage = state.last_prompt_usage.clone();
+    }
+
     pub fn stamp_runtime_state(
         &mut self,
         dynamic_state: Option<&crate::DynamicStateSnapshot>,
@@ -385,67 +495,54 @@ impl SessionStateEnvelope {
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
-        crate::SessionReadView::from_runtime_state(self)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RuntimePersistenceState {
-    state: SessionStateEnvelope,
-}
-
-impl RuntimePersistenceState {
-    pub fn from_state(state: SessionStateEnvelope) -> Self {
-        Self { state }
-    }
-
-    pub fn into_state(self) -> SessionStateEnvelope {
-        self.state
-    }
-
-    pub fn state(&self) -> &SessionStateEnvelope {
-        &self.state
-    }
-
-    pub(crate) fn state_mut(&mut self) -> &mut SessionStateEnvelope {
-        &mut self.state
+        crate::SessionReadView::from_persisted_state(self)
     }
 
     pub fn session_graph(&self) -> &crate::SessionGraph {
-        &self.state.session_graph
+        &self.session_graph
     }
 
     pub fn policy(&self) -> &SessionPolicy {
-        &self.state.policy
+        &self.policy
     }
 
     pub fn turn_state(&self) -> PersistedTurnState {
         PersistedTurnState {
-            iteration: self.state.iteration,
-            token_usage: self.state.token_usage.clone(),
-            last_prompt_usage: self.state.last_prompt_usage.clone(),
+            iteration: self.iteration,
+            token_usage: self.token_usage.clone(),
+            last_prompt_usage: self.last_prompt_usage.clone(),
         }
     }
 
     pub fn token_ledger(&self) -> &[TokenLedgerEntry] {
-        &self.state.token_ledger
+        &self.token_ledger
     }
 
-    pub fn stamp_runtime_state(
+    pub fn apply_persisted_commit_result(
         &mut self,
-        dynamic_state: Option<&crate::DynamicStateSnapshot>,
-        plugin_snapshot: Option<&crate::PluginSessionSnapshot>,
+        result: crate::store::PersistedStateCommitResult,
     ) {
-        self.state
-            .stamp_runtime_state(dynamic_state, plugin_snapshot);
+        self.checkpoint_ref = Some(result.checkpoint_ref);
+        self.dynamic_state_ref = result.manifest.dynamic_state_ref;
+        self.dynamic_state_generation = self
+            .dynamic_state_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.base_generation);
+        self.plugin_snapshot_ref = result.manifest.plugin_snapshot_ref;
+        self.plugin_snapshot_revision = result.manifest.plugin_snapshot_revision;
+        self.persisted_graph_node_count = result.persisted_graph_node_count;
+        self.graph_replace_required = false;
+        self.dynamic_state_snapshot = None;
+        self.plugin_snapshot = None;
+        self.execution_state_snapshot = None;
     }
 
     pub fn set_execution_state_snapshot(&mut self, execution_state_snapshot: Option<Vec<u8>>) {
-        self.state.execution_state_snapshot = execution_state_snapshot;
+        self.execution_state_snapshot = execution_state_snapshot;
     }
 
     pub fn execution_state_snapshot(&self) -> Option<&[u8]> {
-        self.state.execution_state_snapshot.as_deref()
+        self.execution_state_snapshot.as_deref()
     }
 }
 
@@ -634,7 +731,7 @@ fn append_stream_piece(full: &mut String, piece: &str) {
     }
 }
 
-impl Default for SessionStateEnvelope {
+impl Default for PersistedSessionState {
     fn default() -> Self {
         Self {
             session_id: "root".to_string(),
@@ -685,7 +782,7 @@ fn apply_persisted_session_config(
 }
 
 fn apply_session_checkpoint(
-    state: &mut SessionStateEnvelope,
+    state: &mut PersistedSessionState,
     checkpoint: Option<crate::store::HydratedSessionCheckpoint>,
 ) {
     let Some(checkpoint) = checkpoint else {
@@ -713,7 +810,7 @@ fn apply_session_checkpoint(
     state.execution_state_snapshot = None;
 }
 
-fn apply_session_head(state: &mut SessionStateEnvelope, head: &crate::store::SessionHead) {
+fn apply_session_head(state: &mut PersistedSessionState, head: &crate::store::SessionHead) {
     state.session_graph = head.graph.clone();
     state.checkpoint_ref = head.checkpoint_ref.clone();
     state.token_ledger = head.token_ledger.clone();
@@ -729,19 +826,20 @@ fn apply_session_head(state: &mut SessionStateEnvelope, head: &crate::store::Ses
     apply_persisted_session_config(&mut state.policy, &head.config);
 }
 
-fn session_head_meta_from_state(state: &SessionStateEnvelope) -> crate::store::SessionHeadMeta {
+fn session_head_meta_from_state(state: &PersistedSessionState) -> crate::store::SessionHeadMeta {
     crate::store::SessionHeadMeta {
+        session_id: state.session_id.clone(),
         config: persisted_session_config(&state.policy),
         checkpoint_ref: state.checkpoint_ref.clone(),
         leaf_node_id: state.session_graph.leaf_node_id.clone(),
         graph_node_count: state.session_graph.nodes.len(),
-        token_ledger: state.token_ledger.clone(),
+        token_ledger: Vec::new(),
     }
 }
 
 async fn persist_session_graph_and_head(
     store: &(dyn crate::store::RuntimeStore + '_),
-    state: &mut SessionStateEnvelope,
+    state: &mut PersistedSessionState,
 ) {
     let nodes_len = state.session_graph.nodes.len();
     if state.graph_replace_required || state.persisted_graph_node_count > nodes_len {
@@ -768,7 +866,7 @@ async fn load_session_checkpoint(
     crate::store::get_checkpoint(store, checkpoint_ref).await
 }
 
-fn clear_persisted_runtime_caches(state: &mut SessionStateEnvelope) {
+fn clear_persisted_runtime_caches(state: &mut PersistedSessionState) {
     state.dynamic_state_snapshot = None;
     state.plugin_snapshot = None;
     state.execution_state_snapshot = None;
@@ -782,56 +880,8 @@ fn merge_usage_delta_entries(entries: Vec<TokenLedgerEntry>) -> Vec<TokenLedgerE
     merged
 }
 
-async fn build_committed_checkpoint(
-    state: &SessionStateEnvelope,
-    plugins: &crate::PluginSession,
-) -> crate::store::HydratedSessionCheckpoint {
-    let (dynamic_state_ref, dynamic_state) = if let Some(dynamic_tools) = plugins.dynamic_tools() {
-        let current_generation = dynamic_tools.generation();
-        if state.dynamic_state_ref.is_some()
-            && state.dynamic_state_generation == Some(current_generation)
-        {
-            (state.dynamic_state_ref.clone(), None)
-        } else {
-            let snapshot = dynamic_tools.export_state();
-            (None, Some(snapshot))
-        }
-    } else {
-        (None, None)
-    };
-
-    let current_plugin_snapshot_revision = plugins.snapshot_revision_fingerprint();
-    let (plugin_snapshot_ref, plugin_snapshot) = if state.plugin_snapshot_ref.is_some()
-        && state.plugin_snapshot_revision == Some(current_plugin_snapshot_revision)
-    {
-        (state.plugin_snapshot_ref.clone(), None)
-    } else {
-        (None, plugins.snapshot().ok())
-    };
-
-    let mut checkpoint = crate::store::HydratedSessionCheckpoint {
-        turn_state: crate::PersistedTurnState {
-            iteration: state.iteration,
-            token_usage: state.token_usage.clone(),
-            last_prompt_usage: state.last_prompt_usage.clone(),
-        },
-        dynamic_state_ref,
-        dynamic_state,
-        plugin_snapshot_ref,
-        plugin_snapshot_revision: Some(current_plugin_snapshot_revision),
-        plugin_snapshot,
-    };
-    if checkpoint.dynamic_state.is_some() {
-        checkpoint.dynamic_state_ref = None;
-    }
-    if checkpoint.plugin_snapshot.is_some() {
-        checkpoint.plugin_snapshot_ref = None;
-    }
-    checkpoint
-}
-
 fn append_session_nodes_to_state(
-    state: &mut SessionStateEnvelope,
+    state: &mut PersistedSessionState,
     nodes: &[crate::SessionAppendNode],
 ) -> Vec<String> {
     let mut node_ids = Vec::with_capacity(nodes.len());
@@ -854,30 +904,10 @@ fn append_session_nodes_to_state(
     node_ids
 }
 
-fn normalize_session_graph(state: &mut SessionStateEnvelope) {
+fn normalize_session_graph(state: &mut PersistedSessionState) {
     if state.session_graph.heal_orphaned_leaf() {
         state.graph_replace_required = true;
     }
-}
-
-async fn apply_graph_execution_mode_state(
-    session: &mut Session,
-    state: &SessionStateEnvelope,
-) -> Result<(), SessionError> {
-    if !matches!(state.policy.execution_mode, ExecutionMode::Rlm) {
-        return Ok(());
-    }
-    for body in state
-        .session_graph
-        .active_path_plugins(crate::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE)
-    {
-        let patch = serde_json::from_value::<crate::RlmGlobalsPatchPluginBody>(body.clone())
-            .map_err(|err| {
-                SessionError::Protocol(format!("invalid RLM globals patch node: {err}"))
-            })?;
-        session.apply_rlm_globals_patch(&patch).await?;
-    }
-    Ok(())
 }
 
 /// Canonical assistant output payload.
@@ -1043,7 +1073,7 @@ pub trait SessionStoreFactory: Send + Sync {
 }
 
 fn merge_ledger_entry(ledger: &mut Vec<TokenLedgerEntry>, entry: TokenLedgerEntry) {
-    if entry.usage.total() == 0 {
+    if entry.usage.total() == 0 && entry.usage.cached_input_tokens == 0 {
         return;
     }
     if let Some(existing) = ledger
@@ -1288,7 +1318,8 @@ pub struct LashRuntime {
     policy: SessionPolicy,
     host: RuntimeHost,
     services: RuntimeServices,
-    state: SessionStateEnvelope,
+    state: PersistedSessionState,
+    runtime_scope_id: Arc<str>,
     llm_factory: LlmFactory,
     managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
@@ -1341,7 +1372,7 @@ impl LashRuntime {
         policy: SessionPolicy,
         host: RuntimeHost,
         services: RuntimeServices,
-        mut state: SessionStateEnvelope,
+        mut state: PersistedSessionState,
     ) -> Result<Self, SessionError> {
         if state.session_id.is_empty() {
             state.session_id = "root".to_string();
@@ -1374,12 +1405,8 @@ impl LashRuntime {
                 .restore(&snapshot)
                 .map_err(|err| SessionError::Protocol(err.to_string()))?;
         }
-        if matches!(state.policy.execution_mode, ExecutionMode::Rlm)
-            && let Some(snapshot) = state.execution_state_snapshot.clone()
-        {
-            session.restore_execution_state(&snapshot).await?;
-        }
-        apply_graph_execution_mode_state(&mut session, &state).await?;
+        let mode_session = Arc::clone(session.plugins().mode_session());
+        mode_session.restore_session(&mut session, &state).await?;
         clear_persisted_runtime_caches(&mut state);
         session
             .plugins()
@@ -1394,6 +1421,7 @@ impl LashRuntime {
             host,
             services,
             state,
+            runtime_scope_id: Arc::<str>::from(uuid::Uuid::new_v4().to_string()),
             llm_factory,
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1411,7 +1439,7 @@ impl LashRuntime {
         policy: SessionPolicy,
         host: EmbeddedRuntimeHost,
         services: RuntimeServices,
-        state: SessionStateEnvelope,
+        state: PersistedSessionState,
     ) -> Result<Self, SessionError> {
         Self::from_host_state(policy, host.into(), services, state).await
     }
@@ -1421,9 +1449,29 @@ impl LashRuntime {
         policy: SessionPolicy,
         host: BackgroundRuntimeHost,
         services: RuntimeServices,
-        state: SessionStateEnvelope,
+        state: PersistedSessionState,
     ) -> Result<Self, SessionError> {
         Self::from_host_state(policy, host.into(), services, state).await
+    }
+
+    /// Build a runtime for an embedded host with persistent store support.
+    pub async fn from_persistent_embedded_state(
+        policy: SessionPolicy,
+        host: EmbeddedRuntimeHost,
+        services: PersistentRuntimeServices,
+        state: PersistedSessionState,
+    ) -> Result<Self, SessionError> {
+        Self::from_host_state(policy, host.into(), services.into_runtime_services(), state).await
+    }
+
+    /// Build a runtime for a background-capable host with persistent store support.
+    pub async fn from_persistent_background_state(
+        policy: SessionPolicy,
+        host: BackgroundRuntimeHost,
+        services: PersistentRuntimeServices,
+        state: PersistedSessionState,
+    ) -> Result<Self, SessionError> {
+        Self::from_host_state(policy, host.into(), services.into_runtime_services(), state).await
     }
 
     #[doc(hidden)]
@@ -1445,7 +1493,7 @@ impl LashRuntime {
 
     /// Override the RLM termination contract for this session. Defaults
     /// to `ProseWithoutFence` (today's chat-style behavior). Sub-sessions
-    /// spawned via the typed `predict` path call this with
+    /// spawned via the typed `delegate` path call this with
     /// `Finish { schema }` to require typed termination.
     pub(crate) fn set_repl_termination(&mut self, termination: crate::RlmTermination) {
         self.rlm_termination = termination;
@@ -1455,25 +1503,25 @@ impl LashRuntime {
     /// This keeps persistence-heavy snapshots untouched; callers that need a
     /// fully persisted view should use `export_persisted_state`.
     pub fn export_state(&self) -> SessionStateEnvelope {
-        self.state.clone()
+        self.state.export_state()
     }
 
     /// Export the narrow persistence snapshot used by stores and resume logic.
-    pub fn export_persistence_state(&self) -> RuntimePersistenceState {
-        RuntimePersistenceState::from_state(self.state.clone())
+    pub fn export_persistence_state(&self) -> PersistedSessionState {
+        self.state.clone()
     }
 
-    pub fn apply_persistence_state(&mut self, state: RuntimePersistenceState) {
-        self.set_state(state.into_state());
+    pub fn apply_persistence_state(&mut self, state: PersistedSessionState) {
+        self.set_persisted_state(state);
     }
 
-    pub(crate) fn export_graph_first_state(&self) -> SessionStateEnvelope {
+    pub(crate) fn export_graph_first_state(&self) -> PersistedSessionState {
         self.state.clone()
     }
 
     /// Export a persistence-ready state envelope with dynamic/plugin snapshots
     /// refreshed from the live session.
-    pub fn export_persisted_state(&self) -> SessionStateEnvelope {
+    pub fn export_persisted_state(&self) -> PersistedSessionState {
         let mut state = self.state.clone();
         if let Some(session) = self.session.as_ref() {
             if let Some(dynamic_tools) = session.plugins().dynamic_tools() {
@@ -1532,12 +1580,14 @@ impl LashRuntime {
         if !has_newer_graph {
             return;
         }
-        let graph = store.load_session_graph().await;
+        let mut graph = store.load_session_graph().await;
+        graph.set_leaf_node_id(head_meta.leaf_node_id.clone());
         let head = crate::store::SessionHead {
+            session_id: head_meta.session_id.clone(),
             graph,
             config: head_meta.config.clone(),
             checkpoint_ref: head_meta.checkpoint_ref.clone(),
-            token_ledger: head_meta.token_ledger.clone(),
+            token_ledger: merge_usage_delta_entries(store.load_usage_deltas().await),
         };
         apply_session_head(&mut self.state, &head);
         let checkpoint =
@@ -1552,11 +1602,13 @@ impl LashRuntime {
     fn runtime_session_manager_for_turn(
         &self,
         prompt_bridge: Option<HostPromptBridge>,
+        child_usage_event_relay: Option<ChildUsageEventRelay>,
     ) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
             prompt_bridge,
             false,
+            child_usage_event_relay,
         )?))
     }
 
@@ -1568,6 +1620,7 @@ impl LashRuntime {
             self,
             prompt_bridge,
             true,
+            None,
         )?))
     }
 
@@ -1600,7 +1653,7 @@ impl LashRuntime {
             state: self.state.read_view(),
             host: manager,
         };
-        let input = crate::HistoryState::from_state(&self.state);
+        let input = crate::HistoryState::from_state(&self.state.export_state());
         let baseline_messages = input.messages.len();
         let outcome = plugin_session
             .rewrite_history(&ctx, input)
@@ -1643,14 +1696,14 @@ impl LashRuntime {
         };
         session
             .plugins()
-            .emit_runtime_event(crate::PluginRuntimeEvent::SessionConfigChanged(
+            .emit_runtime_event(crate::PluginRuntimeEvent::SessionConfigChanged(Box::new(
                 SessionConfigChangedContext {
                     session_id: self.state.session_id.clone(),
                     previous,
                     current,
                     host,
                 },
-            ))
+            )))
             .await;
     }
 
@@ -1681,7 +1734,7 @@ impl LashRuntime {
     }
 
     /// Replace the host-owned state envelope.
-    pub fn set_state(&mut self, state: SessionStateEnvelope) {
+    pub fn set_persisted_state(&mut self, state: PersistedSessionState) {
         let mut state = state;
         normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
@@ -1709,25 +1762,11 @@ impl LashRuntime {
             });
         }
         let node_ids = append_session_nodes_to_state(&mut self.state, &request.nodes);
-        if matches!(self.state.policy.execution_mode, ExecutionMode::Rlm)
-            && let Some(session) = self.session.as_mut()
-        {
-            for node in &request.nodes {
-                let crate::SessionAppendNode::Plugin { plugin_type, body } = node else {
-                    continue;
-                };
-                if plugin_type != crate::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE {
-                    continue;
-                }
-                let patch =
-                    serde_json::from_value::<crate::RlmGlobalsPatchPluginBody>(body.clone())
-                        .map_err(|err| {
-                            SessionError::Protocol(format!(
-                                "invalid RLM globals patch node body: {err}"
-                            ))
-                        })?;
-                session.apply_rlm_globals_patch(&patch).await?;
-            }
+        if let Some(session) = self.session.as_mut() {
+            let mode_session = Arc::clone(session.plugins().mode_session());
+            mode_session
+                .append_session_nodes(session, &request.nodes)
+                .await?;
         }
         if let Some(store) = self
             .session
@@ -1753,20 +1792,23 @@ impl LashRuntime {
     ) -> Result<SessionStateEnvelope, SessionError> {
         let mut state = self.export_state();
         state.session_graph.branch_to(node_id);
-        normalize_session_graph(&mut state);
+        let mut persisted_state = PersistedSessionState::from_state(state);
+        normalize_session_graph(&mut persisted_state);
 
-        let policy = state.policy.clone();
+        let policy = persisted_state.policy.clone();
         let host = self.host.clone();
         let services = self.services.clone();
         let managed_sessions = Arc::clone(&self.managed_sessions);
         let managed_turns = Arc::clone(&self.managed_turns);
         let background_sync_needed = Arc::clone(&self.background_sync_needed);
+        let runtime_scope_id = Arc::clone(&self.runtime_scope_id);
         let turn_phase_probe = self.turn_phase_probe.clone();
 
-        let mut rebuilt = Self::from_host_state(policy, host, services, state).await?;
+        let mut rebuilt = Self::from_host_state(policy, host, services, persisted_state).await?;
         rebuilt.managed_sessions = managed_sessions;
         rebuilt.managed_turns = managed_turns;
         rebuilt.background_sync_needed = background_sync_needed;
+        rebuilt.runtime_scope_id = runtime_scope_id;
         rebuilt.turn_phase_probe = turn_phase_probe;
 
         let exported = rebuilt.export_state();
@@ -1960,7 +2002,7 @@ impl LashRuntime {
                 assembler.push(&SessionEvent::Done);
                 events.emit(SessionEvent::Done).await;
                 return Ok(assembler.finish(
-                    self.state.clone(),
+                    self.state.export_state(),
                     false,
                     None,
                     &self.host.core.sanitizer,
@@ -1970,10 +2012,7 @@ impl LashRuntime {
         };
 
         let base_messages = self.state.session_graph.shared_projected_messages();
-        let base_rendered_prompt = self
-            .state
-            .session_graph
-            .shared_projected_rendered_prompt(self.policy.execution_mode);
+        let base_rendered_prompt = self.state.session_graph.shared_projected_rendered_prompt();
         let mut turn_delta = Vec::new();
         let mode = input.mode.unwrap_or(RunMode::Normal);
         let mode_msg = match mode {
@@ -2057,7 +2096,7 @@ impl LashRuntime {
         });
 
         let manager = self
-            .runtime_session_manager_for_turn(None)
+            .runtime_session_manager_for_turn(None, None)
             .map_err(|err| RuntimeError {
                 code: "plugin_session_manager".to_string(),
                 message: err.to_string(),
@@ -2131,8 +2170,12 @@ impl LashRuntime {
     ) -> Result<AssembledTurn, RuntimeError> {
         let prompt_bridge = HostPromptBridge::new();
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
+        let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
         let manager = self
-            .runtime_session_manager_for_turn(Some(prompt_bridge.clone()))
+            .runtime_session_manager_for_turn(
+                Some(prompt_bridge.clone()),
+                Some(child_usage_event_relay.clone()),
+            )
             .map_err(|err| RuntimeError {
                 code: "plugin_session_manager".to_string(),
                 message: err.to_string(),
@@ -2268,7 +2311,7 @@ impl LashRuntime {
             assembler.push(&SessionEvent::Done);
             events.emit(SessionEvent::Done).await;
             return Ok(assembler.finish(
-                state,
+                state.export_state(),
                 cancel.is_cancelled(),
                 Some(issue),
                 &self.host.core.sanitizer,
@@ -2302,8 +2345,45 @@ impl LashRuntime {
                 .await;
             (driver, new_messages, new_iteration)
         });
+        tokio::pin!(run_task);
 
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
+        let (driver, new_messages, new_iteration) = loop {
+            tokio::select! {
+                maybe_event = event_rx.recv() => {
+                    if let Some(event) = maybe_event {
+                        match event {
+                            RuntimeStreamEvent::Session(event) => {
+                                assembler.push(&event);
+                                events.emit(event).await;
+                            }
+                        }
+                    }
+                }
+                joined = &mut run_task => {
+                    child_usage_event_relay.clear();
+                    let joined = match joined {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let issue = TurnIssue {
+                                kind: "runtime".to_string(),
+                                code: Some("run_task_join_failed".to_string()),
+                                message: format!("Runtime turn task failed: {e}"),
+                            };
+                            return Ok(assembler.finish(
+                                self.state.export_state(),
+                                cancel_state.is_cancelled(),
+                                Some(issue),
+                                &self.host.core.sanitizer,
+                                &self.host.core.termination,
+                            ));
+                        }
+                    };
+                    break joined;
+                }
+            }
+        };
+        let _ = prompt_forward.await;
         while let Some(event) = event_rx.recv().await {
             match event {
                 RuntimeStreamEvent::Session(event) => {
@@ -2312,25 +2392,6 @@ impl LashRuntime {
                 }
             }
         }
-        let _ = prompt_forward.await;
-
-        let (driver, new_messages, new_iteration) = match run_task.await {
-            Ok(v) => v,
-            Err(e) => {
-                let issue = TurnIssue {
-                    kind: "runtime".to_string(),
-                    code: Some("run_task_join_failed".to_string()),
-                    message: format!("Runtime turn task failed: {e}"),
-                };
-                return Ok(assembler.finish(
-                    self.state.clone(),
-                    cancel_state.is_cancelled(),
-                    Some(issue),
-                    &self.host.core.sanitizer,
-                    &self.host.core.termination,
-                ));
-            }
-        };
         self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
         tracing::debug!(
             rss_kb = debug_rss_kb(),
@@ -2350,7 +2411,7 @@ impl LashRuntime {
         for entry in child_ledger {
             merge_ledger_entry(&mut self.state.token_ledger, entry);
         }
-        if assembler.token_usage.total() > 0 {
+        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             let entry = TokenLedgerEntry {
                 source: "turn".to_string(),
                 model: driver.policy.model.clone(),
@@ -2382,7 +2443,7 @@ impl LashRuntime {
             self.state
                 .replace_projection(new_messages.as_slice(), &next_tool_calls);
         }
-        if assembler.token_usage.total() > 0 {
+        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             self.state.token_usage = assembler.token_usage.clone();
         }
 
@@ -2391,7 +2452,7 @@ impl LashRuntime {
             .and_then(|usage| normalize_prompt_usage(&self.policy.provider, usage));
         let finalize_manager = if self.session.is_some() {
             Some(
-                self.runtime_session_manager_for_turn(None)
+                self.runtime_session_manager_for_turn(None, None)
                     .map_err(|err| RuntimeError {
                         code: "plugin_session_manager".to_string(),
                         message: err.to_string(),
@@ -2407,15 +2468,15 @@ impl LashRuntime {
             token_ledger_entries = self.state.token_ledger.len(),
             "runtime before assembler.finish"
         );
-        let assembled_state = std::mem::take(&mut self.state);
-        let mut assembled = assembler.finish(
-            assembled_state,
+        let mut assembled_state = std::mem::take(&mut self.state);
+        assembled_state.last_prompt_usage = last_prompt_usage.clone();
+        let assembled = assembler.finish(
+            assembled_state.export_state(),
             cancel_state.is_cancelled(),
             None,
             &self.host.core.sanitizer,
             &self.host.core.termination,
         );
-        assembled.state.last_prompt_usage = last_prompt_usage.clone();
         tracing::debug!(
             rss_kb = debug_rss_kb(),
             assembled_message_count = assembled.state.projected_messages().len(),
@@ -2451,18 +2512,18 @@ impl LashRuntime {
                 "runtime before stamp_runtime_state"
             );
             self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
-            returned_turn.state.dynamic_state_snapshot = dynamic_state;
-            returned_turn.state.dynamic_state_generation = returned_turn
-                .state
+            assembled_state.apply_exported_state(&returned_turn.state);
+            assembled_state.dynamic_state_snapshot = dynamic_state;
+            assembled_state.dynamic_state_generation = assembled_state
                 .dynamic_state_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.base_generation);
-            returned_turn.state.plugin_snapshot = plugin_snapshot;
-            returned_turn.state.plugin_snapshot_revision = plugin_snapshot_revision;
+            assembled_state.plugin_snapshot = plugin_snapshot;
+            assembled_state.plugin_snapshot_revision = plugin_snapshot_revision;
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                persisted_graph_node_count = returned_turn.state.session_graph.nodes.len(),
-                persisted_message_count = returned_turn.state.projected_messages().len(),
+                persisted_graph_node_count = assembled_state.session_graph.nodes.len(),
+                persisted_message_count = assembled_state.projected_messages().len(),
                 "runtime after stamp_runtime_state"
             );
             if let Some(store) = self
@@ -2470,25 +2531,27 @@ impl LashRuntime {
                 .as_ref()
                 .and_then(|session| session.history_store())
             {
-                let checkpoint = build_committed_checkpoint(&returned_turn.state, &plugins).await;
-                let stored_checkpoint =
-                    crate::store::put_checkpoint(store.as_ref(), &checkpoint).await;
-                returned_turn.state.checkpoint_ref = Some(stored_checkpoint.checkpoint_ref);
-                returned_turn.state.dynamic_state_ref =
-                    stored_checkpoint.manifest.dynamic_state_ref;
-                returned_turn.state.dynamic_state_generation =
-                    plugins.dynamic_tools().map(|tools| tools.generation());
-                returned_turn.state.plugin_snapshot_ref =
-                    stored_checkpoint.manifest.plugin_snapshot_ref;
-                returned_turn.state.plugin_snapshot_revision =
-                    stored_checkpoint.manifest.plugin_snapshot_revision;
-                clear_persisted_runtime_caches(&mut returned_turn.state);
-                crate::store::append_usage_deltas(store.as_ref(), &turn_usage_delta).await;
-                persist_session_graph_and_head(store.as_ref(), &mut returned_turn.state).await;
-                store.clear_live_resume().await;
+                let commit = crate::store::RuntimeCommit::persisted_state(
+                    &assembled_state,
+                    &turn_usage_delta,
+                );
+                let crate::store::RuntimeCommitResult::PersistedState(result) = store
+                    .apply_runtime_commit(commit)
+                    .await
+                    .map_err(|err| RuntimeError {
+                        code: "store_commit_failed".to_string(),
+                        message: err.to_string(),
+                    })?
+                else {
+                    unreachable!("persisted state commit should return persisted result");
+                };
+                assembled_state.apply_persisted_commit_result(result);
+            } else {
+                clear_persisted_runtime_caches(&mut assembled_state);
             }
+            returned_turn.state = assembled_state.export_state();
             emit_session_events_to_sink(events, finalized.events).await;
-            self.state = returned_turn.state.clone();
+            self.state = assembled_state;
             if let Some(session) = self.session.as_ref()
                 && let Ok(host) = self.runtime_session_manager()
             {
@@ -2506,7 +2569,7 @@ impl LashRuntime {
             self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
             Ok(returned_turn)
         } else {
-            self.state = assembled.state.clone();
+            self.state.apply_exported_state(&assembled.state);
             Ok(assembled)
         }
     }

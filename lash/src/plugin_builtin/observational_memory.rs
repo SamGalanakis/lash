@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::plugin::{
     HistoryError, PluginError, PluginFactory, PluginRegistrar, PluginRuntimeEvent,
@@ -12,14 +11,18 @@ use crate::plugin::{
 };
 use crate::session_model::context::PreparedContext;
 use crate::{
-    ContextApproach, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
-    Message, MessageOrigin, MessageRole, ObservationalMemoryConfig, Part, PartKind, SessionGraph,
+    AppendSessionNodesRequest, AppendSessionNodesResult, ContextApproach, DirectMessage,
+    DirectOutputSpec, DirectPart, DirectRequest, DirectRole, Message, MessageOrigin, MessageRole,
+    ObservationalMemoryConfig, Part, PartKind, SessionAppendNode, SessionGraph,
     SessionStateChangedContext,
 };
 
 const OBSERVATIONAL_MEMORY_PLUGIN_ID: &str = "observational_memory";
-const OBSERVATION_PLUGIN_TYPE: &str = "lash.context.observational_memory.observation_batch";
-const REFLECTION_PLUGIN_TYPE: &str = "lash.context.observational_memory.reflection";
+const ACTIVE_STATE_PLUGIN_TYPE: &str = "lash.context.observational_memory.state";
+const BUFFERED_OBSERVATION_PLUGIN_TYPE: &str =
+    "lash.context.observational_memory.buffered_observation";
+const BUFFERED_REFLECTION_PLUGIN_TYPE: &str =
+    "lash.context.observational_memory.buffered_reflection";
 
 const OBSERVATION_CONTEXT_PROMPT: &str =
     "The following observations block contains your memory of past conversations with this user.";
@@ -197,7 +200,7 @@ Hint for the agent's immediate next message.
 User messages are extremely important. If the user asks a question or gives a new task, make it clear in <current-task> that this is the priority. If the assistant needs to respond to the user, indicate in <suggested-response> that it should pause for user reply before continuing other tasks."#;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct ObservationBatchNode {
+struct ActiveMemoryNode {
     observed_through_message_id: String,
     observations: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,28 +210,100 @@ struct ObservationBatchNode {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct ReflectionNode {
+struct BufferedObservationNode {
     observed_through_message_id: String,
     observations: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     current_task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     suggested_response: Option<String>,
+    #[serde(default)]
+    observation_tokens: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BufferedReflectionNode {
+    source_state_node_id: String,
+    observed_through_message_id: String,
+    observations: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    suggested_response: Option<String>,
+    #[serde(default)]
+    observation_tokens: usize,
 }
 
 #[derive(Clone, Debug)]
-struct MemoryState {
+struct ActiveMemoryState {
+    state_node_id: String,
+    observed_through_message_id: Option<String>,
     observations: String,
     current_task: Option<String>,
     suggested_response: Option<String>,
-    observed_through_message_id: Option<String>,
-    latest_memory_node_id: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct BufferedObservationState {
+    observed_through_message_id: String,
+    observations: String,
+    current_task: Option<String>,
+    suggested_response: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct BufferedReflectionState {
+    source_state_node_id: String,
+    observed_through_message_id: String,
+    observations: String,
+    current_task: Option<String>,
+    suggested_response: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct OmGraphState {
+    active: Option<ActiveMemoryState>,
+    buffered_observations: Vec<BufferedObservationState>,
+    buffered_reflection: Option<BufferedReflectionState>,
+}
+
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct MessageNode {
     timestamp: String,
     message: Message,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MessageNodeRef<'a> {
+    timestamp: &'a str,
+    message: &'a Message,
+}
+
+trait ObservedMessageNode {
+    fn timestamp(&self) -> &str;
+    fn message(&self) -> &Message;
+}
+
+#[cfg(test)]
+impl ObservedMessageNode for MessageNode {
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+
+    fn message(&self) -> &Message {
+        &self.message
+    }
+}
+
+impl<'a> ObservedMessageNode for MessageNodeRef<'a> {
+    fn timestamp(&self) -> &str {
+        self.timestamp
+    }
+
+    fn message(&self) -> &Message {
+        self.message
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -292,13 +367,17 @@ impl SessionPlugin for ObservationalMemoryPlugin {
             let config = config.clone();
             Box::pin(async move {
                 if let PluginRuntimeEvent::TurnPersisted(ctx) = event {
+                    let graph = ctx.state.session_graph().clone();
+                    if !should_run_async_maintenance(&config, &graph) {
+                        return Ok(());
+                    }
                     let session_id = ctx.session_id.clone();
                     let host = Arc::clone(&ctx.host);
                     host.spawn_background_job(
                         &session_id,
                         OBSERVATIONAL_MEMORY_PLUGIN_ID,
                         Box::pin(async move {
-                            if let Err(err) = run_async_maintenance(config, ctx).await {
+                            if let Err(err) = run_async_maintenance(config, graph, ctx).await {
                                 tracing::warn!("observational-memory maintenance failed: {err}");
                             }
                             Ok(())
@@ -314,11 +393,13 @@ impl SessionPlugin for ObservationalMemoryPlugin {
     }
 }
 
-struct ObservationalMemoryTransform;
+struct ObservationalMemoryTransform {
+    config: ObservationalMemoryConfig,
+}
 
 impl ObservationalMemoryTransform {
-    fn new(_config: ObservationalMemoryConfig) -> Self {
-        Self
+    fn new(config: ObservationalMemoryConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -333,12 +414,43 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         ctx: &TurnTransformContext,
         input: PreparedContext,
     ) -> Result<PreparedContext, HistoryError> {
-        let Some(memory_state) = build_memory_state(ctx.state.session_graph()) else {
+        let mut graph = ctx.state.session_graph().clone();
+        let om_state = build_graph_state(&graph);
+        let pending_message_tokens = approx_message_nodes_tokens(&active_unobserved_message_nodes(
+            &graph,
+            om_state
+                .active
+                .as_ref()
+                .and_then(|state| state.observed_through_message_id.as_deref()),
+        ));
+        let active_observation_tokens = om_state
+            .active
+            .as_ref()
+            .map(|state| approx_token_count(&state.observations))
+            .unwrap_or(0);
+
+        if pending_message_tokens >= self.config.observation_message_tokens
+            || active_observation_tokens >= self.config.reflection_observation_tokens
+        {
+            ctx.host.await_background_jobs(&ctx.session_id).await?;
+            graph = ctx.host.snapshot_current().await?.session_graph;
+        }
+
+        graph = maybe_advance_memory_state(
+            &self.config,
+            &ctx.session_id,
+            &ctx.host,
+            ctx.state.policy(),
+            graph,
+        )
+        .await?;
+
+        let Some(active) = build_graph_state(&graph).active else {
             return Ok(input);
         };
-        if memory_state.observations.trim().is_empty()
-            && memory_state.current_task.is_none()
-            && memory_state.suggested_response.is_none()
+        if active.observations.trim().is_empty()
+            && active.current_task.is_none()
+            && active.suggested_response.is_none()
         {
             return Ok(input);
         }
@@ -348,7 +460,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
             .iter()
             .take_while(|message| matches!(message.role, MessageRole::System))
             .count();
-        let tail_start = memory_state
+        let tail_start = active
             .observed_through_message_id
             .as_deref()
             .and_then(|message_id| {
@@ -361,7 +473,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
 
         let mut messages = Vec::new();
         messages.extend_from_slice(&input_messages[..prefix_len]);
-        messages.extend(build_memory_context_messages(&memory_state));
+        messages.extend(build_memory_context_messages(&active));
         messages.extend_from_slice(&input_messages[tail_start..]);
 
         Ok(PreparedContext {
@@ -371,43 +483,12 @@ impl TurnContextTransform for ObservationalMemoryTransform {
     }
 }
 
-fn debug_rss_kb() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    status.lines().find_map(|line| {
-        let value = line.strip_prefix("VmRSS:")?.trim();
-        let kb = value.split_whitespace().next()?.parse::<u64>().ok()?;
-        Some(kb)
-    })
-}
-
 async fn run_async_maintenance(
     config: ObservationalMemoryConfig,
+    graph: SessionGraph,
     ctx: SessionStateChangedContext,
 ) -> Result<(), PluginError> {
-    tracing::debug!(
-        rss_kb = debug_rss_kb(),
-        node_count = ctx.state.session_graph().nodes.len(),
-        message_count = ctx.state.session_graph().project_messages().len(),
-        "OM maintenance start"
-    );
-    let mut graph = ctx.state.session_graph().clone();
-    if let Some(next) = maybe_run_observer_batches(
-        &config,
-        &ctx.session_id,
-        &ctx.host,
-        ctx.state.policy(),
-        &graph,
-    )
-    .await?
-    {
-        graph = next;
-        tracing::debug!(
-            rss_kb = debug_rss_kb(),
-            node_count = graph.nodes.len(),
-            "OM maintenance after observer batches"
-        );
-    }
-    let _ = maybe_run_reflector(
+    maybe_buffer_observations(
         &config,
         &ctx.session_id,
         &ctx.host,
@@ -415,65 +496,158 @@ async fn run_async_maintenance(
         &graph,
     )
     .await?;
-    tracing::debug!(
-        rss_kb = debug_rss_kb(),
-        node_count = graph.nodes.len(),
-        "OM maintenance end"
-    );
+    maybe_buffer_reflection(
+        &config,
+        &ctx.session_id,
+        &ctx.host,
+        ctx.state.policy(),
+        &graph,
+    )
+    .await?;
     Ok(())
 }
 
-async fn maybe_run_observer_batches(
+fn should_run_async_maintenance(config: &ObservationalMemoryConfig, graph: &SessionGraph) -> bool {
+    let om_state = build_graph_state(graph);
+    let start_after = om_state
+        .buffered_observations
+        .last()
+        .map(|chunk| chunk.observed_through_message_id.as_str())
+        .or_else(|| {
+            om_state
+                .active
+                .as_ref()
+                .and_then(|state| state.observed_through_message_id.as_deref())
+        });
+    let observation_interval = config.observation_buffer_interval_tokens();
+    if observation_interval > 0
+        && approx_message_nodes_tokens(&active_unobserved_message_nodes(graph, start_after))
+            >= observation_interval
+    {
+        return true;
+    }
+
+    om_state.buffered_reflection.is_none()
+        && om_state
+            .active
+            .as_ref()
+            .map(|active| approx_token_count(&active.observations))
+            .unwrap_or(0)
+            >= config.reflection_buffer_activation_tokens()
+}
+
+async fn maybe_advance_memory_state(
+    config: &ObservationalMemoryConfig,
+    session_id: &str,
+    host: &Arc<dyn SessionManager>,
+    policy: &crate::SessionPolicy,
+    mut graph: SessionGraph,
+) -> Result<SessionGraph, PluginError> {
+    for _ in 0..6 {
+        let om_state = build_graph_state(&graph);
+        let pending_messages = active_unobserved_message_nodes(
+            &graph,
+            om_state
+                .active
+                .as_ref()
+                .and_then(|state| state.observed_through_message_id.as_deref()),
+        );
+        let pending_tokens = approx_message_nodes_tokens(&pending_messages);
+        if pending_tokens >= config.observation_message_tokens {
+            if let Some(next) =
+                activate_buffered_observations(config, session_id, host, &graph).await?
+            {
+                graph = next;
+                continue;
+            }
+            if pending_tokens >= config.observation_block_after_tokens
+                && let Some(next) =
+                    sync_observe_pending_messages(config, session_id, host, policy, &graph).await?
+            {
+                graph = next;
+                continue;
+            }
+        }
+
+        let om_state = build_graph_state(&graph);
+        let active_tokens = om_state
+            .active
+            .as_ref()
+            .map(|state| approx_token_count(&state.observations))
+            .unwrap_or(0);
+        if active_tokens >= config.reflection_observation_tokens {
+            if let Some(next) = activate_buffered_reflection(session_id, host, &graph).await? {
+                graph = next;
+                continue;
+            }
+            if active_tokens >= config.reflection_block_after_tokens
+                && let Some(next) =
+                    sync_reflect_active_memory(session_id, host, policy, &graph).await?
+            {
+                graph = next;
+                continue;
+            }
+        }
+
+        break;
+    }
+
+    Ok(graph)
+}
+
+async fn maybe_buffer_observations(
     config: &ObservationalMemoryConfig,
     session_id: &str,
     host: &Arc<dyn SessionManager>,
     policy: &crate::SessionPolicy,
     graph: &SessionGraph,
-) -> Result<Option<SessionGraph>, PluginError> {
-    let memory_state = build_memory_state(graph);
-    let unobserved = active_unobserved_message_nodes(graph, memory_state.as_ref());
-    if unobserved.is_empty() {
-        return Ok(None);
+) -> Result<(), PluginError> {
+    let om_state = build_graph_state(graph);
+    let start_after = om_state
+        .buffered_observations
+        .last()
+        .map(|chunk| chunk.observed_through_message_id.as_str())
+        .or_else(|| {
+            om_state
+                .active
+                .as_ref()
+                .and_then(|state| state.observed_through_message_id.as_deref())
+        });
+    let unbuffered = active_unobserved_message_nodes(graph, start_after);
+    let interval_tokens = config.observation_buffer_interval_tokens();
+    if interval_tokens == 0 {
+        return Ok(());
+    }
+    let total_tokens = approx_message_nodes_tokens(&unbuffered);
+    if total_tokens < interval_tokens {
+        return Ok(());
     }
 
-    let total_tokens = approx_message_nodes_tokens(&unobserved);
-    if total_tokens < config.observation_activation_tokens() {
-        return Ok(None);
+    let target_tokens = total_tokens - (total_tokens % interval_tokens);
+    let Some(prefix_len) = prefix_len_covering_tokens(&unbuffered, target_tokens) else {
+        return Ok(());
+    };
+    if prefix_len == 0 {
+        return Ok(());
     }
-
-    let observe_until =
-        prefix_len_leaving_tail_budget(&unobserved, config.observation_buffer_tokens);
-    if observe_until == 0 {
-        return Ok(None);
-    }
-
-    let batches = split_message_batches(
-        &unobserved[..observe_until],
-        config.observation_max_tokens_per_batch.max(1),
-    );
+    let batch_target = config
+        .observation_max_tokens_per_batch
+        .min(interval_tokens)
+        .max(1);
+    let batches = split_message_batches(&unbuffered[..prefix_len], batch_target);
     if batches.is_empty() {
-        return Ok(None);
+        return Ok(());
     }
-    tracing::debug!(
-        rss_kb = debug_rss_kb(),
-        unobserved_messages = unobserved.len(),
-        observe_until,
-        batch_count = batches.len(),
-        total_tokens,
-        "OM observer batches queued"
-    );
 
-    let mut next_graph = graph.clone();
-    let mut next_memory_state = memory_state;
-    let mut required_ancestor = next_graph.leaf_node_id.clone();
-
+    let mut preview = om_state.active.clone();
+    let mut nodes = Vec::new();
     for batch in batches {
         let output = run_observer_batch(
             config,
             session_id,
             host,
             policy.clone(),
-            next_memory_state.as_ref(),
+            preview.as_ref(),
             &batch,
         )
         .await?;
@@ -483,114 +657,652 @@ async fn maybe_run_observer_batches(
         {
             continue;
         }
-
         let Some(last_message) = batch.last() else {
             continue;
         };
-        let node = ObservationBatchNode {
+        let node = BufferedObservationNode {
             observed_through_message_id: last_message.message.id.clone(),
             observations: output.observations.trim().to_string(),
             current_task: output.current_task.clone(),
             suggested_response: output.suggested_response.clone(),
+            observation_tokens: approx_token_count(output.observations.trim()),
         };
-        let body = serde_json::to_value(&node).map_err(|err| {
-            PluginError::Snapshot(format!("failed to encode OM observation: {err}"))
-        })?;
-        match host
-            .append_session_nodes(
-                session_id,
-                crate::AppendSessionNodesRequest {
-                    nodes: vec![crate::SessionAppendNode::plugin(
-                        OBSERVATION_PLUGIN_TYPE,
-                        body,
-                    )],
-                    requires_ancestor_node_id: required_ancestor.clone(),
-                },
-            )
-            .await?
-        {
-            crate::AppendSessionNodesResult::Appended { node_ids, .. } => {
-                let Some(node_id) = node_ids.last().cloned() else {
-                    continue;
-                };
-                next_graph.append_plugin(
-                    OBSERVATION_PLUGIN_TYPE,
-                    serde_json::to_value(&node).unwrap_or(json!(null)),
-                );
-                required_ancestor = Some(node_id.clone());
-                next_memory_state = Some(merge_memory_state(
-                    next_memory_state.as_ref(),
-                    &node,
-                    node_id,
-                ));
-            }
-            crate::AppendSessionNodesResult::StaleBranch { .. } => break,
+        preview = Some(merge_active_state_with_observation(preview.as_ref(), &node));
+        nodes.push((
+            BUFFERED_OBSERVATION_PLUGIN_TYPE.to_string(),
+            serde_json::to_value(node).map_err(|err| {
+                PluginError::Snapshot(format!("failed to encode OM buffered observation: {err}"))
+            })?,
+        ));
+    }
+
+    if nodes.is_empty() {
+        return Ok(());
+    }
+
+    let _ = append_plugin_nodes(session_id, host, graph, nodes).await?;
+    Ok(())
+}
+
+async fn maybe_buffer_reflection(
+    config: &ObservationalMemoryConfig,
+    session_id: &str,
+    host: &Arc<dyn SessionManager>,
+    policy: &crate::SessionPolicy,
+    graph: &SessionGraph,
+) -> Result<(), PluginError> {
+    let om_state = build_graph_state(graph);
+    let Some(active) = om_state.active else {
+        return Ok(());
+    };
+    if om_state.buffered_reflection.is_some() {
+        return Ok(());
+    }
+
+    let observation_tokens = approx_token_count(&active.observations);
+    if observation_tokens < config.reflection_buffer_activation_tokens() {
+        return Ok(());
+    }
+
+    let output = run_reflector(session_id, host, policy.clone(), &active.observations).await?;
+    if output.observations.trim().is_empty() {
+        return Ok(());
+    }
+    if output.observations.trim() == active.observations.trim()
+        && output.current_task == active.current_task
+        && output.suggested_response == active.suggested_response
+    {
+        return Ok(());
+    }
+
+    let node = BufferedReflectionNode {
+        source_state_node_id: active.state_node_id,
+        observed_through_message_id: active.observed_through_message_id.unwrap_or_default(),
+        observations: output.observations.trim().to_string(),
+        current_task: output.current_task,
+        suggested_response: output.suggested_response,
+        observation_tokens,
+    };
+    let _ = append_plugin_nodes(
+        session_id,
+        host,
+        graph,
+        vec![(
+            BUFFERED_REFLECTION_PLUGIN_TYPE.to_string(),
+            serde_json::to_value(node).map_err(|err| {
+                PluginError::Snapshot(format!("failed to encode OM buffered reflection: {err}"))
+            })?,
+        )],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn activate_buffered_observations(
+    config: &ObservationalMemoryConfig,
+    session_id: &str,
+    host: &Arc<dyn SessionManager>,
+    graph: &SessionGraph,
+) -> Result<Option<SessionGraph>, PluginError> {
+    let om_state = build_graph_state(graph);
+    if om_state.buffered_observations.is_empty() {
+        return Ok(None);
+    }
+    let pending_messages = active_unobserved_message_nodes(
+        graph,
+        om_state
+            .active
+            .as_ref()
+            .and_then(|state| state.observed_through_message_id.as_deref()),
+    );
+    if pending_messages.is_empty() {
+        return Ok(None);
+    }
+
+    let retained_after = retained_message_tokens_by_message_id(&pending_messages);
+    let mut activated = Vec::new();
+    let mut merged = om_state.active.clone();
+    for chunk in &om_state.buffered_observations {
+        activated.push(chunk.clone());
+        merged = Some(merge_active_state_with_observation(
+            merged.as_ref(),
+            &BufferedObservationNode {
+                observed_through_message_id: chunk.observed_through_message_id.clone(),
+                observations: chunk.observations.clone(),
+                current_task: chunk.current_task.clone(),
+                suggested_response: chunk.suggested_response.clone(),
+                observation_tokens: approx_token_count(&chunk.observations),
+            },
+        ));
+        let remaining = retained_after
+            .get(chunk.observed_through_message_id.as_str())
+            .copied()
+            .unwrap_or(0);
+        if remaining <= config.observation_retention_tokens() {
+            break;
         }
     }
 
-    Ok(Some(next_graph))
+    if activated.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(next_active) = merged else {
+        return Ok(None);
+    };
+    let node = ActiveMemoryNode {
+        observed_through_message_id: next_active.observed_through_message_id.unwrap_or_default(),
+        observations: next_active.observations,
+        current_task: next_active.current_task,
+        suggested_response: next_active.suggested_response,
+    };
+    match append_plugin_nodes(
+        session_id,
+        host,
+        graph,
+        vec![(
+            ACTIVE_STATE_PLUGIN_TYPE.to_string(),
+            serde_json::to_value(node).map_err(|err| {
+                PluginError::Snapshot(format!("failed to encode OM state activation: {err}"))
+            })?,
+        )],
+    )
+    .await?
+    {
+        Some(next) => Ok(Some(next)),
+        None => Ok(None),
+    }
 }
 
-async fn maybe_run_reflector(
+async fn activate_buffered_reflection(
+    session_id: &str,
+    host: &Arc<dyn SessionManager>,
+    graph: &SessionGraph,
+) -> Result<Option<SessionGraph>, PluginError> {
+    let om_state = build_graph_state(graph);
+    let Some(active) = om_state.active else {
+        return Ok(None);
+    };
+    let Some(buffered) = om_state.buffered_reflection else {
+        return Ok(None);
+    };
+    if buffered.source_state_node_id != active.state_node_id {
+        return Ok(None);
+    }
+    let node = ActiveMemoryNode {
+        observed_through_message_id: buffered.observed_through_message_id,
+        observations: buffered.observations,
+        current_task: buffered.current_task,
+        suggested_response: buffered.suggested_response,
+    };
+    append_plugin_nodes(
+        session_id,
+        host,
+        graph,
+        vec![(
+            ACTIVE_STATE_PLUGIN_TYPE.to_string(),
+            serde_json::to_value(node).map_err(|err| {
+                PluginError::Snapshot(format!("failed to encode OM reflection activation: {err}"))
+            })?,
+        )],
+    )
+    .await
+}
+
+async fn sync_observe_pending_messages(
     config: &ObservationalMemoryConfig,
     session_id: &str,
     host: &Arc<dyn SessionManager>,
     policy: &crate::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
-    let Some(memory_state) = build_memory_state(graph) else {
+    let om_state = build_graph_state(graph);
+    let unobserved = active_unobserved_message_nodes(
+        graph,
+        om_state
+            .active
+            .as_ref()
+            .and_then(|state| state.observed_through_message_id.as_deref()),
+    );
+    if unobserved.is_empty() {
         return Ok(None);
-    };
-    if approx_token_count(&memory_state.observations) < config.reflection_activation_tokens() {
+    }
+    let observe_until =
+        prefix_len_leaving_tail_budget(&unobserved, config.observation_retention_tokens());
+    if observe_until == 0 {
+        return Ok(None);
+    }
+    let batches = split_message_batches(
+        &unobserved[..observe_until],
+        config.observation_max_tokens_per_batch.max(1),
+    );
+    if batches.is_empty() {
         return Ok(None);
     }
 
-    let output =
-        run_reflector(session_id, host, policy.clone(), &memory_state.observations).await?;
+    let mut merged = om_state.active.clone();
+    for batch in batches {
+        let output = run_observer_batch(
+            config,
+            session_id,
+            host,
+            policy.clone(),
+            merged.as_ref(),
+            &batch,
+        )
+        .await?;
+        if output.observations.trim().is_empty()
+            && output.current_task.is_none()
+            && output.suggested_response.is_none()
+        {
+            continue;
+        }
+        let Some(last_message) = batch.last() else {
+            continue;
+        };
+        merged = Some(merge_active_state_with_observer_output(
+            merged.as_ref(),
+            last_message.message.id.clone(),
+            output,
+        ));
+    }
+
+    let Some(active) = merged else {
+        return Ok(None);
+    };
+    let node = ActiveMemoryNode {
+        observed_through_message_id: active.observed_through_message_id.unwrap_or_default(),
+        observations: active.observations,
+        current_task: active.current_task,
+        suggested_response: active.suggested_response,
+    };
+    append_plugin_nodes(
+        session_id,
+        host,
+        graph,
+        vec![(
+            ACTIVE_STATE_PLUGIN_TYPE.to_string(),
+            serde_json::to_value(node).map_err(|err| {
+                PluginError::Snapshot(format!("failed to encode OM sync observation: {err}"))
+            })?,
+        )],
+    )
+    .await
+}
+
+async fn sync_reflect_active_memory(
+    session_id: &str,
+    host: &Arc<dyn SessionManager>,
+    policy: &crate::SessionPolicy,
+    graph: &SessionGraph,
+) -> Result<Option<SessionGraph>, PluginError> {
+    let om_state = build_graph_state(graph);
+    let Some(active) = om_state.active else {
+        return Ok(None);
+    };
+    let output = run_reflector(session_id, host, policy.clone(), &active.observations).await?;
     if output.observations.trim().is_empty() {
         return Ok(None);
     }
-    if output.observations.trim() == memory_state.observations.trim()
-        && output.current_task == memory_state.current_task
-        && output.suggested_response == memory_state.suggested_response
+    if output.observations.trim() == active.observations.trim()
+        && output.current_task == active.current_task
+        && output.suggested_response == active.suggested_response
     {
         return Ok(None);
     }
-
-    let Some(observed_through_message_id) = memory_state.observed_through_message_id.clone() else {
-        return Ok(None);
-    };
-    let node = ReflectionNode {
-        observed_through_message_id,
+    let node = ActiveMemoryNode {
+        observed_through_message_id: active.observed_through_message_id.unwrap_or_default(),
         observations: output.observations.trim().to_string(),
         current_task: output.current_task,
         suggested_response: output.suggested_response,
     };
-    let body = serde_json::to_value(&node)
-        .map_err(|err| PluginError::Snapshot(format!("failed to encode OM reflection: {err}")))?;
+    append_plugin_nodes(
+        session_id,
+        host,
+        graph,
+        vec![(
+            ACTIVE_STATE_PLUGIN_TYPE.to_string(),
+            serde_json::to_value(node).map_err(|err| {
+                PluginError::Snapshot(format!("failed to encode OM sync reflection: {err}"))
+            })?,
+        )],
+    )
+    .await
+}
+
+async fn append_plugin_nodes(
+    session_id: &str,
+    host: &Arc<dyn SessionManager>,
+    graph: &SessionGraph,
+    nodes: Vec<(String, serde_json::Value)>,
+) -> Result<Option<SessionGraph>, PluginError> {
+    if nodes.is_empty() {
+        return Ok(Some(graph.clone()));
+    }
+    let request_nodes = nodes
+        .iter()
+        .cloned()
+        .map(|(plugin_type, body)| SessionAppendNode::plugin(plugin_type, body))
+        .collect::<Vec<_>>();
     match host
         .append_session_nodes(
             session_id,
-            crate::AppendSessionNodesRequest {
-                nodes: vec![crate::SessionAppendNode::plugin(
-                    REFLECTION_PLUGIN_TYPE,
-                    body,
-                )],
-                requires_ancestor_node_id: memory_state.latest_memory_node_id.clone(),
+            AppendSessionNodesRequest {
+                nodes: request_nodes,
+                requires_ancestor_node_id: graph.leaf_node_id.clone(),
             },
         )
         .await?
     {
-        crate::AppendSessionNodesResult::Appended { .. } => {
-            let mut next_graph = graph.clone();
-            next_graph.append_plugin(
-                REFLECTION_PLUGIN_TYPE,
-                serde_json::to_value(node).unwrap_or(json!(null)),
-            );
-            Ok(Some(next_graph))
+        AppendSessionNodesResult::Appended { .. } => {
+            let mut next = graph.clone();
+            for (plugin_type, body) in nodes {
+                next.append_plugin(plugin_type, body);
+            }
+            Ok(Some(next))
         }
-        crate::AppendSessionNodesResult::StaleBranch { .. } => Ok(None),
+        AppendSessionNodesResult::StaleBranch { .. } => Ok(None),
     }
+}
+
+fn merge_active_state_with_observation(
+    previous: Option<&ActiveMemoryState>,
+    batch: &BufferedObservationNode,
+) -> ActiveMemoryState {
+    let mut observations = previous
+        .map(|state| state.observations.clone())
+        .unwrap_or_default();
+    if !observations.trim().is_empty() && !batch.observations.trim().is_empty() {
+        observations.push_str("\n\n");
+    }
+    observations.push_str(batch.observations.trim());
+    ActiveMemoryState {
+        state_node_id: previous
+            .map(|state| state.state_node_id.clone())
+            .unwrap_or_default(),
+        observations,
+        current_task: batch
+            .current_task
+            .clone()
+            .or_else(|| previous.and_then(|state| state.current_task.clone())),
+        suggested_response: batch
+            .suggested_response
+            .clone()
+            .or_else(|| previous.and_then(|state| state.suggested_response.clone())),
+        observed_through_message_id: Some(batch.observed_through_message_id.clone()),
+    }
+}
+
+fn merge_active_state_with_observer_output(
+    previous: Option<&ActiveMemoryState>,
+    observed_through_message_id: String,
+    output: ParsedMemoryOutput,
+) -> ActiveMemoryState {
+    let mut observations = previous
+        .map(|state| state.observations.clone())
+        .unwrap_or_default();
+    if !observations.trim().is_empty() && !output.observations.trim().is_empty() {
+        observations.push_str("\n\n");
+    }
+    observations.push_str(output.observations.trim());
+    ActiveMemoryState {
+        state_node_id: previous
+            .map(|state| state.state_node_id.clone())
+            .unwrap_or_default(),
+        observations,
+        current_task: output
+            .current_task
+            .or_else(|| previous.and_then(|state| state.current_task.clone())),
+        suggested_response: output
+            .suggested_response
+            .or_else(|| previous.and_then(|state| state.suggested_response.clone())),
+        observed_through_message_id: Some(observed_through_message_id),
+    }
+}
+
+fn build_memory_context_messages(active: &ActiveMemoryState) -> Vec<Message> {
+    let mut messages = Vec::new();
+    messages.push(plugin_message(
+        "om-memory-system",
+        MessageRole::System,
+        format!("{OBSERVATION_CONTEXT_PROMPT}\n\n{OBSERVATION_CONTEXT_INSTRUCTIONS}"),
+    ));
+
+    let mut memory_block = String::from("<observations>\n");
+    memory_block.push_str(active.observations.trim());
+    memory_block.push_str("\n</observations>");
+    if let Some(current_task) = &active.current_task {
+        memory_block.push_str(&format!(
+            "\n\n<current-task>\n{}\n</current-task>",
+            current_task.trim()
+        ));
+    }
+    if let Some(suggested_response) = &active.suggested_response {
+        memory_block.push_str(&format!(
+            "\n\n<suggested-response>\n{}\n</suggested-response>",
+            suggested_response.trim()
+        ));
+    }
+    messages.push(plugin_message(
+        "om-memory-block",
+        MessageRole::System,
+        memory_block,
+    ));
+    messages.push(plugin_message(
+        "om-memory-reminder",
+        MessageRole::User,
+        format!("<system-reminder>{OBSERVATION_CONTINUATION_HINT}</system-reminder>"),
+    ));
+    messages
+}
+
+fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
+    Message {
+        id: id.to_string(),
+        role,
+        parts: vec![Part {
+            id: format!("{id}.p0"),
+            kind: PartKind::Prose,
+            content,
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: crate::PruneState::Intact,
+        }],
+        user_input: None,
+        origin: Some(MessageOrigin::Plugin {
+            plugin_id: OBSERVATIONAL_MEMORY_PLUGIN_ID.to_string(),
+            transient: true,
+        }),
+    }
+}
+
+fn build_graph_state(graph: &SessionGraph) -> OmGraphState {
+    let mut state = OmGraphState::default();
+    for node in graph.active_path_nodes() {
+        let Some((kind, _)) = node.plugin() else {
+            continue;
+        };
+        match kind {
+            ACTIVE_STATE_PLUGIN_TYPE => {
+                let Some(active) = node.plugin_body::<ActiveMemoryNode>() else {
+                    continue;
+                };
+                state.active = Some(ActiveMemoryState {
+                    state_node_id: node.node_id.clone(),
+                    observed_through_message_id: Some(active.observed_through_message_id),
+                    observations: active.observations,
+                    current_task: active.current_task,
+                    suggested_response: active.suggested_response,
+                });
+                state.buffered_observations.clear();
+                state.buffered_reflection = None;
+            }
+            BUFFERED_OBSERVATION_PLUGIN_TYPE => {
+                let Some(buffered) = node.plugin_body::<BufferedObservationNode>() else {
+                    continue;
+                };
+                if state.buffered_observations.iter().any(|chunk| {
+                    chunk.observed_through_message_id == buffered.observed_through_message_id
+                }) {
+                    continue;
+                }
+                state.buffered_observations.push(BufferedObservationState {
+                    observed_through_message_id: buffered.observed_through_message_id,
+                    observations: buffered.observations,
+                    current_task: buffered.current_task,
+                    suggested_response: buffered.suggested_response,
+                });
+            }
+            BUFFERED_REFLECTION_PLUGIN_TYPE => {
+                let Some(buffered) = node.plugin_body::<BufferedReflectionNode>() else {
+                    continue;
+                };
+                let Some(active) = state.active.as_ref() else {
+                    continue;
+                };
+                if buffered.source_state_node_id != active.state_node_id {
+                    continue;
+                }
+                state.buffered_reflection = Some(BufferedReflectionState {
+                    source_state_node_id: buffered.source_state_node_id,
+                    observed_through_message_id: buffered.observed_through_message_id,
+                    observations: buffered.observations,
+                    current_task: buffered.current_task,
+                    suggested_response: buffered.suggested_response,
+                });
+            }
+            _ => {}
+        }
+    }
+    state
+}
+
+fn active_unobserved_message_nodes<'a>(
+    graph: &'a SessionGraph,
+    observed_through_message_id: Option<&str>,
+) -> Vec<MessageNodeRef<'a>> {
+    let mut seen_observed = observed_through_message_id.is_none();
+    graph
+        .active_path_nodes()
+        .into_iter()
+        .filter_map(|node| {
+            let message = node.message()?;
+            if matches!(message.role, MessageRole::System) {
+                return None;
+            }
+            if !seen_observed {
+                if observed_through_message_id == Some(message.id.as_str()) {
+                    seen_observed = true;
+                }
+                return None;
+            }
+            Some(MessageNodeRef {
+                timestamp: node.timestamp.as_str(),
+                message,
+            })
+        })
+        .collect()
+}
+
+fn retained_message_tokens_by_message_id<N: ObservedMessageNode>(
+    messages: &[N],
+) -> std::collections::HashMap<&str, usize> {
+    let mut retained = std::collections::HashMap::new();
+    let mut suffix_tokens = 0usize;
+    for message in messages.iter().rev() {
+        retained.insert(message.message().id.as_str(), suffix_tokens);
+        suffix_tokens = suffix_tokens.saturating_add(approx_message_tokens(message));
+    }
+    retained
+}
+
+fn prefix_len_leaving_tail_budget<N: ObservedMessageNode>(
+    messages: &[N],
+    tail_budget_tokens: usize,
+) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+    if tail_budget_tokens == 0 {
+        return messages.len();
+    }
+    let mut suffix_tokens = 0usize;
+    for (idx, message) in messages.iter().enumerate().rev() {
+        suffix_tokens = suffix_tokens.saturating_add(approx_message_tokens(message));
+        if suffix_tokens > tail_budget_tokens {
+            return idx + 1;
+        }
+    }
+    0
+}
+
+fn prefix_len_covering_tokens<N: ObservedMessageNode>(
+    messages: &[N],
+    target_tokens: usize,
+) -> Option<usize> {
+    if target_tokens == 0 {
+        return Some(0);
+    }
+    let mut total = 0usize;
+    for (idx, message) in messages.iter().enumerate() {
+        total = total.saturating_add(approx_message_tokens(message));
+        if total >= target_tokens {
+            return Some(idx + 1);
+        }
+    }
+    None
+}
+
+fn split_message_batches<N: ObservedMessageNode + Clone>(
+    messages: &[N],
+    max_tokens_per_batch: usize,
+) -> Vec<Vec<N>> {
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut current_tokens = 0usize;
+
+    for message in messages {
+        let tokens = approx_message_tokens(message).max(1);
+        if !current.is_empty() && current_tokens + tokens > max_tokens_per_batch {
+            batches.push(current);
+            current = Vec::new();
+            current_tokens = 0;
+        }
+        current.push(message.clone());
+        current_tokens += tokens;
+    }
+
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+fn approx_message_nodes_tokens<N: ObservedMessageNode>(messages: &[N]) -> usize {
+    messages.iter().map(approx_message_tokens).sum()
+}
+
+fn approx_message_tokens<N: ObservedMessageNode>(message: &N) -> usize {
+    approx_token_count(&format_message_for_observer(message))
+}
+
+fn approx_token_count(text: &str) -> usize {
+    text.chars().count().div_ceil(4)
+}
+
+fn truncate_observation_tail(observations: &str, budget_tokens: usize) -> String {
+    if budget_tokens == 0 {
+        return String::new();
+    }
+    let budget_chars = budget_tokens.saturating_mul(4);
+    let chars = observations.chars().collect::<Vec<_>>();
+    if chars.len() <= budget_chars {
+        return observations.to_string();
+    }
+    let start = chars.len().saturating_sub(budget_chars);
+    let tail = chars[start..].iter().collect::<String>();
+    format!("[Earlier observations omitted]\n{tail}")
 }
 
 async fn run_observer_batch(
@@ -598,16 +1310,16 @@ async fn run_observer_batch(
     session_id: &str,
     host: &Arc<dyn SessionManager>,
     policy: crate::SessionPolicy,
-    memory_state: Option<&MemoryState>,
-    batch: &[MessageNode],
+    active: Option<&ActiveMemoryState>,
+    batch: &[impl ObservedMessageNode],
 ) -> Result<ParsedMemoryOutput, PluginError> {
-    let existing_observations = memory_state
+    let existing_observations = active
         .map(|state| {
             truncate_observation_tail(&state.observations, config.previous_observer_tokens)
         })
         .filter(|text| !text.trim().is_empty());
-    let prior_current_task = memory_state.and_then(|state| state.current_task.clone());
-    let prior_suggested_response = memory_state.and_then(|state| state.suggested_response.clone());
+    let prior_current_task = active.and_then(|state| state.current_task.clone());
+    let prior_suggested_response = active.and_then(|state| state.suggested_response.clone());
     let prompt = build_observer_prompt(
         existing_observations.as_deref(),
         batch,
@@ -651,13 +1363,6 @@ async fn run_worker_turn(
     system_prompt: &str,
     prompt: &str,
 ) -> Result<ParsedMemoryOutput, PluginError> {
-    tracing::debug!(
-        rss_kb = debug_rss_kb(),
-        worker_kind,
-        system_prompt_chars = system_prompt.len(),
-        prompt_chars = prompt.len(),
-        "OM worker direct completion start"
-    );
     let completion = host
         .direct_completion(
             DirectRequest {
@@ -680,278 +1385,13 @@ async fn run_worker_turn(
             },
             worker_kind,
         )
-        .await;
-    let completion = completion?;
-    tracing::debug!(
-        rss_kb = debug_rss_kb(),
-        worker_kind,
-        output_chars = completion.text.len(),
-        "OM worker direct completion end"
-    );
+        .await?;
     Ok(parse_memory_output(&completion.text))
-}
-
-fn build_memory_context_messages(memory_state: &MemoryState) -> Vec<Message> {
-    let mut messages = Vec::new();
-    messages.push(plugin_message(
-        "om-memory-system",
-        MessageRole::System,
-        format!("{OBSERVATION_CONTEXT_PROMPT}\n\n{OBSERVATION_CONTEXT_INSTRUCTIONS}"),
-    ));
-
-    let mut memory_block = String::from("<observations>\n");
-    memory_block.push_str(memory_state.observations.trim());
-    memory_block.push_str("\n</observations>");
-    if let Some(current_task) = &memory_state.current_task {
-        memory_block.push_str(&format!(
-            "\n\n<current-task>\n{}\n</current-task>",
-            current_task.trim()
-        ));
-    }
-    if let Some(suggested_response) = &memory_state.suggested_response {
-        memory_block.push_str(&format!(
-            "\n\n<suggested-response>\n{}\n</suggested-response>",
-            suggested_response.trim()
-        ));
-    }
-    messages.push(plugin_message(
-        "om-memory-block",
-        MessageRole::System,
-        memory_block,
-    ));
-    messages.push(plugin_message(
-        "om-memory-reminder",
-        MessageRole::User,
-        format!("<system-reminder>{OBSERVATION_CONTINUATION_HINT}</system-reminder>"),
-    ));
-    messages
-}
-
-fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
-    Message {
-        id: id.to_string(),
-        role,
-        parts: vec![Part {
-            id: format!("{id}.p0"),
-            kind: PartKind::Prose,
-            content,
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: crate::PruneState::Intact,
-        }],
-        user_input: None,
-        origin: Some(MessageOrigin::Plugin {
-            plugin_id: OBSERVATIONAL_MEMORY_PLUGIN_ID.to_string(),
-            transient: true,
-        }),
-    }
-}
-
-fn build_memory_state(graph: &SessionGraph) -> Option<MemoryState> {
-    let path = graph.active_path_nodes();
-    let latest_reflection_idx = path.iter().rposition(|node| {
-        matches!(
-            node.plugin(),
-            Some((kind, _)) if kind == REFLECTION_PLUGIN_TYPE
-        )
-    });
-
-    let mut observations = Vec::new();
-    let mut current_task = None;
-    let mut suggested_response = None;
-    let mut observed_through_message_id = None;
-    let mut latest_memory_node_id = None;
-
-    if let Some(idx) = latest_reflection_idx
-        && let Some(node) = path.get(idx)
-        && let Some((_, body)) = node.plugin()
-        && let Ok(reflection) = serde_json::from_value::<ReflectionNode>(body.clone())
-    {
-        observations.push(reflection.observations);
-        current_task = reflection.current_task;
-        suggested_response = reflection.suggested_response;
-        observed_through_message_id = Some(reflection.observed_through_message_id);
-        latest_memory_node_id = Some(node.node_id.clone());
-    }
-
-    let start_idx = latest_reflection_idx.map_or(0, |idx| idx + 1);
-    for node in path.into_iter().skip(start_idx) {
-        let Some((kind, body)) = node.plugin() else {
-            continue;
-        };
-        if kind != OBSERVATION_PLUGIN_TYPE {
-            continue;
-        }
-        let Ok(batch) = serde_json::from_value::<ObservationBatchNode>(body.clone()) else {
-            continue;
-        };
-        if !batch.observations.trim().is_empty() {
-            observations.push(batch.observations);
-        }
-        if batch
-            .current_task
-            .as_ref()
-            .is_some_and(|text| !text.trim().is_empty())
-        {
-            current_task = batch.current_task;
-        }
-        if batch
-            .suggested_response
-            .as_ref()
-            .is_some_and(|text| !text.trim().is_empty())
-        {
-            suggested_response = batch.suggested_response;
-        }
-        observed_through_message_id = Some(batch.observed_through_message_id);
-        latest_memory_node_id = Some(node.node_id.clone());
-    }
-
-    let observations = observations
-        .into_iter()
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    if observations.trim().is_empty() && current_task.is_none() && suggested_response.is_none() {
-        return None;
-    }
-
-    Some(MemoryState {
-        observations,
-        current_task,
-        suggested_response,
-        observed_through_message_id,
-        latest_memory_node_id,
-    })
-}
-
-fn active_unobserved_message_nodes(
-    graph: &SessionGraph,
-    memory_state: Option<&MemoryState>,
-) -> Vec<MessageNode> {
-    let observed_through =
-        memory_state.and_then(|state| state.observed_through_message_id.as_deref());
-    let mut seen_observed = observed_through.is_none();
-    graph
-        .active_path_nodes()
-        .into_iter()
-        .filter_map(|node| {
-            let message = node.message()?.clone();
-            if matches!(message.role, MessageRole::System) {
-                return None;
-            }
-            if !seen_observed {
-                if observed_through == Some(message.id.as_str()) {
-                    seen_observed = true;
-                }
-                return None;
-            }
-            Some(MessageNode {
-                timestamp: node.timestamp.clone(),
-                message,
-            })
-        })
-        .collect()
-}
-
-fn merge_memory_state(
-    previous: Option<&MemoryState>,
-    batch: &ObservationBatchNode,
-    latest_memory_node_id: String,
-) -> MemoryState {
-    let mut observations = previous
-        .map(|state| state.observations.clone())
-        .unwrap_or_default();
-    if !observations.trim().is_empty() && !batch.observations.trim().is_empty() {
-        observations.push_str("\n\n");
-    }
-    observations.push_str(batch.observations.trim());
-    MemoryState {
-        observations,
-        current_task: batch
-            .current_task
-            .clone()
-            .or_else(|| previous.and_then(|state| state.current_task.clone())),
-        suggested_response: batch
-            .suggested_response
-            .clone()
-            .or_else(|| previous.and_then(|state| state.suggested_response.clone())),
-        observed_through_message_id: Some(batch.observed_through_message_id.clone()),
-        latest_memory_node_id: Some(latest_memory_node_id),
-    }
-}
-
-fn prefix_len_leaving_tail_budget(messages: &[MessageNode], tail_budget_tokens: usize) -> usize {
-    if messages.is_empty() {
-        return 0;
-    }
-    if tail_budget_tokens == 0 {
-        return messages.len();
-    }
-    let mut suffix_tokens = 0usize;
-    for (idx, message) in messages.iter().enumerate().rev() {
-        suffix_tokens = suffix_tokens.saturating_add(approx_message_tokens(message));
-        if suffix_tokens > tail_budget_tokens {
-            return idx + 1;
-        }
-    }
-    0
-}
-
-fn split_message_batches(
-    messages: &[MessageNode],
-    max_tokens_per_batch: usize,
-) -> Vec<Vec<MessageNode>> {
-    let mut batches = Vec::new();
-    let mut current = Vec::new();
-    let mut current_tokens = 0usize;
-
-    for message in messages {
-        let tokens = approx_message_tokens(message).max(1);
-        if !current.is_empty() && current_tokens + tokens > max_tokens_per_batch {
-            batches.push(current);
-            current = Vec::new();
-            current_tokens = 0;
-        }
-        current.push(message.clone());
-        current_tokens += tokens;
-    }
-
-    if !current.is_empty() {
-        batches.push(current);
-    }
-    batches
-}
-
-fn approx_message_nodes_tokens(messages: &[MessageNode]) -> usize {
-    messages.iter().map(approx_message_tokens).sum()
-}
-
-fn approx_message_tokens(message: &MessageNode) -> usize {
-    approx_token_count(&format_message_for_observer(message))
-}
-
-fn approx_token_count(text: &str) -> usize {
-    text.chars().count().div_ceil(4)
-}
-
-fn truncate_observation_tail(observations: &str, budget_tokens: usize) -> String {
-    if budget_tokens == 0 {
-        return String::new();
-    }
-    let budget_chars = budget_tokens.saturating_mul(4);
-    let chars = observations.chars().collect::<Vec<_>>();
-    if chars.len() <= budget_chars {
-        return observations.to_string();
-    }
-    let start = chars.len().saturating_sub(budget_chars);
-    let tail = chars[start..].iter().collect::<String>();
-    format!("[Earlier observations omitted]\n{tail}")
 }
 
 fn build_observer_prompt(
     existing_observations: Option<&str>,
-    messages: &[MessageNode],
+    messages: &[impl ObservedMessageNode],
     prior_current_task: Option<&str>,
     prior_suggested_response: Option<&str>,
 ) -> String {
@@ -981,112 +1421,90 @@ fn build_observer_prompt(
         ));
     }
     if !prior_lines.is_empty() {
-        prompt.push_str("## Prior Thread Metadata\n\n");
+        prompt.push_str("## Existing Continuity Signals\n");
         prompt.push_str(&prior_lines.join("\n"));
-        prompt.push_str(
-            "\n\nUse the prior current-task and suggested-response as continuity hints, then update them based on the new messages.\n\n---\n\n",
-        );
+        prompt.push_str("\n\n");
     }
-    prompt.push_str("## Your Task\n\nExtract new observations from the message history above. Do not repeat observations that are already in the previous observations. Add your new observations in the format specified in your instructions.");
+    prompt.push_str("## Task\nObserve only the NEW message history above and produce incremental memory updates.\n");
     prompt
 }
 
 fn build_reflector_prompt(observations: &str) -> String {
     format!(
-        "## OBSERVATIONS TO REFLECT ON\n\n{}\n\n---\n\nPlease analyze these observations and produce a refined, condensed version that will become the assistant's entire memory going forward.",
+        "## Observations to Reflect\n\n{}\n\n## Task\nRestructure and compress these observations while preserving the most important user facts, active tasks, and continuity cues.",
         observations.trim()
     )
 }
 
-fn format_message_for_observer(message: &MessageNode) -> String {
-    let role = match message.message.role {
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
-        MessageRole::System => "system",
-    };
-    let mut lines = vec![format!("--- message boundary ({}) ---", message.timestamp)];
-    lines.push(format!(
-        "<message role=\"{role}\" id=\"{}\">",
-        message.message.id
-    ));
-    for part in &message.message.parts {
-        let kind = match part.kind {
-            PartKind::Text => "text",
-            PartKind::Image => "image",
-            PartKind::Code => "code",
-            PartKind::Output => "output",
-            PartKind::Error => "error",
-            PartKind::Prose => "prose",
-            PartKind::ToolCall => "tool_call",
-            PartKind::ToolResult => "tool_result",
-        };
-        let rendered = render_part_for_observer(part);
-        if let Some(tool_name) = &part.tool_name {
-            lines.push(format!(
-                "<part kind=\"{kind}\" tool_name=\"{}\">",
-                tool_name
-            ));
-        } else {
-            lines.push(format!("<part kind=\"{kind}\">"));
-        }
-        lines.push(rendered);
-        lines.push("</part>".to_string());
-    }
-    lines.push("</message>".to_string());
-    lines.join("\n")
-}
-
-fn render_part_for_observer(part: &Part) -> String {
-    if matches!(part.kind, PartKind::Image) {
-        return if part.attachment.is_some() || part.content.trim().is_empty() {
-            "[Image attached]".to_string()
-        } else {
-            part.content.clone()
-        };
-    }
-    match &part.prune_state {
-        crate::PruneState::Intact => part.content.clone(),
-        crate::PruneState::Cleared => "[Old tool result content cleared]".to_string(),
-        crate::PruneState::Deleted { breadcrumb, .. } => breadcrumb.clone(),
-        crate::PruneState::Summarized { summary, .. } => summary.clone(),
-    }
-}
-
 fn observer_system_prompt() -> String {
     format!(
-        "You are the memory consciousness of an AI assistant. Your observations will be the ONLY information the assistant has about past interactions with this user.\n\nExtract observations that will help the assistant remember:\n\n{OBSERVER_EXTRACTION_INSTRUCTIONS}\n\n=== OUTPUT FORMAT ===\n\nYour output MUST use XML tags to structure the response. This allows the system to properly parse and manage memory over time.\n\n{OBSERVER_OUTPUT_FORMAT_BASE}\n\n=== GUIDELINES ===\n\n{OBSERVER_GUIDELINES}\n\n=== IMPORTANT: THREAD ATTRIBUTION ===\n\nDo NOT add thread identifiers, thread IDs, or <thread> tags to your observations.\nThread attribution is handled externally by the system.\nSimply output your observations without any thread-related markup.\n\nRemember: These observations are the assistant's ONLY memory. Make them count.\n\nUser messages are extremely important. If the user asks a question or gives a new task, make it clear in <current-task> that this is the priority. If the assistant needs to respond to the user, indicate in <suggested-response> that it should pause for user reply before continuing other tasks."
+        "{}\n\n{}\n\n{}\n\n{}",
+        OBSERVER_EXTRACTION_INSTRUCTIONS,
+        OBSERVER_OUTPUT_FORMAT_BASE,
+        OBSERVER_GUIDELINES,
+        "Output only the XML blocks."
     )
 }
 
 fn reflector_system_prompt() -> String {
     format!(
-        "{REFLECTOR_SYSTEM_PROMPT_PREFIX}\n{OBSERVER_EXTRACTION_INSTRUCTIONS}\n\n=== OUTPUT FORMAT ===\n\n{OBSERVER_OUTPUT_FORMAT_BASE}\n\n=== GUIDELINES ===\n\n{OBSERVER_GUIDELINES}\n{REFLECTOR_SYSTEM_PROMPT_SUFFIX}"
+        "{}\n{}\n\n{}",
+        REFLECTOR_SYSTEM_PROMPT_PREFIX,
+        observer_system_prompt(),
+        REFLECTOR_SYSTEM_PROMPT_SUFFIX
     )
 }
 
-fn parse_memory_output(output: &str) -> ParsedMemoryOutput {
+fn parse_memory_output(text: &str) -> ParsedMemoryOutput {
+    let observations =
+        capture_xml_block(text, "observations").unwrap_or_else(|| text.trim().to_string());
+    let current_task =
+        capture_xml_block(text, "current-task").filter(|value| !value.trim().is_empty());
+    let suggested_response =
+        capture_xml_block(text, "suggested-response").filter(|value| !value.trim().is_empty());
     ParsedMemoryOutput {
-        observations: extract_xml_block(output, "observations")
-            .unwrap_or_else(|| output.trim().to_string()),
-        current_task: extract_xml_block(output, "current-task")
-            .filter(|text| !text.trim().is_empty()),
-        suggested_response: extract_xml_block(output, "suggested-response")
-            .filter(|text| !text.trim().is_empty()),
+        observations: observations.trim().to_string(),
+        current_task: current_task.map(|value| value.trim().to_string()),
+        suggested_response: suggested_response.map(|value| value.trim().to_string()),
     }
 }
 
-fn extract_xml_block(content: &str, tag: &str) -> Option<String> {
-    let pattern = format!(
-        r"(?ims)^[ \t]*<{}>(.*?)^[ \t]*</{}>",
-        regex::escape(tag),
-        regex::escape(tag)
-    );
-    let regex = Regex::new(&pattern).ok()?;
-    regex
-        .captures(content)
-        .and_then(|captures| captures.get(1))
-        .map(|matched| matched.as_str().trim().to_string())
-        .filter(|text| !text.is_empty())
+fn capture_xml_block(text: &str, tag: &str) -> Option<String> {
+    let pattern = format!(r"(?s)<{tag}>\s*(.*?)\s*</{tag}>");
+    let re = Regex::new(&pattern).ok()?;
+    let captures = re.captures(text)?;
+    Some(captures.get(1)?.as_str().to_string())
+}
+
+fn format_message_for_observer(node: &impl ObservedMessageNode) -> String {
+    let timestamp = format_observation_timestamp(node.timestamp());
+    let role = match node.message().role {
+        MessageRole::User => "USER",
+        MessageRole::Assistant => "ASSISTANT",
+        MessageRole::System => "SYSTEM",
+    };
+    let content = node
+        .message()
+        .parts
+        .iter()
+        .map(|part| match part.kind {
+            PartKind::Text | PartKind::Prose | PartKind::Output | PartKind::Error => {
+                part.content.clone()
+            }
+            PartKind::Code => format!("```{}\n```", part.content),
+            PartKind::ToolCall => format!("[tool call] {}", part.content),
+            PartKind::ToolResult => format!("[tool result] {}", part.content),
+            PartKind::Image => "[image]".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("[{timestamp}] {role}\n{}", content.trim())
+}
+
+fn format_observation_timestamp(timestamp: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|dt| dt.format("%b %-d, %Y %H:%M").to_string())
+        .unwrap_or_else(|_| timestamp.to_string())
 }
 
 #[cfg(test)]
@@ -1095,7 +1513,7 @@ mod tests {
 
     fn user_message(id: &str, content: &str) -> MessageNode {
         MessageNode {
-            timestamp: "2026-04-12T10:00:00Z".to_string(),
+            timestamp: "2026-04-14T10:00:00Z".to_string(),
             message: Message {
                 id: id.to_string(),
                 role: MessageRole::User,
@@ -1115,88 +1533,67 @@ mod tests {
     }
 
     #[test]
-    fn memory_state_prefers_latest_reflection_then_incremental_observations() {
+    fn build_graph_state_resets_buffers_after_active_state() {
         let mut graph = SessionGraph::default();
-        graph.append_message(Message {
-            id: "m1".to_string(),
-            role: MessageRole::User,
-            parts: vec![Part {
-                id: "m1.p0".to_string(),
-                kind: PartKind::Text,
-                content: "hello".to_string(),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            user_input: None,
-            origin: None,
-        });
+        graph.append_message(user_message("m1", "hello").message);
         graph.append_plugin(
-            OBSERVATION_PLUGIN_TYPE,
-            serde_json::to_value(ObservationBatchNode {
-                observed_through_message_id: "m1".to_string(),
-                observations: "Date: Apr 12, 2026\n* 🔴 User said hello".to_string(),
-                current_task: Some("Greet the user".to_string()),
-                suggested_response: None,
-            })
-            .expect("obs"),
+            BUFFERED_OBSERVATION_PLUGIN_TYPE,
+            serde_json::json!({
+                "observed_through_message_id": "m1",
+                "observations": "old buffered",
+                "observation_tokens": 10
+            }),
         );
         graph.append_plugin(
-            REFLECTION_PLUGIN_TYPE,
-            serde_json::to_value(ReflectionNode {
-                observed_through_message_id: "m1".to_string(),
-                observations: "Date: Apr 12, 2026\n* 🔴 Reflected hello".to_string(),
-                current_task: Some("Continue greeting".to_string()),
-                suggested_response: Some("Respond warmly.".to_string()),
-            })
-            .expect("reflection"),
+            ACTIVE_STATE_PLUGIN_TYPE,
+            serde_json::json!({
+                "observed_through_message_id": "m1",
+                "observations": "active memory"
+            }),
         );
-        graph.append_message(Message {
-            id: "m2".to_string(),
-            role: MessageRole::User,
-            parts: vec![Part {
-                id: "m2.p0".to_string(),
-                kind: PartKind::Text,
-                content: "need help".to_string(),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            user_input: None,
-            origin: None,
-        });
+        graph.append_message(user_message("m2", "need help").message);
         graph.append_plugin(
-            OBSERVATION_PLUGIN_TYPE,
-            serde_json::to_value(ObservationBatchNode {
-                observed_through_message_id: "m2".to_string(),
-                observations: "Date: Apr 12, 2026\n* 🔴 User asked for help".to_string(),
-                current_task: Some("Help the user".to_string()),
-                suggested_response: Some("Ask what they need.".to_string()),
-            })
-            .expect("obs2"),
+            BUFFERED_OBSERVATION_PLUGIN_TYPE,
+            serde_json::json!({
+                "observed_through_message_id": "m2",
+                "observations": "new buffered",
+                "observation_tokens": 20
+            }),
         );
 
-        let state = build_memory_state(&graph).expect("memory state");
-        assert!(state.observations.contains("Reflected hello"));
-        assert!(state.observations.contains("User asked for help"));
-        assert_eq!(state.current_task.as_deref(), Some("Help the user"));
+        let state = build_graph_state(&graph);
         assert_eq!(
-            state.suggested_response.as_deref(),
-            Some("Ask what they need.")
+            state.active.as_ref().map(|item| item.observations.as_str()),
+            Some("active memory")
         );
-        assert_eq!(state.observed_through_message_id.as_deref(), Some("m2"));
+        assert_eq!(state.buffered_observations.len(), 1);
+        assert_eq!(
+            state.buffered_observations[0].observations,
+            "new buffered".to_string()
+        );
     }
 
     #[test]
-    fn prefix_len_leaves_tail_budget() {
+    fn retained_message_tokens_tracks_suffix_after_message() {
         let messages = vec![
             user_message("m1", &"a".repeat(4000)),
             user_message("m2", &"b".repeat(4000)),
             user_message("m3", &"c".repeat(4000)),
         ];
-        let prefix = prefix_len_leaving_tail_budget(&messages, 1200);
+        let retained = retained_message_tokens_by_message_id(&messages);
+        assert_eq!(retained.get("m3").copied(), Some(0));
+        assert!(retained.get("m2").copied().unwrap_or_default() > 0);
+        assert!(retained.get("m1").copied().unwrap_or_default() > retained["m2"]);
+    }
+
+    #[test]
+    fn prefix_len_covering_tokens_handles_partial_prefix() {
+        let messages = vec![
+            user_message("m1", &"a".repeat(4000)),
+            user_message("m2", &"b".repeat(4000)),
+            user_message("m3", &"c".repeat(4000)),
+        ];
+        let prefix = prefix_len_covering_tokens(&messages, 2000).expect("prefix");
         assert_eq!(prefix, 2);
     }
 

@@ -216,6 +216,7 @@ pub struct LlmResponse {
     pub deltas: Vec<String>,
     pub parts: Vec<LlmOutputPart>,
     pub usage: LlmUsage,
+    pub provider_usage: Option<serde_json::Value>,
     pub request_body: Option<String>,
     pub http_summary: Option<String>,
 }

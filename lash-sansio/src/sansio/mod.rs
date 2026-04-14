@@ -19,7 +19,7 @@ use crate::session_model::{
     PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, format_tool_result_content,
     fresh_message_id, make_error_envelope, make_error_event, reassign_part_ids,
 };
-use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolResult};
+use crate::{CheckpointKind, PluginMessage, ToolCallRecord, ToolResult};
 
 // ─── Public types ───
 
@@ -50,6 +50,7 @@ pub enum LogEvent {
         session_id: String,
         iteration: usize,
         usage: TokenUsage,
+        provider_usage: Option<Value>,
         request_body: Option<String>,
         response_text: String,
         response_parts: Option<Value>,
@@ -135,9 +136,17 @@ pub enum Response {
     Timeout { id: EffectId },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnProtocol {
+    Standard,
+    Rlm,
+}
+
 /// Configuration for a `TurnMachine` instance.
 pub struct TurnMachineConfig {
-    pub execution_mode: ExecutionMode,
+    pub turn_protocol: TurnProtocol,
+    pub sync_execution_surface: bool,
     pub model: String,
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
@@ -346,7 +355,7 @@ impl TurnMachine {
     // ─── State transitions ───
 
     fn prepare_mode(&mut self) {
-        if matches!(self.config.execution_mode, ExecutionMode::Rlm) {
+        if self.config.sync_execution_surface {
             let id = self.next_id();
             self.state = MachineState::WaitingExecutionSurface { effect_id: id };
             self.pending_effects
@@ -358,7 +367,7 @@ impl TurnMachine {
     }
 
     fn prepare_iteration(&mut self) {
-        let rendered_prompt = self.messages.render_prompt(self.config.execution_mode);
+        let rendered_prompt = self.messages.render_prompt();
 
         let use_tools = !self.config.tool_specs.is_empty();
         let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
@@ -419,7 +428,7 @@ impl TurnMachine {
         });
 
         let id = self.next_id();
-        let rlm = if matches!(self.config.execution_mode, ExecutionMode::Rlm) {
+        let rlm = if matches!(self.config.turn_protocol, TurnProtocol::Rlm) {
             Some(rlm.unwrap_or_else(RlmState::new))
         } else {
             None
@@ -627,11 +636,11 @@ impl TurnMachine {
                     response_text,
                     waiting.rlm.as_ref().map(|rlm| &rlm.latest_usage),
                 );
-                match self.config.execution_mode {
-                    ExecutionMode::Standard => {
+                match self.config.turn_protocol {
+                    TurnProtocol::Standard => {
                         self.handle_standard_llm_success(llm_response, text_streamed)
                     }
-                    ExecutionMode::Rlm => self.handle_repl_llm_success(
+                    TurnProtocol::Rlm => self.handle_repl_llm_success(
                         llm_response,
                         waiting.request,
                         waiting.rlm.unwrap_or_else(RlmState::new),
@@ -751,6 +760,7 @@ impl TurnMachine {
                     session_id: self.config.session_id.clone(),
                     iteration: self.iteration,
                     usage,
+                    provider_usage: llm_response.provider_usage.clone(),
                     request_body: llm_response.request_body.clone(),
                     response_text: response_text.to_string(),
                     response_parts,

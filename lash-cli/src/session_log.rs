@@ -381,6 +381,7 @@ mod tests {
             })
             .checkpoint_ref;
         store.save_session_head(lash::SessionHead {
+            session_id: "root".to_string(),
             graph,
             config: lash::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),

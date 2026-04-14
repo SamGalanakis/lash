@@ -1,9 +1,14 @@
 use super::*;
+use crate::ExecutionMode;
 use crate::session_model::{Message, MessageRole, MessageSequence, Part, PartKind, PruneState};
 
 fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
     TurnMachineConfig {
-        execution_mode: mode,
+        turn_protocol: match mode {
+            ExecutionMode::Standard => TurnProtocol::Standard,
+            ExecutionMode::Rlm => TurnProtocol::Rlm,
+        },
+        sync_execution_surface: matches!(mode, ExecutionMode::Rlm),
         model: "test-model".to_string(),
         max_turns: None,
         model_variant: None,

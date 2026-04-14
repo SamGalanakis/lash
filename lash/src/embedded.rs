@@ -58,6 +58,22 @@ pub enum LashlangResponse {
         args: String,
         result_tx: std_mpsc::Sender<String>,
     },
+    StartToolCall {
+        id: String,
+        name: String,
+        args: String,
+        result_tx: std_mpsc::Sender<String>,
+    },
+    AwaitToolHandle {
+        id: String,
+        handle: String,
+        result_tx: std_mpsc::Sender<String>,
+    },
+    CancelToolHandle {
+        id: String,
+        handle: String,
+        result_tx: std_mpsc::Sender<String>,
+    },
     ExecResult {
         id: String,
         output: String,
@@ -328,6 +344,27 @@ impl ToolHost for HostBridge<'_> {
         wait_tool_result(result_rx)
     }
 
+    fn start_call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
+        let mut payload = flow_to_json_value(&FlowValue::Record(Arc::new(args.clone())));
+        if let Some(obj) = payload.as_object_mut() {
+            obj.entry("__session_id__".to_string())
+                .or_insert_with(|| Value::String(self.session_id.clone()));
+        }
+
+        let result_rx = send_start_tool_call(self.response_tx, name, payload)?;
+        wait_tool_result(result_rx)
+    }
+
+    fn await_handle(&self, handle: &FlowValue) -> Result<FlowValue, ToolHostError> {
+        let result_rx = send_await_tool_handle(self.response_tx, flow_to_json_value(handle))?;
+        wait_tool_result(result_rx)
+    }
+
+    fn cancel_handle(&self, handle: &FlowValue) -> Result<FlowValue, ToolHostError> {
+        let result_rx = send_cancel_tool_handle(self.response_tx, flow_to_json_value(handle))?;
+        wait_tool_result(result_rx)
+    }
+
     fn observe(&self, value: &FlowValue) -> Result<(), ToolHostError> {
         let text = format_output_value(value);
         self.observations
@@ -352,6 +389,53 @@ fn send_tool_call(
             result_tx,
         })
         .map_err(|_| ToolHostError::new(format!("failed to dispatch tool `{name}`")))?;
+    Ok(result_rx)
+}
+
+fn send_start_tool_call(
+    response_tx: &std_mpsc::Sender<LashlangResponse>,
+    name: &str,
+    payload: Value,
+) -> Result<std_mpsc::Receiver<String>, ToolHostError> {
+    let (result_tx, result_rx) = std_mpsc::channel();
+    response_tx
+        .send(LashlangResponse::StartToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            args: payload.to_string(),
+            result_tx,
+        })
+        .map_err(|_| ToolHostError::new(format!("failed to start tool `{name}`")))?;
+    Ok(result_rx)
+}
+
+fn send_await_tool_handle(
+    response_tx: &std_mpsc::Sender<LashlangResponse>,
+    handle: Value,
+) -> Result<std_mpsc::Receiver<String>, ToolHostError> {
+    let (result_tx, result_rx) = std_mpsc::channel();
+    response_tx
+        .send(LashlangResponse::AwaitToolHandle {
+            id: uuid::Uuid::new_v4().to_string(),
+            handle: handle.to_string(),
+            result_tx,
+        })
+        .map_err(|_| ToolHostError::new("failed to await async tool handle"))?;
+    Ok(result_rx)
+}
+
+fn send_cancel_tool_handle(
+    response_tx: &std_mpsc::Sender<LashlangResponse>,
+    handle: Value,
+) -> Result<std_mpsc::Receiver<String>, ToolHostError> {
+    let (result_tx, result_rx) = std_mpsc::channel();
+    response_tx
+        .send(LashlangResponse::CancelToolHandle {
+            id: uuid::Uuid::new_v4().to_string(),
+            handle: handle.to_string(),
+            result_tx,
+        })
+        .map_err(|_| ToolHostError::new("failed to cancel async tool handle"))?;
     Ok(result_rx)
 }
 

@@ -13,7 +13,6 @@ use crate::{plugin_surface, util};
 
 pub(crate) struct AutonomousPersistenceContext {
     pub(crate) store: Arc<Store>,
-    pub(crate) dynamic_state: DynamicStateSnapshot,
     pub(crate) await_background_work: bool,
     pub(crate) turn_usage_json: Option<std::path::PathBuf>,
 }
@@ -170,6 +169,7 @@ impl AutonomousRenderer {
             },
             SessionEvent::Done
             | SessionEvent::TokenUsage { .. }
+            | SessionEvent::ChildTokenUsage { .. }
             | SessionEvent::InjectedMessagesCommitted { .. }
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TypedFinish { .. } => {}
@@ -239,13 +239,7 @@ pub(crate) async fn run_autonomous(
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
     let turn_input = make_turn_input(&prepared);
     let ui_state = UiResumeState::default();
-    persist_pending_turn(
-        persistence.store.as_ref(),
-        &runtime,
-        &turn_input,
-        &ui_state,
-        &persistence.dynamic_state,
-    );
+    persist_pending_turn(persistence.store.as_ref(), &runtime, &turn_input, &ui_state).await;
     let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
     let sink = AutonomousChannelSink { tx: event_tx };
     let (cancel, return_rx) = spawn_runtime_turn(runtime, turn_input, sink, 1);
@@ -292,7 +286,6 @@ pub(crate) async fn run_autonomous(
         interrupted,
         persistence.store.as_ref(),
         &ui_state,
-        &persistence.dynamic_state,
     )
     .await;
     let cumulative_usage = done.runtime.usage_report();
@@ -307,7 +300,9 @@ pub(crate) async fn run_autonomous(
                     %err,
                     "failed to diff token ledger for autonomous turn; falling back to assembled turn usage"
                 );
-                let fallback = if done.result.token_usage.total() > 0 {
+                let fallback = if done.result.token_usage.total() > 0
+                    || done.result.token_usage.cached_input_tokens > 0
+                {
                     vec![lash::TokenLedgerEntry {
                         source: "turn".to_string(),
                         model: done.result.state.policy.model.clone(),

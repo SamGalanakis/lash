@@ -1,6 +1,6 @@
 use lash::Store;
 #[cfg(test)]
-use lash::{DynamicStateSnapshot, SessionStateEnvelope};
+use lash::{DynamicStateSnapshot, PersistedSessionState, SessionStateEnvelope};
 
 use crate::app::UiResumeState;
 #[cfg(test)]
@@ -16,11 +16,11 @@ pub(crate) struct LoadedLiveResumeSnapshot {
 }
 
 #[cfg(test)]
-pub(crate) fn save_live_resume_snapshot(
+pub(crate) async fn save_live_resume_snapshot(
     store: &Store,
     state: &SessionStateEnvelope,
     ui_state: &UiResumeState,
-    dynamic_state: &DynamicStateSnapshot,
+    _dynamic_state: &DynamicStateSnapshot,
 ) -> Result<(), String> {
     let projected_messages = state.project_messages();
     if !lash::messages_are_live_resume_safe(&projected_messages) {
@@ -34,15 +34,15 @@ pub(crate) fn save_live_resume_snapshot(
     let projected_tool_calls = state.project_tool_calls();
     let mut live_graph = base_graph.clone();
     live_graph.merge_active_projection(&projected_messages, &projected_tool_calls);
-    let persistence_state = lash::RuntimePersistenceState::from_state(state.clone());
+    let persistence_state = PersistedSessionState::from_state(state.clone());
     persist_live_runtime_state(
         store,
         Some(base_graph),
         live_graph,
         ui_state,
         &persistence_state,
-        dynamic_state,
-    );
+    )
+    .await;
     Ok(())
 }
 
@@ -128,17 +128,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unsafe_live_snapshot_does_not_replace_last_safe_snapshot() {
+    #[tokio::test]
+    async fn unsafe_live_snapshot_does_not_replace_last_safe_snapshot() {
         let store = Store::memory().expect("store");
         let dynamic_state = empty_dynamic_state();
         let ui_state = UiResumeState::default();
         let safe_state = snapshot_state(vec![text_message("m0", "hello")]);
         save_live_resume_snapshot(&store, &safe_state, &ui_state, &dynamic_state)
+            .await
             .expect("save safe snapshot");
 
         let unsafe_state = snapshot_state(vec![unsafe_tool_call_message("m1", "call_1")]);
         save_live_resume_snapshot(&store, &unsafe_state, &ui_state, &dynamic_state)
+            .await
             .expect("skip unsafe snapshot");
 
         let loaded = load_live_resume_snapshot(&store).expect("safe snapshot still present");

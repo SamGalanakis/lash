@@ -1,4 +1,3 @@
-use crate::ExecutionMode;
 use crate::llm::types::{LlmAttachment, LlmMessage, LlmRole};
 use crate::plugin::UserInputProvenance;
 use base64::Engine;
@@ -408,20 +407,20 @@ impl MessageSequence {
         combined
     }
 
-    pub fn render_prompt(&self, mode: ExecutionMode) -> RenderedPrompt {
+    pub fn render_prompt(&self) -> RenderedPrompt {
         if let Some(owned) = &self.owned {
-            return render_prompt(owned.as_slice(), mode);
+            return render_prompt(owned.as_slice());
         }
         if self.base.is_empty() {
-            return render_prompt(self.delta.as_slice(), mode);
+            return render_prompt(self.delta.as_slice());
         }
         let mut rendered = self
             .base_rendered_prompt
             .as_ref()
             .map(|prompt| prompt.as_ref().clone())
-            .unwrap_or_else(|| render_prompt(self.base.as_slice(), mode));
+            .unwrap_or_else(|| render_prompt(self.base.as_slice()));
         if !self.delta.is_empty() {
-            append_rendered_prompt(&mut rendered, self.delta.as_slice(), mode);
+            append_rendered_prompt(&mut rendered, self.delta.as_slice());
         }
         rendered
     }
@@ -433,9 +432,9 @@ struct TranscriptTurn {
     assistant: Vec<String>,
 }
 
-pub fn render_prompt(msgs: &[Message], mode: ExecutionMode) -> RenderedPrompt {
+pub fn render_prompt(msgs: &[Message]) -> RenderedPrompt {
     let mut rendered = RenderedPrompt::default();
-    append_rendered_prompt(&mut rendered, msgs, mode);
+    append_rendered_prompt(&mut rendered, msgs);
     rendered
 }
 
@@ -565,14 +564,8 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
     }
 }
 
-pub fn append_rendered_prompt(
-    rendered: &mut RenderedPrompt,
-    msgs: &[Message],
-    mode: ExecutionMode,
-) {
-    match mode {
-        ExecutionMode::Rlm | ExecutionMode::Standard => append_structured_prompt(rendered, msgs),
-    }
+pub fn append_rendered_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
+    append_structured_prompt(rendered, msgs)
 }
 
 #[cfg(test)]
@@ -796,7 +789,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_prompt(&msgs, ExecutionMode::Rlm);
+        let rendered = render_prompt(&msgs);
         assert_eq!(rendered.messages.len(), 4);
         assert_eq!(rendered.messages[0].content, "first");
         assert!(rendered.messages[1].content.contains("reply one"));

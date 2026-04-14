@@ -151,13 +151,13 @@ pub(crate) fn build_execution_preamble(
     model: String,
 ) -> ExecutionPreamble {
     let session_id = policy.session_id.as_deref().unwrap_or("root");
-    let preamble = session.execution_preamble_data(session_id, mode);
+    let preamble = session.mode_execution_preamble(session_id, mode);
     let prompt = PromptContext {
         mode,
-        tool_list: preamble.tool_list.as_ref().clone(),
-        tool_names: preamble.tool_names.as_ref().clone(),
+        execution_prompt: preamble.execution_prompt.clone(),
+        tool_names: preamble.tool_names.clone(),
         omitted_tool_count: preamble.omitted_tool_count,
-        contributions: Vec::new(),
+        contributions: preamble.prompt_contributions.clone(),
     };
 
     tracing::debug!(
@@ -167,13 +167,13 @@ pub(crate) fn build_execution_preamble(
         enabled_tool_count = prompt.tool_names.len(),
         omitted_tool_count = prompt.omitted_tool_count,
         tool_names = ?prompt.tool_names,
-        tool_list_preview = %prompt.tool_list.chars().take(400).collect::<String>(),
+        execution_prompt_preview = %prompt.execution_prompt.chars().take(400).collect::<String>(),
         "built execution preamble"
     );
 
     ExecutionPreamble {
         model,
-        tool_specs: preamble.tool_specs,
+        tool_specs: Arc::clone(&preamble.tool_specs),
         prompt,
     }
 }

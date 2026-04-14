@@ -826,6 +826,7 @@ impl GoogleCloudCodeAdapter {
                 deltas: Vec::new(),
                 parts,
                 usage,
+                provider_usage: None,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", url)),
             });
@@ -872,6 +873,7 @@ impl GoogleCloudCodeAdapter {
             deltas,
             parts,
             usage,
+            provider_usage: None,
             request_body,
             http_summary: Some(format!("HTTP POST {}?alt=sse", url)),
         })

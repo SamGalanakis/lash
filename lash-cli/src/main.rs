@@ -6,7 +6,6 @@ mod bootstrap;
 mod cli_support;
 mod clipboard;
 mod command;
-mod delegate_tools;
 mod diff;
 mod editor;
 mod event;

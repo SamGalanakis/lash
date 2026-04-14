@@ -73,12 +73,15 @@ impl Default for ObservationalMemoryConfig {
 }
 
 impl ObservationalMemoryConfig {
-    pub fn observation_activation_tokens(&self) -> usize {
-        self.observation_message_tokens
-            .saturating_sub(self.observation_buffer_tokens)
+    pub fn observation_buffer_interval_tokens(&self) -> usize {
+        self.observation_buffer_tokens
     }
 
-    pub fn reflection_activation_tokens(&self) -> usize {
+    pub fn observation_retention_tokens(&self) -> usize {
+        self.observation_buffer_tokens
+    }
+
+    pub fn reflection_buffer_activation_tokens(&self) -> usize {
         self.reflection_observation_tokens
             .saturating_mul(self.reflection_buffer_activation_bps as usize)
             / 10_000

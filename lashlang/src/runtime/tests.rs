@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 #[derive(Default)]
 struct Host;
@@ -640,4 +641,81 @@ fn truthiness_covers_scalar_and_container_values() {
     assert!(is_truthy(&Value::Number(1.0)));
     assert!(is_truthy(&Value::List(Vec::new().into())));
     assert!(is_truthy(&Value::Record(Record::default().into())));
+}
+
+struct AsyncHost;
+
+impl ToolHost for AsyncHost {
+    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
+        Host.call(name, args)
+    }
+
+    fn start_call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
+        let mut record = Record::default();
+        record.insert("__handle__".to_string(), Value::String("task".into()));
+        record.insert("tool".to_string(), Value::String(name.to_string().into()));
+        record.insert(
+            "value".to_string(),
+            args.get("value").cloned().unwrap_or(Value::Null),
+        );
+        Ok(Value::Record(Arc::new(record)))
+    }
+
+    fn await_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
+        let record = handle
+            .as_record()
+            .ok_or_else(|| ToolHostError::new("expected handle record"))?;
+        Ok(record.get("value").cloned().unwrap_or(Value::Null))
+    }
+
+    fn cancel_handle(&self, _handle: &Value) -> Result<Value, ToolHostError> {
+        Ok(Value::Null)
+    }
+}
+
+#[test]
+fn async_tool_handles_can_be_started_awaited_and_cancelled() {
+    let program = crate::parse(
+        r#"
+        handle = start call echo { value: "done" }
+        result = await handle
+        cancel handle
+        finish result
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    let record = value
+        .as_record()
+        .expect("await should return wrapped result");
+    assert_eq!(record["ok"], Value::Bool(true));
+    assert_eq!(record["value"], Value::String("done".into()));
+}
+
+#[test]
+fn await_unknown_handle_surfaces_runtime_error() {
+    let program = crate::parse(
+        r#"
+        result = await 1
+        finish result
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    let record = value
+        .as_record()
+        .expect("await should return wrapped error");
+    assert_eq!(record["ok"], Value::Bool(false));
+    assert_eq!(
+        record["error"],
+        Value::String("expected handle record".into())
+    );
 }

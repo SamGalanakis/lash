@@ -229,7 +229,7 @@ impl RuntimeTurnDriver {
         all_prompt_contributions.extend(plugin_prompt_contributions);
         preamble.prompt = finalize_prompt_context(preamble.prompt, all_prompt_contributions);
         self.policy = session_policy;
-        let machine_config = self.machine_config(preamble, execution_mode);
+        let machine_config = self.machine_config(preamble);
         self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
         Ok(TurnMachine::new_shared(
             machine_config,
@@ -277,17 +277,6 @@ impl RuntimeTurnDriver {
             iteration,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
-            dynamic_state_ref: None,
-            dynamic_state_generation: None,
-            dynamic_state_snapshot: None,
-            plugin_snapshot_ref: None,
-            plugin_snapshot_revision: None,
-            plugin_snapshot: None,
-            execution_state_snapshot: None,
-            token_ledger: Vec::new(),
-            checkpoint_ref: None,
-            persisted_graph_node_count: 0,
-            graph_replace_required: false,
         };
         crate::SessionReadView::from_graph_projection(
             &state,
@@ -457,13 +446,14 @@ impl RuntimeTurnDriver {
     fn machine_config(
         &self,
         preamble: crate::session_model::ExecutionPreamble,
-        execution_mode: ExecutionMode,
     ) -> TurnMachineConfig {
+        let mode_turn = self.session.plugins().mode_execution().turn_config();
         let mut prompt_overrides = self.host.core.prompt_overrides.clone();
         prompt_overrides.extend(self.session.context_prompt_overrides().iter().cloned());
         let system_prompt = self.render_system_prompt(&preamble.prompt, &prompt_overrides);
         TurnMachineConfig {
-            execution_mode,
+            turn_protocol: mode_turn.protocol,
+            sync_execution_surface: mode_turn.sync_execution_surface,
             model: preamble.model,
             max_turns: self.policy.max_turns,
             model_variant: self.policy.model_variant.clone(),
@@ -686,7 +676,6 @@ impl RuntimeTurnDriver {
                 .execution_surface(&self.session_id, self.policy.execution_mode),
             host: Arc::clone(&manager),
             session_id: self.session_id.clone(),
-            execution_mode: self.policy.execution_mode,
             event_tx: tool_event_tx,
             turn_injection_bridge: self.session.turn_injection_bridge().clone(),
         });
@@ -805,6 +794,7 @@ impl RuntimeTurnDriver {
                 session_id,
                 iteration,
                 usage,
+                provider_usage,
                 request_body,
                 response_text,
                 response_parts,
@@ -823,6 +813,11 @@ impl RuntimeTurnDriver {
                         "reasoning_tokens": usage.reasoning_tokens,
                     }
                 });
+                if let Some(provider_usage) = provider_usage
+                    && let Some(object) = entry.as_object_mut()
+                {
+                    object.insert("provider_usage".to_string(), provider_usage);
+                }
                 if let Some(parts) = response_parts
                     && let Some(object) = entry.as_object_mut()
                 {
@@ -840,6 +835,7 @@ impl RuntimeTurnDriver {
                 {
                     Ok(mut file) => {
                         use std::io::Write;
+                        let _log_guard = self.host.core.llm_log_lock.lock().ok();
                         if let Err(err) = writeln!(file, "{}", entry) {
                             tracing::warn!(error = %err, path = %path.display(), "failed to append llm debug log");
                         }
@@ -864,6 +860,7 @@ impl RuntimeTurnDriver {
         {
             Ok(mut file) => {
                 use std::io::Write;
+                let _log_guard = self.host.core.llm_log_lock.lock().ok();
                 if let Err(err) = writeln!(file, "{}", entry) {
                     tracing::warn!(
                         error = %err,

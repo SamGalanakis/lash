@@ -1,40 +1,39 @@
-//! Delegate projector: `agent_call`, `agent_result`, `agent_kill`.
+//! Delegate projector: `delegate`, `delegate_result`, `delegate_kill`.
 //!
 //! All three share the `delegate_handles` map on the ctx:
-//! - `agent_call` stores `handle_id → task` on success so later
-//!   `agent_result` / `agent_kill` calls can recover the task label.
-//! - `agent_result` removes the handle and rebuilds a completion
+//! - `delegate` stores `handle_id → task` on success so later
+//!   `delegate_result` / `delegate_kill` calls can recover the task label.
+//! - `delegate_result` removes the handle and rebuilds a completion
 //!   summary based on the child's status and token usage.
-//! - `agent_kill` removes the handle and produces a "delegate stopped"
+//! - `delegate_kill` removes the handle and produces a "delegate stopped"
 //!   block.
 
 use serde_json::Value;
 
 use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, ProjectCtx, ToolProjector,
-    shared::{inline_text, tool_arg_str},
+    shared::{inline_snippet, inline_text, tool_arg_str},
 };
 
 pub(crate) struct DelegateProjector;
 
 impl ToolProjector for DelegateProjector {
     fn tool_names(&self) -> &'static [&'static str] {
-        &["agent_call", "agent_result", "agent_kill"]
+        &["delegate", "delegate_result", "delegate_kill"]
     }
 
     fn project(&self, ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
         match ctx.name {
-            "agent_call" => project_agent_call(ctx),
-            "agent_result" => project_agent_result(ctx),
-            "agent_kill" => project_agent_kill(ctx),
+            "delegate" => project_delegate(ctx),
+            "delegate_result" => project_delegate_result(ctx),
+            "delegate_kill" => project_delegate_kill(ctx),
             _ => Vec::new(),
         }
     }
 }
 
-fn project_agent_call(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
+fn project_delegate(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     let task = tool_arg_str(&ctx.args, "task")
-        .or_else(|| tool_arg_str(&ctx.args, "prompt"))
         .unwrap_or("delegate task")
         .to_string();
     if ctx.success
@@ -68,6 +67,27 @@ fn project_agent_call(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
             detail_lines.push(label);
         }
     }
+    if let Some(vars) = ctx.args.get("vars").and_then(Value::as_object)
+        && !vars.is_empty()
+    {
+        let var_entries: Vec<String> = vars
+            .iter()
+            .map(|(name, value)| format!("{name}: {}", json_type_short(value)))
+            .collect();
+        detail_lines.push(format!("vars  {}", var_entries.join(", ")));
+    }
+    if let Some(output) = ctx.args.get("output").and_then(Value::as_object)
+        && !output.is_empty()
+    {
+        let field_entries: Vec<String> = output
+            .iter()
+            .map(|(name, ty)| {
+                let ty_str = ty.as_str().unwrap_or("any");
+                format!("{name}: {ty_str}")
+            })
+            .collect();
+        detail_lines.push(format!("out   {{ {} }}", field_entries.join(", ")));
+    }
     let args = std::mem::replace(&mut ctx.args, Value::Null);
     let result = std::mem::replace(&mut ctx.result, Value::Null);
     vec![
@@ -84,7 +104,7 @@ fn project_agent_call(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     ]
 }
 
-fn project_agent_result(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
+fn project_delegate_result(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     let handle_id = tool_arg_str(&ctx.args, "id")
         .unwrap_or_default()
         .to_string();
@@ -158,11 +178,10 @@ fn project_agent_result(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     let artifact = ctx
         .result
         .get("result")
-        .and_then(|value| value.as_str())
-        .filter(|text| !text.trim().is_empty())
+        .and_then(delegate_result_preview)
         .map(|text| ActivityArtifact::TextPreview {
             title: Some("Delegate result".to_string()),
-            text: text.to_string(),
+            text,
         });
     let args = std::mem::replace(&mut ctx.args, Value::Null);
     let result = std::mem::replace(&mut ctx.result, Value::Null);
@@ -181,7 +200,7 @@ fn project_agent_result(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     ]
 }
 
-fn project_agent_kill(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
+fn project_delegate_kill(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     let handle_id = tool_arg_str(&ctx.args, "id")
         .unwrap_or_default()
         .to_string();
@@ -265,5 +284,44 @@ fn delegate_token_usage_line(meta: &Value) -> Option<String> {
         None
     } else {
         Some(parts.join(" · "))
+    }
+}
+
+fn delegate_result_preview(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) if text.trim().is_empty() => None,
+        Value::String(text) => Some(text.to_string()),
+        Value::Object(obj) => {
+            let entries: Vec<String> = obj
+                .iter()
+                .map(|(key, value)| {
+                    let rendered = match value {
+                        Value::String(text) => inline_snippet(text, 80),
+                        other => inline_snippet(&other.to_string(), 80),
+                    };
+                    format!("{key}: {rendered}")
+                })
+                .collect();
+            Some(format!("{{ {} }}", entries.join(", ")))
+        }
+        other => Some(inline_snippet(&other.to_string(), 120)),
+    }
+}
+
+fn json_type_short(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(n) => {
+            if n.is_f64() && n.as_f64().is_some_and(|v| v.fract() != 0.0) {
+                "float"
+            } else {
+                "int"
+            }
+        }
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "record",
     }
 }

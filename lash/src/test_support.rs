@@ -12,8 +12,8 @@ use crate::plugin::{
 };
 use crate::{
     AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, ExecutionSummary, OutputState,
-    Provider, ProviderOptions, SessionPolicy, SessionStateEnvelope, TokenUsage, TurnInput,
-    TurnStatus,
+    PersistedSessionState, Provider, ProviderOptions, SessionPolicy, SessionStateEnvelope,
+    TokenUsage, TurnInput, TurnStatus,
 };
 
 /// Build a `SessionPolicy` populated with the canonical mock provider
@@ -78,7 +78,7 @@ pub struct MockSessionManager {
 impl Default for MockSessionManager {
     fn default() -> Self {
         Self {
-            snapshot: SessionStateEnvelope::default(),
+            snapshot: PersistedSessionState::default(),
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
             created: Mutex::new(Vec::new()),
@@ -89,6 +89,7 @@ impl Default for MockSessionManager {
 }
 
 impl MockSessionManager {
+    #[allow(dead_code)]
     pub fn with_snapshot(mut self, snapshot: SessionSnapshot) -> Self {
         self.snapshot = snapshot;
         self

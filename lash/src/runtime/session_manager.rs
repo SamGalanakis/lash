@@ -13,7 +13,7 @@ enum CurrentSnapshot {
 }
 
 impl CurrentSnapshot {
-    fn into_snapshot(&self) -> SessionSnapshot {
+    fn to_snapshot(&self) -> SessionSnapshot {
         match self {
             Self::Owned(snapshot) => snapshot.clone(),
             Self::Projection {
@@ -37,6 +37,7 @@ pub(super) struct ManagedSessionTurn {
 
 #[derive(Clone)]
 pub(super) struct RuntimeSessionManager {
+    runtime_scope_id: Arc<str>,
     current_session_id: String,
     current_snapshot: CurrentSnapshot,
     current_policy: SessionPolicy,
@@ -55,6 +56,13 @@ pub(super) struct RuntimeSessionManager {
     background_sync_needed: Arc<AtomicBool>,
     /// Maps child session_id → usage_source label.
     child_usage_sources: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// Tracks live child-turn usage already bubbled into the shared
+    /// token ledger so `await_turn` can reconcile the final turn usage
+    /// without double counting.
+    child_turn_live_usage: Arc<std::sync::Mutex<HashMap<String, TokenUsage>>>,
+    /// Optional relay for bubbling child-session token usage into the
+    /// parent turn's live event stream.
+    child_usage_event_relay: Option<ChildUsageEventRelay>,
     /// Out-of-turn managers persist drained usage back into the
     /// current session graph. Turn-time managers leave the shared
     /// ledger alone so the parent turn can commit it once.
@@ -63,11 +71,147 @@ pub(super) struct RuntimeSessionManager {
 
 pub(super) struct ChannelEventSink {
     pub(super) tx: mpsc::Sender<SessionEvent>,
+    live_usage: Option<LiveChildUsageForwarder>,
+}
+
+#[derive(Clone)]
+struct LiveChildUsageForwarder {
+    turn_id: String,
+    session_id: String,
+    source: String,
+    model: String,
+    token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
+    child_turn_live_usage: Arc<std::sync::Mutex<HashMap<String, TokenUsage>>>,
+    relay: Option<ChildUsageEventRelay>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct ChildUsageEventRelay {
+    tx: Arc<StdMutex<Option<mpsc::Sender<RuntimeStreamEvent>>>>,
+}
+
+impl ChildUsageEventRelay {
+    pub(super) fn new(tx: mpsc::Sender<RuntimeStreamEvent>) -> Self {
+        Self {
+            tx: Arc::new(StdMutex::new(Some(tx))),
+        }
+    }
+
+    pub(super) fn clear(&self) {
+        self.tx.lock().expect("child usage relay lock").take();
+    }
+
+    async fn emit(&self, event: SessionEvent) {
+        let tx = self.tx.lock().expect("child usage relay lock").clone();
+        if let Some(tx) = tx
+            && !tx.is_closed()
+        {
+            let _ = tx.send(RuntimeStreamEvent::Session(event)).await;
+        }
+    }
+}
+
+fn usage_has_any_tokens(usage: &TokenUsage) -> bool {
+    usage.input_tokens != 0
+        || usage.output_tokens != 0
+        || usage.cached_input_tokens != 0
+        || usage.reasoning_tokens != 0
+}
+
+fn record_token_usage_shared(
+    token_ledger: &Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
+    source: &str,
+    model: &str,
+    usage: &TokenUsage,
+) {
+    if !usage_has_any_tokens(usage) {
+        return;
+    }
+    let mut ledger = token_ledger.lock().expect("token ledger lock");
+    if let Some(entry) = ledger
+        .iter_mut()
+        .find(|entry| entry.source == source && entry.model == model)
+    {
+        entry.usage.input_tokens += usage.input_tokens;
+        entry.usage.output_tokens += usage.output_tokens;
+        entry.usage.cached_input_tokens += usage.cached_input_tokens;
+        entry.usage.reasoning_tokens += usage.reasoning_tokens;
+    } else {
+        ledger.push(TokenLedgerEntry {
+            source: source.to_string(),
+            model: model.to_string(),
+            usage: usage.clone(),
+        });
+    }
+}
+
+fn subtract_usage(reported_total: &TokenUsage, final_total: &TokenUsage) -> Option<TokenUsage> {
+    let delta = TokenUsage {
+        input_tokens: final_total
+            .input_tokens
+            .saturating_sub(reported_total.input_tokens),
+        output_tokens: final_total
+            .output_tokens
+            .saturating_sub(reported_total.output_tokens),
+        cached_input_tokens: final_total
+            .cached_input_tokens
+            .saturating_sub(reported_total.cached_input_tokens),
+        reasoning_tokens: final_total
+            .reasoning_tokens
+            .saturating_sub(reported_total.reasoning_tokens),
+    };
+    usage_has_any_tokens(&delta).then_some(delta)
+}
+
+impl LiveChildUsageForwarder {
+    async fn relay_token_usage(
+        &self,
+        iteration: usize,
+        _usage: &TokenUsage,
+        cumulative_usage: &TokenUsage,
+    ) {
+        let (delta, cumulative) = {
+            let mut live_usage = self
+                .child_turn_live_usage
+                .lock()
+                .expect("child turn live usage lock");
+            let reported = live_usage.entry(self.turn_id.clone()).or_default();
+            let Some(delta) = subtract_usage(reported, cumulative_usage) else {
+                return;
+            };
+            *reported = cumulative_usage.clone();
+            (delta, reported.clone())
+        };
+        record_token_usage_shared(&self.token_ledger, &self.source, &self.model, &delta);
+        if let Some(relay) = &self.relay {
+            relay
+                .emit(SessionEvent::ChildTokenUsage {
+                    session_id: self.session_id.clone(),
+                    source: self.source.clone(),
+                    model: self.model.clone(),
+                    iteration,
+                    usage: delta,
+                    cumulative,
+                })
+                .await;
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl EventSink for ChannelEventSink {
     async fn emit(&self, event: SessionEvent) {
+        if let SessionEvent::TokenUsage {
+            iteration,
+            usage,
+            cumulative,
+        } = &event
+            && let Some(live_usage) = &self.live_usage
+        {
+            live_usage
+                .relay_token_usage(*iteration, usage, cumulative)
+                .await;
+        }
         if !self.tx.is_closed() {
             let _ = self.tx.send(event).await;
         }
@@ -150,11 +294,13 @@ impl RuntimeSessionManager {
         runtime: &LashRuntime,
         prompt_bridge: Option<HostPromptBridge>,
         persist_usage_to_store: bool,
+        child_usage_event_relay: Option<ChildUsageEventRelay>,
     ) -> Result<Self, ExternalInvokeError> {
         let Some(session) = runtime.session.as_ref() else {
             return Err(ExternalInvokeError::Unknown("session_manager".to_string()));
         };
         Ok(Self {
+            runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
             current_session_id: runtime.state.session_id.clone(),
             current_snapshot: if persist_usage_to_store {
                 CurrentSnapshot::Owned(runtime.export_graph_first_state())
@@ -177,30 +323,14 @@ impl RuntimeSessionManager {
             token_ledger: Arc::clone(&runtime.shared_token_ledger),
             background_sync_needed: Arc::clone(&runtime.background_sync_needed),
             child_usage_sources: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            child_turn_live_usage: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            child_usage_event_relay,
             persist_usage_to_store,
         })
     }
 
     fn record_token_usage(&self, source: &str, model: &str, usage: &TokenUsage) {
-        if usage.total() == 0 {
-            return;
-        }
-        let mut ledger = self.token_ledger.lock().expect("token ledger lock");
-        if let Some(entry) = ledger
-            .iter_mut()
-            .find(|e| e.source == source && e.model == model)
-        {
-            entry.usage.input_tokens += usage.input_tokens;
-            entry.usage.output_tokens += usage.output_tokens;
-            entry.usage.cached_input_tokens += usage.cached_input_tokens;
-            entry.usage.reasoning_tokens += usage.reasoning_tokens;
-        } else {
-            ledger.push(TokenLedgerEntry {
-                source: source.to_string(),
-                model: model.to_string(),
-                usage: usage.clone(),
-            });
-        }
+        record_token_usage_shared(&self.token_ledger, source, model, usage);
     }
 
     fn drain_token_ledger(&self) -> Vec<TokenLedgerEntry> {
@@ -219,8 +349,12 @@ impl RuntimeSessionManager {
         true
     }
 
+    fn background_scope_key(&self, session_id: &str) -> String {
+        format!("{}:{session_id}", self.runtime_scope_id)
+    }
+
     async fn current_snapshot_for_store_write(&self) -> SessionSnapshot {
-        let mut state = self.current_snapshot.into_snapshot();
+        let mut state = self.current_snapshot.to_snapshot();
         if let Some(store) = &self.current_store
             && let Some(head) = store.load_session_head().await
         {
@@ -273,7 +407,7 @@ impl RuntimeSessionManager {
         session_id: &str,
     ) -> Result<SessionSnapshot, crate::PluginError> {
         if session_id == self.current_session_id {
-            let mut snapshot = self.current_snapshot.into_snapshot();
+            let mut snapshot = self.current_snapshot.to_snapshot();
             super::normalize_session_graph(&mut snapshot);
             return Ok(snapshot);
         }
@@ -283,7 +417,7 @@ impl RuntimeSessionManager {
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
         let runtime = runtime.lock().await;
-        Ok(runtime.export_state())
+        Ok(runtime.export_persisted_state())
     }
 
     async fn tool_catalog_by_id(
@@ -310,7 +444,7 @@ impl RuntimeSessionManager {
 #[async_trait::async_trait]
 impl SessionManager for RuntimeSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, crate::PluginError> {
-        let mut snapshot = self.current_snapshot.into_snapshot();
+        let mut snapshot = self.current_snapshot.to_snapshot();
         super::normalize_session_graph(&mut snapshot);
         Ok(snapshot)
     }
@@ -338,12 +472,19 @@ impl SessionManager for RuntimeSessionManager {
             .clone()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if session_id == self.current_session_id
+            || self.registry.lock().await.contains_key(&session_id)
+        {
+            return Err(crate::PluginError::Session(format!(
+                "session `{session_id}` already exists"
+            )));
+        }
         let snapshot = match &request.start {
             SessionStartPoint::Empty => SessionSnapshot {
                 session_id: session_id.clone(),
                 ..Default::default()
             },
-            SessionStartPoint::CurrentSession => self.current_snapshot.into_snapshot(),
+            SessionStartPoint::CurrentSession => self.current_snapshot.to_snapshot(),
             SessionStartPoint::ExistingSession { session_id } => {
                 self.snapshot_by_id(session_id).await?
             }
@@ -392,12 +533,8 @@ impl SessionManager for RuntimeSessionManager {
             ),
             None => None,
         };
-        let services = match &session_store {
-            Some(store) => RuntimeServices::new(plugins).with_store(Arc::clone(store)),
-            None => RuntimeServices::new(plugins),
-        };
-        let mut runtime = match &self.current_host.background_executor {
-            Some(executor) => {
+        let mut runtime = match (&self.current_host.background_executor, &session_store) {
+            (Some(executor), Some(store)) => {
                 let host = BackgroundRuntimeHost::new(
                     EmbeddedRuntimeHost {
                         core: self.current_host.core.clone(),
@@ -405,20 +542,65 @@ impl SessionManager for RuntimeSessionManager {
                     },
                     Arc::clone(executor),
                 );
-                LashRuntime::from_background_state(policy.clone(), host, services, state).await
+                LashRuntime::from_persistent_background_state(
+                    policy.clone(),
+                    host,
+                    crate::PersistentRuntimeServices::new(plugins, Arc::clone(store)),
+                    state,
+                )
+                .await
             }
-            None => {
+            (Some(executor), None) => {
+                let host = BackgroundRuntimeHost::new(
+                    EmbeddedRuntimeHost {
+                        core: self.current_host.core.clone(),
+                        session_store_factory: self.current_host.session_store_factory.clone(),
+                    },
+                    Arc::clone(executor),
+                );
+                LashRuntime::from_background_state(
+                    policy.clone(),
+                    host,
+                    RuntimeServices::new(plugins),
+                    state,
+                )
+                .await
+            }
+            (None, Some(store)) => {
                 let host = EmbeddedRuntimeHost {
                     core: self.current_host.core.clone(),
                     session_store_factory: self.current_host.session_store_factory.clone(),
                 };
-                LashRuntime::from_embedded_state(policy.clone(), host, services, state).await
+                LashRuntime::from_persistent_embedded_state(
+                    policy.clone(),
+                    host,
+                    crate::PersistentRuntimeServices::new(plugins, Arc::clone(store)),
+                    state,
+                )
+                .await
+            }
+            (None, None) => {
+                let host = EmbeddedRuntimeHost {
+                    core: self.current_host.core.clone(),
+                    session_store_factory: self.current_host.session_store_factory.clone(),
+                };
+                LashRuntime::from_embedded_state(
+                    policy.clone(),
+                    host,
+                    RuntimeServices::new(plugins),
+                    state,
+                )
+                .await
             }
         }
         .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         runtime.llm_factory = Arc::clone(&self.llm_factory);
-        if let crate::ModeExtras::Rlm(extras) = &request.mode_extras {
-            runtime.set_repl_termination(extras.termination.clone());
+        let mode_session = runtime
+            .session
+            .as_ref()
+            .map(|session| Arc::clone(session.plugins().mode_session()));
+        if let Some(mode_session) = mode_session {
+            mode_session.configure_runtime_from_request(&mut runtime, &request);
         }
         if let Some(session) = runtime.session.as_mut() {
             session.set_context_surface(
@@ -431,34 +613,17 @@ impl SessionManager for RuntimeSessionManager {
         if let Some(store) = &session_store {
             let mut persisted_state = runtime.export_persisted_state();
             super::normalize_session_graph(&mut persisted_state);
-            let stored_checkpoint = crate::store::put_checkpoint(
-                store.as_ref(),
-                &crate::store::HydratedSessionCheckpoint {
-                    turn_state: crate::PersistedTurnState {
-                        iteration: persisted_state.iteration,
-                        token_usage: persisted_state.token_usage.clone(),
-                        last_prompt_usage: persisted_state.last_prompt_usage.clone(),
-                    },
-                    dynamic_state_ref: None,
-                    dynamic_state: persisted_state.dynamic_state_snapshot.clone(),
-                    plugin_snapshot_ref: None,
-                    plugin_snapshot_revision: persisted_state.plugin_snapshot_revision,
-                    plugin_snapshot: persisted_state.plugin_snapshot.clone(),
-                },
-            )
-            .await;
-            persisted_state.checkpoint_ref = Some(stored_checkpoint.checkpoint_ref);
-            persisted_state.dynamic_state_ref = stored_checkpoint.manifest.dynamic_state_ref;
-            persisted_state.dynamic_state_generation = persisted_state
-                .dynamic_state_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.base_generation);
-            persisted_state.plugin_snapshot_ref = stored_checkpoint.manifest.plugin_snapshot_ref;
-            persisted_state.plugin_snapshot_revision =
-                stored_checkpoint.manifest.plugin_snapshot_revision;
-            persisted_state.execution_state_snapshot = None;
-            super::persist_session_graph_and_head(store.as_ref(), &mut persisted_state).await;
-            store.clear_live_resume().await;
+            let crate::store::RuntimeCommitResult::PersistedState(result) = store
+                .apply_runtime_commit(crate::store::RuntimeCommit::persisted_state(
+                    &persisted_state,
+                    &[],
+                ))
+                .await
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?
+            else {
+                unreachable!("persisted state commit should return persisted result");
+            };
+            persisted_state.apply_persisted_commit_result(result);
         }
         self.registry
             .lock()
@@ -497,6 +662,10 @@ impl SessionManager for RuntimeSessionManager {
             )));
         }
         self.registry.lock().await.remove(session_id);
+        self.child_usage_sources
+            .lock()
+            .expect("child usage sources lock")
+            .remove(session_id);
         self.current_plugins.host().unregister_session(session_id)?;
         Ok(())
     }
@@ -529,11 +698,29 @@ impl SessionManager for RuntimeSessionManager {
         let turn_id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
         let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(100);
+        let usage_source = self
+            .child_usage_sources
+            .lock()
+            .expect("child usage sources lock")
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| "child".to_string());
         let runtime_clone = Arc::clone(&runtime);
         let cancel_clone = cancel.clone();
+        let sink = ChannelEventSink {
+            tx: event_tx,
+            live_usage: Some(LiveChildUsageForwarder {
+                turn_id: turn_id.clone(),
+                session_id: session_id.to_string(),
+                source: usage_source,
+                model: policy.model.clone(),
+                token_ledger: Arc::clone(&self.token_ledger),
+                child_turn_live_usage: Arc::clone(&self.child_turn_live_usage),
+                relay: self.child_usage_event_relay.clone(),
+            }),
+        };
         let task = tokio::spawn(async move {
             let mut runtime = runtime_clone.lock().await;
-            let sink = ChannelEventSink { tx: event_tx };
             runtime
                 .stream_turn(input, &sink, cancel_clone)
                 .await
@@ -567,17 +754,25 @@ impl SessionManager for RuntimeSessionManager {
             .task
             .await
             .map_err(|err| crate::PluginError::Session(format!("turn task failed: {err}")))?;
-        // Record the child session's token usage in the parent's ledger.
+        let live_reported = self
+            .child_turn_live_usage
+            .lock()
+            .expect("child turn live usage lock")
+            .remove(turn_id)
+            .unwrap_or_default();
         if let Ok(turn) = &turn {
             let source = self
                 .child_usage_sources
                 .lock()
                 .expect("child usage sources lock")
-                .remove(&session_id)
+                .get(&session_id)
+                .cloned()
                 .unwrap_or_else(|| "child".to_string());
-            self.record_token_usage(&source, &turn.state.policy.model, &turn.token_usage);
-            self.persist_current_usage_ledger().await?;
+            if let Some(remainder) = subtract_usage(&live_reported, &turn.token_usage) {
+                self.record_token_usage(&source, &turn.state.policy.model, &remainder);
+            }
         }
+        self.persist_current_usage_ledger().await?;
         turn
     }
 
@@ -612,14 +807,18 @@ impl SessionManager for RuntimeSessionManager {
         if session_id == self.current_session_id {
             self.background_sync_needed.store(true, Ordering::Release);
         }
-        executor.spawn(session_id, label, job).await
+        executor
+            .spawn(&self.background_scope_key(session_id), label, job)
+            .await
     }
 
     async fn await_background_jobs(&self, session_id: &str) -> Result<(), crate::PluginError> {
         let Some(executor) = &self.current_host.background_executor else {
             return Ok(());
         };
-        executor.await_all(session_id).await
+        executor
+            .await_all(&self.background_scope_key(session_id))
+            .await
     }
 
     async fn prompt_user(
@@ -665,7 +864,7 @@ impl SessionManager for RuntimeSessionManager {
         let mut state = if self.persist_usage_to_store {
             self.current_snapshot_for_store_write().await
         } else {
-            let mut state = self.current_snapshot.into_snapshot();
+            let mut state = self.current_snapshot.to_snapshot();
             super::normalize_session_graph(&mut state);
             state
         };
@@ -681,27 +880,14 @@ impl SessionManager for RuntimeSessionManager {
         }
         let node_ids = append_session_nodes_to_state(&mut state, &request.nodes);
         let leaf_node_id = state.session_graph.leaf_node_id.clone().unwrap_or_default();
-        let stored_checkpoint = crate::store::put_checkpoint(
-            store.as_ref(),
-            &crate::store::HydratedSessionCheckpoint {
-                turn_state: crate::PersistedTurnState {
-                    iteration: state.iteration,
-                    token_usage: state.token_usage.clone(),
-                    last_prompt_usage: state.last_prompt_usage.clone(),
-                },
-                dynamic_state_ref: state.dynamic_state_ref.clone(),
-                dynamic_state: state.dynamic_state_snapshot.clone(),
-                plugin_snapshot_ref: state.plugin_snapshot_ref.clone(),
-                plugin_snapshot_revision: state.plugin_snapshot_revision,
-                plugin_snapshot: state.plugin_snapshot.clone(),
-            },
-        )
-        .await;
-        state.checkpoint_ref = Some(stored_checkpoint.checkpoint_ref);
-        state.dynamic_state_ref = stored_checkpoint.manifest.dynamic_state_ref;
-        state.plugin_snapshot_ref = stored_checkpoint.manifest.plugin_snapshot_ref;
-        state.execution_state_snapshot = None;
-        super::persist_session_graph_and_head(store.as_ref(), &mut state).await;
+        let crate::store::RuntimeCommitResult::PersistedState(result) = store
+            .apply_runtime_commit(crate::store::RuntimeCommit::persisted_state(&state, &[]))
+            .await
+            .map_err(|err| crate::PluginError::Session(err.to_string()))?
+        else {
+            unreachable!("persisted state commit should return persisted result");
+        };
+        state.apply_persisted_commit_result(result);
         self.background_sync_needed.store(true, Ordering::Release);
         Ok(crate::AppendSessionNodesResult::Appended {
             node_ids,

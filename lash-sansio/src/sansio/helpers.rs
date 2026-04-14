@@ -87,7 +87,7 @@ pub(super) fn extract_first_lashlang_fence(text: &str) -> Option<FenceExtraction
 /// Validate a `finish` value against the JSON Schema embedded in the
 /// session's `RlmTermination::Finish { schema }`. Returns `Ok(())` on
 /// success or a human-readable error string on mismatch. Supports the
-/// subset of JSON Schema that `predict` generates: `type` (string,
+/// subset of JSON Schema that `delegate` generates: `type` (string,
 /// number, integer, boolean, array, object, null), nested object
 /// `properties` with `required`, and `items` for arrays. Unsupported
 /// keywords are ignored (permissive).

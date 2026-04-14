@@ -118,7 +118,7 @@ const SECTION_DEFS: [PromptSectionDef; 4] = [
         name: PromptSectionName::Execution,
         title: Some("Execution"),
         builder: execution_section,
-        block_builder: execution_blocks,
+        block_builder: no_blocks,
     },
     PromptSectionDef {
         name: PromptSectionName::Guidance,
@@ -188,20 +188,6 @@ pub fn default_prompt_renderer() -> Arc<dyn PromptRenderer> {
 
 fn no_blocks(_ctx: &PromptRenderContext<'_>) -> Vec<PromptBlockState> {
     Vec::new()
-}
-
-fn execution_blocks(ctx: &PromptRenderContext<'_>) -> Vec<PromptBlockState> {
-    if matches!(ctx.prompt.mode, crate::ExecutionMode::Rlm)
-        && !ctx.prompt.tool_list.trim().is_empty()
-    {
-        vec![PromptBlockState::new(
-            "available_tools",
-            Some("Available Tools".to_string()),
-            ctx.prompt.tool_list.trim().to_string(),
-        )]
-    } else {
-        Vec::new()
-    }
 }
 
 fn apply_section_overrides(
@@ -389,66 +375,13 @@ const CORE_GUIDANCE_SECTION: &str = r#"- Be clear, direct, and natural. Avoid fi
 - Prefer the simplest correct solution over cleverness or unnecessary abstraction.
 - Keep final answers focused and well-written. Use short numbered next steps only when there are real next steps."#;
 
-const REPL_EXECUTION_SECTION: &str = r#"In this mode you write `lashlang` code inside your prose response and the runtime executes it. There is no native tool-call envelope — you embed code directly.
-
-Format every work step like this:
-
-````
-Brief reasoning here in plain prose (one or two sentences is fine).
-
-```lashlang
-files = call ls { path: "." }
-observe files
-```
-````
-
-- Wrap each work step in **exactly one** ` ```lashlang ` fenced block. Only the first block runs per turn — additional blocks are ignored.
-- Plain prose alongside the block becomes your reasoning trace; keep it short.
-- After each execution result, decide whether to write another fenced block (more work to do) or finish the turn in pure prose with no fenced block (task complete).
-- When the task is complete, reply with prose only — no fenced lashlang block — and that ends the turn.
-- Work iteratively: inspect, act, observe, continue. Most tasks take multiple lashlang steps, not one large step.
-- Verify the concrete end state before finalizing in prose when possible.
-- Do not describe what you would do instead of doing it.
-
-### RLM Language
-
-`lashlang` is a small workflow language for tool orchestration.
-
-- Values are null, booleans, numbers, strings, lists, and records.
-- List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`. Tool-argument records follow the same rule.
-- Assign with `name = expr`. Variables persist across iterations — anything you bind in one fenced block is still in scope on the next.
-- If the prompt includes a **Bound Variables** section, those names are already in scope. Access them directly in lashlang instead of rebuilding them from prose.
-- Bare expressions are valid statements. In `parallel { ... }`, a bare-expression branch contributes that value to the result list.
-- Call tools with `call tool_name { arg: expr }`.
-- Use `parallel { ... }` only for independent tool calls. If one call needs another call's output, do not put them in the same `parallel { ... }`.
-- `parallel { ... }` returns a list of branch results in order.
-- Use ternary expressions for inline branching: `cond ? yes : no`. There is no expression-form `if`.
-- Control flow is limited to statement `if` and `for`.
-- Boolean negation supports both `!cond` and `not cond`.
-- Use `observe expr` to inspect a value and continue execution.
-- `observe` output and tool results are fed back into the next iteration (your context), so inspect first and refine on the next step if needed.
-- You must explicitly use `observe` to inspect values and make progress based on them. Do not rely on implicit inspection through tool results or execution errors."#;
-
-const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution is needed.
-
-- Work in small, concrete steps and verify each meaningful step.
-- Use `batch` for two or more independent tool calls. Serialize calls when later arguments depend on earlier results.
-- Avoid filler prose between tool calls.
-- If you are unsure, resolve the uncertainty with the smallest relevant check.
-- Before concluding, verify the concrete end-state whenever possible.
-- For direct conversational requests that need no tools, respond in prose only."#;
-
 fn intro_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
     let _ = ctx;
     Some(MAIN_AGENT_INTRO.to_string())
 }
 
 fn execution_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
-    Some(if matches!(ctx.prompt.mode, crate::ExecutionMode::Rlm) {
-        REPL_EXECUTION_SECTION.to_string()
-    } else {
-        STANDARD_EXECUTION_SECTION.to_string()
-    })
+    Some(ctx.prompt.execution_prompt.clone())
 }
 
 fn guidance_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
@@ -467,7 +400,7 @@ mod tests {
     fn prompt(mode: crate::ExecutionMode) -> PromptContext {
         PromptContext {
             mode,
-            tool_list: "tools".to_string(),
+            execution_prompt: "mode execution".to_string(),
             ..PromptContext::default()
         }
     }
@@ -540,6 +473,12 @@ mod tests {
         prompt.contributions = vec![
             PromptContribution::guidance("custom", "Custom", "More guidance."),
             PromptContribution::environment("runtime_context", "Runtime Context", "cwd: /repo"),
+            PromptContribution::block(
+                PromptSectionName::Execution,
+                "available_tools",
+                "Available Tools",
+                "tools",
+            ),
         ];
         let text = DefaultPromptRenderer.render(&prompt, &[]);
         let intro_idx = text.find(MAIN_AGENT_INTRO).unwrap();
@@ -548,6 +487,26 @@ mod tests {
         assert!(intro_idx < guidance_idx);
         assert!(guidance_idx < env_idx);
         assert!(text.contains("### Available Tools"));
+    }
+
+    #[test]
+    fn rlm_execution_prompt_documents_decomposition_guidance() {
+        let mut prompt = prompt(crate::ExecutionMode::Rlm);
+        prompt.execution_prompt =
+            "### Decomposition\n\nPrefer narrow checks over brute-force scanning".to_string();
+        let text = DefaultPromptRenderer.render(&prompt, &[]);
+        assert!(text.contains("### Decomposition"));
+        assert!(text.contains("Prefer narrow checks over brute-force scanning"));
+    }
+
+    #[test]
+    fn rlm_execution_prompt_mentions_async_tool_handles() {
+        let mut prompt = prompt(crate::ExecutionMode::Rlm);
+        prompt.execution_prompt = "start call tool_name\nawait handle\ncancel handle".to_string();
+        let text = DefaultPromptRenderer.render(&prompt, &[]);
+        assert!(text.contains("start call tool_name"));
+        assert!(text.contains("await handle"));
+        assert!(text.contains("cancel handle"));
     }
 
     #[test]

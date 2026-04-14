@@ -316,6 +316,8 @@ mod tests {
                 &ToolExecutionContext {
                     session_id: "root".to_string(),
                     host: manager.clone(),
+                    cancellation_token: None,
+                    async_task_id: None,
                 },
             )
             .await;
@@ -380,6 +382,8 @@ mod tests {
                 &ToolExecutionContext {
                     session_id: "root".to_string(),
                     host: manager.clone(),
+                    cancellation_token: None,
+                    async_task_id: None,
                 },
             )
             .await;
@@ -424,6 +428,8 @@ mod tests {
                 &ToolExecutionContext {
                     session_id: "root".to_string(),
                     host: manager.clone(),
+                    cancellation_token: None,
+                    async_task_id: None,
                 },
                 None,
             )

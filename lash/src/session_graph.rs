@@ -94,12 +94,14 @@ impl SharedJsonValue {
         Self(Arc::new(value))
     }
 
-    pub fn as_ref(&self) -> &serde_json::Value {
-        self.0.as_ref()
-    }
-
     pub fn to_owned(&self) -> serde_json::Value {
         self.0.as_ref().clone()
+    }
+}
+
+impl AsRef<serde_json::Value> for SharedJsonValue {
+    fn as_ref(&self) -> &serde_json::Value {
+        self.0.as_ref()
     }
 }
 
@@ -201,8 +203,7 @@ struct SessionGraphCache {
     projected_messages: Arc<Vec<Message>>,
     projected_tool_calls: Arc<Vec<ToolCallRecord>>,
     projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
-    rendered_prompt_standard: Arc<crate::RenderedPrompt>,
-    rendered_prompt_rlm: Arc<crate::RenderedPrompt>,
+    rendered_prompt: Arc<crate::RenderedPrompt>,
 }
 
 impl SessionGraphCache {
@@ -233,8 +234,7 @@ impl SessionGraphCache {
             projected_messages: Arc::new(Vec::new()),
             projected_tool_calls: Arc::new(Vec::new()),
             projected_rlm_globals: Arc::new(serde_json::Map::new()),
-            rendered_prompt_standard: Arc::new(crate::RenderedPrompt::default()),
-            rendered_prompt_rlm: Arc::new(crate::RenderedPrompt::default()),
+            rendered_prompt: Arc::new(crate::RenderedPrompt::default()),
         };
         cache.rebuild_projection(graph);
         cache
@@ -268,14 +268,7 @@ impl SessionGraphCache {
         self.projected_messages = Arc::new(projected_messages);
         self.projected_tool_calls = Arc::new(projected_tool_calls);
         self.projected_rlm_globals = Arc::new(projected_rlm_globals);
-        self.rendered_prompt_standard = Arc::new(render_prompt(
-            self.projected_messages.as_slice(),
-            ExecutionMode::Standard,
-        ));
-        self.rendered_prompt_rlm = Arc::new(render_prompt(
-            self.projected_messages.as_slice(),
-            ExecutionMode::Rlm,
-        ));
+        self.rendered_prompt = Arc::new(render_prompt(self.projected_messages.as_slice()));
     }
 
     fn append_node(
@@ -299,14 +292,8 @@ impl SessionGraphCache {
             {
                 Arc::make_mut(&mut self.projected_messages).push(message.clone());
                 append_rendered_prompt(
-                    Arc::make_mut(&mut self.rendered_prompt_standard),
+                    Arc::make_mut(&mut self.rendered_prompt),
                     std::slice::from_ref(message),
-                    ExecutionMode::Standard,
-                );
-                append_rendered_prompt(
-                    Arc::make_mut(&mut self.rendered_prompt_rlm),
-                    std::slice::from_ref(message),
-                    ExecutionMode::Rlm,
                 );
             }
             return;
@@ -352,6 +339,14 @@ impl SessionNodeRecord {
                 Some((plugin_type.as_str(), body.as_ref()))
             }
         }
+    }
+
+    pub fn plugin_body<T>(&self) -> Option<T>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let (_, body) = self.plugin()?;
+        T::deserialize(body).ok()
     }
 }
 
@@ -507,14 +502,8 @@ impl SessionGraph {
         Arc::clone(&self.cache().projected_messages)
     }
 
-    pub fn shared_projected_rendered_prompt(
-        &self,
-        mode: ExecutionMode,
-    ) -> Arc<crate::RenderedPrompt> {
-        match mode {
-            ExecutionMode::Standard => Arc::clone(&self.cache().rendered_prompt_standard),
-            ExecutionMode::Rlm => Arc::clone(&self.cache().rendered_prompt_rlm),
-        }
+    pub fn shared_projected_rendered_prompt(&self) -> Arc<crate::RenderedPrompt> {
+        Arc::clone(&self.cache().rendered_prompt)
     }
 
     pub fn project_tool_calls(&self) -> Vec<ToolCallRecord> {

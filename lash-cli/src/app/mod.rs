@@ -1077,7 +1077,7 @@ impl App {
             } => {
                 self.finalize_live_assistant();
                 self.clear_live_tool_output();
-                if matches!(name.as_str(), "agent_result" | "agent_kill") {
+                if matches!(name.as_str(), "delegate_result" | "delegate_kill") {
                     self.active_delegate = None;
                 }
                 let plan_content = if success && name == "update_plan" {
@@ -1266,6 +1266,7 @@ impl App {
                     self.live_output_tokens_estimate = 0;
                 }
             }
+            SessionEvent::ChildTokenUsage { .. } => {}
             SessionEvent::PluginEvent { plugin_id, event } => {
                 let renders_visible_output = plugin_surface_event_renders_visible_output(&event);
                 let mutation = plugin_surface::apply_surface_event(
