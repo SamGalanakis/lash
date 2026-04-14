@@ -35,7 +35,6 @@ pub use web_search::WebSearch;
 use crate::ToolResult;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,48 +267,47 @@ pub(crate) fn rg_file_list(
     max_depth: Option<usize>,
     globs: &[String],
 ) -> Result<Vec<PathBuf>, ToolResult> {
-    let mut cmd = Command::new("rg");
-    cmd.arg("--files").arg("--null").arg("--no-config");
-    if include_hidden {
-        cmd.arg("--hidden");
-    }
-    if !respect_gitignore {
-        cmd.arg("--no-ignore").arg("--no-ignore-parent");
-    }
-    if let Some(depth) = max_depth {
-        cmd.arg(format!("--max-depth={depth}"));
-    }
-    for glob in globs {
-        cmd.arg("--glob").arg(glob);
-    }
-    cmd.current_dir(base);
+    let mut builder = ignore::WalkBuilder::new(base);
+    builder.hidden(!include_hidden).max_depth(max_depth);
 
-    let output = cmd.output().map_err(|e| {
-        ToolResult::err_fmt(format_args!("failed to run rg for {}: {e}", base.display()))
-    })?;
+    if respect_gitignore {
+        builder.git_ignore(true).git_exclude(true).git_global(true);
+        builder.require_git(true);
+    } else {
+        builder
+            .git_ignore(false)
+            .git_exclude(false)
+            .git_global(false)
+            .ignore(false)
+            .parents(false)
+            .require_git(false);
+    }
 
-    if !output.status.success() {
-        if output.status.code() == Some(1) && output.stdout.is_empty() {
-            return Ok(Vec::new());
+    if !globs.is_empty() {
+        let mut override_builder = ignore::overrides::OverrideBuilder::new(base);
+        for glob in globs {
+            override_builder.add(glob).map_err(|err| {
+                ToolResult::err_fmt(format_args!(
+                    "invalid ignore glob for {}: {err}",
+                    base.display()
+                ))
+            })?;
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let message = stderr.trim();
-        return Err(ToolResult::err_fmt(format_args!(
-            "rg --files failed for {}: {}",
-            base.display(),
-            if message.is_empty() {
-                "unknown error"
-            } else {
-                message
-            }
-        )));
+
+        let overrides = override_builder.build().map_err(|err| {
+            ToolResult::err_fmt(format_args!(
+                "failed to build ignore globs for {}: {err}",
+                base.display()
+            ))
+        })?;
+        builder.overrides(overrides);
     }
 
-    let files = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|chunk| !chunk.is_empty())
-        .map(|chunk| base.join(String::from_utf8_lossy(chunk).as_ref()))
+    let files = builder
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path() != base)
+        .map(ignore::DirEntry::into_path)
         .collect();
     Ok(files)
 }
