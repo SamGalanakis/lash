@@ -8,13 +8,14 @@ use lash::tools::{
 };
 use lash::{
     BuiltinObservationalMemoryPluginFactory, BuiltinRollingHistoryPluginFactory,
-    BuiltinToolResultProjectionPluginFactory, ExecutionMode, FsInstructionSource, PluginHost,
-    ToolProvider,
+    BuiltinToolResultProjectionPluginFactory, ContextApproach, ExecutionMode, FsInstructionSource,
+    PluginHost, ToolProvider,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefaultToolBundle {
     CoreRuntime,
+    RollingHistory,
     ObservationalMemory,
     Shell,
     Editing,
@@ -25,34 +26,52 @@ pub enum DefaultToolBundle {
     RlmState,
 }
 
-impl DefaultToolBundle {
-    pub fn default_surface(execution_mode: ExecutionMode, interactive: bool) -> Vec<Self> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefaultToolSurfaceProfile {
+    pub bundles: Vec<DefaultToolBundle>,
+    pub interactive_extras: bool,
+}
+
+impl DefaultToolSurfaceProfile {
+    pub fn for_runtime(
+        execution_mode: ExecutionMode,
+        context_approach: &ContextApproach,
+        interactive: bool,
+        web_enabled: bool,
+    ) -> Self {
         let mut bundles = vec![
-            Self::CoreRuntime,
-            Self::Shell,
-            Self::Editing,
-            Self::Files,
-            Self::Search,
+            DefaultToolBundle::CoreRuntime,
+            match context_approach.kind() {
+                lash::ContextApproachKind::RollingHistory => DefaultToolBundle::RollingHistory,
+                lash::ContextApproachKind::ObservationalMemory => {
+                    DefaultToolBundle::ObservationalMemory
+                }
+            },
+            DefaultToolBundle::Shell,
+            DefaultToolBundle::Editing,
+            DefaultToolBundle::Files,
+            DefaultToolBundle::Search,
         ];
         if interactive {
-            bundles.push(Self::UserPrompts);
+            bundles.push(DefaultToolBundle::UserPrompts);
         }
         if matches!(execution_mode, ExecutionMode::Rlm) {
-            bundles.push(Self::RlmState);
+            bundles.push(DefaultToolBundle::RlmState);
         }
-        bundles
-    }
-
-    pub fn background_surface(execution_mode: ExecutionMode, interactive: bool) -> Vec<Self> {
-        let mut bundles = Self::default_surface(execution_mode, interactive);
-        bundles.push(Self::ObservationalMemory);
-        bundles
+        if web_enabled {
+            bundles.push(DefaultToolBundle::Web);
+        }
+        Self {
+            bundles,
+            interactive_extras: interactive,
+        }
     }
 }
 
 #[derive(Default)]
 pub struct DefaultToolPluginOptions {
     pub execution_mode: ExecutionMode,
+    pub context_approach: ContextApproach,
     pub bundles: Vec<DefaultToolBundle>,
     pub tavily_api_key: Option<String>,
     pub instruction_source: Option<Arc<dyn InstructionSource>>,
@@ -64,13 +83,21 @@ fn shell_provider() -> Arc<dyn ToolProvider> {
 
 pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<dyn PluginFactory>> {
     if options.bundles.is_empty() {
-        options.bundles = DefaultToolBundle::default_surface(options.execution_mode, true);
+        options.bundles = DefaultToolSurfaceProfile::for_runtime(
+            options.execution_mode,
+            &options.context_approach,
+            true,
+            options.tavily_api_key.is_some(),
+        )
+        .bundles;
     }
     let mut factories: Vec<Arc<dyn PluginFactory>> = Vec::new();
     for bundle in options.bundles {
         match bundle {
             DefaultToolBundle::CoreRuntime => {
                 factories.push(Arc::new(BuiltinToolResultProjectionPluginFactory::default()));
+            }
+            DefaultToolBundle::RollingHistory => {
                 factories.push(Arc::new(BuiltinRollingHistoryPluginFactory::default()));
             }
             DefaultToolBundle::ObservationalMemory => {
@@ -169,17 +196,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_surface_for_interactive_rlm_includes_prompt_and_state_tools() {
-        let bundles = DefaultToolBundle::default_surface(ExecutionMode::Rlm, true);
-        assert!(bundles.contains(&DefaultToolBundle::UserPrompts));
-        assert!(bundles.contains(&DefaultToolBundle::RlmState));
-        assert!(!bundles.contains(&DefaultToolBundle::ObservationalMemory));
+    fn rolling_history_profile_for_interactive_rlm_includes_prompt_and_state_tools() {
+        let profile = DefaultToolSurfaceProfile::for_runtime(
+            ExecutionMode::Rlm,
+            &ContextApproach::RollingHistory(Default::default()),
+            true,
+            false,
+        );
+        assert!(profile.bundles.contains(&DefaultToolBundle::UserPrompts));
+        assert!(profile.bundles.contains(&DefaultToolBundle::RlmState));
+        assert!(profile.bundles.contains(&DefaultToolBundle::RollingHistory));
+        assert!(!profile.bundles.contains(&DefaultToolBundle::ObservationalMemory));
     }
 
     #[test]
-    fn background_surface_adds_observational_memory_bundle() {
-        let bundles = DefaultToolBundle::background_surface(ExecutionMode::Standard, false);
-        assert!(bundles.contains(&DefaultToolBundle::ObservationalMemory));
+    fn observational_memory_profile_selects_om_bundle() {
+        let profile = DefaultToolSurfaceProfile::for_runtime(
+            ExecutionMode::Standard,
+            &ContextApproach::ObservationalMemory(Default::default()),
+            false,
+            false,
+        );
+        assert!(profile.bundles.contains(&DefaultToolBundle::ObservationalMemory));
+        assert!(!profile.bundles.contains(&DefaultToolBundle::RollingHistory));
     }
 
     #[test]

@@ -662,8 +662,8 @@ impl PluginFactory for RollingHistoryPluginFactory {
         ROLLING_HISTORY_PLUGIN_ID
     }
 
-    fn supports_context_approach(&self, approach: &ContextApproach) -> bool {
-        matches!(approach, ContextApproach::RollingHistory(_))
+    fn supported_context_approaches(&self) -> &'static [crate::ContextApproachKind] {
+        &[crate::ContextApproachKind::RollingHistory]
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {

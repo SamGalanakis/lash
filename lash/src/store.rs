@@ -601,6 +601,132 @@ impl Store {
         })
     }
 
+    pub fn refresh_runtime_persistence_state(&self, state: &mut crate::RuntimePersistenceState) {
+        let Some(head) = self.load_session_head() else {
+            return;
+        };
+        let checkpoint = head
+            .checkpoint_ref
+            .as_ref()
+            .and_then(|blob_ref| self.get_checkpoint(blob_ref));
+        let state = state.state_mut();
+        state.session_graph = head.graph;
+        state.checkpoint_ref = head.checkpoint_ref;
+        state.token_ledger = head.token_ledger;
+        state.persisted_graph_node_count = state.session_graph.nodes.len();
+        state.graph_replace_required = false;
+        if let Some(checkpoint) = checkpoint {
+            state.iteration = checkpoint.turn_state.iteration;
+            state.token_usage = checkpoint.turn_state.token_usage;
+            state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
+            state.dynamic_state_ref = checkpoint.dynamic_state_ref;
+            state.dynamic_state_generation = checkpoint
+                .dynamic_state
+                .as_ref()
+                .map(|snapshot| snapshot.base_generation);
+            state.dynamic_state_snapshot = None;
+            state.plugin_snapshot_ref = checkpoint.plugin_snapshot_ref;
+            state.plugin_snapshot = None;
+            state.execution_state_snapshot = None;
+        }
+    }
+
+    pub fn persist_committed_runtime_state(
+        &self,
+        state: &mut crate::RuntimePersistenceState,
+        dynamic_state: &crate::DynamicStateSnapshot,
+    ) {
+        state.stamp_runtime_state(Some(dynamic_state), None);
+        let checkpoint = crate::HydratedSessionCheckpoint {
+            turn_state: state.turn_state(),
+            dynamic_state_ref: state.state().dynamic_state_ref.clone(),
+            dynamic_state: state.state().dynamic_state_snapshot.clone(),
+            plugin_snapshot_ref: state.state().plugin_snapshot_ref.clone(),
+            plugin_snapshot_revision: state.state().plugin_snapshot_revision,
+            plugin_snapshot: state.state().plugin_snapshot.clone(),
+        };
+        let stored_checkpoint = self.put_checkpoint(&checkpoint);
+        let state = state.state_mut();
+        state.checkpoint_ref = Some(stored_checkpoint.checkpoint_ref.clone());
+        state.dynamic_state_ref = stored_checkpoint.manifest.dynamic_state_ref;
+        state.dynamic_state_generation = state
+            .dynamic_state_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.base_generation);
+        state.plugin_snapshot_ref = stored_checkpoint.manifest.plugin_snapshot_ref;
+        state.execution_state_snapshot = None;
+        state.dynamic_state_snapshot = None;
+        state.plugin_snapshot = None;
+        let node_count = state.session_graph.nodes.len();
+        if state.graph_replace_required || state.persisted_graph_node_count > node_count {
+            self.replace_session_graph(&state.session_graph);
+        } else if state.persisted_graph_node_count < node_count {
+            self.append_session_graph_nodes(
+                &state.session_graph.nodes[state.persisted_graph_node_count..],
+            );
+        }
+        self.save_session_head_meta(crate::SessionHeadMeta {
+            config: crate::PersistedSessionConfig {
+                provider_id: state.policy.provider.id().to_string(),
+                configured_model: state.policy.model.clone(),
+                context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
+                execution_mode: state.policy.execution_mode,
+                context_approach: state.policy.context_approach.clone(),
+                model_variant: state.policy.model_variant.clone(),
+            },
+            checkpoint_ref: Some(stored_checkpoint.checkpoint_ref),
+            leaf_node_id: state.session_graph.leaf_node_id.clone(),
+            graph_node_count: state.session_graph.nodes.len(),
+            token_ledger: state.token_ledger.clone(),
+        });
+        state.persisted_graph_node_count = node_count;
+        state.graph_replace_required = false;
+        self.clear_live_resume();
+    }
+
+    pub fn persist_live_runtime_state(
+        &self,
+        seed_graph: Option<crate::SessionGraph>,
+        live_graph: crate::SessionGraph,
+        state: &crate::RuntimePersistenceState,
+        dynamic_state: &crate::DynamicStateSnapshot,
+    ) {
+        let base = self
+            .load_live_resume()
+            .map(|snapshot| (snapshot.graph, snapshot.checkpoint_ref))
+            .or_else(|| {
+                self.load_session_head()
+                    .map(|head| (head.graph, head.checkpoint_ref))
+            });
+        let (graph, checkpoint_ref) =
+            base.unwrap_or_else(|| (seed_graph.unwrap_or_default(), None));
+        if !crate::messages_are_live_resume_safe(&live_graph.project_messages()) {
+            return;
+        }
+        let delta_ref = self.put_typed_blob(&crate::LiveResumeDelta {
+            appended_graph_nodes: live_graph.nodes[graph.nodes.len()..].to_vec(),
+            leaf_node_id: live_graph.leaf_node_id.clone(),
+            turn_state: state.turn_state(),
+            dynamic_state: Some(dynamic_state.clone()),
+            plugin_snapshot: state.state().plugin_snapshot.clone(),
+            execution_state_snapshot: state.state().execution_state_snapshot.clone(),
+            token_ledger: state.token_ledger().to_vec(),
+        });
+        self.save_live_resume(crate::LiveResumeSnapshot {
+            graph,
+            config: crate::PersistedSessionConfig {
+                provider_id: state.policy().provider.id().to_string(),
+                configured_model: state.policy().model.clone(),
+                context_window: state.policy().max_context_tokens.unwrap_or_default() as u64,
+                execution_mode: state.policy().execution_mode,
+                context_approach: state.policy().context_approach.clone(),
+                model_variant: state.policy().model_variant.clone(),
+            },
+            checkpoint_ref,
+            delta_ref: Some(delta_ref),
+        });
+    }
+
     pub fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
         if entries.is_empty() {
             return;

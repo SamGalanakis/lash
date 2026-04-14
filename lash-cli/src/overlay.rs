@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use lash::{
-    Message, MessageRole, PartKind, PromptPanel, PromptRequest, PromptResponse,
-    PromptSelectionMode, SessionMessageTreeNode,
+    Message, MessageRole, PartKind, PromptRequest, PromptResponse, PromptSelectionMode,
+    SessionMessageTreeNode,
 };
 
 use crate::session_log::SessionInfo;
@@ -213,9 +213,6 @@ impl PromptState {
 
 #[derive(Debug)]
 pub struct WaitState {
-    pub question: String,
-    pub panel: Option<PromptPanel>,
-    pub seconds: u64,
     deadline: Instant,
     pub response_tx: std::sync::mpsc::Sender<PromptResponse>,
 }
@@ -232,9 +229,6 @@ impl WaitState {
             .expect("wait state requires PromptRequest::wait");
         let now = Instant::now();
         Self {
-            question: request.question,
-            panel: request.panel,
-            seconds,
             deadline: now + Duration::from_secs(seconds),
             response_tx,
         }

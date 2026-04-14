@@ -9,7 +9,9 @@ use lash::llm::transport::{LlmTransport, LlmTransportError};
 use lash::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
 use lash::*;
-use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
+use lash_default_tools::{
+    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+};
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio_util::sync::CancellationToken;
@@ -702,9 +704,12 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<LashRunt
         ..SessionPolicy::default()
     };
 
+    let profile =
+        DefaultToolSurfaceProfile::for_runtime(execution_mode, &context_approach, false, false);
     let plugin_host = PluginHost::new(tool_plugin_factories(DefaultToolPluginOptions {
         execution_mode,
-        bundles: DefaultToolBundle::background_surface(execution_mode, false),
+        context_approach: context_approach.clone(),
+        bundles: profile.bundles,
         tavily_api_key: None,
         instruction_source: None,
     }))

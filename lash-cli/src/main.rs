@@ -15,6 +15,7 @@ mod input_items;
 mod interactive;
 mod markdown;
 mod overlay;
+mod persistence;
 mod plugin_surface;
 mod prompt_overrides;
 mod render;

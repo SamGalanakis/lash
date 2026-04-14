@@ -141,39 +141,6 @@ fn prompt_question_wraps_long_path_cleanly() {
 }
 
 #[test]
-fn wait_overlay_help_uses_ctrl_j_resume_binding() {
-    let (response_tx, _response_rx) = mpsc::channel();
-    let wait = crate::overlay::WaitState::from_request(
-        PromptRequest::freeform("Pausing briefly before continuing.")
-            .with_wait(5)
-            .with_markdown_panel("PAUSED", "Waiting for a retry window."),
-        response_tx,
-    );
-
-    let rendered = wait_content_lines_snapshot(&wait, 48)
-        .into_iter()
-        .map(|line| {
-            line.spans
-                .into_iter()
-                .map(|span| span.content.into_owned())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("Auto-resume in 5s"))
-    );
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("ctrl+j resume now"))
-    );
-    assert!(rendered.iter().any(|line| line.contains("esc skip wait")));
-}
-
-#[test]
 fn prompt_panel_renders_before_question_and_choices() {
     let (response_tx, _response_rx) = mpsc::channel();
     let prompt = PromptState {

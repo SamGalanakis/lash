@@ -643,9 +643,10 @@ impl PluginHost {
     }
 
     pub fn supports_context_approach(&self, context_approach: &crate::ContextApproach) -> bool {
+        let required = context_approach.kind();
         self.factories()
             .iter()
-            .any(|factory| factory.supports_context_approach(context_approach))
+            .any(|factory| factory.supported_context_approaches().contains(&required))
     }
 
     pub fn build_standard_session(
@@ -1334,15 +1335,15 @@ impl PluginSession {
     pub async fn mutate_session_config(
         &self,
         ctx: SessionConfigChangedContext,
-        mut state: SessionStateEnvelope,
-    ) -> SessionStateEnvelope {
+        mut policy: SessionPolicy,
+    ) -> SessionPolicy {
         for hook in &self.session_config_mutators {
-            match hook(ctx.clone(), state.clone()).await {
-                Ok(next_state) => state = next_state,
+            match hook(ctx.clone(), policy.clone()).await {
+                Ok(next_policy) => policy = next_policy,
                 Err(err) => tracing::warn!("plugin config mutator failed: {err}"),
             }
         }
-        state
+        policy
     }
 
     pub async fn finalize_turn(

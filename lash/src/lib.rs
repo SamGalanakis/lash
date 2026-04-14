@@ -78,7 +78,9 @@ pub fn default_skill_dirs() -> Vec<PathBuf> {
 }
 
 // Re-exports
-pub use context_approach::{ContextApproach, ObservationalMemoryConfig, RollingHistoryConfig};
+pub use context_approach::{
+    ContextApproach, ContextApproachKind, ObservationalMemoryConfig, RollingHistoryConfig,
+};
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
@@ -139,10 +141,10 @@ pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundExecutor, BackgroundRuntimeHost, CodeOutputRecord,
     DefaultPathResolver, DoneReason, EmbeddedRuntimeHost, EventSink, ExecutionSummary, InputItem,
     LashRuntime, NoopEventSink, OutputState, PathResolver, PromptUsage, RunMode, RuntimeCoreConfig,
-    RuntimeError, SanitizerPolicy, SessionStateEnvelope, SessionStoreCreateRequest,
-    SessionStoreFactory, SessionUsageReport, TerminationPolicy, TokenLedgerEntry,
-    TokioBackgroundExecutor, TurnInput, TurnIssue, TurnStatus, UsageReportRow, UsageTotals,
-    diff_token_ledger, diff_usage_reports,
+    RuntimeError, RuntimePersistenceState, SanitizerPolicy, SessionStateEnvelope,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, TerminationPolicy,
+    TokenLedgerEntry, TokioBackgroundExecutor, TurnInput, TurnIssue, TurnStatus, UsageReportRow,
+    UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use session::{Session, SessionError, TurnInjectionBridge};
 pub use session_graph::{
