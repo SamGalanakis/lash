@@ -3,7 +3,7 @@ members = ["lash-sansio", "lash", "lash-default-tools", "lash-ui", "lash-tui", "
 resolver = "3"
 
 [workspace.package]
-version = "0.2.48"
+version = "0.2.49"
 license = "MIT"
 
 [profile.release]
