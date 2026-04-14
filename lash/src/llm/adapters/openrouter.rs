@@ -845,6 +845,7 @@ impl LlmTransport for OpenAiGenericAdapter {
             .json(&body);
         let resp = send_request(
             request,
+            request_body.clone(),
             response_start_timeout(
                 self.request_timeout,
                 self.chunk_timeout,
@@ -881,6 +882,7 @@ impl LlmTransport for OpenAiGenericAdapter {
                 retryable: status.as_u16() == 429 || status.as_u16() >= 500,
                 raw: Some(text),
                 code: Some(status.as_u16().to_string()),
+                request_body,
             });
         }
 

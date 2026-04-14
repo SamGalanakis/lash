@@ -2200,6 +2200,7 @@ fn output_state_recovered_from_error() {
         kind: "runtime".to_string(),
         code: Some("example".to_string()),
         message: "something failed".to_string(),
+        raw: None,
     }];
     assert_eq!(
         classify_output_state("raw", "usable", &issues),
@@ -2720,6 +2721,71 @@ async fn standard_runtime_debug_log_records_stream_event_entries() {
     );
 
     let _ = std::fs::remove_file(&log_path);
+}
+
+#[tokio::test]
+async fn standard_runtime_debug_log_records_failed_llm_calls() {
+    let transport = MockTransport::new(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Err(crate::llm::transport::LlmTransportError::new(
+            "HTTP request failed: builder error",
+        )
+        .with_code("builder")
+        .with_raw("transport raw body")
+        .with_request_body("{\"model\":\"mock-model\"}")),
+    }]);
+    let log_path = std::env::temp_dir().join(format!(
+        "lash-standard-debug-log-error-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let mut runtime = standard_runtime_with_transport_and_host(
+        transport,
+        test_host_config_with_llm_log_path(log_path.clone()),
+    )
+    .await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert_eq!(turn.status, TurnStatus::Failed);
+    assert_eq!(turn.errors.len(), 1);
+    assert_eq!(turn.errors[0].raw.as_deref(), Some("transport raw body"));
+
+    let logged = std::fs::read_to_string(&log_path).expect("read log");
+    let entries = logged
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json log entry"))
+        .collect::<Vec<_>>();
+    let error_entry = entries
+        .iter()
+        .find(|entry| entry.get("kind").and_then(|v| v.as_str()) == Some("llm_error"))
+        .expect("llm error entry");
+    assert_eq!(
+        error_entry["error"]["message"].as_str(),
+        Some("HTTP request failed: builder error")
+    );
+    assert_eq!(error_entry["error"]["code"].as_str(), Some("builder"));
+    assert_eq!(error_entry["raw"].as_str(), Some("transport raw body"));
+    assert_eq!(
+        error_entry["request"].as_str(),
+        Some("{\"model\":\"mock-model\"}")
+    );
 }
 
 #[test]

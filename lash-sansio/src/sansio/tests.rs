@@ -129,6 +129,31 @@ fn find_llm_debug(effects: &[Effect]) -> Option<(TokenUsage, String, Option<Valu
     })
 }
 
+fn find_llm_error(
+    effects: &[Effect],
+) -> Option<(String, bool, Option<String>, Option<String>, Option<String>)> {
+    effects.iter().find_map(|e| match e {
+        Effect::Log {
+            event:
+                LogEvent::LlmError {
+                    message,
+                    retryable,
+                    raw,
+                    code,
+                    request_body,
+                    ..
+                },
+        } => Some((
+            message.clone(),
+            *retryable,
+            raw.clone(),
+            code.clone(),
+            request_body.clone(),
+        )),
+        _ => None,
+    })
+}
+
 // ─── Standard tests ───
 
 #[test]
@@ -473,6 +498,7 @@ fn standard_retryable_error_sleeps_then_retries() {
             retryable: true,
             raw: None,
             code: None,
+            request_body: None,
         }),
     });
 
@@ -518,6 +544,7 @@ fn standard_retryable_error_exhaustion_emits_error_and_done() {
                 retryable: true,
                 raw: None,
                 code: Some("http_500".to_string()),
+                request_body: None,
             }),
         });
 
@@ -547,6 +574,7 @@ fn standard_retryable_error_exhaustion_emits_error_and_done() {
             retryable: true,
             raw: None,
             code: Some("http_500".to_string()),
+            request_body: None,
         }),
     });
 
@@ -573,6 +601,7 @@ fn standard_fatal_error_emits_done() {
             retryable: false,
             raw: None,
             code: None,
+            request_body: None,
         }),
     });
 
@@ -979,6 +1008,38 @@ fn llm_debug_log_preserves_tool_call_only_responses() {
             "input_json": r#"{"path":"foo.txt"}"#,
         })]))
     );
+}
+
+#[test]
+fn llm_debug_log_records_failed_calls() {
+    let mut config = test_config(ExecutionMode::Standard);
+    config.emit_llm_debug_log = true;
+    let msgs = vec![user_message("hello")];
+    let mut machine = TurnMachine::new(config, msgs, 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Err(LlmCallError {
+            message: "HTTP request failed: builder error".to_string(),
+            retryable: false,
+            raw: Some("transport raw".to_string()),
+            code: Some("builder".to_string()),
+            request_body: Some("{\"model\":\"x\"}".to_string()),
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (message, retryable, raw, code, request_body) =
+        find_llm_error(&effects).expect("llm error log");
+    assert_eq!(message, "HTTP request failed: builder error");
+    assert!(!retryable);
+    assert_eq!(raw.as_deref(), Some("transport raw"));
+    assert_eq!(code.as_deref(), Some("builder"));
+    assert_eq!(request_body.as_deref(), Some("{\"model\":\"x\"}"));
 }
 
 #[test]

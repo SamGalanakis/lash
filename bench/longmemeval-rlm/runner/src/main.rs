@@ -802,7 +802,7 @@ fn build_globals_patch(question: &LongMemEvalQuestion) -> RlmGlobalsPatchPluginB
 fn build_prompt(
     question: &BenchmarkQuestionContext,
     profile: PromptProfile,
-    _session_tools: bool,
+    session_tools: bool,
 ) -> String {
     let profile_guidance = match profile {
         PromptProfile::Baseline => None,
@@ -824,6 +824,11 @@ fn build_prompt(
             .unwrap_or("unknown"),
         user_question = question.question.question,
     );
+    if !session_tools {
+        prompt.push_str(
+            "\n- do not invent retrieval or search tools\n- start by judging the size of the provided history and plan accordingly\n- if the history is large, narrow to likely sessions or date ranges before inspecting details\n- use `delegate` for focused subproblems; keep each delegate bounded and concrete\n- avoid observing or printing the entire history unless it is already small",
+        );
+    }
     if let Some(extra) = profile_guidance {
         prompt.push_str("\n\n");
         prompt.push_str(extra);
@@ -832,13 +837,75 @@ fn build_prompt(
 }
 
 fn prompt_overrides(profile: PromptProfile, session_tools: bool) -> Vec<PromptSectionOverride> {
-    let mut overrides = vec![PromptSectionOverride {
-        section: PromptSectionName::Intro,
-        block: None,
-        mode: PromptOverrideMode::Prepend,
-        content: "This is a memory question over prior conversation history, not a coding task."
-            .to_string(),
-    }];
+    let mut overrides = vec![
+        PromptSectionOverride {
+            section: PromptSectionName::Intro,
+            block: None,
+            mode: PromptOverrideMode::Replace,
+            content: "You are answering a memory question over prior conversation history."
+                .to_string(),
+        },
+        PromptSectionOverride {
+            section: PromptSectionName::Execution,
+            block: None,
+            mode: PromptOverrideMode::Replace,
+            content: if session_tools {
+                r#"In this mode you work by writing `lashlang` code inside your response and the runtime executes it.
+
+Format each work step like this:
+
+````
+Brief reasoning here in plain prose.
+
+```lashlang
+result = call tool_name { arg: value }
+observe result
+```
+````
+
+- Wrap each work step in exactly one ` ```lashlang ` fenced block. Only the first block runs per turn.
+- Keep prose short. It is only a compact reasoning trace.
+- After each result, either write another fenced block to continue or finish in plain prose with no fenced block.
+- When you are done, reply with plain prose only.
+- Variables persist across iterations.
+- If the prompt includes bound variables, use them directly.
+- Call tools with `call tool_name { arg: expr }`.
+- Start background work with `start call tool_name { arg: expr }`, wait with `await handle`, and stop it with `cancel handle`.
+- Use `observe expr` to inspect values before deciding the next step.
+- Break large tasks into smaller, bounded steps instead of brute-force scanning."#
+                    .to_string()
+            } else {
+                r#"In this mode you work by writing `lashlang` code inside your response and the runtime executes it.
+
+Format each work step like this:
+
+````
+Brief reasoning here in plain prose.
+
+```lashlang
+candidate = call delegate { task: "narrow the search to likely sessions", intelligence: "low" }
+observe candidate
+```
+````
+
+- Wrap each work step in exactly one ` ```lashlang ` fenced block. Only the first block runs per turn.
+- Keep prose short. It is only a compact reasoning trace.
+- After each result, either write another fenced block to continue or finish in plain prose with no fenced block.
+- When you are done, reply with plain prose only.
+- Variables persist across iterations.
+- If the prompt includes bound variables, use them directly.
+- In this run, do not assume any retrieval or search tools exist. The only helper tool is `delegate`.
+- If there is no Available Tools section, do not invent tool names.
+- Start by checking the size and shape of the bound input so you can plan the search.
+- If the history is large, work hierarchically: narrow candidate sessions or date ranges first, then inspect those candidates, then verify the final answer.
+- Use `delegate` for focused recursive subproblems such as narrowing candidate sessions, extracting date candidates, or verifying one hypothesis.
+- Keep each delegate bounded and concrete. Do not fan out one delegate per session unless the narrowed candidate set is already small.
+- Use `observe expr` to inspect values before deciding the next step.
+- Avoid observing or printing the entire haystack unless it is already small."#
+                    .to_string()
+            },
+        },
+    ];
     if matches!(profile, PromptProfile::TemporalObservations) {
         overrides.push(PromptSectionOverride {
             section: PromptSectionName::Execution,

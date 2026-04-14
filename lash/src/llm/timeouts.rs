@@ -65,14 +65,20 @@ where
 
 pub async fn send_request(
     request: reqwest::RequestBuilder,
+    request_body: Option<String>,
     timeout: Option<Duration>,
     timeout_message: &str,
 ) -> Result<reqwest::Response, LlmTransportError> {
     run_with_timeout(
         async move {
             request.send().await.map_err(|e| {
-                LlmTransportError::new(format!("HTTP request failed: {e}"))
-                    .retryable(is_retryable_http_error(&e))
+                let error = LlmTransportError::new(format!("HTTP request failed: {e}"))
+                    .retryable(is_retryable_http_error(&e));
+                if let Some(request_body) = request_body {
+                    error.with_request_body(request_body)
+                } else {
+                    error
+                }
             })
         },
         timeout,

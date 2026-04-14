@@ -711,7 +711,12 @@ impl PluginHost {
     }
 
     pub fn new(factories: Vec<Arc<dyn PluginFactory>>) -> Self {
+        let override_ids: BTreeSet<&'static str> =
+            factories.iter().map(|factory| factory.id()).collect();
         let mut all_factories = super::builtin_mode_plugin_factories();
+        if !override_ids.is_empty() {
+            all_factories.retain(|factory| !override_ids.contains(factory.id()));
+        }
         all_factories.extend(factories);
         Self {
             factories: Arc::new(all_factories),

@@ -188,6 +188,7 @@ pub struct Session {
     tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
     scratch_dir: tempfile::TempDir,
+    rlm_observe_projection_config: crate::ToolResultProjectionPluginConfig,
     execution_surface_cache:
         std::sync::Mutex<Vec<(ExecutionSurfaceCacheKey, ExecutionSurfaceHandle)>>,
     async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
@@ -215,6 +216,7 @@ impl Session {
             tool_images: Vec::new(),
             message_tx: None,
             scratch_dir,
+            rlm_observe_projection_config: crate::ToolResultProjectionPluginConfig::default(),
             execution_surface_cache: std::sync::Mutex::new(Vec::new()),
             async_tool_handles: Arc::new(StdMutex::new(HashMap::new())),
         };
@@ -235,6 +237,13 @@ impl Session {
 
     pub fn supports_repl(&self) -> bool {
         self.rlm_runtime.is_some()
+    }
+
+    pub(crate) fn set_rlm_observe_projection_config(
+        &mut self,
+        config: crate::ToolResultProjectionPluginConfig,
+    ) {
+        self.rlm_observe_projection_config = config;
     }
 
     pub(crate) async fn start_rlm_runtime(&mut self, session_id: &str) -> Result<(), SessionError> {
@@ -1021,6 +1030,7 @@ impl Session {
         self.runtime()?.send(LashlangRequest::Reconfigure {
             tools_json: tools_json.clone(),
             generation,
+            observe_projection: self.rlm_observe_projection_config.clone(),
         })?;
 
         loop {
@@ -1057,6 +1067,7 @@ impl Session {
         self.runtime()?.send(LashlangRequest::Init {
             tools_json: tools_json.clone(),
             session_id: session_id.to_string(),
+            observe_projection: self.rlm_observe_projection_config.clone(),
         })?;
 
         match self.runtime()?.recv()? {
@@ -1615,5 +1626,62 @@ observe "cancelled"
             "observations were: {:?}",
             response.observations
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rlm_run_code_caps_observe_output_via_mode_plugin_config() {
+        let plugin_host = PluginHost::new(vec![Arc::new(crate::BuiltinRlmModePluginFactory::new(
+            crate::RlmModePluginConfig {
+                observe_projection: crate::ToolResultProjectionPluginConfig {
+                    mode: crate::ToolResultProjectionMode::Bytes,
+                    limit: 24,
+                    max_lines: 2,
+                },
+            },
+        ))]);
+        let plugin_session = plugin_host
+            .build_session(
+                "root",
+                crate::ExecutionMode::Rlm,
+                crate::ContextApproach::default(),
+                None,
+            )
+            .expect("plugin session");
+        let mut session = Session::new(
+            crate::RuntimeServices::new(plugin_session),
+            "root",
+            crate::ExecutionMode::Rlm,
+        )
+        .await
+        .expect("session");
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+
+        let response = session
+            .run_code(
+                "root",
+                manager,
+                &event_tx,
+                r#"
+observe "abcdefghijklmnopqrstuvwxyz0123456789"
+"#,
+                false,
+            )
+            .await
+            .expect("exec response");
+
+        assert!(
+            response.error.is_none(),
+            "unexpected rlm error: {:?}",
+            response.error
+        );
+        let observation = response
+            .observations
+            .first()
+            .expect("expected one observation");
+        assert!(observation.contains("truncated"));
+        assert!(observation.contains("observe output was capped at 24 bytes and 2 lines max"));
+        assert!(observation.contains("Use a narrower `observe` expression"));
     }
 }

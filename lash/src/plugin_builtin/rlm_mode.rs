@@ -8,14 +8,16 @@ use crate::plugin::{
     ModeTurnConfig, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
 };
-use crate::{ExecutionMode, ProgressSender, SessionError, ToolResult};
+use crate::{
+    ExecutionMode, ProgressSender, SessionError, ToolResult, ToolResultProjectionPluginConfig,
+};
 
 use self::rlm_support::{
     SearchToolsProvider, bound_variables_prompt_contributions, tool_discovery_prompt_contributions,
     tool_surface_contribution,
 };
 
-const RLM_EXECUTION_SECTION: &str = r#"In this mode you write `lashlang` code inside your prose response and the runtime executes it. There is no native tool-call envelope — you embed code directly.
+const RLM_EXECUTION_SECTION_BASE: &str = r#"In this mode you write `lashlang` code inside your prose response and the runtime executes it. There is no native tool-call envelope — you embed code directly.
 
 Format every work step like this:
 
@@ -23,8 +25,8 @@ Format every work step like this:
 Brief reasoning here in plain prose (one or two sentences is fine).
 
 ```lashlang
-files = call ls { path: "." }
-observe files
+result = call tool_name { arg: value }
+observe result
 ```
 ````
 
@@ -66,9 +68,45 @@ observe files
 - Keep each step concrete and bounded instead of attempting the whole task at once.
 - Use `start`/`await` when a long-running tool can make progress in the background while you do other work. This is especially useful for `delegate`."#;
 
-pub(crate) struct RlmModePluginFactory;
+fn rlm_execution_section(observe_projection: &ToolResultProjectionPluginConfig) -> String {
+    let mut prompt = String::from(RLM_EXECUTION_SECTION_BASE);
+    prompt.push_str("\n\n");
+    prompt.push_str(&format!(
+        "Observe output is capped before reinjection using the current RLM observe limit (mode: `{}`, limit: {}, max_lines: {}). If you see a cap/truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
+        match observe_projection.mode {
+            crate::ToolResultProjectionMode::Bytes => "bytes",
+            crate::ToolResultProjectionMode::Tokens => "tokens",
+        },
+        observe_projection.limit,
+        observe_projection.max_lines,
+    ));
+    prompt
+}
 
-impl PluginFactory for RlmModePluginFactory {
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+pub struct RlmModePluginConfig {
+    pub observe_projection: ToolResultProjectionPluginConfig,
+}
+
+pub struct BuiltinRlmModePluginFactory {
+    config: RlmModePluginConfig,
+}
+
+impl BuiltinRlmModePluginFactory {
+    pub fn new(config: RlmModePluginConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Default for BuiltinRlmModePluginFactory {
+    fn default() -> Self {
+        Self::new(RlmModePluginConfig::default())
+    }
+}
+
+impl PluginFactory for BuiltinRlmModePluginFactory {
     fn id(&self) -> &'static str {
         "mode_rlm"
     }
@@ -77,6 +115,7 @@ impl PluginFactory for RlmModePluginFactory {
         Ok(Arc::new(RlmModePlugin {
             active: matches!(ctx.execution_mode, ExecutionMode::Rlm),
             provider: Arc::new(SearchToolsProvider::new()),
+            config: self.config.clone(),
         }))
     }
 }
@@ -84,6 +123,7 @@ impl PluginFactory for RlmModePluginFactory {
 struct RlmModePlugin {
     active: bool,
     provider: Arc<SearchToolsProvider>,
+    config: RlmModePluginConfig,
 }
 
 impl SessionPlugin for RlmModePlugin {
@@ -95,8 +135,12 @@ impl SessionPlugin for RlmModePlugin {
         if !self.active {
             return Ok(());
         }
-        reg.mode().execution(Arc::new(RlmModeExecution))?;
-        reg.mode().session(Arc::new(RlmModeSession))?;
+        reg.mode().execution(Arc::new(RlmModeExecution {
+            config: self.config.clone(),
+        }))?;
+        reg.mode().session(Arc::new(RlmModeSession {
+            config: self.config.clone(),
+        }))?;
         reg.mode().native_tools(Arc::new(RlmModeNativeTools))?;
         reg.tools()
             .provider(Arc::clone(&self.provider) as Arc<dyn crate::ToolProvider>)?;
@@ -113,7 +157,9 @@ impl SessionPlugin for RlmModePlugin {
     }
 }
 
-struct RlmModeExecution;
+struct RlmModeExecution {
+    config: RlmModePluginConfig,
+}
 
 impl ModeExecutionPlugin for RlmModeExecution {
     fn build_execution_preamble(
@@ -144,7 +190,7 @@ impl ModeExecutionPlugin for RlmModeExecution {
             tool_specs: Arc::new(Vec::new()),
             tool_names: enabled_tools.iter().map(|tool| tool.name.clone()).collect(),
             omitted_tool_count,
-            execution_prompt: RLM_EXECUTION_SECTION.to_string(),
+            execution_prompt: rlm_execution_section(&self.config.observe_projection),
             prompt_contributions,
         }
     }
@@ -157,7 +203,9 @@ impl ModeExecutionPlugin for RlmModeExecution {
     }
 }
 
-struct RlmModeSession;
+struct RlmModeSession {
+    config: RlmModePluginConfig,
+}
 
 #[async_trait::async_trait]
 impl ModeSessionPlugin for RlmModeSession {
@@ -166,6 +214,7 @@ impl ModeSessionPlugin for RlmModeSession {
         session: &mut crate::Session,
         session_id: &str,
     ) -> Result<(), SessionError> {
+        session.set_rlm_observe_projection_config(self.config.observe_projection.clone());
         session.start_rlm_runtime(session_id).await
     }
 
@@ -238,5 +287,22 @@ impl ModeNativeToolsPlugin for RlmModeNativeTools {
         _progress: Option<&ProgressSender>,
     ) -> Option<ToolResult> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_prompt_mentions_observe_cap_guidance() {
+        let prompt = rlm_execution_section(&ToolResultProjectionPluginConfig {
+            mode: crate::ToolResultProjectionMode::Tokens,
+            limit: 321,
+            max_lines: 17,
+        });
+        assert!(prompt.contains("Observe output is capped before reinjection"));
+        assert!(prompt.contains("mode: `tokens`, limit: 321, max_lines: 17"));
+        assert!(prompt.contains("narrow the expression"));
     }
 }

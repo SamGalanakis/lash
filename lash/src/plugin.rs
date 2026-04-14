@@ -1522,6 +1522,7 @@ mod rolling_history;
 mod standard_mode;
 
 pub use observational_memory::ObservationalMemoryPluginFactory;
+pub use rlm_mode::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
 pub use rolling_history::RollingHistoryPluginFactory;
 
 pub use runtime_impl::{
@@ -1536,12 +1537,13 @@ pub use tool_result_projection_builtin::{
 };
 pub(crate) use tool_result_projection_builtin::{
     DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
+    truncate_observation_text,
 };
 
 pub(crate) fn builtin_mode_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     vec![
         Arc::new(standard_mode::StandardModePluginFactory),
-        Arc::new(rlm_mode::RlmModePluginFactory),
+        Arc::new(rlm_mode::BuiltinRlmModePluginFactory::default()),
     ]
 }
 

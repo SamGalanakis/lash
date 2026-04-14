@@ -11,6 +11,7 @@ pub struct LlmTransportError {
     pub retryable: bool,
     pub raw: Option<String>,
     pub code: Option<String>,
+    pub request_body: Option<String>,
 }
 
 impl LlmTransportError {
@@ -20,6 +21,7 @@ impl LlmTransportError {
             retryable: false,
             raw: None,
             code: None,
+            request_body: None,
         }
     }
 
@@ -35,6 +37,11 @@ impl LlmTransportError {
 
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         self.code = Some(code.into());
+        self
+    }
+
+    pub fn with_request_body(mut self, request_body: impl Into<String>) -> Self {
+        self.request_body = Some(request_body.into());
         self
     }
 }

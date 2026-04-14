@@ -973,6 +973,8 @@ pub struct TurnIssue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
 }
 
 /// Canonical high-level turn result returned to hosts.
@@ -1189,15 +1191,20 @@ impl TurnAssembler {
                 self.last_llm_usage = Some(usage.clone());
             }
             SessionEvent::Error { message, envelope } => {
-                let (kind, code) = if let Some(envelope) = envelope {
-                    (envelope.kind.clone(), envelope.code.clone())
+                let (kind, code, raw) = if let Some(envelope) = envelope {
+                    (
+                        envelope.kind.clone(),
+                        envelope.code.clone(),
+                        envelope.raw.clone(),
+                    )
                 } else {
-                    ("runtime".to_string(), None)
+                    ("runtime".to_string(), None, None)
                 };
                 self.issues.push(TurnIssue {
                     kind,
                     code,
                     message: message.clone(),
+                    raw,
                 });
             }
             SessionEvent::Done => {
@@ -2296,6 +2303,7 @@ impl LashRuntime {
                 kind: "plugin".to_string(),
                 code: Some(abort.code),
                 message: abort.message.clone(),
+                raw: None,
             };
             let error_event = SessionEvent::Error {
                 message: abort.message,
@@ -2369,6 +2377,7 @@ impl LashRuntime {
                                 kind: "runtime".to_string(),
                                 code: Some("run_task_join_failed".to_string()),
                                 message: format!("Runtime turn task failed: {e}"),
+                                raw: None,
                             };
                             return Ok(assembler.finish(
                                 self.state.export_state(),

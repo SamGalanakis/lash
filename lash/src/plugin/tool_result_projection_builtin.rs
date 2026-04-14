@@ -251,7 +251,22 @@ fn formatted_truncate_text(
     if !needs_truncation(text, config) {
         return text.to_string();
     }
-    truncate_text(text, config, direction, ctx)
+    truncate_text_with_hint(text, config, direction, truncation_hint(ctx, text))
+}
+
+pub(crate) fn truncate_observation_text(
+    text: &str,
+    config: &ToolResultProjectionPluginConfig,
+) -> String {
+    if !needs_truncation(text, config) {
+        return text.to_string();
+    }
+    truncate_text_with_hint(
+        text,
+        config,
+        ProjectionDirection::Head,
+        observation_truncation_hint(text, config),
+    )
 }
 
 fn truncate_text(
@@ -259,6 +274,15 @@ fn truncate_text(
     config: &ToolResultProjectionPluginConfig,
     direction: ProjectionDirection,
     ctx: Option<&ToolResultProjectionContext>,
+) -> String {
+    truncate_text_with_hint(text, config, direction, truncation_hint(ctx, text))
+}
+
+fn truncate_text_with_hint(
+    text: &str,
+    config: &ToolResultProjectionPluginConfig,
+    direction: ProjectionDirection,
+    hint: String,
 ) -> String {
     if text.is_empty() {
         return String::new();
@@ -325,7 +349,6 @@ fn truncate_text(
     } else {
         "lines"
     };
-    let hint = truncation_hint(ctx, text);
     match direction {
         ProjectionDirection::Head => {
             format!("{preview}\n\n...{removed} {unit} truncated...\n\n{hint}")
@@ -386,6 +409,22 @@ fn truncation_hint(ctx: Option<&ToolResultProjectionContext>, text: &str) -> Str
         ),
         None => "The tool output was truncated. Use `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.".to_string(),
     }
+}
+
+fn observation_truncation_hint(text: &str, config: &ToolResultProjectionPluginConfig) -> String {
+    let limit_unit = match config.mode {
+        ToolResultProjectionMode::Bytes => "bytes",
+        ToolResultProjectionMode::Tokens => "tokens",
+    };
+    let total_units = match config.mode {
+        ToolResultProjectionMode::Bytes => text.len(),
+        ToolResultProjectionMode::Tokens => approx_token_count(text),
+    };
+    let total_lines = text.lines().count();
+    format!(
+        "The observe output was capped at {} {} and {} lines max; original size was {} {} across {} lines. Use a narrower `observe` expression to inspect specific fields or slices instead of dumping the whole value at once.",
+        config.limit, limit_unit, config.max_lines, total_units, limit_unit, total_lines
+    )
 }
 
 fn spill_tool_output(
@@ -736,5 +775,18 @@ mod tests {
             },
         );
         assert_eq!(projected.result, json!("Path does not exist: nope.txt"));
+    }
+
+    #[test]
+    fn observation_truncation_uses_shared_limits_and_hint() {
+        let config = ToolResultProjectionPluginConfig {
+            mode: ToolResultProjectionMode::Bytes,
+            limit: 12,
+            max_lines: 2,
+        };
+        let projected = truncate_observation_text("line one\nline two\nline three", &config);
+        assert!(projected.contains("truncated"));
+        assert!(projected.contains("observe output was capped at 12 bytes and 2 lines max"));
+        assert!(projected.contains("Use a narrower `observe` expression"));
     }
 }

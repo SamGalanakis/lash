@@ -463,6 +463,7 @@ pub(crate) async fn run(
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
+        let session_db_path = db_path.to_string_lossy().to_string();
         println!(
             "{}",
             info_text(
@@ -476,6 +477,8 @@ pub(crate) async fn run(
                 &toolset_hash,
                 &cwd,
                 None,
+                run_session_id.as_deref(),
+                Some(&session_db_path),
             )
         );
         return Ok(());

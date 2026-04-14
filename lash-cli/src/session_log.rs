@@ -136,6 +136,10 @@ impl SessionLogger {
         &self.store
     }
 
+    pub fn db_path(&self) -> PathBuf {
+        sessions_dir().join(&self.filename)
+    }
+
     pub fn mark_as_child_of(&self, parent_session_id: &str) -> Result<()> {
         let meta = self
             .store

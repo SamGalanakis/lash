@@ -529,6 +529,8 @@ pub(crate) fn info_text(
     toolset_hash: &str,
     cwd: &str,
     session_name: Option<&str>,
+    session_id: Option<&str>,
+    session_db_path: Option<&str>,
 ) -> String {
     let resolved_model = provider.resolve_model(configured_model);
     let mut lines = vec![
@@ -555,6 +557,12 @@ pub(crate) fn info_text(
         format!("cwd: {}", cwd),
         format!("session: {}", session_name.unwrap_or("(not started)")),
     ]);
+    if let Some(session_id) = session_id {
+        lines.push(format!("session id: {}", session_id));
+    }
+    if let Some(session_db_path) = session_db_path {
+        lines.push(format!("session db: {}", session_db_path));
+    }
 
     lines.join(
         "
@@ -844,5 +852,31 @@ mod tests {
         )
         .expect_err("expected validation error");
         assert!(err.contains("observational_memory"));
+    }
+
+    #[test]
+    fn info_text_includes_session_id_and_db_path() {
+        let provider = Provider::OpenAiGeneric {
+            api_key: "test".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            options: Default::default(),
+        };
+        let text = info_text(
+            &provider,
+            "google/gemini-3-flash-preview",
+            None,
+            ExecutionMode::Rlm,
+            &lash::ContextApproach::default(),
+            Some(123_000),
+            7,
+            "abcd1234",
+            "/tmp/demo",
+            Some("demo-session"),
+            Some("sess-123"),
+            Some("/tmp/demo/session.db"),
+        );
+        assert!(text.contains("session: demo-session"));
+        assert!(text.contains("session id: sess-123"));
+        assert!(text.contains("session db: /tmp/demo/session.db"));
     }
 }
