@@ -6,8 +6,8 @@ use std::sync::{Arc, OnceLock};
 use crate::llm::types::LlmResponse;
 use crate::runtime::AssembledTurn;
 use crate::{
-    ExecutionMode, MessageRole, SessionPolicy, SessionStateEnvelope, ToolDefinition, ToolProvider,
-    ToolResult, TurnInput,
+    ContextApproachKind, ExecutionMode, MessageRole, SessionPolicy, SessionStateEnvelope,
+    ToolDefinition, ToolProvider, ToolResult, TurnInput,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -18,9 +18,7 @@ pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> +
 pub type PluginRuntimeEventHook = Arc<dyn Fn(PluginRuntimeEvent) -> PluginFuture<()> + Send + Sync>;
 pub type PluginBackgroundJob = PluginFuture<()>;
 pub type SessionConfigMutator = Arc<
-    dyn Fn(SessionConfigChangedContext, SessionStateEnvelope) -> PluginFuture<SessionStateEnvelope>
-        + Send
-        + Sync,
+    dyn Fn(SessionConfigChangedContext, SessionPolicy) -> PluginFuture<SessionPolicy> + Send + Sync,
 >;
 pub type ExternalInvokeFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
 pub type ExternalInvokeHandler =
@@ -1358,8 +1356,8 @@ pub trait SessionPlugin: Send + Sync {
 
 pub trait PluginFactory: Send + Sync {
     fn id(&self) -> &'static str;
-    fn supports_context_approach(&self, _approach: &crate::ContextApproach) -> bool {
-        false
+    fn supported_context_approaches(&self) -> &'static [ContextApproachKind] {
+        &[]
     }
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError>;
 }

@@ -28,9 +28,9 @@ use crate::session_model::{
 };
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
-    CheckpointKind, ExecutionMode, ExternalInvokeError, PromptHookContext, RuntimeServices,
-    SandboxMessage, Session, SessionCreateRequest, SessionError, SessionHandle, SessionManager,
-    SessionSnapshot, SessionStartPoint, ToolCallRecord,
+    CheckpointKind, ExecutionMode, ExternalInvokeError, PersistedTurnState, PromptHookContext,
+    RuntimeServices, SandboxMessage, Session, SessionCreateRequest, SessionError, SessionHandle,
+    SessionManager, SessionSnapshot, SessionStartPoint, ToolCallRecord,
 };
 
 use host::*;
@@ -386,6 +386,66 @@ impl SessionStateEnvelope {
 
     pub fn read_view(&self) -> crate::SessionReadView {
         crate::SessionReadView::from_runtime_state(self)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimePersistenceState {
+    state: SessionStateEnvelope,
+}
+
+impl RuntimePersistenceState {
+    pub fn from_state(state: SessionStateEnvelope) -> Self {
+        Self { state }
+    }
+
+    pub fn into_state(self) -> SessionStateEnvelope {
+        self.state
+    }
+
+    pub fn state(&self) -> &SessionStateEnvelope {
+        &self.state
+    }
+
+    pub(crate) fn state_mut(&mut self) -> &mut SessionStateEnvelope {
+        &mut self.state
+    }
+
+    pub fn session_graph(&self) -> &crate::SessionGraph {
+        &self.state.session_graph
+    }
+
+    pub fn policy(&self) -> &SessionPolicy {
+        &self.state.policy
+    }
+
+    pub fn turn_state(&self) -> PersistedTurnState {
+        PersistedTurnState {
+            iteration: self.state.iteration,
+            token_usage: self.state.token_usage.clone(),
+            last_prompt_usage: self.state.last_prompt_usage.clone(),
+        }
+    }
+
+    pub fn token_ledger(&self) -> &[TokenLedgerEntry] {
+        &self.state.token_ledger
+    }
+
+    pub fn stamp_runtime_state(
+        &mut self,
+        dynamic_state: Option<&crate::DynamicStateSnapshot>,
+        plugin_snapshot: Option<&crate::PluginSessionSnapshot>,
+    ) {
+        self.state
+            .stamp_runtime_state(dynamic_state, plugin_snapshot);
+    }
+
+    pub fn set_execution_state_snapshot(&mut self, execution_state_snapshot: Option<Vec<u8>>) {
+        self.state.execution_state_snapshot = execution_state_snapshot;
+    }
+
+    pub fn execution_state_snapshot(&self) -> Option<&[u8]> {
+        self.state.execution_state_snapshot.as_deref()
     }
 }
 
@@ -1398,6 +1458,15 @@ impl LashRuntime {
         self.state.clone()
     }
 
+    /// Export the narrow persistence snapshot used by stores and resume logic.
+    pub fn export_persistence_state(&self) -> RuntimePersistenceState {
+        RuntimePersistenceState::from_state(self.state.clone())
+    }
+
+    pub fn apply_persistence_state(&mut self, state: RuntimePersistenceState) {
+        self.set_state(state.into_state());
+    }
+
     pub(crate) fn export_graph_first_state(&self) -> SessionStateEnvelope {
         self.state.clone()
     }
@@ -1596,7 +1665,7 @@ impl LashRuntime {
         let Ok(host) = self.runtime_session_manager() else {
             return;
         };
-        self.state = session
+        self.policy = session
             .plugins()
             .mutate_session_config(
                 SessionConfigChangedContext {
@@ -1605,10 +1674,10 @@ impl LashRuntime {
                     current,
                     host,
                 },
-                self.state.clone(),
+                self.policy.clone(),
             )
             .await;
-        normalize_session_graph(&mut self.state);
+        self.state.policy = self.policy.clone();
     }
 
     /// Replace the host-owned state envelope.

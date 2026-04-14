@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use lash::DynamicStateSnapshot;
 
 use crate::app::UiResumeState;
+use crate::persistence::{persist_committed_runtime_state, snapshot_execution_state};
 use crate::session_log::{self, SessionLogger};
 
 #[allow(clippy::too_many_arguments)]
@@ -15,12 +16,11 @@ async fn persist_parent_root_snapshot(
     ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
 ) -> Result<()> {
-    let mut state = runtime.export_state();
-    state.execution_state_snapshot = runtime
-        .snapshot_execution_state()
+    let mut state = runtime.export_persistence_state();
+    snapshot_execution_state(runtime, &mut state)
         .await
         .context("Failed to snapshot execution state for fork")?;
-    crate::persist_root_session_state(store, &mut state, ui_state, dynamic_state);
+    persist_committed_runtime_state(store, &mut state, ui_state, dynamic_state);
     Ok(())
 }
 
@@ -544,15 +544,31 @@ fn materialize_child_from_graph(
     graph: &lash::SessionGraph,
     config: &lash::PersistedSessionConfig,
     checkpoint_ref: Option<&lash::BlobRef>,
+    live_delta: Option<&lash::LiveResumeDelta>,
     ui_state: &UiResumeState,
     persist_live_graph: bool,
 ) {
     let child_graph = graph.fork_current_path();
-    let child_checkpoint_ref = checkpoint_ref.and_then(|blob_ref| {
-        parent_store
-            .get_checkpoint(blob_ref)
-            .map(|checkpoint| child_store.put_checkpoint(&checkpoint).checkpoint_ref)
-    });
+    let child_checkpoint_ref = live_delta
+        .map(|delta| {
+            child_store
+                .put_checkpoint(&lash::HydratedSessionCheckpoint {
+                    turn_state: delta.turn_state.clone(),
+                    dynamic_state_ref: None,
+                    dynamic_state: delta.dynamic_state.clone(),
+                    plugin_snapshot_ref: None,
+                    plugin_snapshot_revision: None,
+                    plugin_snapshot: delta.plugin_snapshot.clone(),
+                })
+                .checkpoint_ref
+        })
+        .or_else(|| {
+            checkpoint_ref.and_then(|blob_ref| {
+                parent_store
+                    .get_checkpoint(blob_ref)
+                    .map(|checkpoint| child_store.put_checkpoint(&checkpoint).checkpoint_ref)
+            })
+        });
     child_store.save_session_head(lash::SessionHead {
         graph: child_graph.clone(),
         config: config.clone(),
@@ -592,12 +608,17 @@ pub async fn fork_current_session(
                     .store()
                     .get_typed_blob::<lash::LiveResumeDelta>(blob_ref)
             });
-            let graph = lash::materialize_live_resume_graph(&snapshot, delta.as_ref());
-            lash::LiveResumeSnapshot {
-                graph: forkable_live_graph(&graph),
-                delta_ref: None,
-                ..snapshot
-            }
+            (
+                lash::LiveResumeSnapshot {
+                    graph: forkable_live_graph(&lash::materialize_live_resume_graph(
+                        &snapshot,
+                        delta.as_ref(),
+                    )),
+                    delta_ref: None,
+                    ..snapshot
+                },
+                delta,
+            )
         })
     } else {
         None
@@ -636,13 +657,14 @@ pub async fn fork_current_session(
         child_session_name.clone(),
     )?;
     child_logger.mark_as_child_of(&logger.session_id)?;
-    if let Some(live_snapshot) = live_snapshot_for_fork.as_ref() {
+    if let Some((live_snapshot, live_delta)) = live_snapshot_for_fork.as_ref() {
         materialize_child_from_graph(
             child_store.as_ref(),
             logger.store().as_ref(),
             &live_snapshot.graph,
             &live_snapshot.config,
             live_snapshot.checkpoint_ref.as_ref(),
+            live_delta.as_ref(),
             ui_state,
             true,
         );
@@ -653,6 +675,7 @@ pub async fn fork_current_session(
             &parent_head.graph,
             &parent_head.config,
             parent_head.checkpoint_ref.as_ref(),
+            None,
             ui_state,
             false,
         );

@@ -246,8 +246,8 @@ impl PluginFactory for ObservationalMemoryPluginFactory {
         OBSERVATIONAL_MEMORY_PLUGIN_ID
     }
 
-    fn supports_context_approach(&self, approach: &ContextApproach) -> bool {
-        matches!(approach, ContextApproach::ObservationalMemory(_))
+    fn supported_context_approaches(&self) -> &'static [crate::ContextApproachKind] {
+        &[crate::ContextApproachKind::ObservationalMemory]
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {

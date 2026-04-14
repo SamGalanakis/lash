@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::{PreparedTurn, UiResumeState};
 use crate::input_items::build_items_from_editor_input;
-use crate::{persist_live_runtime_snapshot, persist_root_session_state};
+use crate::persistence::{
+    persist_committed_runtime_state, persist_live_runtime_state, snapshot_execution_state,
+};
 
 /// Returned by the spawned runtime task so callers can reclaim ownership.
 pub(crate) struct RuntimeRunResult {
@@ -114,15 +116,12 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
     }
 }
 
-pub(crate) fn live_resume_graph_from_state(state: &SessionStateEnvelope) -> SessionGraph {
-    state.session_graph.clone()
+pub(crate) fn live_resume_graph_from_state(graph: &SessionGraph) -> SessionGraph {
+    graph.clone()
 }
 
-pub(crate) fn pending_turn_graph(
-    state: &SessionStateEnvelope,
-    turn_input: &TurnInput,
-) -> SessionGraph {
-    let mut graph = live_resume_graph_from_state(state);
+pub(crate) fn pending_turn_graph(graph: &SessionGraph, turn_input: &TurnInput) -> SessionGraph {
+    let mut graph = live_resume_graph_from_state(graph);
     graph.append_message(turn_input_message(turn_input));
     graph
 }
@@ -134,66 +133,15 @@ pub(crate) fn persist_pending_turn(
     ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
 ) {
-    let persisted_state = runtime.export_state();
-    persist_live_runtime_snapshot(
+    let persistence_state = runtime.export_persistence_state();
+    persist_live_runtime_state(
         store,
-        Some(persisted_state.session_graph.clone()),
-        pending_turn_graph(&persisted_state, turn_input),
+        Some(persistence_state.session_graph().clone()),
+        pending_turn_graph(persistence_state.session_graph(), turn_input),
         ui_state,
+        &persistence_state,
         dynamic_state,
-        &persisted_state.policy,
-        lash::PersistedTurnState {
-            iteration: persisted_state.iteration,
-            token_usage: persisted_state.token_usage.clone(),
-            last_prompt_usage: persisted_state.last_prompt_usage.clone(),
-        },
-        &persisted_state.token_ledger,
-        None,
-        None,
     );
-}
-
-fn refresh_state_from_committed_graph(store: &Store, state: &mut SessionStateEnvelope) {
-    let Some(head) = store.load_session_head() else {
-        return;
-    };
-    let checkpoint = head
-        .checkpoint_ref
-        .as_ref()
-        .and_then(|blob_ref| store.get_checkpoint(blob_ref));
-    state.session_graph = head.graph;
-    state.checkpoint_ref = head.checkpoint_ref;
-    state.token_ledger = head.token_ledger;
-    state.persisted_graph_node_count = state.session_graph.nodes.len();
-    state.graph_replace_required = false;
-    if let Some(checkpoint) = checkpoint {
-        state.iteration = checkpoint.turn_state.iteration;
-        state.token_usage = checkpoint.turn_state.token_usage;
-        state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
-        state.dynamic_state_ref = checkpoint.dynamic_state_ref;
-        state.dynamic_state_generation = checkpoint
-            .dynamic_state
-            .as_ref()
-            .map(|snapshot| snapshot.base_generation);
-        state.dynamic_state_snapshot = None;
-        state.plugin_snapshot_ref = checkpoint.plugin_snapshot_ref;
-        state.plugin_snapshot = None;
-        state.execution_state_snapshot = None;
-    }
-}
-
-async fn snapshot_execution_state_into(
-    runtime: &mut LashRuntime,
-    state: &mut SessionStateEnvelope,
-) {
-    state.execution_state_snapshot = match runtime.snapshot_execution_state().await {
-        Ok(Some(blob)) => Some(blob),
-        Ok(None) => None,
-        Err(err) => {
-            tracing::warn!("failed to snapshot execution state for persistence: {err}");
-            None
-        }
-    };
 }
 
 pub(crate) async fn persist_runtime_turn_state(
@@ -204,29 +152,25 @@ pub(crate) async fn persist_runtime_turn_state(
     ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
 ) {
-    snapshot_execution_state_into(runtime, state).await;
+    let mut persistence_state = RuntimePersistenceState::from_state(state.clone());
+    if let Err(err) = snapshot_execution_state(runtime, &mut persistence_state).await {
+        tracing::warn!("{err:#}");
+    }
     if interrupted {
-        persist_live_runtime_snapshot(
+        persist_live_runtime_state(
             store,
             store.load_session_head().map(|head| head.graph),
-            live_resume_graph_from_state(state),
+            live_resume_graph_from_state(persistence_state.session_graph()),
             ui_state,
+            &persistence_state,
             dynamic_state,
-            &state.policy,
-            lash::PersistedTurnState {
-                iteration: state.iteration,
-                token_usage: state.token_usage.clone(),
-                last_prompt_usage: state.last_prompt_usage.clone(),
-            },
-            &state.token_ledger,
-            state.plugin_snapshot.as_ref(),
-            state.execution_state_snapshot.as_deref(),
         );
     } else {
-        refresh_state_from_committed_graph(store, state);
-        persist_root_session_state(store, state, ui_state, dynamic_state);
+        store.refresh_runtime_persistence_state(&mut persistence_state);
+        persist_committed_runtime_state(store, &mut persistence_state, ui_state, dynamic_state);
     }
-    runtime.set_state(state.clone());
+    runtime.apply_persistence_state(persistence_state.clone());
+    *state = persistence_state.into_state();
 }
 
 pub(crate) fn spawn_runtime_turn<S>(
@@ -287,7 +231,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refresh_state_from_committed_graph_recovers_latest_token_ledger() {
+    fn refresh_runtime_persistence_state_recovers_latest_token_ledger() {
         let store = Store::memory().expect("store");
         let mut graph = SessionGraph::default();
         graph.append_message(Message {
@@ -348,12 +292,14 @@ mod tests {
             token_ledger: ledger,
         });
 
-        let mut stale_state = SessionStateEnvelope {
+        let stale_state = SessionStateEnvelope {
             session_graph: SessionGraph::default(),
             token_ledger: Vec::new(),
             ..SessionStateEnvelope::default()
         };
-        refresh_state_from_committed_graph(&store, &mut stale_state);
+        let mut persistence_state = RuntimePersistenceState::from_state(stale_state);
+        store.refresh_runtime_persistence_state(&mut persistence_state);
+        let stale_state = persistence_state.into_state();
 
         assert_eq!(stale_state.iteration, 2);
         assert_eq!(stale_state.projected_messages().len(), 1);

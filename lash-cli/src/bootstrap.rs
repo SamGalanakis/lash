@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use lash::provider::{LashConfig, Provider};
 use lash::*;
-use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
+use lash_default_tools::{
+    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -34,13 +36,16 @@ fn plugin_factories_for_surface(
             .unwrap_or(ExecutionMode::Standard),
     };
 
-    let mut bundles = DefaultToolBundle::background_surface(execution_mode, !autonomous);
-    if !tavily_key.is_empty() {
-        bundles.push(DefaultToolBundle::Web);
-    }
+    let profile = DefaultToolSurfaceProfile::for_runtime(
+        execution_mode,
+        &session_policy.context_approach,
+        !autonomous,
+        !tavily_key.is_empty(),
+    );
     let mut plugin_factories = tool_plugin_factories(DefaultToolPluginOptions {
         execution_mode,
-        bundles,
+        context_approach: session_policy.context_approach.clone(),
+        bundles: profile.bundles.clone(),
         tavily_api_key: if tavily_key.is_empty() {
             None
         } else {
@@ -52,7 +57,7 @@ fn plugin_factories_for_surface(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
     )) as Arc<dyn PluginFactory>);
-    if !autonomous {
+    if profile.interactive_extras {
         plugin_factories.push(Arc::new(BuiltinPlanTrackerPluginFactory));
         plugin_factories.push(Arc::new(BuiltinPlanModePluginFactory::new(
             Default::default(),

@@ -38,14 +38,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if queue_height > 0 {
         draw_lines_region(frame, queue_area, &queue_lines, bg(theme::surface_raised()));
     }
-    if app.has_wait() {
-        // History reads as inactive while we're waiting on an auto-resume.
-        // Dimming it distinguishes "input is blocked, please wait" from
-        // "the app is idle and you can type" — the second-pass critique's
-        // "user might try to type during a scheduled wait" concern.
-        draw_overlay_scrim(frame, history);
-        draw_wait(frame, app, input_area);
-    } else if app.has_prompt() {
+    if app.has_prompt() {
         draw_overlay_scrim(frame, history);
         draw_prompt(frame, app, input_area);
     } else {
@@ -499,30 +492,6 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
         prompt.scroll_offset.min(max_scroll)
     };
     for (idx, line) in lines.iter().skip(scroll).take(visible).enumerate() {
-        frame.write_line(
-            area.x + PROMPT_HORIZONTAL_PADDING,
-            area.y + idx as u16,
-            line,
-            area.width
-                .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)),
-        );
-    }
-}
-
-fn draw_wait(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let Some(wait) = app.wait_state() else {
-        return;
-    };
-    if area.width < 2 || area.height < 1 {
-        return;
-    }
-    frame.fill(area, ' ', bg(theme::surface_deep()));
-    let inner_width = area
-        .width
-        .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize;
-    let lines = render::wait_content_lines_for_app(wait, inner_width.max(1));
-    let visible = area.height as usize;
-    for (idx, line) in lines.iter().take(visible).enumerate() {
         frame.write_line(
             area.x + PROMPT_HORIZONTAL_PADDING,
             area.y + idx as u16,
@@ -1045,7 +1014,6 @@ mod tests {
 
         assert!(visible.contains("/LASH  Waiting"));
         assert!(visible.contains("5s left"));
-        assert!(visible.contains("Auto-resume in 5s"));
     }
 
     #[test]

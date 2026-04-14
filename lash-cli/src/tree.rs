@@ -2,7 +2,7 @@ use lash::{DynamicStateSnapshot, LashRuntime, Message, MessageRole, SessionMessa
 
 use crate::app::{App, projected_blocks_from_state};
 use crate::overlay::TreeSelection;
-use crate::persist_root_session_state;
+use crate::persistence::persist_committed_runtime_state;
 use crate::session_log::SessionLogger;
 
 pub fn current_message_tree(runtime: &LashRuntime) -> Vec<SessionMessageTreeNode> {
@@ -45,7 +45,7 @@ pub async fn switch_to_tree_selection(
         return Ok(());
     }
 
-    let mut state = runtime
+    let state = runtime
         .branch_to_node(target_leaf)
         .await
         .map_err(|err| err.to_string())?;
@@ -73,9 +73,10 @@ pub async fn switch_to_tree_selection(
     app.invalidate_height_cache();
     app.scroll_to_bottom();
 
-    persist_root_session_state(
+    let mut persistence_state = lash::RuntimePersistenceState::from_state(state);
+    persist_committed_runtime_state(
         logger.store().as_ref(),
-        &mut state,
+        &mut persistence_state,
         &app.ui_resume_state(),
         dynamic_state,
     );

@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ContextApproachKind {
+    RollingHistory,
+    ObservationalMemory,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContextApproach {
@@ -14,10 +20,23 @@ impl Default for ContextApproach {
 }
 
 impl ContextApproach {
-    pub fn label(&self) -> &'static str {
+    pub fn kind(&self) -> ContextApproachKind {
         match self {
-            Self::RollingHistory(_) => "rolling_history",
-            Self::ObservationalMemory(_) => "observational_memory",
+            Self::RollingHistory(_) => ContextApproachKind::RollingHistory,
+            Self::ObservationalMemory(_) => ContextApproachKind::ObservationalMemory,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        self.kind().label()
+    }
+}
+
+impl ContextApproachKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RollingHistory => "rolling_history",
+            Self::ObservationalMemory => "observational_memory",
         }
     }
 }

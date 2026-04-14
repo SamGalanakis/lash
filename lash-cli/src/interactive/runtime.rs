@@ -462,7 +462,7 @@ mod tests {
     fn pending_turn_graph_preserves_user_input_provenance() {
         let turn = PreparedTurn::prepare("/yolopush".into(), Vec::new(), &SkillCatalog::default());
         let turn_input = crate::turn_runner::make_turn_input(&turn);
-        let graph = pending_turn_graph(&SessionStateEnvelope::default(), &turn_input);
+        let graph = pending_turn_graph(&SessionGraph::default(), &turn_input);
 
         let messages = graph.project_messages();
         let user_message = messages.last().expect("user message");
@@ -492,7 +492,7 @@ mod tests {
             }),
             mode: Some(RunMode::Normal),
         };
-        let graph = pending_turn_graph(&SessionStateEnvelope::default(), &turn_input);
+        let graph = pending_turn_graph(&SessionGraph::default(), &turn_input);
 
         let messages = graph.project_messages();
         let user_message = messages.last().expect("user message");

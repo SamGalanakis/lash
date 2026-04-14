@@ -24,7 +24,9 @@ struct ExecutionSurfaceCacheKey {
 }
 
 #[derive(Debug, Default)]
-struct ExecutionSurfaceDerived {
+struct ToolSurfaceDerived {
+    enabled_tools: OnceLock<Arc<Vec<ToolDefinition>>>,
+    prompt_tools: OnceLock<Arc<Vec<ToolDefinition>>>,
     catalog: OnceLock<Arc<Vec<serde_json::Value>>>,
     standard_tool_specs: OnceLock<Arc<Vec<crate::llm::types::LlmToolSpec>>>,
     tool_names: OnceLock<Arc<Vec<String>>>,
@@ -34,25 +36,41 @@ struct ExecutionSurfaceDerived {
 }
 
 #[derive(Debug)]
-struct ExecutionSurfaceCacheEntry {
+struct ToolSurfaceArtifact {
     surface: Arc<crate::plugin::ExecutionSurface>,
-    enabled_tools: Arc<Vec<ToolDefinition>>,
-    prompt_tools: Arc<Vec<ToolDefinition>>,
-    derived: ExecutionSurfaceDerived,
+    derived: ToolSurfaceDerived,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ExecutionSurfaceHandle(Arc<ExecutionSurfaceCacheEntry>);
+pub(crate) struct ExecutionSurfaceHandle(Arc<ToolSurfaceArtifact>);
 
 impl ExecutionSurfaceHandle {
     fn surface(&self) -> Arc<crate::plugin::ExecutionSurface> {
         Arc::clone(&self.0.surface)
     }
 
+    fn enabled_tools(&self) -> Arc<Vec<ToolDefinition>> {
+        Arc::clone(
+            self.0
+                .derived
+                .enabled_tools
+                .get_or_init(|| Arc::new(self.0.surface.enabled_tools())),
+        )
+    }
+
+    fn prompt_tools(&self) -> Arc<Vec<ToolDefinition>> {
+        Arc::clone(
+            self.0
+                .derived
+                .prompt_tools
+                .get_or_init(|| Arc::new(self.0.surface.prompt_tools())),
+        )
+    }
+
     fn catalog(&self) -> Arc<Vec<serde_json::Value>> {
         Arc::clone(self.0.derived.catalog.get_or_init(|| {
             Arc::new(crate::tools::project_tool_catalog(
-                self.0.enabled_tools.iter().cloned(),
+                self.enabled_tools().iter().cloned(),
             ))
         }))
     }
@@ -60,7 +78,7 @@ impl ExecutionSurfaceHandle {
     fn standard_tool_specs(&self) -> Arc<Vec<crate::llm::types::LlmToolSpec>> {
         Arc::clone(self.0.derived.standard_tool_specs.get_or_init(|| {
             Arc::new(lash_sansio::session_model::model_tool_specs(
-                self.0.enabled_tools.as_slice(),
+                self.enabled_tools().as_slice(),
             ))
         }))
     }
@@ -68,8 +86,7 @@ impl ExecutionSurfaceHandle {
     fn tool_names(&self) -> Arc<Vec<String>> {
         Arc::clone(self.0.derived.tool_names.get_or_init(|| {
             Arc::new(
-                self.0
-                    .enabled_tools
+                self.enabled_tools()
                     .iter()
                     .map(|tool| tool.name.clone())
                     .collect(),
@@ -79,7 +96,7 @@ impl ExecutionSurfaceHandle {
 
     fn rlm_tool_list(&self) -> Arc<String> {
         Arc::clone(self.0.derived.rlm_tool_list.get_or_init(|| {
-            let mut tool_list = ToolDefinition::format_tool_docs(self.0.prompt_tools.as_slice());
+            let mut tool_list = ToolDefinition::format_tool_docs(self.prompt_tools().as_slice());
             for note in &self.0.surface.tool_list_notes {
                 if !tool_list.is_empty() {
                     tool_list.push_str("\n\n");
@@ -92,7 +109,7 @@ impl ExecutionSurfaceHandle {
 
     fn rlm_omitted_tool_count(&self) -> usize {
         *self.0.derived.rlm_omitted_tool_count.get_or_init(|| {
-            crate::session_model::count_prompt_omitted_tools(self.0.enabled_tools.as_slice())
+            crate::session_model::count_prompt_omitted_tools(self.enabled_tools().as_slice())
         })
     }
 
@@ -302,13 +319,9 @@ impl Session {
                 crate::plugin::ExecutionSurface::from_tools(tools)
             });
         let surface = Arc::new(surface);
-        let enabled_tools = Arc::new(surface.enabled_tools());
-        let prompt_tools = Arc::new(surface.prompt_tools());
-        ExecutionSurfaceHandle(Arc::new(ExecutionSurfaceCacheEntry {
+        ExecutionSurfaceHandle(Arc::new(ToolSurfaceArtifact {
             surface,
-            enabled_tools,
-            prompt_tools,
-            derived: ExecutionSurfaceDerived::default(),
+            derived: ToolSurfaceDerived::default(),
         }))
     }
 

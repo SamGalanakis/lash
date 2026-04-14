@@ -4,7 +4,6 @@ mod prompt;
 mod queue;
 #[cfg(test)]
 mod tests;
-mod wait;
 
 use lash::{SkillCatalog, collect_skill_mentions_with_ranges};
 use lash_tui::{Line, Modifier, Rect, Span, Style};
@@ -33,14 +32,10 @@ use self::artifact::{
     render_plan_block, render_question_panel_artifact, render_section_panel_block,
 };
 use self::prompt::prompt_height;
-use self::wait::wait_height;
 
 pub(crate) use self::prompt::prompt_content_lines_snapshot;
 pub(crate) use self::prompt::prompt_max_scroll;
 pub(crate) use self::queue::queue_preview_lines_snapshot;
-pub(crate) use self::wait::wait_content_lines_for_app;
-#[cfg(test)]
-pub(crate) use self::wait::wait_content_lines_snapshot;
 
 const INPUT_HORIZONTAL_PADDING: u16 = 1;
 const PROMPT_HORIZONTAL_PADDING: u16 = 1;
@@ -70,9 +65,7 @@ fn prompt_inner_width(frame_width: u16) -> usize {
 }
 
 fn desired_input_height(app: &App, frame_width: u16) -> u16 {
-    if app.has_wait() {
-        wait_height(app, frame_width, u16::MAX)
-    } else if app.has_prompt() {
+    if app.has_prompt() {
         prompt_height(app, frame_width, u16::MAX)
     } else {
         let inner_w = padded_content_width(frame_width, INPUT_HORIZONTAL_PADDING);
