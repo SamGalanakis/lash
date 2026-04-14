@@ -49,6 +49,7 @@ bench/longmemeval-rlm/evaluate.sh .benchmarks/longmemeval-rlm/runs/<run-id>/hypo
 - context approach: `rolling_history`
 - benchmark-local session tools: enabled
 - batch size: `10`
+- per-question context-token budget: `3,000,000`
 
 ## Useful flags
 
@@ -57,6 +58,7 @@ bench/longmemeval-rlm/run.sh --dataset-preset flash-failures-64
 bench/longmemeval-rlm/run.sh --dataset-preset cleaned-s --limit 64
 bench/longmemeval-rlm/run.sh --question-id e47becba
 bench/longmemeval-rlm/run.sh --batch-size 10
+bench/longmemeval-rlm/run.sh --max-question-context-tokens 3000000
 bench/longmemeval-rlm/run.sh --prompt-profile temporal-observations
 bench/longmemeval-rlm/run.sh --context-approach observational_memory --await-background-work
 bench/longmemeval-rlm/run.sh --no-session-tools
@@ -69,6 +71,7 @@ bench/longmemeval-rlm/run.sh --resume
 - It builds against `lash` directly, not `lash-cli`.
 - It reads benchmark API credentials from `.env` instead of the user’s saved Lash provider config.
 - Questions run in isolated parallel batches; each question gets its own runtime, store, and artifacts.
+- The runner enforces a live per-question context-token budget across both root and delegated child usage. Set `--max-question-context-tokens 0` to disable it.
 - `bench/longmemeval-rlm/setup.sh` prefetches the rawwerks `flash_failures_64` and `discordant_110` subset files into ignored `.benchmarks/longmemeval-rlm/data/`.
 - The benchmark-local tools are harness-owned, not product tools:
   - `list_sessions`

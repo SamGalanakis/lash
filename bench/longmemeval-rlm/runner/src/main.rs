@@ -37,6 +37,7 @@ const DEFAULT_PROVIDER_ID: &str = "openai-compatible";
 const DEFAULT_CONTEXT_APPROACH: &str = "rolling_history";
 const DEFAULT_EXECUTION_MODE: &str = "rlm";
 const DEFAULT_MAX_CONTEXT_TOKENS: usize = 1_000_000;
+const DEFAULT_MAX_QUESTION_CONTEXT_TOKENS: i64 = 3_000_000;
 const CLEANED_S_URL: &str = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json";
 const FLASH_FAILURES_64_URL: &str = "https://raw.githubusercontent.com/rawwerks/longmemeval-rlm/master/data/longmemeval_s_flash_failures_64.json";
 const DISCORDANT_110_URL: &str =
@@ -127,6 +128,9 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_MAX_CONTEXT_TOKENS)]
     max_context_tokens: usize,
 
+    #[arg(long, default_value_t = DEFAULT_MAX_QUESTION_CONTEXT_TOKENS)]
+    max_question_context_tokens: i64,
+
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     session_tools: bool,
 
@@ -172,6 +176,7 @@ struct RunManifest {
     prompt_profile: String,
     session_tools: bool,
     batch_size: usize,
+    max_question_context_tokens: i64,
     question_count: usize,
     created_at: String,
 }
@@ -190,6 +195,9 @@ struct QuestionResult {
     error_count: usize,
     failure_reason: Option<String>,
     partial_output: Option<String>,
+    observed_context_tokens: i64,
+    token_budget_limit: Option<i64>,
+    token_budget_exceeded: bool,
     provider_cost: ProviderCostSummary,
     usage: SessionUsageReport,
     tool_calls: usize,
@@ -215,6 +223,7 @@ struct RunSummary {
     questions_with_retries: usize,
     error_count: usize,
     questions_with_errors: usize,
+    token_budget_exceeded_question_count: usize,
     provider_cost: ProviderCostSummary,
     usage: SessionUsageReport,
     results: Vec<QuestionResult>,
@@ -248,6 +257,42 @@ struct SinkErrorRecord {
     kind: Option<String>,
     code: Option<String>,
     raw: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LiveTokenBudget {
+    max_context_tokens: Option<i64>,
+    observed_context_tokens: i64,
+    exceeded: bool,
+}
+
+impl LiveTokenBudget {
+    fn new(max_context_tokens: i64) -> Self {
+        Self {
+            max_context_tokens: (max_context_tokens > 0).then_some(max_context_tokens),
+            observed_context_tokens: 0,
+            exceeded: false,
+        }
+    }
+
+    fn record(&mut self, usage: &lash::TokenUsage) -> bool {
+        self.observed_context_tokens = self
+            .observed_context_tokens
+            .saturating_add(context_tokens_for_usage(usage));
+        if let Some(limit) = self.max_context_tokens
+            && self.observed_context_tokens > limit
+        {
+            self.exceeded = true;
+            return true;
+        }
+        false
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TokenBudgetExceeded {
+    observed_context_tokens: i64,
+    max_context_tokens: i64,
 }
 
 #[tokio::main]
@@ -301,6 +346,7 @@ async fn main() -> anyhow::Result<()> {
         .to_string(),
         session_tools: args.session_tools,
         batch_size: args.batch_size.max(1),
+        max_question_context_tokens: args.max_question_context_tokens,
         question_count: questions.len(),
         created_at: Utc::now().to_rfc3339(),
     };
@@ -432,6 +478,10 @@ async fn main() -> anyhow::Result<()> {
         questions_with_errors: results
             .iter()
             .filter(|result| result.error_count > 0)
+            .count(),
+        token_budget_exceeded_question_count: results
+            .iter()
+            .filter(|result| result.token_budget_exceeded)
             .count(),
         provider_cost: aggregate_provider_cost(results.iter().map(|result| &result.provider_cost)),
         usage,
@@ -580,7 +630,12 @@ async fn run_question(
         .context("append benchmark globals patch")?;
 
     let before_usage = runtime.usage_report();
-    let sink = JsonlEventSink::new(question_dir.join("events.jsonl"))?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let sink = JsonlEventSink::new(
+        question_dir.join("events.jsonl"),
+        args.max_question_context_tokens,
+        cancel.clone(),
+    )?;
     let started_at = std::time::Instant::now();
     let turn = runtime
         .stream_turn(
@@ -591,7 +646,7 @@ async fn run_question(
                 mode: None,
             },
             &sink,
-            tokio_util::sync::CancellationToken::new(),
+            cancel,
         )
         .await
         .context("run benchmark question")?;
@@ -604,10 +659,11 @@ async fn run_question(
         .map(|rows| SessionUsageReport::from_entries(&rows))
         .map_err(anyhow::Error::msg)
         .context("diff usage reports")?;
+    let token_budget = sink.token_budget();
     let partial_output = sink
         .last_llm_response()
         .or_else(|| non_empty_text(&turn.assistant_output.safe_text));
-    let answer = if matches!(turn.status, lash::TurnStatus::Completed) {
+    let answer = if matches!(turn.status, lash::TurnStatus::Completed) && token_budget.is_none() {
         partial_output.clone().unwrap_or_default()
     } else {
         String::new()
@@ -629,7 +685,14 @@ async fn run_question(
 
     let trace_metrics = collect_trace_metrics(&llm_log_path).context("collect trace metrics")?;
     let error_records = sink.error_records();
-    let failure_reason = format_failure_reason(&turn, &error_records);
+    let failure_reason = if let Some(budget) = token_budget.as_ref() {
+        Some(format!(
+            "token budget exceeded: observed_context_tokens={} limit={}",
+            budget.observed_context_tokens, budget.max_context_tokens
+        ))
+    } else {
+        format_failure_reason(&turn, &error_records)
+    };
     if let Some(reason) = &failure_reason {
         fs::write(question_dir.join("failure.txt"), format!("{reason}\n"))
             .with_context(|| format!("write {}", question_dir.join("failure.txt").display()))?;
@@ -639,14 +702,25 @@ async fn run_question(
         hypothesis: answer.clone(),
         question_type: question.question_type.clone(),
         elapsed_seconds,
-        status: turn_status_label(&turn.status).to_string(),
-        done_reason: done_reason_label(&turn.done_reason).to_string(),
+        status: if token_budget.is_some() {
+            "failed".to_string()
+        } else {
+            turn_status_label(&turn.status).to_string()
+        },
+        done_reason: if token_budget.is_some() {
+            "token_budget".to_string()
+        } else {
+            done_reason_label(&turn.done_reason).to_string()
+        },
         iterations: trace_metrics.iterations.max(sink.iteration_count()),
         llm_calls: trace_metrics.llm_calls.max(sink.llm_call_count()),
         retry_count: sink.retry_count(),
         error_count: error_records.len(),
         failure_reason,
         partial_output: partial_output.filter(|value| *value != answer),
+        observed_context_tokens: sink.observed_context_tokens(),
+        token_budget_limit: sink.max_question_context_tokens(),
+        token_budget_exceeded: token_budget.is_some(),
         provider_cost: trace_metrics.provider_cost,
         usage,
         tool_calls: turn.tool_calls.len(),
@@ -936,6 +1010,10 @@ fn write_summary_text(path: PathBuf, summary: &RunSummary) -> anyhow::Result<()>
             "Errors: {} across {} question(s)",
             summary.error_count, summary.questions_with_errors
         ),
+        format!(
+            "Token budget exceeded: {} question(s)",
+            summary.token_budget_exceeded_question_count
+        ),
         format!("Started: {}", summary.started_at),
         format!("Finished: {}", summary.finished_at),
         format!("Duration seconds: {}", summary.duration_seconds),
@@ -1078,10 +1156,16 @@ struct JsonlEventSink {
     llm_iterations: Mutex<BTreeSet<usize>>,
     retry_count: Mutex<usize>,
     error_records: Mutex<Vec<SinkErrorRecord>>,
+    token_budget: Mutex<LiveTokenBudget>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl JsonlEventSink {
-    fn new(path: PathBuf) -> anyhow::Result<Self> {
+    fn new(
+        path: PathBuf,
+        max_question_context_tokens: i64,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<Self> {
         let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
         Ok(Self {
             file: Mutex::new(file),
@@ -1090,6 +1174,8 @@ impl JsonlEventSink {
             llm_iterations: Mutex::new(BTreeSet::new()),
             retry_count: Mutex::new(0),
             error_records: Mutex::new(Vec::new()),
+            token_budget: Mutex::new(LiveTokenBudget::new(max_question_context_tokens)),
+            cancel,
         })
     }
 
@@ -1127,6 +1213,29 @@ impl JsonlEventSink {
             .map(|value| value.clone())
             .unwrap_or_default()
     }
+
+    fn observed_context_tokens(&self) -> i64 {
+        self.token_budget
+            .lock()
+            .map(|value| value.observed_context_tokens)
+            .unwrap_or_default()
+    }
+
+    fn max_question_context_tokens(&self) -> Option<i64> {
+        self.token_budget
+            .lock()
+            .ok()
+            .and_then(|value| value.max_context_tokens)
+    }
+
+    fn token_budget(&self) -> Option<TokenBudgetExceeded> {
+        self.token_budget.lock().ok().and_then(|value| {
+            value.exceeded.then_some(TokenBudgetExceeded {
+                observed_context_tokens: value.observed_context_tokens,
+                max_context_tokens: value.max_context_tokens.unwrap_or_default(),
+            })
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -1160,6 +1269,13 @@ impl EventSink for JsonlEventSink {
                 raw: envelope.as_ref().and_then(|value| value.raw.clone()),
             });
         }
+        if let SessionEvent::TokenUsage { usage, .. } | SessionEvent::ChildTokenUsage { usage, .. } =
+            &event
+            && let Ok(mut budget) = self.token_budget.lock()
+            && budget.record(usage)
+        {
+            self.cancel.cancel();
+        }
         if let Ok(line) = serde_json::to_string(&event)
             && let Ok(mut file) = self.file.lock()
         {
@@ -1184,6 +1300,15 @@ fn done_reason_label(reason: &lash::DoneReason) -> &'static str {
         lash::DoneReason::ToolFailure => "tool_failure",
         lash::DoneReason::RuntimeError => "runtime_error",
     }
+}
+
+fn context_tokens_for_usage(usage: &lash::TokenUsage) -> i64 {
+    usage
+        .input_tokens
+        .max(0)
+        .saturating_add(usage.output_tokens.max(0))
+        .saturating_add(usage.reasoning_tokens.max(0))
+        .saturating_add(usage.cached_input_tokens.max(0))
 }
 
 fn non_empty_text(text: &str) -> Option<String> {
@@ -1225,4 +1350,41 @@ fn format_failure_reason(
                 done_reason_label(&turn.done_reason)
             ))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_token_budget_counts_context_tokens() {
+        let mut budget = LiveTokenBudget::new(100);
+        assert!(!budget.record(&lash::TokenUsage {
+            input_tokens: 40,
+            output_tokens: 5,
+            cached_input_tokens: 10,
+            reasoning_tokens: 0,
+        }));
+        assert_eq!(budget.observed_context_tokens, 55);
+        assert!(!budget.exceeded);
+    }
+
+    #[test]
+    fn live_token_budget_trips_after_combined_root_and_child_usage() {
+        let mut budget = LiveTokenBudget::new(100);
+        assert!(!budget.record(&lash::TokenUsage {
+            input_tokens: 45,
+            output_tokens: 5,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+        }));
+        assert!(budget.record(&lash::TokenUsage {
+            input_tokens: 40,
+            output_tokens: 0,
+            cached_input_tokens: 20,
+            reasoning_tokens: 0,
+        }));
+        assert_eq!(budget.observed_context_tokens, 110);
+        assert!(budget.exceeded);
+    }
 }
