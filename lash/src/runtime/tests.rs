@@ -656,7 +656,11 @@ async fn rlm_runtime_with_transport(transport: MockTransport) -> LashRuntime {
     let mut runtime = LashRuntime::from_embedded_state(
         rlm_test_policy(),
         test_host_config(),
-        crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new()),
+        crate::RuntimeServices::new_with_bridges(
+            plugins,
+            crate::TurnInjectionBridge::new(),
+            crate::TurnInputInjectionBridge::new(),
+        ),
         PersistedSessionState::from_state(SessionStateEnvelope {
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::Rlm,
@@ -683,6 +687,7 @@ async fn rlm_runtime_with_transport_and_store(
         crate::PersistentRuntimeServices::new_with_bridges(
             plugins,
             crate::TurnInjectionBridge::new(),
+            crate::TurnInputInjectionBridge::new(),
             store,
         ),
         PersistedSessionState::from_state(SessionStateEnvelope {
@@ -738,6 +743,28 @@ async fn standard_runtime_with_bridge(
         crate::RuntimeServices::new_with_bridges(
             plugin_session_with_tools("root", ExecutionMode::Standard, tools),
             turn_injection_bridge,
+            crate::TurnInputInjectionBridge::new(),
+        ),
+        PersistedSessionState::default(),
+    )
+    .await
+    .expect("runtime");
+    runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+    runtime
+}
+
+async fn standard_runtime_with_input_bridge(
+    transport: MockTransport,
+    turn_input_injection_bridge: crate::TurnInputInjectionBridge,
+) -> LashRuntime {
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
+    let mut runtime = LashRuntime::from_embedded_state(
+        standard_test_policy(),
+        test_host_config(),
+        crate::RuntimeServices::new_with_bridges(
+            plugin_session_with_tools("root", ExecutionMode::Standard, tools),
+            crate::TurnInjectionBridge::new(),
+            turn_input_injection_bridge,
         ),
         PersistedSessionState::default(),
     )
@@ -1123,12 +1150,11 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
 
 #[tokio::test]
 async fn bridge_checkpoint_injection_continues_standard_turn() {
-    let bridge = crate::TurnInjectionBridge::new();
+    let bridge = crate::TurnInputInjectionBridge::new();
     bridge
-        .enqueue(vec![crate::PluginMessage::text(
-            crate::MessageRole::User,
-            "one more thing",
-        )])
+        .enqueue(vec![crate::InjectedTurnInput {
+            message: crate::PluginMessage::text(crate::MessageRole::User, "one more thing"),
+        }])
         .expect("enqueue");
     let transport = MockTransport::new(vec![
         MockCall {
@@ -1152,7 +1178,7 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
             }),
         },
     ]);
-    let mut runtime = standard_runtime_with_bridge(transport, bridge).await;
+    let mut runtime = standard_runtime_with_input_bridge(transport, bridge).await;
 
     let turn = runtime
         .run_turn_assembled(
@@ -1170,18 +1196,18 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
         .expect("turn");
 
     assert!(projected_messages(&turn.state).iter().any(|message| {
-        message.role == MessageRole::User
-            && message
-                .parts
-                .iter()
-                .any(|part| part.content == "one more thing")
-    }));
-    assert!(projected_messages(&turn.state).iter().any(|message| {
         message.role == MessageRole::Assistant
             && message
                 .parts
                 .iter()
                 .any(|part| part.content.contains("Second answer."))
+    }));
+    assert!(projected_messages(&turn.state).iter().all(|message| {
+        !(message.role == MessageRole::User
+            && message
+                .parts
+                .iter()
+                .any(|part| part.content == "one more thing"))
     }));
 }
 
@@ -1342,6 +1368,85 @@ async fn checkpoint_hook_can_inject_messages() {
                 .parts
                 .iter()
                 .any(|part| part.content == "checkpoint injected")
+    }));
+}
+
+#[tokio::test]
+async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_duplicate_user_message()
+{
+    let bridge = crate::TurnInputInjectionBridge::new();
+    bridge
+        .enqueue(vec![crate::InjectedTurnInput {
+            message: crate::PluginMessage {
+                role: crate::MessageRole::User,
+                content: "follow up".to_string(),
+                parts: Vec::new(),
+                images: Vec::new(),
+                user_input: Some(crate::UserInputProvenance {
+                    display_text: "follow up".to_string(),
+                    effective_text: "follow up".to_string(),
+                    transforms: Vec::new(),
+                }),
+            },
+        }])
+        .expect("enqueue injected turn input");
+
+    let transport = MockTransport::new(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "answer".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "answer".to_string(),
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let mut runtime = standard_runtime_with_input_bridge(transport, bridge).await;
+    let sink = RecordingSink::default();
+    let assembled = runtime
+        .stream_turn(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+            },
+            &sink,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    let mut saw_injected_accept = false;
+    for event in sink.snapshot() {
+        if let crate::SessionEvent::InjectedTurnInputAccepted { messages, .. } = event {
+            saw_injected_accept = messages.iter().any(|message| {
+                message.role == crate::MessageRole::User && message.content == "follow up"
+            });
+        }
+    }
+    assert!(
+        saw_injected_accept,
+        "expected injected turn input accepted event"
+    );
+
+    let projected = projected_messages(&assembled.state);
+    let follow_up_count = projected
+        .iter()
+        .filter(|message| {
+            message.role == crate::MessageRole::User
+                && message.parts.iter().any(|part| part.content == "follow up")
+        })
+        .count();
+    assert_eq!(
+        follow_up_count, 0,
+        "injected active-turn input must stay out of persisted history"
+    );
+    assert!(projected.iter().any(|message| {
+        message.role == crate::MessageRole::User
+            && message.parts.iter().any(|part| part.content == "hello")
     }));
 }
 
@@ -1761,11 +1866,9 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
                 include_base_tools: false,
                 tool_providers: vec![Arc::new(MemoryProbeTool)],
                 prompt_contributions: vec![crate::PromptContribution::guidance(
-                    "memory_context",
                     "Memory Context",
                     "memory child",
                 )],
-                prompt_overrides: Vec::new(),
             },
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -3284,6 +3387,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
         crate::PersistentRuntimeServices::new_with_bridges(
             default_tool_session("root", ExecutionMode::Rlm, true),
             crate::TurnInjectionBridge::new(),
+            crate::TurnInputInjectionBridge::new(),
             store.clone() as Arc<dyn crate::store::RuntimeStore>,
         ),
         PersistedSessionState {

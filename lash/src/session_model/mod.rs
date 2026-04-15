@@ -16,11 +16,12 @@ use crate::session::Session;
 use crate::{ContextApproach, ExecutionMode};
 
 pub use lash_sansio::session_model::{
-    DefaultPromptRenderer, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole,
-    Part, PartKind, PromptOverrideMode, PromptRenderer, PromptSectionName, PromptSectionOverride,
-    PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, default_prompt_renderer,
-    format_tool_result_content, fresh_message_id, make_error_envelope, make_error_event,
-    reassign_part_ids, render_prompt, render_transcript_prompt,
+    CORE_GUIDANCE_SECTION, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, MAIN_AGENT_INTRO,
+    Message, MessageRole, Part, PartKind, PromptBuiltin, PromptSlot, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, PruneState, SessionEvent, TokenUsage,
+    TurnTerminationPolicyState, default_prompt_template, format_tool_result_content,
+    fresh_message_id, make_error_envelope, make_error_event, reassign_part_ids, render_prompt,
+    render_transcript_prompt,
 };
 
 /// Send an event to the channel if it's still open.

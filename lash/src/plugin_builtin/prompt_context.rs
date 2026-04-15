@@ -74,17 +74,11 @@ impl crate::SessionPlugin for PromptContextPlugin {
                 let mut contributions = Vec::new();
                 let base_context = build_prompt_environment_context();
                 if config.include_environment && !base_context.trim().is_empty() {
-                    contributions.push(PromptContribution::environment(
-                        "runtime_context",
-                        "Runtime Context",
-                        base_context,
-                    ));
+                    contributions.push(PromptContribution::runtime_context(base_context));
                 }
                 let project_instructions = instruction_source.system_instructions();
                 if config.include_project_instructions && !project_instructions.trim().is_empty() {
-                    contributions.push(PromptContribution::guidance(
-                        "project_instructions",
-                        "Project Instructions",
+                    contributions.push(PromptContribution::project_instructions(
                         project_instructions,
                     ));
                 }

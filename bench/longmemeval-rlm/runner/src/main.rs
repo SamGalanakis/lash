@@ -19,10 +19,11 @@ use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinObservationalMemoryPluginFactory,
     BuiltinRollingHistoryPluginFactory, BuiltinToolResultProjectionPluginFactory, ContextApproach,
     EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, PromptOverrideMode, PromptSectionName,
-    PromptSectionOverride, Provider, ProviderOptions, RlmGlobalsPatchPluginBody, RuntimeCoreConfig,
+    PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, Provider, ProviderOptions, RlmGlobalsPatchPluginBody, RuntimeCoreConfig,
     RuntimeStore, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
-    TokioBackgroundExecutor, TurnInjectionBridge, TurnInput, diff_usage_reports,
+    TokioBackgroundExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
+    diff_usage_reports,
 };
 use lash_delegate_tools::{DelegateToolConfig, DelegateToolsPluginFactory};
 use reqwest::Client;
@@ -595,14 +596,14 @@ async fn run_question(
     let services = PersistentRuntimeServices::new_with_bridges(
         root_plugins,
         TurnInjectionBridge::new(),
+        TurnInputInjectionBridge::new(),
         store.clone() as Arc<dyn RuntimeStore>,
     );
     let host = BackgroundRuntimeHost::new(
         EmbeddedRuntimeHost::new(
             RuntimeCoreConfig::default()
                 .with_llm_log_path(Some(llm_log_path.clone()))
-                .with_prompt_renderer(lash::default_prompt_renderer())
-                .with_prompt_overrides(prompt_overrides(args.prompt_profile, args.session_tools)),
+                .with_prompt_template(prompt_template(args.prompt_profile, args.session_tools)),
         ),
         Arc::new(TokioBackgroundExecutor::default()),
     );
@@ -836,21 +837,9 @@ fn build_prompt(
     prompt
 }
 
-fn prompt_overrides(profile: PromptProfile, session_tools: bool) -> Vec<PromptSectionOverride> {
-    let mut overrides = vec![
-        PromptSectionOverride {
-            section: PromptSectionName::Intro,
-            block: None,
-            mode: PromptOverrideMode::Replace,
-            content: "You are answering a memory question over prior conversation history."
-                .to_string(),
-        },
-        PromptSectionOverride {
-            section: PromptSectionName::Execution,
-            block: None,
-            mode: PromptOverrideMode::Replace,
-            content: if session_tools {
-                r#"In this mode you work by writing `lashlang` code inside your response and the runtime executes it.
+fn prompt_template(profile: PromptProfile, session_tools: bool) -> PromptTemplate {
+    let mut execution_entries = vec![PromptTemplateEntry::text(if session_tools {
+        r#"In this mode you work by writing `lashlang` code inside your response and the runtime executes it.
 
 Format each work step like this:
 
@@ -870,12 +859,11 @@ observe result
 - Variables persist across iterations.
 - If the prompt includes bound variables, use them directly.
 - Call tools with `call tool_name { arg: expr }`.
-- Start background work with `start call tool_name { arg: expr }`, wait with `await handle`, and stop it with `cancel handle`.
+- Start background work with `start call tool_name { arg: expr }`, wait with `await handle`, and stop it with `cancel handle`. If you have a list of handles, `await handles` returns a list of results in order.
 - Use `observe expr` to inspect values before deciding the next step.
 - Break large tasks into smaller, bounded steps instead of brute-force scanning."#
-                    .to_string()
-            } else {
-                r#"In this mode you work by writing `lashlang` code inside your response and the runtime executes it.
+    } else {
+        r#"In this mode you work by writing `lashlang` code inside your response and the runtime executes it.
 
 Format each work step like this:
 
@@ -902,20 +890,32 @@ observe candidate
 - Keep each delegate bounded and concrete. Do not fan out one delegate per session unless the narrowed candidate set is already small.
 - Use `observe expr` to inspect values before deciding the next step.
 - Avoid observing or printing the entire haystack unless it is already small."#
-                    .to_string()
-            },
-        },
-    ];
+    })];
     if matches!(profile, PromptProfile::TemporalObservations) {
-        overrides.push(PromptSectionOverride {
-            section: PromptSectionName::Execution,
-            block: None,
-            mode: PromptOverrideMode::Append,
-            content: "Before answering, explicitly ground your reasoning in session/date evidence and resolve entity ambiguity before producing the final answer.".to_string(),
-        });
+        execution_entries.push(PromptTemplateEntry::text(
+            "Before answering, explicitly ground your reasoning in session/date evidence and resolve entity ambiguity before producing the final answer.",
+        ));
     }
-    let _ = session_tools;
-    overrides
+    PromptTemplate::new(vec![
+        PromptTemplateSection::untitled(vec![PromptTemplateEntry::text(
+            "You are answering a memory question over prior conversation history.",
+        )]),
+        PromptTemplateSection::titled("Execution", execution_entries),
+        PromptTemplateSection::titled(
+            "Guidance",
+            vec![
+                PromptTemplateEntry::slot(PromptSlot::ProjectInstructions),
+                PromptTemplateEntry::slot(PromptSlot::Guidance),
+            ],
+        ),
+        PromptTemplateSection::titled(
+            "Environment",
+            vec![
+                PromptTemplateEntry::slot(PromptSlot::RuntimeContext),
+                PromptTemplateEntry::slot(PromptSlot::Environment),
+            ],
+        ),
+    ])
 }
 
 fn resolve_provider(args: &Args) -> anyhow::Result<Provider> {

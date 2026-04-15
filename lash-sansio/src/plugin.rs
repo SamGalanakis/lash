@@ -53,8 +53,7 @@ impl PluginMessage {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptContribution {
-    pub section: crate::PromptSectionName,
-    pub block: String,
+    pub slot: crate::PromptSlot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default)]
@@ -63,43 +62,56 @@ pub struct PromptContribution {
 }
 
 impl PromptContribution {
-    pub fn block(
-        section: crate::PromptSectionName,
-        block: impl Into<String>,
+    pub fn new(
+        slot: crate::PromptSlot,
         title: impl Into<String>,
         content: impl Into<String>,
     ) -> Self {
         let title = title.into();
         let title = (!title.trim().is_empty()).then_some(title);
         Self {
-            section,
-            block: block.into(),
+            slot,
             title,
             priority: 0,
             content: content.into(),
         }
     }
 
-    pub fn guidance(
-        block: impl Into<String>,
-        title: impl Into<String>,
-        content: impl Into<String>,
-    ) -> Self {
-        Self {
-            section: crate::PromptSectionName::Guidance,
-            ..Self::block(crate::PromptSectionName::Guidance, block, title, content)
-        }
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
     }
 
-    pub fn environment(
-        block: impl Into<String>,
-        title: impl Into<String>,
-        content: impl Into<String>,
-    ) -> Self {
-        Self {
-            section: crate::PromptSectionName::Environment,
-            ..Self::block(crate::PromptSectionName::Environment, block, title, content)
-        }
+    pub fn intro(title: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new(crate::PromptSlot::Intro, title, content)
+    }
+
+    pub fn execution(title: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new(crate::PromptSlot::Execution, title, content)
+    }
+
+    pub fn guidance(title: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new(crate::PromptSlot::Guidance, title, content)
+    }
+
+    pub fn project_instructions(content: impl Into<String>) -> Self {
+        Self::new(
+            crate::PromptSlot::ProjectInstructions,
+            "Project Instructions",
+            content,
+        )
+    }
+
+    pub fn runtime_context(content: impl Into<String>) -> Self {
+        Self::new(
+            crate::PromptSlot::RuntimeContext,
+            "Runtime Context",
+            content,
+        )
+    }
+
+    pub fn environment(title: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new(crate::PromptSlot::Environment, title, content)
     }
 }
 

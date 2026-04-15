@@ -17,6 +17,13 @@ Patch-based editing, shell execution, file search, web search, planning, skills,
   - `lash` — async host runtime built on `lash-sansio`. Adds plugin infrastructure, tool execution, session management, context approaches, and child-session delegation. Use this to embed a full agent in a larger Rust application.
   - `lash-cli` — the end-user binary. TUI, provider auth, config, and the single-shot `--print` mode. Built on top of `lash`.
 
+## Agent behavior
+
+- Finish the task by continuing with the next concrete action while actionable work remains.
+- Do not stop just to report that work is incomplete.
+- Only summarize remaining work when blocked, when a decision is required, or when no further feasible action remains in the current turn.
+- Do not claim completion unless the required end state has actually been verified.
+
 ## Install
 
 Download the relevant release, use the install script below or build from source.
@@ -35,6 +42,13 @@ cargo build -p lash-cli --release
 lash                           # interactive TUI
 lash -p "summarize this repo"  # single-shot, output to stdout
 ```
+
+## Agent behavior
+
+- Continue with the next concrete action while actionable work remains.
+- Do not stop merely to report that work is incomplete.
+- Only summarize remaining work when blocked, when a decision is required, or when no further feasible action remains in the current turn.
+- Do not claim completion unless the required end state has actually been verified.
 
 ## Docs
 

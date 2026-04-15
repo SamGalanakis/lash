@@ -552,7 +552,6 @@ async fn summarize_compaction_prefix(
                 include_base_tools: false,
                 tool_providers: Vec::new(),
                 prompt_contributions: Vec::new(),
-                prompt_overrides: Vec::new(),
             },
             mode_extras: ModeExtras::default(),
             usage_source: Some("compaction".to_string()),

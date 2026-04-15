@@ -16,7 +16,6 @@ mod markdown;
 mod overlay;
 mod persistence;
 mod plugin_surface;
-mod prompt_overrides;
 mod render;
 mod repo_status;
 mod resume;
@@ -53,13 +52,11 @@ use std::alloc::System;
 use app::PreparedTurn;
 #[cfg(test)]
 use autonomous::AutonomousRenderer;
+pub(crate) use cli_support::*;
 #[cfg(test)]
 use input_items::insert_inline_marker;
 #[cfg(test)]
 use input_items::{build_items_from_editor_input, image_marker_ranges};
-use prompt_overrides::resolve_prompt_overrides;
-
-pub(crate) use cli_support::*;
 pub(crate) use interactive::generate_session_name;
 #[cfg(test)]
 pub(crate) use interactive::{injected_image_part_indices, make_injected_plugin_message};
@@ -88,21 +85,41 @@ fn turn_has_visible_output(turn: &AssembledTurn) -> bool {
         || turn.has_plugin_visible_output
 }
 
-fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
-    vec![
-        PromptSectionOverride {
-            section: PromptSectionName::Intro,
-            block: None,
-            mode: PromptOverrideMode::Prepend,
-            content: "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.".to_string(),
-        },
-        PromptSectionOverride {
-            section: PromptSectionName::Execution,
-            block: None,
-            mode: PromptOverrideMode::Append,
-            content: "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.".to_string(),
-        },
-    ]
+fn autonomous_prompt_template() -> PromptTemplate {
+    PromptTemplate::new(vec![
+        PromptTemplateSection::untitled(vec![
+            PromptTemplateEntry::text(
+                "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.",
+            ),
+            PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro),
+            PromptTemplateEntry::slot(PromptSlot::Intro),
+        ]),
+        PromptTemplateSection::titled(
+            "Execution",
+            vec![
+                PromptTemplateEntry::builtin(PromptBuiltin::ExecutionInstructions),
+                PromptTemplateEntry::text(
+                    "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.\n- Do not stop merely to report that work remains. If concrete actions are still available, keep executing them.\n- Only summarize remaining work when you are blocked, need a decision, or have exhausted feasible actions for this turn.\n- Do not claim completion unless you have actually verified the required end state.",
+                ),
+                PromptTemplateEntry::slot(PromptSlot::Execution),
+            ],
+        ),
+        PromptTemplateSection::titled(
+            "Guidance",
+            vec![
+                PromptTemplateEntry::builtin(PromptBuiltin::CoreGuidance),
+                PromptTemplateEntry::slot(PromptSlot::ProjectInstructions),
+                PromptTemplateEntry::slot(PromptSlot::Guidance),
+            ],
+        ),
+        PromptTemplateSection::titled(
+            "Environment",
+            vec![
+                PromptTemplateEntry::slot(PromptSlot::RuntimeContext),
+                PromptTemplateEntry::slot(PromptSlot::Environment),
+            ],
+        ),
+    ])
 }
 
 fn normalized_cli_args() -> Vec<std::ffi::OsString> {
@@ -316,34 +333,6 @@ struct Args {
     /// Number of committed turns to run inside each measured runtime session
     #[arg(long, hide = true, default_value_t = 12)]
     runtime_perf_turns: usize,
-
-    /// Replace a prompt target: --prompt-replace section[.block]=text
-    #[arg(long = "prompt-replace", value_name = "TARGET=TEXT")]
-    prompt_replace: Vec<String>,
-
-    /// Replace a prompt target from file: --prompt-replace-file section[.block]=path
-    #[arg(long = "prompt-replace-file", value_name = "TARGET=PATH")]
-    prompt_replace_file: Vec<String>,
-
-    /// Prepend text to a prompt target: --prompt-prepend section[.block]=text
-    #[arg(long = "prompt-prepend", value_name = "TARGET=TEXT")]
-    prompt_prepend: Vec<String>,
-
-    /// Prepend text to a prompt target from file: --prompt-prepend-file section[.block]=path
-    #[arg(long = "prompt-prepend-file", value_name = "TARGET=PATH")]
-    prompt_prepend_file: Vec<String>,
-
-    /// Append text to a prompt target: --prompt-append section[.block]=text
-    #[arg(long = "prompt-append", value_name = "TARGET=TEXT")]
-    prompt_append: Vec<String>,
-
-    /// Append text to a prompt target from file: --prompt-append-file section[.block]=path
-    #[arg(long = "prompt-append-file", value_name = "TARGET=PATH")]
-    prompt_append_file: Vec<String>,
-
-    /// Disable a prompt target entirely.
-    #[arg(long = "prompt-disable", value_name = "TARGET")]
-    prompt_disable: Vec<String>,
 }
 
 fn cleanup_terminal() {
@@ -417,8 +406,7 @@ async fn main() -> anyhow::Result<()> {
             "initialized lash tracing"
         );
     }
-    let prompt_overrides = resolve_prompt_overrides(&args)?;
-    bootstrap::run(args, prompt_overrides).await
+    bootstrap::run(args, default_prompt_template()).await
 }
 
 #[allow(clippy::too_many_arguments)]

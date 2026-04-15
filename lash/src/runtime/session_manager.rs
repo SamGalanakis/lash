@@ -606,7 +606,6 @@ impl SessionManager for RuntimeSessionManager {
             session.set_context_surface(
                 request.context_surface.tool_providers.clone(),
                 request.context_surface.prompt_contributions.clone(),
-                request.context_surface.prompt_overrides.clone(),
                 request.context_surface.include_base_tools,
             );
         }

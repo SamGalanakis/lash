@@ -986,6 +986,21 @@ impl App {
         self.assistant_text_finalized = true;
     }
 
+    fn accept_injected_turn_input(&mut self, messages: &[PluginMessage]) {
+        self.finalize_live_assistant();
+        let mut accepted_user_message = false;
+        for message in messages {
+            if !matches!(message.role, MessageRole::User) {
+                continue;
+            }
+            accepted_user_message = true;
+            let _ = self.take_matching_pending_steer(&message.content);
+        }
+        if accepted_user_message {
+            self.keep_latest_user_block_visible();
+        }
+    }
+
     fn commit_injected_messages(&mut self, messages: &[PluginMessage]) {
         self.finalize_live_assistant();
         let mut committed_user_message = false;
@@ -1285,6 +1300,9 @@ impl App {
                 if mutation.indicators_changed {
                     self.dirty = true;
                 }
+            }
+            SessionEvent::InjectedTurnInputAccepted { messages, .. } => {
+                self.accept_injected_turn_input(&messages);
             }
             SessionEvent::InjectedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);

@@ -1,346 +1,222 @@
 use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::Arc;
 
 use crate::PromptContext;
 use crate::plugin::PromptContribution;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PromptSectionName {
+pub enum PromptBuiltin {
+    MainAgentIntro,
+    ExecutionInstructions,
+    CoreGuidance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptSlot {
     Intro,
     Execution,
     Guidance,
+    ProjectInstructions,
+    RuntimeContext,
     Environment,
 }
 
-impl PromptSectionName {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Intro => "intro",
-            Self::Execution => "execution",
-            Self::Guidance => "guidance",
-            Self::Environment => "environment",
-        }
-    }
-
-    pub fn names_csv() -> String {
-        SECTION_DEFS
-            .iter()
-            .map(|def| def.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PromptTemplateEntry {
+    Text { content: String },
+    Builtin { builtin: PromptBuiltin },
+    Slot { slot: PromptSlot },
 }
 
-impl FromStr for PromptSectionName {
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        let value = raw.trim().to_ascii_lowercase();
-        match value.as_str() {
-            "intro" => Ok(Self::Intro),
-            "execution" => Ok(Self::Execution),
-            "guidance" => Ok(Self::Guidance),
-            "environment" => Ok(Self::Environment),
-            _ => Err(format!(
-                "unknown prompt section `{raw}` (expected one of: {})",
-                Self::names_csv()
-            )),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptOverrideMode {
-    Replace,
-    Prepend,
-    Append,
-    Disable,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct PromptSectionOverride {
-    pub section: PromptSectionName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub block: Option<String>,
-    pub mode: PromptOverrideMode,
-    #[serde(default)]
-    pub content: String,
-}
-
-pub trait PromptRenderer: Send + Sync {
-    fn render(&self, prompt: &PromptContext, overrides: &[PromptSectionOverride]) -> String;
-}
-
-type PromptSectionBuilder = for<'a> fn(&PromptRenderContext<'a>) -> Option<String>;
-type PromptBlockBuilder = for<'a> fn(&PromptRenderContext<'a>) -> Vec<PromptBlockState>;
-
-struct PromptSectionDef {
-    name: PromptSectionName,
-    title: Option<&'static str>,
-    builder: PromptSectionBuilder,
-    block_builder: PromptBlockBuilder,
-}
-
-#[derive(Clone, Debug, Default)]
-struct PromptSectionState {
-    body: Option<String>,
-    blocks: Vec<PromptBlockState>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PromptBlockState {
-    key: String,
-    title: Option<String>,
-    content: String,
-}
-
-impl PromptBlockState {
-    fn new(key: impl Into<String>, title: Option<String>, content: impl Into<String>) -> Self {
-        Self {
-            key: key.into(),
-            title,
+impl PromptTemplateEntry {
+    pub fn text(content: impl Into<String>) -> Self {
+        Self::Text {
             content: content.into(),
         }
     }
-}
 
-const SECTION_DEFS: [PromptSectionDef; 4] = [
-    PromptSectionDef {
-        name: PromptSectionName::Intro,
-        title: None,
-        builder: intro_section,
-        block_builder: no_blocks,
-    },
-    PromptSectionDef {
-        name: PromptSectionName::Execution,
-        title: Some("Execution"),
-        builder: execution_section,
-        block_builder: no_blocks,
-    },
-    PromptSectionDef {
-        name: PromptSectionName::Guidance,
-        title: Some("Guidance"),
-        builder: guidance_section,
-        block_builder: no_blocks,
-    },
-    PromptSectionDef {
-        name: PromptSectionName::Environment,
-        title: Some("Environment"),
-        builder: environment_section,
-        block_builder: no_blocks,
-    },
-];
+    pub fn builtin(builtin: PromptBuiltin) -> Self {
+        Self::Builtin { builtin }
+    }
 
-struct PromptRenderContext<'a> {
-    prompt: &'a PromptContext,
-}
-
-impl<'a> PromptRenderContext<'a> {
-    fn new(prompt: &'a PromptContext) -> Self {
-        Self { prompt }
+    pub fn slot(slot: PromptSlot) -> Self {
+        Self::Slot { slot }
     }
 }
 
-#[derive(Default)]
-pub struct DefaultPromptRenderer;
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptTemplateSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<PromptTemplateEntry>,
+}
 
-impl PromptRenderer for DefaultPromptRenderer {
-    fn render(&self, prompt: &PromptContext, overrides: &[PromptSectionOverride]) -> String {
-        let render_context = PromptRenderContext::new(prompt);
-        let mut sections: HashMap<PromptSectionName, PromptSectionState> = HashMap::new();
-        for def in SECTION_DEFS {
-            sections.insert(
-                def.name,
-                PromptSectionState {
-                    body: (def.builder)(&render_context),
-                    blocks: (def.block_builder)(&render_context),
-                },
-            );
+impl PromptTemplateSection {
+    pub fn new(title: Option<String>, entries: Vec<PromptTemplateEntry>) -> Self {
+        Self { title, entries }
+    }
+
+    pub fn untitled(entries: Vec<PromptTemplateEntry>) -> Self {
+        Self {
+            title: None,
+            entries,
         }
-        apply_prompt_contributions(&mut sections, &prompt.contributions);
-        apply_block_overrides(&mut sections, overrides);
+    }
 
-        let mut rendered_sections: HashMap<PromptSectionName, Option<String>> = HashMap::new();
-        for def in SECTION_DEFS {
-            let rendered = sections
-                .get(&def.name)
-                .and_then(|state| render_section(def.title, state));
-            rendered_sections.insert(def.name, rendered);
+    pub fn titled(title: impl Into<String>, entries: Vec<PromptTemplateEntry>) -> Self {
+        Self {
+            title: Some(title.into()),
+            entries,
         }
-        apply_section_overrides(&mut rendered_sections, overrides);
+    }
+}
 
-        SECTION_DEFS
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptTemplate {
+    pub sections: Vec<PromptTemplateSection>,
+}
+
+impl PromptTemplate {
+    pub fn new(sections: Vec<PromptTemplateSection>) -> Self {
+        Self { sections }
+    }
+
+    pub fn render(&self, prompt: &PromptContext) -> String {
+        let contributions = grouped_contributions(prompt);
+        self.sections
             .iter()
-            .filter_map(|def| rendered_sections.get(&def.name).cloned().flatten())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .filter_map(|section| render_section(section, prompt, &contributions))
             .collect::<Vec<_>>()
             .join("\n\n")
     }
 }
 
-pub fn default_prompt_renderer() -> Arc<dyn PromptRenderer> {
-    Arc::new(DefaultPromptRenderer)
-}
-
-fn no_blocks(_ctx: &PromptRenderContext<'_>) -> Vec<PromptBlockState> {
-    Vec::new()
-}
-
-fn apply_section_overrides(
-    sections: &mut HashMap<PromptSectionName, Option<String>>,
-    overrides: &[PromptSectionOverride],
-) {
-    for ov in overrides.iter().filter(|ov| ov.block.is_none()) {
-        let entry = sections.entry(ov.section).or_insert(None);
-        *entry = apply_text_override(entry.take(), ov.mode, &ov.content);
+impl Default for PromptTemplate {
+    fn default() -> Self {
+        default_prompt_template()
     }
 }
 
-fn apply_prompt_contributions(
-    sections: &mut HashMap<PromptSectionName, PromptSectionState>,
-    contributions: &[PromptContribution],
-) {
-    let mut ordered = contributions.to_vec();
-    ordered.sort_by_key(|contribution| contribution.priority);
-    for contribution in &ordered {
-        let content = contribution.content.trim();
-        if content.is_empty() {
-            continue;
-        }
-        let entry = sections.entry(contribution.section).or_default();
-        upsert_block(
-            &mut entry.blocks,
-            contribution.block.clone(),
-            contribution.title.clone(),
-            content.to_string(),
-        );
-    }
+pub fn default_prompt_template() -> PromptTemplate {
+    PromptTemplate::new(vec![
+        PromptTemplateSection::untitled(vec![
+            PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro),
+            PromptTemplateEntry::slot(PromptSlot::Intro),
+        ]),
+        PromptTemplateSection::titled(
+            "Execution",
+            vec![
+                PromptTemplateEntry::builtin(PromptBuiltin::ExecutionInstructions),
+                PromptTemplateEntry::slot(PromptSlot::Execution),
+            ],
+        ),
+        PromptTemplateSection::titled(
+            "Guidance",
+            vec![
+                PromptTemplateEntry::builtin(PromptBuiltin::CoreGuidance),
+                PromptTemplateEntry::slot(PromptSlot::ProjectInstructions),
+                PromptTemplateEntry::slot(PromptSlot::Guidance),
+            ],
+        ),
+        PromptTemplateSection::titled(
+            "Environment",
+            vec![
+                PromptTemplateEntry::slot(PromptSlot::RuntimeContext),
+                PromptTemplateEntry::slot(PromptSlot::Environment),
+            ],
+        ),
+    ])
 }
 
-fn apply_block_overrides(
-    sections: &mut HashMap<PromptSectionName, PromptSectionState>,
-    overrides: &[PromptSectionOverride],
-) {
-    for ov in overrides.iter().filter(|ov| ov.block.is_some()) {
-        let state = sections.entry(ov.section).or_default();
-        apply_block_override(state, ov);
+pub const MAIN_AGENT_INTRO: &str = "You are an AI coding assistant piloting the lash harness.";
+
+pub const CORE_GUIDANCE_SECTION: &str = r#"- Be clear, direct, and natural. Avoid filler, hedging, and performative tone.
+- Take initiative when the user's intent is clear. Default to acting without asking; ask only when progress is blocked and user intervention is strictly required.
+- Before a grouped set of tool calls or a substantial action, send a brief preamble about the immediate next step. Skip it for trivial actions.
+- Fix root causes instead of masking symptoms.
+- Do not stop at partial progress; follow the task through to completion.
+- Prefer the simplest correct solution over cleverness or unnecessary abstraction.
+- Keep final answers focused and well-written. Use short numbered next steps only when there are real next steps."#;
+
+fn grouped_contributions(prompt: &PromptContext) -> HashMap<PromptSlot, Vec<PromptContribution>> {
+    let mut grouped: HashMap<PromptSlot, Vec<PromptContribution>> = HashMap::new();
+    for contribution in &prompt.contributions {
+        grouped
+            .entry(contribution.slot)
+            .or_default()
+            .push(contribution.clone());
     }
+    for entries in grouped.values_mut() {
+        entries.sort_by_key(|contribution| contribution.priority);
+    }
+    grouped
 }
 
-fn apply_block_override(state: &mut PromptSectionState, override_def: &PromptSectionOverride) {
-    let Some(block_key) = override_def.block.as_deref() else {
-        return;
-    };
-    let Some(index) = state.blocks.iter().position(|block| block.key == block_key) else {
-        if matches!(override_def.mode, PromptOverrideMode::Disable) {
-            return;
-        }
-        let title = Some(titleize_block_key(block_key));
-        let block = PromptBlockState::new(block_key, title, override_def.content.clone());
-        if matches!(override_def.mode, PromptOverrideMode::Prepend) {
-            state.blocks.insert(0, block);
-        } else {
-            state.blocks.push(block);
-        }
-        return;
-    };
-
-    let existing = state.blocks[index].content.clone();
-    match apply_text_override(Some(existing), override_def.mode, &override_def.content) {
-        Some(content) => state.blocks[index].content = content,
-        None => {
-            state.blocks.remove(index);
-        }
-    }
-}
-
-fn apply_text_override(
-    existing: Option<String>,
-    mode: PromptOverrideMode,
-    content: &str,
+fn render_section(
+    section: &PromptTemplateSection,
+    prompt: &PromptContext,
+    contributions: &HashMap<PromptSlot, Vec<PromptContribution>>,
 ) -> Option<String> {
-    match mode {
-        PromptOverrideMode::Disable => None,
-        PromptOverrideMode::Replace => Some(content.to_string()),
-        PromptOverrideMode::Prepend => {
-            let existing = existing.unwrap_or_default();
-            Some(if existing.trim().is_empty() {
-                content.to_string()
-            } else {
-                format!("{content}\n\n{existing}")
-            })
-        }
-        PromptOverrideMode::Append => {
-            let existing = existing.unwrap_or_default();
-            Some(if existing.trim().is_empty() {
-                content.to_string()
-            } else {
-                format!("{existing}\n\n{content}")
-            })
+    let mut parts = Vec::new();
+    for entry in &section.entries {
+        match entry {
+            PromptTemplateEntry::Text { content } => push_text(&mut parts, content),
+            PromptTemplateEntry::Builtin { builtin } => {
+                push_text(&mut parts, &render_builtin(*builtin, prompt))
+            }
+            PromptTemplateEntry::Slot { slot } => {
+                if let Some(entries) = contributions.get(slot) {
+                    for contribution in entries {
+                        if let Some(rendered) = render_contribution(contribution) {
+                            parts.push(rendered);
+                        }
+                    }
+                }
+            }
         }
     }
-}
 
-fn upsert_block(
-    blocks: &mut Vec<PromptBlockState>,
-    key: String,
-    title: Option<String>,
-    content: String,
-) {
-    if let Some(existing) = blocks.iter_mut().find(|block| block.key == key) {
-        if existing.title.is_none() {
-            existing.title = title;
-        }
-        if existing.content.trim().is_empty() {
-            existing.content = content;
-        } else {
-            existing.content.push_str("\n\n");
-            existing.content.push_str(content.trim());
-        }
-        return;
-    }
-
-    blocks.push(PromptBlockState::new(key, title, content));
-}
-
-fn render_section(title: Option<&'static str>, state: &PromptSectionState) -> Option<String> {
-    let body = state
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|body| !body.is_empty())
-        .map(str::to_string);
-    let blocks = state
-        .blocks
-        .iter()
-        .filter_map(render_block)
-        .collect::<Vec<_>>();
-
-    if body.is_none() && blocks.is_empty() {
+    if parts.is_empty() {
         return None;
     }
 
-    let mut parts = Vec::new();
-    if let Some(title) = title {
-        parts.push(format!("## {title}"));
+    let mut rendered = Vec::new();
+    if let Some(title) = section
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        rendered.push(format!("## {title}"));
     }
-    if let Some(body) = body {
-        parts.push(body);
-    }
-    parts.extend(blocks);
-    Some(parts.join("\n\n"))
+    rendered.extend(parts);
+    Some(rendered.join("\n\n"))
 }
 
-fn render_block(block: &PromptBlockState) -> Option<String> {
-    let content = block.content.trim();
+fn push_text(parts: &mut Vec<String>, text: &str) {
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_string());
+    }
+}
+
+fn render_builtin(builtin: PromptBuiltin, prompt: &PromptContext) -> String {
+    match builtin {
+        PromptBuiltin::MainAgentIntro => MAIN_AGENT_INTRO.to_string(),
+        PromptBuiltin::ExecutionInstructions => prompt.execution_prompt.clone(),
+        PromptBuiltin::CoreGuidance => CORE_GUIDANCE_SECTION.to_string(),
+    }
+}
+
+fn render_contribution(contribution: &PromptContribution) -> Option<String> {
+    let content = contribution.content.trim();
     if content.is_empty() {
         return None;
     }
-    match block
+    match contribution
         .title
         .as_deref()
         .map(str::trim)
@@ -349,48 +225,6 @@ fn render_block(block: &PromptBlockState) -> Option<String> {
         Some(title) => Some(format!("### {title}\n\n{content}")),
         None => Some(content.to_string()),
     }
-}
-
-fn titleize_block_key(key: &str) -> String {
-    key.split(['_', '-', '.'])
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| {
-            let mut chars = segment.chars();
-            match chars.next() {
-                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-const MAIN_AGENT_INTRO: &str = "You are an AI coding assistant piloting the lash harness.";
-
-const CORE_GUIDANCE_SECTION: &str = r#"- Be clear, direct, and natural. Avoid filler, hedging, and performative tone.
-- Take initiative when the user's intent is clear. Default to acting without asking; ask only when progress is blocked and user intervention is strictly required.
-- Before a grouped set of tool calls or a substantial action, send a brief preamble about the immediate next step. Skip it for trivial actions.
-- Fix root causes instead of masking symptoms.
-- Do not stop at partial progress; follow the task through to completion.
-- Prefer the simplest correct solution over cleverness or unnecessary abstraction.
-- Keep final answers focused and well-written. Use short numbered next steps only when there are real next steps."#;
-
-fn intro_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
-    let _ = ctx;
-    Some(MAIN_AGENT_INTRO.to_string())
-}
-
-fn execution_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
-    Some(ctx.prompt.execution_prompt.clone())
-}
-
-fn guidance_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
-    let _ = ctx;
-    Some(CORE_GUIDANCE_SECTION.to_string())
-}
-
-fn environment_section(_ctx: &PromptRenderContext<'_>) -> Option<String> {
-    None
 }
 
 #[cfg(test)]
@@ -406,133 +240,73 @@ mod tests {
     }
 
     #[test]
-    fn parses_prompt_section_names() {
-        assert_eq!(
-            PromptSectionName::from_str("guidance").unwrap(),
-            PromptSectionName::Guidance
-        );
-        assert!(PromptSectionName::from_str("available_tools").is_err());
-        assert!(PromptSectionName::from_str("memory_api").is_err());
-    }
-
-    #[test]
-    fn overrides_apply_in_order() {
-        let overrides = vec![
-            PromptSectionOverride {
-                section: PromptSectionName::Intro,
-                block: None,
-                mode: PromptOverrideMode::Replace,
-                content: "A".into(),
-            },
-            PromptSectionOverride {
-                section: PromptSectionName::Intro,
-                block: None,
-                mode: PromptOverrideMode::Append,
-                content: "B".into(),
-            },
-        ];
-        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Rlm), &overrides);
-        assert!(text.starts_with("A\n\nB"));
-    }
-
-    #[test]
-    fn guidance_contributions_render_with_default_guidance_section() {
-        let mut prompt = prompt(crate::ExecutionMode::Rlm);
-        prompt.contributions = vec![
-            PromptContribution::guidance("first_guide", "First Guide", "First details."),
-            PromptContribution::guidance("second_guide", "Second Guide", "Second details."),
-        ];
-        let text = DefaultPromptRenderer.render(&prompt, &[]);
+    fn default_template_renders_builtin_sections() {
+        let text = default_prompt_template().render(&prompt(crate::ExecutionMode::Rlm));
+        assert!(text.contains(MAIN_AGENT_INTRO));
+        assert!(text.contains("## Execution"));
+        assert!(text.contains("mode execution"));
         assert!(text.contains("## Guidance"));
         assert!(text.contains("Fix root causes instead of masking symptoms"));
+    }
+
+    #[test]
+    fn template_renders_slot_contributions_in_order() {
+        let mut prompt = prompt(crate::ExecutionMode::Rlm);
+        prompt.contributions = vec![
+            PromptContribution::guidance("Second Guide", "Second details.").with_priority(10),
+            PromptContribution::guidance("First Guide", "First details.").with_priority(0),
+        ];
+        let text = default_prompt_template().render(&prompt);
         assert!(text.contains("### First Guide"));
-        assert!(text.contains("Second details."));
+        assert!(text.contains("### Second Guide"));
+        assert!(text.find("### First Guide").unwrap() < text.find("### Second Guide").unwrap());
     }
 
     #[test]
-    fn prompt_contributions_append_to_sections() {
+    fn template_can_omit_builtin_guidance_and_keep_plugin_guidance() {
+        let template = PromptTemplate::new(vec![PromptTemplateSection::titled(
+            "Guidance",
+            vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
+        )]);
+        let mut prompt = prompt(crate::ExecutionMode::Rlm);
+        prompt.contributions = vec![PromptContribution::guidance("Custom", "More guidance.")];
+        let text = template.render(&prompt);
+        assert!(text.contains("## Guidance"));
+        assert!(text.contains("### Custom"));
+        assert!(!text.contains("Fix root causes instead of masking symptoms"));
+    }
+
+    #[test]
+    fn template_can_place_project_instructions_separately() {
+        let template = PromptTemplate::new(vec![
+            PromptTemplateSection::titled(
+                "Rules",
+                vec![PromptTemplateEntry::slot(PromptSlot::ProjectInstructions)],
+            ),
+            PromptTemplateSection::titled(
+                "Guidance",
+                vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
+            ),
+        ]);
         let mut prompt = prompt(crate::ExecutionMode::Rlm);
         prompt.contributions = vec![
-            PromptContribution::environment("runtime_context", "Runtime Context", "cwd: /tmp/demo"),
-            PromptContribution::guidance(
-                "project_instructions",
-                "Project Instructions",
-                "Do the safe thing.",
-            ),
+            PromptContribution::project_instructions("Repo rules"),
+            PromptContribution::guidance("Shell", "Use exec_command."),
         ];
-        let text = DefaultPromptRenderer.render(&prompt, &[]);
-        assert!(text.contains("## Environment"));
-        assert!(text.contains("### Runtime Context"));
-        assert!(text.contains("cwd: /tmp/demo"));
-        assert!(text.contains("### Project Instructions"));
+        let text = template.render(&prompt);
+        assert!(text.contains("## Rules"));
+        assert!(text.contains("Repo rules"));
+        assert!(text.contains("## Guidance"));
+        assert!(text.contains("### Shell"));
     }
 
     #[test]
-    fn prompt_orders_environment_after_execution() {
-        let mut prompt = prompt(crate::ExecutionMode::Rlm);
-        prompt.contributions = vec![
-            PromptContribution::guidance("custom", "Custom", "More guidance."),
-            PromptContribution::environment("runtime_context", "Runtime Context", "cwd: /repo"),
-            PromptContribution::block(
-                PromptSectionName::Execution,
-                "available_tools",
-                "Available Tools",
-                "tools",
-            ),
-        ];
-        let text = DefaultPromptRenderer.render(&prompt, &[]);
-        let intro_idx = text.find(MAIN_AGENT_INTRO).unwrap();
-        let guidance_idx = text.find("## Guidance").unwrap();
-        let env_idx = text.find("## Environment").unwrap();
-        assert!(intro_idx < guidance_idx);
-        assert!(guidance_idx < env_idx);
-        assert!(text.contains("### Available Tools"));
-    }
-
-    #[test]
-    fn rlm_execution_prompt_documents_decomposition_guidance() {
-        let mut prompt = prompt(crate::ExecutionMode::Rlm);
-        prompt.execution_prompt =
-            "### Decomposition\n\nPrefer narrow checks over brute-force scanning".to_string();
-        let text = DefaultPromptRenderer.render(&prompt, &[]);
-        assert!(text.contains("### Decomposition"));
-        assert!(text.contains("Prefer narrow checks over brute-force scanning"));
-    }
-
-    #[test]
-    fn rlm_execution_prompt_mentions_async_tool_handles() {
-        let mut prompt = prompt(crate::ExecutionMode::Rlm);
-        prompt.execution_prompt = "start call tool_name\nawait handle\ncancel handle".to_string();
-        let text = DefaultPromptRenderer.render(&prompt, &[]);
-        assert!(text.contains("start call tool_name"));
-        assert!(text.contains("await handle"));
-        assert!(text.contains("cancel handle"));
-    }
-
-    #[test]
-    fn block_overrides_can_target_structured_prompt_blocks() {
-        let mut prompt = prompt(crate::ExecutionMode::Rlm);
-        prompt.contributions = vec![PromptContribution::guidance(
-            "project_instructions",
-            "Project Instructions",
-            "Follow the repo rules.",
-        )];
-        let overrides = vec![PromptSectionOverride {
-            section: PromptSectionName::Guidance,
-            block: Some("project_instructions".to_string()),
-            mode: PromptOverrideMode::Replace,
-            content: "Use the local conventions.".to_string(),
-        }];
-        let text = DefaultPromptRenderer.render(&prompt, &overrides);
-        assert!(text.contains("### Project Instructions"));
-        assert!(text.contains("Use the local conventions."));
-        assert!(!text.contains("Follow the repo rules."));
-    }
-
-    #[test]
-    fn prompt_does_not_emit_runtime_prune_status() {
-        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Rlm), &[]);
-        assert!(!text.contains("Context-pruned turns this run"));
-        assert!(!text.contains("Skip history-mining detours"));
+    fn empty_sections_are_skipped() {
+        let template = PromptTemplate::new(vec![PromptTemplateSection::titled(
+            "Environment",
+            vec![PromptTemplateEntry::slot(PromptSlot::Environment)],
+        )]);
+        let text = template.render(&prompt(crate::ExecutionMode::Rlm));
+        assert!(text.is_empty());
     }
 }

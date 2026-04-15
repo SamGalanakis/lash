@@ -201,7 +201,6 @@ pub(super) fn tool_discovery_prompt_contributions(
     }
 
     vec![PromptContribution::guidance(
-        "tool_discovery",
         "Tool Discovery",
         "Use `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.",
     )]
@@ -217,6 +216,7 @@ pub(super) fn bound_variables_prompt_contributions(
 
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
+        "The type and size hints below are there to help you choose the right strategy before inspecting a value.".to_string(),
     ];
     let mut entries = globals.iter().collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(right.0));
@@ -230,12 +230,17 @@ pub(super) fn bound_variables_prompt_contributions(
     }
 
     lines.push(String::new());
-    lines.push("Variables:".to_string());
+    lines.push("Available variables:".to_string());
     for (name, shape) in &variable_types {
-        lines.push(format!(
-            "- `{name}`: `{}`",
-            render_shape_inline(shape, &registry)
-        ));
+        let value = globals
+            .get(*name)
+            .expect("bound variable should still exist while rendering prompt contribution");
+        let type_text = render_shape_inline(shape, &registry);
+        if let Some(size_hint) = render_value_size_hint(value) {
+            lines.push(format!("- `{name}`: `{type_text}`, {size_hint}"));
+        } else {
+            lines.push(format!("- `{name}`: `{type_text}`"));
+        }
     }
 
     if !registry.definitions.is_empty() {
@@ -252,10 +257,27 @@ pub(super) fn bound_variables_prompt_contributions(
     }
 
     vec![PromptContribution::guidance(
-        "bound_variables",
         "Bound Variables",
         lines.join("\n"),
     )]
+}
+
+fn render_value_size_hint(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(_) => None,
+        serde_json::Value::Number(_) => None,
+        serde_json::Value::String(text) => {
+            let lines = text.lines().count();
+            if lines > 1 {
+                Some(format!("len={}, lines={lines}", text.chars().count()))
+            } else {
+                Some(format!("len={}", text.chars().count()))
+            }
+        }
+        serde_json::Value::Array(values) => Some(format!("len={}", values.len())),
+        serde_json::Value::Object(map) => Some(format!("keys={}", map.len())),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -754,9 +776,14 @@ mod tests {
         let contributions = bound_variables_prompt_contributions(&ctx);
         assert_eq!(contributions.len(), 1);
         assert_eq!(contributions[0].title.as_deref(), Some("Bound Variables"));
-        assert!(contributions[0].content.contains("Variables:"));
-        assert!(contributions[0].content.contains("- `input`: `Input`"));
+        assert!(contributions[0].content.contains("Available variables:"));
+        assert!(
+            contributions[0]
+                .content
+                .contains("- `input`: `Input`, keys=3")
+        );
         assert!(contributions[0].content.contains("- `limit`: `int`"));
+        assert!(!contributions[0].content.contains("size=scalar"));
         assert!(contributions[0].content.contains("type Input = {"));
         assert!(
             contributions[0]

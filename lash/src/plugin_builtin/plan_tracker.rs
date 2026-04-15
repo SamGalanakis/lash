@@ -9,7 +9,6 @@ use crate::{SessionPlugin, ToolProvider};
 
 fn plan_tracker_prompt_contributions() -> Vec<PromptContribution> {
     vec![PromptContribution::guidance(
-        "update_plan",
         "`update_plan`",
         "Use `update_plan` to keep an up-to-date, step-by-step plan for substantial multi-step work. Plans help show that you understand the task, make your approach visible to the user, and keep complex or ambiguous work organized.\n\nDo not use plans for simple, single-step requests you can just do immediately. Do not pad plans with filler, obvious steps, or actions you cannot actually perform.\n\nUse a plan when:\n- the task is non-trivial and will take multiple actions\n- sequencing or dependencies matter\n- the work has ambiguity that benefits from checkpoints\n- the user asked for a plan or TODOs\n- you discover additional steps you intend to complete before yielding\n\nPlan quality rules:\n- use short, meaningful, logically ordered, easy-to-verify steps\n- keep each step concise; prefer roughly 5-7 words when possible\n- avoid vague steps like \"work on feature\" or \"make it better\"\n- only include work you genuinely expect to do\n\nStatus rules:\n- keep exactly one step `in_progress` at a time\n- mark steps complete as soon as they are done\n- update the plan before continuing when scope changes materially\n- do not let the plan go stale while you work\n- finish with all steps marked `completed`",
     )]

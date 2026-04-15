@@ -610,7 +610,7 @@ mod tests {
             codex().supported_variants("gpt-5.3-codex"),
             &["low", "medium", "high", "xhigh"]
         );
-        assert_eq!(codex().default_model_variant("gpt-5.4"), Some("high"));
+        assert_eq!(codex().default_model_variant("gpt-5.4"), Some("xhigh"));
         assert_eq!(
             google_oauth().supported_variants("gemini-3.1-pro-preview"),
             &["low", "medium", "high"]

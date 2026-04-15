@@ -312,6 +312,7 @@ pub(crate) async fn run_app(
     plugin_host: PluginHost,
     dynamic_tools: Arc<DynamicToolProvider>,
     turn_injection_bridge: TurnInjectionBridge,
+    turn_input_injection_bridge: TurnInputInjectionBridge,
     logger: &mut SessionLogger,
     args: &Args,
     mut provider: Provider,
@@ -1861,8 +1862,10 @@ pub(crate) async fn run_app(
                                 app.restore_prepared_turn(queued);
                                 continue;
                             }
-                            let injection = make_injected_plugin_message(&queued);
-                            match turn_injection_bridge.enqueue(vec![injection]) {
+                            let injection = lash::InjectedTurnInput {
+                                message: make_injected_plugin_message(&queued),
+                            };
+                            match turn_input_injection_bridge.enqueue(vec![injection]) {
                                 Ok(()) => {
                                     record_queue_pending_steer(&mut ui_trace, &queued);
                                     app.queue_pending_steer(queued.clone());

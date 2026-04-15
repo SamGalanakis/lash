@@ -7,6 +7,7 @@ pub mod llm;
 pub mod mcp;
 pub mod model_info;
 pub mod model_variant;
+pub mod modes;
 pub mod oauth;
 pub mod plugin;
 pub mod provider;
@@ -92,15 +93,15 @@ pub use dynamic::{
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::{
-    CheckpointKind, DefaultPromptRenderer, Effect, EffectId, ErrorEnvelope, ExecResponse,
-    ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole, MessageSequence, Part,
-    PartKind, PluginMessage, PluginSurfaceEvent, PromptContext, PromptContribution,
-    PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
-    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, RenderedPrompt,
-    Response, SessionEvent, TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam,
-    ToolResult, TurnMachine, TurnMachineConfig, UserInputProvenance, UserInputTransform,
-    WAIT_PROMPT_RESUME_EARLY_TOKEN, WAIT_PROMPT_TIMEOUT_TOKEN, default_execution_mode,
-    default_prompt_renderer, execution_mode_supported, messages_are_live_resume_safe,
+    CheckpointKind, Effect, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError,
+    Message, MessageOrigin, MessageRole, MessageSequence, Part, PartKind, PluginMessage,
+    PluginSurfaceEvent, PromptBuiltin, PromptContext, PromptContribution, PromptPanel,
+    PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, Response, SessionEvent,
+    TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult, TurnMachine,
+    TurnMachineConfig, UserInputProvenance, UserInputTransform, WAIT_PROMPT_RESUME_EARLY_TOKEN,
+    WAIT_PROMPT_TIMEOUT_TOKEN, default_execution_mode, default_prompt_template,
+    execution_mode_supported, messages_are_live_resume_safe,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
@@ -146,7 +147,9 @@ pub use runtime::{
     TerminationPolicy, TokenLedgerEntry, TokioBackgroundExecutor, TurnInput, TurnIssue, TurnStatus,
     UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
-pub use session::{Session, SessionError, TurnInjectionBridge};
+pub use session::{
+    InjectedTurnInput, Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,
+};
 pub use session_graph::{
     INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE, INTERNAL_TOOL_CALL_PLUGIN_TYPE, PersistedSessionConfig,
     PersistedTurnState, RlmGlobalsPatchPluginBody, SessionGraph, SessionMessageTreeNode,

@@ -2147,7 +2147,6 @@ impl LashRuntime {
             session.set_context_surface(
                 prepared_context.tool_providers,
                 prepared_context.prompt_contributions,
-                Vec::new(),
                 prepared_context.include_base_tools,
             );
         }

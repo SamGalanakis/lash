@@ -857,25 +857,26 @@ fn take_last_queued_turn_restores_explicit_queue_only() {
 }
 
 #[test]
-fn injected_messages_commit_render_user_blocks_and_clear_matching_pending_steer() {
+fn accepted_injected_turn_input_clears_matching_pending_steer_without_rendering_history() {
     let mut app = App::new("test-model".into(), "test".into());
     let turn = PreparedTurn::new("follow up".into(), Vec::new());
     app.queue_pending_steer(turn.clone());
 
-    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
+    app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
         messages: vec![PluginMessage::text(MessageRole::User, "follow up")],
         checkpoint: lash::CheckpointKind::AfterWork,
     });
 
     assert!(app.pending_steers.is_empty());
-    assert!(matches!(
-        app.blocks.last(),
-        Some(DisplayBlock::UserInput(text)) if text == "follow up"
-    ));
+    assert!(
+        !app.blocks
+            .iter()
+            .any(|block| matches!(block, DisplayBlock::UserInput(text) if text == "follow up"))
+    );
 }
 
 #[test]
-fn injected_messages_clear_matching_pending_steer_even_when_runtime_content_differs() {
+fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_text_differs() {
     let mut app = App::new("test-model".into(), "test".into());
     let mut turn = PreparedTurn::new("/localref lash for context if needed".into(), Vec::new());
     turn.input_provenance.transforms = vec![lash::UserInputTransform::SkillBlockAppend {
@@ -884,7 +885,7 @@ fn injected_messages_clear_matching_pending_steer_even_when_runtime_content_diff
     }];
     app.queue_pending_steer(turn.clone());
 
-    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
+    app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
         messages: vec![PluginMessage::text(
             MessageRole::User,
             "/localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>",
@@ -893,13 +894,14 @@ fn injected_messages_clear_matching_pending_steer_even_when_runtime_content_diff
     });
 
     assert!(app.pending_steers.is_empty());
-    assert!(
-        matches!(app.blocks.last(), Some(DisplayBlock::UserInput(text)) if text == "/localref lash for context if needed")
-    );
+    assert!(!app.blocks.iter().any(|block| matches!(
+        block,
+        DisplayBlock::UserInput(text) if text == "/localref lash for context if needed"
+    )));
 }
 
 #[test]
-fn injected_messages_remove_matching_pending_steer_without_popping_wrong_one() {
+fn accepted_injected_turn_input_removes_matching_pending_steer_without_popping_wrong_one() {
     let mut app = App::new("test-model".into(), "test".into());
     app.queue_pending_steer(PreparedTurn::new("first queued steer".into(), Vec::new()));
     app.queue_pending_steer(PreparedTurn::new(
@@ -907,7 +909,7 @@ fn injected_messages_remove_matching_pending_steer_without_popping_wrong_one() {
         Vec::new(),
     ));
 
-    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
+    app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
         messages: vec![PluginMessage::text(
             MessageRole::User,
             "uhh do not switch nvm",
@@ -917,36 +919,6 @@ fn injected_messages_remove_matching_pending_steer_without_popping_wrong_one() {
 
     assert_eq!(app.pending_steers.len(), 1);
     assert_eq!(app.pending_steers[0].display_text, "first queued steer");
-    assert!(
-        matches!(app.blocks.last(), Some(DisplayBlock::UserInput(text)) if text == "uhh do not switch nvm")
-    );
-}
-
-#[test]
-fn injected_messages_fallback_to_user_input_display_text() {
-    let mut app = App::new("test-model".into(), "test".into());
-
-    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
-        messages: vec![PluginMessage {
-            role: MessageRole::User,
-            content: "/yolopush\n\n<skill>\nbody\n</skill>".into(),
-            parts: Vec::new(),
-            images: Vec::new(),
-            user_input: Some(lash::UserInputProvenance {
-                display_text: "/yolopush".into(),
-                effective_text: "/yolopush\n\n<skill>\nbody\n</skill>".into(),
-                transforms: vec![lash::UserInputTransform::SkillBlockAppend {
-                    skill_name: "yolopush".into(),
-                    skill_path: "/tmp/yolopush/SKILL.md".into(),
-                }],
-            }),
-        }],
-        checkpoint: lash::CheckpointKind::AfterWork,
-    });
-
-    assert!(
-        matches!(app.blocks.last(), Some(DisplayBlock::UserInput(text)) if text == "/yolopush")
-    );
 }
 
 #[test]

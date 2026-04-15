@@ -1573,10 +1573,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::AwaitHandle => {
                 let handle = self.pop_stack()?;
-                let result = match self.host.await_handle(&handle) {
-                    Ok(value) => success(value),
-                    Err(error) => error_value(error.to_string()),
-                };
+                let result = self.await_value(handle);
                 self.stack.push(result);
             }
             Instruction::CancelHandle => {
@@ -1945,6 +1942,23 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         self.stack.pop().ok_or_else(|| RuntimeError::ValueError {
             message: "vm stack underflow".to_string(),
         })
+    }
+
+    fn await_value(&self, handle: Value) -> Value {
+        match handle {
+            Value::List(handles) => Value::List(
+                handles
+                    .iter()
+                    .cloned()
+                    .map(|handle| self.await_value(handle))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            handle => match self.host.await_handle(&handle) {
+                Ok(value) => success(value),
+                Err(error) => error_value(error.to_string()),
+            },
+        }
     }
 
     fn pop_n(&mut self, len: usize) -> Result<Vec<Value>, RuntimeError> {

@@ -11,16 +11,18 @@ pub use plugin::{
     UserInputTransform,
 };
 pub use sansio::{
-    Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMachineConfig, TurnProtocol,
+    CheckpointResumeAction, CompletedToolCall, DriverAction, DriverContextView, Effect, EffectId,
+    LlmCallError, PendingToolCall, ProtocolDriverHandle, Response, TurnMachine, TurnMachineConfig,
+    WaitingExecState, WaitingLlmState, driver_state,
 };
 pub use session::ExecResponse;
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
-    DefaultPromptRenderer, ErrorEnvelope, Message, MessageRole, MessageSequence, Part, PartKind,
-    PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
-    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, RenderedPrompt,
-    SessionEvent, TokenUsage, WAIT_PROMPT_RESUME_EARLY_TOKEN, WAIT_PROMPT_TIMEOUT_TOKEN,
-    default_prompt_renderer, messages_are_live_resume_safe,
+    CORE_GUIDANCE_SECTION, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, MessageSequence,
+    Part, PartKind, PromptBuiltin, PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode,
+    PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState,
+    RenderedPrompt, SessionEvent, TokenUsage, WAIT_PROMPT_RESUME_EARLY_TOKEN,
+    WAIT_PROMPT_TIMEOUT_TOKEN, default_prompt_template, messages_are_live_resume_safe,
 };
 
 /// Execution backend for session turns.
