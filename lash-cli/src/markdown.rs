@@ -1,19 +1,7 @@
 use lash_tui::{Line, Modifier, Span, Style};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{text_layout, theme};
-
-/// Pad a string with trailing spaces to reach a target display width.
-fn pad_display(s: &str, target: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
-    let padding = target.saturating_sub(w);
-    format!("{}{}", s, " ".repeat(padding))
-}
-
-fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
-}
 
 fn table_column_gap(max_width: usize, col_count: usize) -> usize {
     if col_count <= 1 || max_width < 48 {
@@ -23,103 +11,96 @@ fn table_column_gap(max_width: usize, col_count: usize) -> usize {
     }
 }
 
-fn cell_intrinsic_width(text: &str) -> usize {
-    let width = text.lines().map(display_width).max().unwrap_or(0);
+fn spans_text(spans: &[Span<'_>]) -> String {
+    let mut text = String::new();
+    for span in spans {
+        text.push_str(&span.content);
+    }
+    text
+}
+
+fn line_plain_text(line: &Line<'_>) -> String {
+    spans_text(&line.spans)
+}
+
+fn cell_intrinsic_width(lines: &[Line<'_>]) -> usize {
+    let width = lines.iter().map(Line::width).max().unwrap_or(0);
     width.max(1)
 }
 
-fn wrap_token_chars(token: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
+fn pad_styled_line(line: &Line<'static>, target: usize, fallback_style: Style) -> Line<'static> {
+    let mut spans = line.spans.clone();
+    let padding = target.saturating_sub(line.width());
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), fallback_style));
     }
-
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-
-    for ch in token.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if ch_width > width {
-            if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
-            continue;
-        }
-        if current_width + ch_width > width && !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push(ch);
-        current_width += ch_width;
-    }
-
-    if !current.is_empty() {
-        lines.push(current);
-    }
-
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-
-    lines
+    Line::from(spans)
 }
 
-fn wrap_text_to_width(text: &str, width: usize) -> Vec<String> {
+fn wrap_styled_table_cell(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
-        return vec![String::new()];
+        return vec![Line::from("")];
     }
 
-    let mut out = Vec::new();
-    for raw_line in text.lines() {
-        if raw_line.trim().is_empty() {
-            out.push(String::new());
-            continue;
-        }
+    let text = line_plain_text(line);
+    if text.is_empty() {
+        return vec![Line::from("")];
+    }
 
-        let mut current = String::new();
-        let mut current_width = 0;
+    let ranges = text_layout::wrap_text_ranges_wordwise(&text, width);
+    let mut wrapped = Vec::with_capacity(ranges.len().max(1));
+    for (start, end) in ranges {
+        wrapped.push(Line::from(text_layout::slice_line_spans(line, start, end)));
+    }
+    if wrapped.is_empty() {
+        vec![Line::from("")]
+    } else {
+        wrapped
+    }
+}
 
-        for token in raw_line.split_whitespace() {
-            let token_width = display_width(token);
-            if current.is_empty() {
-                if token_width <= width {
-                    current.push_str(token);
-                    current_width = token_width;
-                } else {
-                    out.extend(wrap_token_chars(token, width));
+fn wrap_styled_cell_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
+    let mut wrapped = Vec::new();
+    for line in lines {
+        wrapped.extend(wrap_styled_table_cell(line, width));
+    }
+    if wrapped.is_empty() {
+        vec![Line::from("")]
+    } else {
+        wrapped
+    }
+}
+
+fn apply_base_style(line: &Line<'static>, style: Style) -> Line<'static> {
+    Line::from(
+        line.spans
+            .iter()
+            .map(|span| {
+                let mut merged = span.style;
+                if style.fg.is_some()
+                    && (merged.fg.is_none() || merged.fg == theme::assistant_text().fg)
+                {
+                    merged.fg = style.fg;
                 }
-                continue;
-            }
-
-            if current_width + 1 + token_width <= width {
-                current.push(' ');
-                current.push_str(token);
-                current_width += 1 + token_width;
-                continue;
-            }
-
-            out.push(std::mem::take(&mut current));
-            current_width = 0;
-
-            if token_width <= width {
-                current.push_str(token);
-                current_width = token_width;
-            } else {
-                out.extend(wrap_token_chars(token, width));
-            }
-        }
-
-        if !current.is_empty() {
-            out.push(current);
-        }
-    }
-
-    if out.is_empty() {
-        out.push(String::new());
-    }
-
-    out
+                if style.bg.is_some() && merged.bg.is_none() {
+                    merged.bg = style.bg;
+                }
+                if style.bold {
+                    merged.bold = true;
+                }
+                if style.dim {
+                    merged.dim = true;
+                }
+                if style.italic {
+                    merged.italic = true;
+                }
+                if style.underlined {
+                    merged.underlined = true;
+                }
+                Span::styled(span.content.to_string(), merged)
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn expand_column_widths(widths: &[usize], target_content_width: usize) -> Vec<usize> {
@@ -343,9 +324,10 @@ struct MdRenderer {
     // Table buffering: collect all rows, then render with aligned columns
     in_table: bool,
     in_table_head: bool,
-    table_rows: Vec<Vec<String>>, // rows of cells (text content)
-    table_head: Vec<String>,      // header row
-    current_cell: String,         // accumulator for current cell text
+    table_rows: Vec<Vec<Vec<Line<'static>>>>,
+    table_head: Vec<Vec<Line<'static>>>,
+    current_cell_lines: Vec<Line<'static>>,
+    current_cell_spans: Vec<Span<'static>>,
 }
 
 struct ListContext {
@@ -423,7 +405,8 @@ impl MdRenderer {
             in_table_head: false,
             table_rows: Vec::new(),
             table_head: Vec::new(),
-            current_cell: String::new(),
+            current_cell_lines: Vec::new(),
+            current_cell_spans: Vec::new(),
         }
     }
 
@@ -453,6 +436,11 @@ impl MdRenderer {
 
     fn blank_line(&mut self) {
         self.lines.push(Line::from(""));
+    }
+
+    fn flush_current_cell_line(&mut self) {
+        let spans = std::mem::take(&mut self.current_cell_spans);
+        self.current_cell_lines.push(Line::from(spans));
     }
 
     fn push_pending_item_prefix(&mut self) {
@@ -502,13 +490,15 @@ impl MdRenderer {
         let cell_style = theme::assistant_text();
         let gap = " ".repeat(column_gap);
 
-        let render_row = |cells: &[String], style: Style, lines: &mut Vec<Line<'static>>| {
-            let wrapped_cells: Vec<Vec<String>> = widths
+        let render_row = |cells: &[Vec<Line<'static>>],
+                          style: Style,
+                          lines: &mut Vec<Line<'static>>| {
+            let wrapped_cells: Vec<Vec<Line<'static>>> = widths
                 .iter()
                 .enumerate()
                 .map(|(idx, width)| {
-                    let text = cells.get(idx).map(|value| value.as_str()).unwrap_or("");
-                    wrap_text_to_width(text, *width)
+                    let cell = cells.get(idx).map(Vec::as_slice).unwrap_or(&[]);
+                    wrap_styled_cell_lines(cell, *width)
                 })
                 .collect();
             let row_height = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1);
@@ -518,9 +508,10 @@ impl MdRenderer {
                 for (col_idx, width) in widths.iter().enumerate() {
                     let content = wrapped_cells[col_idx]
                         .get(line_idx)
-                        .map(String::as_str)
-                        .unwrap_or("");
-                    spans.push(Span::styled(pad_display(content, *width), style));
+                        .cloned()
+                        .unwrap_or_else(|| Line::from(""));
+                    let padded = pad_styled_line(&apply_base_style(&content, style), *width, style);
+                    spans.extend(padded.spans);
                     if col_idx < widths.len() - 1 {
                         spans.push(Span::raw(gap.clone()));
                     }
@@ -571,10 +562,14 @@ impl MdRenderer {
             }
             Event::End(TagEnd::TableRow) => {}
             Event::Start(Tag::TableCell) => {
-                self.current_cell.clear();
+                self.current_cell_lines.clear();
+                self.current_cell_spans.clear();
             }
             Event::End(TagEnd::TableCell) => {
-                let cell = std::mem::take(&mut self.current_cell);
+                if !self.current_cell_spans.is_empty() || self.current_cell_lines.is_empty() {
+                    self.flush_current_cell_line();
+                }
+                let cell = std::mem::take(&mut self.current_cell_lines);
                 if self.in_table_head {
                     self.table_head.push(cell);
                 } else if let Some(row) = self.table_rows.last_mut() {
@@ -630,7 +625,8 @@ impl MdRenderer {
             }
             Event::Code(code) => {
                 if self.in_table {
-                    self.current_cell.push_str(&code);
+                    self.current_cell_spans
+                        .push(Span::styled(code.to_string(), theme::inline_code()));
                 } else {
                     self.spans
                         .push(Span::styled(code.to_string(), theme::inline_code()));
@@ -693,7 +689,8 @@ impl MdRenderer {
             // ── Text ──
             Event::Text(text) => {
                 if self.in_table {
-                    self.current_cell.push_str(&text);
+                    self.current_cell_spans
+                        .push(Span::styled(text.to_string(), self.current_style()));
                 } else if self.in_code_block {
                     for line in text.lines() {
                         self.lines.push(Line::from(vec![
@@ -708,14 +705,20 @@ impl MdRenderer {
                 }
             }
             Event::SoftBreak => {
-                if !self.in_table {
+                if self.in_table {
+                    self.flush_current_cell_line();
+                } else {
                     // Preserve model-emitted line breaks in chat output instead of
                     // collapsing them into spaces.
                     self.flush_line();
                 }
             }
             Event::HardBreak => {
-                self.flush_line();
+                if self.in_table {
+                    self.flush_current_cell_line();
+                } else {
+                    self.flush_line();
+                }
             }
 
             // ── Horizontal rule (---) ──
@@ -739,6 +742,11 @@ impl MdRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    fn display_width(text: &str) -> usize {
+        UnicodeWidthStr::width(text)
+    }
 
     #[test]
     fn render_plain_text() {
@@ -861,6 +869,65 @@ mod tests {
         assert!(all_text.contains("A"));
         assert!(all_text.contains("1"));
         assert!(all_text.contains('\u{2500}'));
+    }
+
+    #[test]
+    fn render_table_preserves_inline_markdown_styles_in_cells() {
+        let lines = render_markdown(
+            "| Name | Notes |\n|---|---|\n| **bold** and *italic* | use `inline` code |",
+            80,
+        );
+
+        let bold_span = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("bold"))
+            .expect("bold span in table cell");
+        assert!(bold_span.style.bold, "expected bold style: {bold_span:?}");
+
+        let italic_span = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("italic"))
+            .expect("italic span in table cell");
+        assert!(
+            italic_span.style.italic,
+            "expected italic style: {italic_span:?}"
+        );
+
+        let inline_code_span = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("inline"))
+            .expect("inline code span in table cell");
+        assert_eq!(inline_code_span.style, theme::inline_code());
+    }
+
+    #[test]
+    fn render_table_preserves_hard_breaks_inside_cells() {
+        let lines = render_markdown(
+            "| Col | Value |\n|---|---|\n| key | first line\\
+second line |",
+            40,
+        );
+
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        let first_idx = rendered
+            .iter()
+            .position(|line| line.contains("first line"))
+            .expect("first table line");
+        let second_idx = rendered
+            .iter()
+            .position(|line| line.contains("second line"))
+            .expect("second table line");
+        assert!(
+            second_idx > first_idx,
+            "cell break should render as a later visual line"
+        );
     }
 
     #[test]

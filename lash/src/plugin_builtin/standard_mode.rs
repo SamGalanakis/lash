@@ -73,7 +73,7 @@ impl ModeExecutionPlugin for StandardModeExecution {
 
     fn turn_config(&self) -> ModeTurnConfig {
         ModeTurnConfig {
-            protocol: crate::sansio::TurnProtocol::Standard,
+            protocol: std::sync::Arc::new(crate::modes::StandardDriver),
             sync_execution_surface: false,
         }
     }

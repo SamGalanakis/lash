@@ -58,9 +58,9 @@ pub struct ModeExecutionPreamble {
     pub prompt_contributions: Vec<PromptContribution>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ModeTurnConfig {
-    pub protocol: crate::sansio::TurnProtocol,
+    pub protocol: std::sync::Arc<dyn crate::sansio::ProtocolDriverHandle>,
     pub sync_execution_surface: bool,
 }
 
@@ -484,7 +484,6 @@ pub struct SessionContextSurface {
     pub include_base_tools: bool,
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub prompt_contributions: Vec<PromptContribution>,
-    pub prompt_overrides: Vec<crate::PromptSectionOverride>,
 }
 
 impl Default for SessionContextSurface {
@@ -493,7 +492,6 @@ impl Default for SessionContextSurface {
             include_base_tools: true,
             tool_providers: Vec::new(),
             prompt_contributions: Vec::new(),
-            prompt_overrides: Vec::new(),
         }
     }
 }
@@ -507,7 +505,6 @@ impl std::fmt::Debug for SessionContextSurface {
                 "prompt_contribution_count",
                 &self.prompt_contributions.len(),
             )
-            .field("prompt_override_count", &self.prompt_overrides.len())
             .finish()
     }
 }
@@ -1562,9 +1559,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        ExecutionMode, PromptSectionName, SessionStateEnvelope, ToolDefinition, ToolParam,
-    };
+    use crate::{ExecutionMode, SessionStateEnvelope, ToolDefinition, ToolParam};
 
     struct MockToolProvider;
 
@@ -1619,20 +1614,9 @@ mod tests {
             reg.prompt().contribute(Arc::new(|_ctx| {
                 Box::pin(async move {
                     Ok(vec![
-                        PromptContribution {
-                            section: PromptSectionName::Guidance,
-                            block: "plugin_prompt".to_string(),
-                            title: Some("Plugin Prompt".to_string()),
-                            priority: 0,
-                            content: "Structured plugin prompt".to_string(),
-                        },
-                        PromptContribution {
-                            section: PromptSectionName::Guidance,
-                            block: "dynamic_note".to_string(),
-                            title: Some("Dynamic Note".to_string()),
-                            priority: 1,
-                            content: "dynamic note".to_string(),
-                        },
+                        PromptContribution::guidance("Plugin Prompt", "Structured plugin prompt"),
+                        PromptContribution::guidance("Dynamic Note", "dynamic note")
+                            .with_priority(1),
                     ])
                 })
             }));
@@ -1690,20 +1674,8 @@ mod tests {
         assert_eq!(
             contributions,
             vec![
-                PromptContribution {
-                    section: PromptSectionName::Guidance,
-                    block: "plugin_prompt".to_string(),
-                    title: Some("Plugin Prompt".to_string()),
-                    priority: 0,
-                    content: "Structured plugin prompt".to_string(),
-                },
-                PromptContribution {
-                    section: PromptSectionName::Guidance,
-                    block: "dynamic_note".to_string(),
-                    title: Some("Dynamic Note".to_string()),
-                    priority: 1,
-                    content: "dynamic note".to_string(),
-                },
+                PromptContribution::guidance("Plugin Prompt", "Structured plugin prompt"),
+                PromptContribution::guidance("Dynamic Note", "dynamic note").with_priority(1),
             ]
         );
     }

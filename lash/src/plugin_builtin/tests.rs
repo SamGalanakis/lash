@@ -12,12 +12,11 @@ use crate::plugin::{
     PluginDirective, PluginError, PromptHookContext, PromptRequestHookContext, SessionPluginMode,
     SessionStartPoint, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContext,
 };
-use crate::session_model::PromptSectionName;
 use crate::{
     AssembledTurn, ExecutionMode, MessageRole, PersistedSessionState, PluginHost,
-    PluginSurfaceEvent, SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy,
-    SessionReadView, SessionSnapshot, SessionStateEnvelope, ToolDefinition, ToolResult,
-    TurnHookContext, TurnInput, TurnResultHookContext,
+    PluginSurfaceEvent, PromptSlot, SessionCreateRequest, SessionHandle, SessionManager,
+    SessionPolicy, SessionReadView, SessionSnapshot, SessionStateEnvelope, ToolDefinition,
+    ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
 };
 
 use crate::test_support::{MockSessionManager, mock_assembled_turn};
@@ -217,16 +216,15 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
         .expect("prompt contributions");
 
     assert!(contributions.iter().any(|contribution| {
-        contribution.section == PromptSectionName::Environment
+        contribution.slot == PromptSlot::RuntimeContext
             && contribution.content.contains("Working directory:")
     }));
     assert!(contributions.iter().any(|contribution| {
-        contribution.section == PromptSectionName::Environment
+        contribution.slot == PromptSlot::RuntimeContext
             && contribution.content.contains("Current date (UTC):")
     }));
     assert!(contributions.iter().any(|contribution| {
-        contribution.section == PromptSectionName::Guidance
-            && contribution.block == "project_instructions"
+        contribution.slot == PromptSlot::ProjectInstructions
             && contribution.title.as_deref() == Some("Project Instructions")
             && contribution.content == "Repo rules"
     }));

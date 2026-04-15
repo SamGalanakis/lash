@@ -1242,15 +1242,14 @@ impl PluginSession {
         let mut seen = BTreeSet::new();
         out.retain(|contribution| {
             seen.insert((
-                contribution.section.as_str().to_string(),
+                format!("{:?}", contribution.slot),
                 contribution.priority,
                 contribution.content.trim().to_string(),
             ))
         });
         out.sort_by(|a, b| {
-            a.section
-                .as_str()
-                .cmp(b.section.as_str())
+            format!("{:?}", a.slot)
+                .cmp(&format!("{:?}", b.slot))
                 .then(a.priority.cmp(&b.priority))
         });
         Ok(out)
@@ -1775,6 +1774,7 @@ pub enum ExternalInvokeError {
 pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
+    pub turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
     pub(crate) store: Option<Arc<dyn crate::store::RuntimeStore>>,
 }
 
@@ -1859,16 +1859,22 @@ impl SessionManager for NoopSessionManager {
 
 impl RuntimeServices {
     pub fn new(plugins: Arc<PluginSession>) -> Self {
-        Self::new_with_bridges(plugins, crate::session::TurnInjectionBridge::new())
+        Self::new_with_bridges(
+            plugins,
+            crate::session::TurnInjectionBridge::new(),
+            crate::session::TurnInputInjectionBridge::new(),
+        )
     }
 
     pub fn new_with_bridges(
         plugins: Arc<PluginSession>,
         turn_injection_bridge: crate::session::TurnInjectionBridge,
+        turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
     ) -> Self {
         Self {
             plugins,
             turn_injection_bridge,
+            turn_input_injection_bridge,
             store: None,
         }
     }
@@ -1876,17 +1882,24 @@ impl RuntimeServices {
 
 impl PersistentRuntimeServices {
     pub fn new(plugins: Arc<PluginSession>, store: Arc<dyn crate::store::RuntimeStore>) -> Self {
-        Self::new_with_bridges(plugins, crate::session::TurnInjectionBridge::new(), store)
+        Self::new_with_bridges(
+            plugins,
+            crate::session::TurnInjectionBridge::new(),
+            crate::session::TurnInputInjectionBridge::new(),
+            store,
+        )
     }
 
     pub fn new_with_bridges(
         plugins: Arc<PluginSession>,
         turn_injection_bridge: crate::session::TurnInjectionBridge,
+        turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
         store: Arc<dyn crate::store::RuntimeStore>,
     ) -> Self {
         Self(RuntimeServices {
             plugins,
             turn_injection_bridge,
+            turn_input_injection_bridge,
             store: Some(store),
         })
     }

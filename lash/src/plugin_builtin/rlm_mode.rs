@@ -49,7 +49,7 @@ observe result
 - Bare expressions are valid statements. In `parallel { ... }`, a bare-expression branch contributes that value to the result list.
 - Call tools with `call tool_name { arg: expr }`.
 - Start any tool call in the background with `start call tool_name { arg: expr }`. This returns a handle value.
-- Resolve a background handle with `await handle`.
+- Resolve a background handle with `await handle`. If you already have a list of handles, `await handles` returns a list of results in order.
 - Stop a background handle with `cancel handle`. Cancellation is best-effort: Lash always stops waiting locally, and cooperative tools are also asked to stop their underlying work.
 - Use `parallel { ... }` only for independent tool calls. If one call needs another call's output, do not put them in the same `parallel { ... }`.
 - `parallel { ... }` returns a list of branch results in order.
@@ -66,7 +66,17 @@ observe result
 - Prefer narrow checks over brute-force scanning when the input is large.
 - Use focused intermediate observations to verify subquestions before finalizing.
 - Keep each step concrete and bounded instead of attempting the whole task at once.
-- Use `start`/`await` when a long-running tool can make progress in the background while you do other work. This is especially useful for `delegate`."#;
+- Use `start`/`await` when a long-running tool can make progress in the background while you do other work. This is especially useful for `delegate`.
+
+Example fanout pattern:
+
+```lashlang
+h1 = start call delegate { task: "Read chunk 1 and extract the key claim", intelligence: "low", output: { claim: "str" } }
+h2 = start call delegate { task: "Read chunk 2 and extract the key claim", intelligence: "low", output: { claim: "str" } }
+handles = [h1, h2]
+results = await handles
+finish results
+```"#;
 
 fn rlm_execution_section(observe_projection: &ToolResultProjectionPluginConfig) -> String {
     let mut prompt = String::from(RLM_EXECUTION_SECTION_BASE);
@@ -179,9 +189,7 @@ impl ModeExecutionPlugin for RlmModeExecution {
             tool_list.push_str(note);
         }
         if !tool_list.trim().is_empty() {
-            prompt_contributions.push(crate::PromptContribution::block(
-                crate::PromptSectionName::Execution,
-                "available_tools",
+            prompt_contributions.push(crate::PromptContribution::execution(
                 "Available Tools",
                 tool_list,
             ));
@@ -197,7 +205,7 @@ impl ModeExecutionPlugin for RlmModeExecution {
 
     fn turn_config(&self) -> ModeTurnConfig {
         ModeTurnConfig {
-            protocol: crate::sansio::TurnProtocol::Rlm,
+            protocol: std::sync::Arc::new(crate::modes::RlmDriver),
             sync_execution_surface: true,
         }
     }

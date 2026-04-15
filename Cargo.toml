@@ -1,9 +1,9 @@
 [workspace]
-members = ["lash-sansio", "lash", "lash-default-tools", "lash-delegate-tools", "lash-ui", "lash-tui", "lash-cli", "lashlang", "xtask", "bench/longmemeval-rlm/runner"]
+members = ["lash-sansio", "lash", "lash-default-tools", "lash-delegate-tools", "lash-ui", "lash-tui", "lash-cli", "lashlang", "bench/longmemeval-rlm/runner"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.51"
+version = "0.2.52"
 license = "MIT"
 
 [profile.release]

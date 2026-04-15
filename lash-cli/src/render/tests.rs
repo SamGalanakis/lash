@@ -408,7 +408,7 @@ async fn show_snippet_to_user_output_wraps_under_line_number_gutter() {
     let path = temp.path().join("sample.rs");
     std::fs::write(
         &path,
-        "fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {\n",
+        "fn autonomous_prompt_template() -> PromptTemplate {\n",
     )
     .expect("write file");
 
@@ -420,7 +420,7 @@ async fn show_snippet_to_user_output_wraps_under_line_number_gutter() {
                 "path": path,
                 "start_line": 1,
                 "end_line": 1,
-                "title": "Autonomous-mode prompt overrides"
+                "title": "Autonomous-mode prompt template"
             }),
         )
         .await;
@@ -435,7 +435,7 @@ async fn show_snippet_to_user_output_wraps_under_line_number_gutter() {
                 "path": path,
                 "start_line": 1,
                 "end_line": 1,
-                "title": "Autonomous-mode prompt overrides"
+                "title": "Autonomous-mode prompt template"
             }),
             result.result,
             true,
@@ -462,16 +462,13 @@ async fn show_snippet_to_user_output_wraps_under_line_number_gutter() {
 
     assert!(
         text.iter()
-            .any(|line| line.contains("Autonomous-mode prompt overrides"))
+            .any(|line| line.contains("Autonomous-mode prompt template"))
     );
     assert!(
         text.iter()
-            .any(|line| line == "     1 │ fn autonomous_prompt_overrides() -> Vec<Promp")
+            .any(|line| line == "     1 │ fn autonomous_prompt_template() -> PromptTemp")
     );
-    assert!(
-        text.iter()
-            .any(|line| line == "       │ tSectionOverride> {")
-    );
+    assert!(text.iter().any(|line| line == "       │ late {"));
 }
 
 #[test]

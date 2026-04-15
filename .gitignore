@@ -9,6 +9,8 @@ target-bullseye/
 .env.*
 jobs/
 .benchmarks/
+bench/longbench-v2/.venv/
+bench/longbench-v2/vendor/
 __pycache__/
 *.pyc
 .DS_Store

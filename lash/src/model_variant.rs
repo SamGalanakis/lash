@@ -81,7 +81,13 @@ pub fn default_variant(provider: &Provider, model: &str) -> Option<&'static str>
     }
     let lower = model.to_ascii_lowercase();
     match provider {
-        Provider::Codex { .. } => Some("high"),
+        Provider::Codex { .. } => {
+            if variants.contains(&"xhigh") {
+                Some("xhigh")
+            } else {
+                Some("high")
+            }
+        }
         Provider::GoogleOAuth { .. } => Some("high"),
         Provider::OpenAiGeneric { .. } => {
             if lower.contains("gpt") {
@@ -192,7 +198,7 @@ mod tests {
             supported_variants(&codex(), "gpt-5.3-codex"),
             CODEX_XHIGH_VARIANTS
         );
-        assert_eq!(default_variant(&codex(), "gpt-5.4"), Some("high"));
+        assert_eq!(default_variant(&codex(), "gpt-5.4"), Some("xhigh"));
     }
 
     #[test]

@@ -719,3 +719,66 @@ fn await_unknown_handle_surfaces_runtime_error() {
         Value::String("expected handle record".into())
     );
 }
+
+#[test]
+fn await_list_of_handles_returns_results_in_order() {
+    let program = crate::parse(
+        r#"
+        handles = [
+          start call echo { value: "first" },
+          start call echo { value: "second" },
+          start call echo { value: "third" }
+        ]
+        results = await handles
+        finish results
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    let Value::List(results) = value else {
+        panic!("await list should return a list");
+    };
+    assert_eq!(results.len(), 3);
+    for (result, expected) in results.iter().zip(["first", "second", "third"]) {
+        let record = result
+            .as_record()
+            .expect("await should return wrapped result");
+        assert_eq!(record["ok"], Value::Bool(true));
+        assert_eq!(record["value"], Value::String(expected.into()));
+    }
+}
+
+#[test]
+fn await_list_preserves_per_item_errors() {
+    let program = crate::parse(
+        r#"
+        handles = [start call echo { value: "done" }, 1]
+        results = await handles
+        finish results
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    let Value::List(results) = value else {
+        panic!("await list should return a list");
+    };
+    let ok = results[0]
+        .as_record()
+        .expect("first result should be wrapped");
+    assert_eq!(ok["ok"], Value::Bool(true));
+    assert_eq!(ok["value"], Value::String("done".into()));
+
+    let err = results[1]
+        .as_record()
+        .expect("second result should be wrapped");
+    assert_eq!(err["ok"], Value::Bool(false));
+    assert_eq!(err["error"], Value::String("expected handle record".into()));
+}

@@ -127,8 +127,7 @@ impl BackgroundExecutor for TokioBackgroundExecutor {
 pub struct RuntimeCoreConfig {
     pub base_dir: PathBuf,
     pub path_resolver: Arc<dyn PathResolver>,
-    pub prompt_renderer: Arc<dyn crate::PromptRenderer>,
-    pub prompt_overrides: Vec<crate::PromptSectionOverride>,
+    pub prompt_template: crate::PromptTemplate,
     pub llm_log_path: Option<PathBuf>,
     pub(crate) llm_log_lock: Arc<StdMutex<()>>,
     pub sanitizer: SanitizerPolicy,
@@ -141,8 +140,7 @@ impl Default for RuntimeCoreConfig {
         Self {
             base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path_resolver: Arc::new(DefaultPathResolver),
-            prompt_renderer: crate::default_prompt_renderer(),
-            prompt_overrides: Vec::new(),
+            prompt_template: crate::default_prompt_template(),
             llm_log_path: None,
             llm_log_lock: Arc::new(StdMutex::new(())),
             sanitizer: SanitizerPolicy::default(),
@@ -163,16 +161,8 @@ impl RuntimeCoreConfig {
         self
     }
 
-    pub fn with_prompt_renderer(mut self, prompt_renderer: Arc<dyn crate::PromptRenderer>) -> Self {
-        self.prompt_renderer = prompt_renderer;
-        self
-    }
-
-    pub fn with_prompt_overrides(
-        mut self,
-        prompt_overrides: Vec<crate::PromptSectionOverride>,
-    ) -> Self {
-        self.prompt_overrides = prompt_overrides;
+    pub fn with_prompt_template(mut self, prompt_template: crate::PromptTemplate) -> Self {
+        self.prompt_template = prompt_template;
         self
     }
 

@@ -101,8 +101,12 @@ impl RuntimeTurnDriver {
                             .run_checkpoint(&mut machine, checkpoint, &event_tx)
                             .await
                         {
-                            Ok(messages) => {
-                                machine.handle_response(Response::Checkpoint { id, messages });
+                            Ok((messages, transient_messages)) => {
+                                machine.handle_response(Response::Checkpoint {
+                                    id,
+                                    messages,
+                                    transient_messages,
+                                });
                             }
                             Err(err) => {
                                 machine.fail_turn(make_error_event(
@@ -291,7 +295,7 @@ impl RuntimeTurnDriver {
         machine: &mut TurnMachine,
         checkpoint: CheckpointKind,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
-    ) -> Result<Vec<PluginMessage>, RuntimeError> {
+    ) -> Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeError> {
         let mut committed = self
             .session
             .turn_injection_bridge()
@@ -300,6 +304,17 @@ impl RuntimeTurnDriver {
                 code: "turn_injection_bridge".to_string(),
                 message: err,
             })?;
+        let injected = self
+            .session
+            .turn_input_injection_bridge()
+            .drain()
+            .map_err(|err| RuntimeError {
+                code: "turn_input_injection_bridge".to_string(),
+                message: err,
+            })?
+            .into_iter()
+            .map(|item| item.message)
+            .collect::<Vec<_>>();
         let plugins = Arc::clone(self.session.plugins());
         let applied = plugins
             .apply_checkpoint(CheckpointHookContext {
@@ -314,6 +329,16 @@ impl RuntimeTurnDriver {
                 code: "plugin_checkpoint".to_string(),
                 message: err.to_string(),
             })?;
+        if !injected.is_empty() {
+            send_session_event(
+                event_tx,
+                SessionEvent::InjectedTurnInputAccepted {
+                    messages: injected.clone(),
+                    checkpoint,
+                },
+            )
+            .await;
+        }
         committed.extend(applied.messages);
         emit_session_events(event_tx, applied.events).await;
         if let Some(abort) = applied.abort {
@@ -334,7 +359,7 @@ impl RuntimeTurnDriver {
             .await;
         }
 
-        Ok(committed)
+        Ok((committed, injected))
     }
 
     async fn prepare_provider(
@@ -450,11 +475,9 @@ impl RuntimeTurnDriver {
         preamble: crate::session_model::ExecutionPreamble,
     ) -> TurnMachineConfig {
         let mode_turn = self.session.plugins().mode_execution().turn_config();
-        let mut prompt_overrides = self.host.core.prompt_overrides.clone();
-        prompt_overrides.extend(self.session.context_prompt_overrides().iter().cloned());
-        let system_prompt = self.render_system_prompt(&preamble.prompt, &prompt_overrides);
+        let system_prompt = self.render_system_prompt(&preamble.prompt);
         TurnMachineConfig {
-            turn_protocol: mode_turn.protocol,
+            protocol_driver: std::sync::Arc::clone(&mode_turn.protocol),
             sync_execution_surface: mode_turn.sync_execution_surface,
             model: preamble.model,
             max_turns: self.policy.max_turns,
@@ -468,11 +491,7 @@ impl RuntimeTurnDriver {
         }
     }
 
-    fn render_system_prompt(
-        &self,
-        prompt: &crate::PromptContext,
-        overrides: &[crate::PromptSectionOverride],
-    ) -> String {
+    fn render_system_prompt(&self, prompt: &crate::PromptContext) -> String {
         struct HashWriter(Sha256);
         impl std::io::Write for HashWriter {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -486,7 +505,7 @@ impl RuntimeTurnDriver {
         }
 
         let mut writer = HashWriter(Sha256::new());
-        let _ = serde_json::to_writer(&mut writer, &(prompt, overrides));
+        let _ = serde_json::to_writer(&mut writer, &(prompt, &self.host.core.prompt_template));
         let key: [u8; 32] = writer.0.finalize().into();
         let mut cache = self
             .prompt_render_cache
@@ -495,7 +514,7 @@ impl RuntimeTurnDriver {
         if cache.last_key == Some(key) {
             return cache.last_rendered.clone();
         }
-        let rendered = self.host.core.prompt_renderer.render(prompt, overrides);
+        let rendered = self.host.core.prompt_template.render(prompt);
         cache.last_key = Some(key);
         cache.last_rendered = rendered.clone();
         rendered

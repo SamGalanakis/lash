@@ -84,6 +84,16 @@ pub struct TurnInjectionBridge {
     queue: std::sync::Arc<std::sync::Mutex<VecDeque<PluginMessage>>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct InjectedTurnInput {
+    pub message: PluginMessage,
+}
+
+#[derive(Clone, Default)]
+pub struct TurnInputInjectionBridge {
+    queue: std::sync::Arc<std::sync::Mutex<VecDeque<InjectedTurnInput>>>,
+}
+
 impl TurnInjectionBridge {
     pub fn new() -> Self {
         Self::default()
@@ -103,6 +113,29 @@ impl TurnInjectionBridge {
             .queue
             .lock()
             .map_err(|_| "turn injection bridge poisoned".to_string())?;
+        Ok(queue.drain(..).collect())
+    }
+}
+
+impl TurnInputInjectionBridge {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue(&self, messages: Vec<InjectedTurnInput>) -> Result<(), String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "turn injection bridge poisoned".to_string())?;
+        queue.extend(messages);
+        Ok(())
+    }
+
+    pub fn drain(&self) -> Result<Vec<InjectedTurnInput>, String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "turn input injection bridge poisoned".to_string())?;
         Ok(queue.drain(..).collect())
     }
 }
@@ -183,7 +216,6 @@ pub struct Session {
     context_surface_revision: u64,
     context_tools: Vec<Arc<dyn ToolProvider>>,
     context_prompt_contributions: Vec<PromptContribution>,
-    context_prompt_overrides: Vec<crate::PromptSectionOverride>,
     tool_calls: Vec<ToolCallRecord>,
     tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
@@ -211,7 +243,6 @@ impl Session {
             context_surface_revision: 0,
             context_tools: Vec::new(),
             context_prompt_contributions: Vec::new(),
-            context_prompt_overrides: Vec::new(),
             tool_calls: Vec::new(),
             tool_images: Vec::new(),
             message_tx: None,
@@ -278,14 +309,12 @@ impl Session {
         &mut self,
         tool_providers: Vec<Arc<dyn ToolProvider>>,
         prompt_contributions: Vec<PromptContribution>,
-        prompt_overrides: Vec<crate::PromptSectionOverride>,
         include_base_tools: bool,
     ) {
         self.include_base_tools = include_base_tools;
         self.context_surface_revision = self.context_surface_revision.wrapping_add(1);
         self.context_tools = tool_providers;
         self.context_prompt_contributions = prompt_contributions;
-        self.context_prompt_overrides = prompt_overrides;
         self.execution_surface_cache
             .lock()
             .expect("execution surface cache lock")
@@ -294,10 +323,6 @@ impl Session {
 
     pub fn context_prompt_contributions(&self) -> &[PromptContribution] {
         &self.context_prompt_contributions
-    }
-
-    pub fn context_prompt_overrides(&self) -> &[crate::PromptSectionOverride] {
-        &self.context_prompt_overrides
     }
 
     pub fn history_store(&self) -> Option<Arc<dyn crate::store::RuntimeStore>> {
@@ -727,6 +752,10 @@ impl Session {
 
     pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
         &self.services.turn_injection_bridge
+    }
+
+    pub fn turn_input_injection_bridge(&self) -> &TurnInputInjectionBridge {
+        &self.services.turn_input_injection_bridge
     }
 
     /// Set the message sender for streaming messages during execution.

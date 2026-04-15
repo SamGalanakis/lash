@@ -170,6 +170,7 @@ impl AutonomousRenderer {
             SessionEvent::Done
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::ChildTokenUsage { .. }
+            | SessionEvent::InjectedTurnInputAccepted { .. }
             | SessionEvent::InjectedMessagesCommitted { .. }
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TypedFinish { .. } => {}

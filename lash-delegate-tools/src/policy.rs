@@ -133,7 +133,6 @@ impl DelegateTools {
                 self.tier_allowed_tools(tier),
             )) as Arc<dyn ToolProvider>],
             prompt_contributions: Vec::new(),
-            prompt_overrides: Vec::new(),
         }
     }
 
@@ -174,14 +173,12 @@ impl DelegateTools {
 pub(super) fn delegate_prompt_contributions() -> Vec<PromptContribution> {
     vec![
         PromptContribution::guidance(
-            "delegation",
             "Delegation",
-            "Use `delegate` proactively for scoped, self-contained sub-tasks when it will make concrete progress without blocking your next local step. Treat delegation as sidecar work, not a handoff of the immediate critical path. Before delegating, identify what you can do locally right now and what can run in parallel.\n\nDelegation rules:\n- Do not duplicate work between the main agent and child sessions. Once a child owns a trace, question, or validation pass, trust it and use your local effort on non-overlapping work until the result is needed.\n- Do not delegate the next blocking step in a single-threaded workflow. If your very next step depends on the result and you have no meaningful parallel work, do it yourself instead.\n- Keep delegated asks concrete, well-bounded, and self-contained.\n- Avoid overlapping file edits across concurrent child sessions.\n- In RLM mode, use `start call delegate { ... }` when the child can run in the background, then `await handle` only when the result is needed.\n\nChoose intelligence by task shape:\n\n- `low`: fast, read-only exploration and synthesis. Use for codebase discovery, tracing behavior, finding examples, summarizing logs or failures, scanning docs, searching history, comparing implementations, or other informational sidecar work.\n- `medium`: bounded implementation or analysis with a contained scope. Use for small features, targeted bug fixes, focused tests, contained refactors, single-module edits, or validating one concrete hypothesis.\n- `high`: peer-level independent work with a clearly separate line of ownership. Use it for substantial parallel tasks, larger isolated implementations, strong validation passes, or serious design investigation when the write scope or responsibility boundary is distinct.",
+            "Use `delegate` proactively for scoped, self-contained sub-tasks when it will make concrete progress without blocking your next local step. Treat delegation as sidecar work, not a handoff of the immediate critical path. Before delegating, identify what you can do locally right now and what can run in parallel.\n\nDelegation rules:\n- Do not duplicate work between the main agent and child sessions. Once a child owns a trace, question, or validation pass, trust it and use your local effort on non-overlapping work until the result is needed.\n- Do not delegate the next blocking step in a single-threaded workflow. If your very next step depends on the result and you have no meaningful parallel work, do it yourself instead.\n- Keep delegated asks concrete, well-bounded, and self-contained.\n- Avoid overlapping file edits across concurrent child sessions.\n- In RLM mode, use `start call delegate { ... }` when the child can run in the background, then `await handle` only when the result is needed. If you already have a list of handles, `await handles` returns the list of results in order.\n\nChoose intelligence by task shape:\n\n- `low`: fast, read-only exploration and synthesis. Use for codebase discovery, tracing behavior, finding examples, summarizing logs or failures, scanning docs, searching history, comparing implementations, or other informational sidecar work.\n- `medium`: bounded implementation or analysis with a contained scope. Use for small features, targeted bug fixes, focused tests, contained refactors, single-module edits, or validating one concrete hypothesis.\n- `high`: peer-level independent work with a clearly separate line of ownership. Use it for substantial parallel tasks, larger isolated implementations, strong validation passes, or serious design investigation when the write scope or responsibility boundary is distinct.",
         ),
         PromptContribution::guidance(
-            "delegate_lifecycle",
             "Delegate Lifecycle",
-            "Plain `delegate(...)` waits for the child and returns its terminal result. In RLM mode you can make delegation asynchronous with lashlang itself: `handle = start call delegate { ... }`, then later `result = await handle` or `cancel handle`. Cancellation is best-effort and asks the child turn to stop.",
+            "Plain `delegate(...)` waits for the child and returns its terminal result. In RLM mode you can make delegation asynchronous with lashlang itself: `handle = start call delegate { ... }`, then later `result = await handle` or `cancel handle`. If you have many handles, `results = await handles` resolves them in order. Cancellation is best-effort and asks the child turn to stop.",
         ),
     ]
 }
@@ -197,12 +194,14 @@ pub(super) fn delegate_tool_definitions(
     let (delegate_description, delegate_examples) = match execution_mode {
         lash::ExecutionMode::Rlm => (
             format!(
-                "Run a scoped child session and return its terminal result. Choose `intelligence` based on the delegation guidance above. In lashlang, use `start call delegate {{ ... }}` when the child should run in the background, then `await handle` when the result is needed; {}. If `output` is provided, the child runs in RLM mode and must terminate with `finish {{ ... }}` matching the declared shape.",
+                "Run a scoped child session and return its terminal result. Choose `intelligence` based on the delegation guidance above. In lashlang, use `start call delegate {{ ... }}` when the child should run in the background, then `await handle` when the result is needed. If you already have a list of handles, `await handles` resolves them in order; {}. If `output` is provided, the child runs in RLM mode and must terminate with `finish {{ ... }}` matching the declared shape.",
                 low_tier_summary
             ),
             vec![
                 r#"handle = start call delegate { task: "Summarize the auth flow", intelligence: "low" }"#.into(),
                 r#"result = await handle"#.into(),
+                r#"handles = [h1, h2, h3]"#.into(),
+                r#"results = await handles"#.into(),
                 r#"typed = call delegate { task: "Extract the longest line", intelligence: "low", vars: { path: "src/main.rs" }, output: { line: "str", length: "int" } }"#.into(),
             ],
         ),

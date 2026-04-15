@@ -14,7 +14,7 @@ use crate::interactive::{generate_session_name, run_app};
 use crate::session_log::{self, DbSessionStoreFactory, SessionLogger};
 use crate::{Args, setup};
 use crate::{
-    apply_context_approach_overrides, autonomous_prompt_overrides, cleanup_terminal,
+    apply_context_approach_overrides, autonomous_prompt_template, cleanup_terminal,
     ensure_supported_execution_mode, hash12, info_text, info_text_unconfigured, models_dev_catalog,
     parse_context_approach, parse_execution_mode, parse_model_selection, resolve_model_selection,
     resolve_model_variant, validate_model_selection,
@@ -149,10 +149,7 @@ fn resolve_rlm_globals_patch(
     Ok(Some(patch))
 }
 
-pub(crate) async fn run(
-    args: Args,
-    mut prompt_overrides: Vec<PromptSectionOverride>,
-) -> anyhow::Result<()> {
+pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::Result<()> {
     // Handle --reset before any TUI/provider setup
     if args.reset {
         use std::io::Write;
@@ -334,9 +331,11 @@ pub(crate) async fn run(
             "`--await-background-work` and `--turn-usage-json` require `--print`."
         ));
     }
-    if autonomous {
-        prompt_overrides.extend(autonomous_prompt_overrides());
-    }
+    let prompt_template = if autonomous {
+        autonomous_prompt_template()
+    } else {
+        prompt_template
+    };
     // Build store (SQLite-backed archive)
     let db_path = sessions_dir.join(&session_filename);
     let store = Arc::new(Store::open(&db_path)?);
@@ -421,12 +420,12 @@ pub(crate) async fn run(
         ..Default::default()
     };
     let host_core = RuntimeCoreConfig::default()
-        .with_prompt_renderer(default_prompt_renderer())
-        .with_prompt_overrides(prompt_overrides)
+        .with_prompt_template(prompt_template)
         .with_llm_log_path(llm_log_path);
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let turn_injection_bridge = TurnInjectionBridge::new();
+    let turn_input_injection_bridge = TurnInputInjectionBridge::new();
 
     let plugin_factories = plugin_factories_for_surface(
         autonomous,
@@ -510,6 +509,7 @@ pub(crate) async fn run(
     let services = lash::PersistentRuntimeServices::new_with_bridges(
         root_plugins,
         turn_injection_bridge.clone(),
+        turn_input_injection_bridge.clone(),
         store.clone() as Arc<dyn RuntimeStore>,
     );
     let state = PersistedSessionState {
@@ -571,6 +571,7 @@ pub(crate) async fn run(
         plugin_host,
         Arc::clone(&dynamic_tools),
         turn_injection_bridge,
+        turn_input_injection_bridge,
         &mut logger,
         &args,
         lash_config.active_provider().clone(),

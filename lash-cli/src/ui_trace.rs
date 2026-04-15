@@ -263,6 +263,7 @@ impl TraceSessionEvent {
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::ChildTokenUsage { .. }
             | SessionEvent::RetryStatus { .. }
+            | SessionEvent::InjectedTurnInputAccepted { .. }
             | SessionEvent::InjectedMessagesCommitted { .. }
             | SessionEvent::TypedFinish { .. } => None,
         }

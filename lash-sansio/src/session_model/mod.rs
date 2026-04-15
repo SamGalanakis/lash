@@ -1,4 +1,3 @@
-pub mod exec;
 pub mod message;
 pub mod prompt;
 
@@ -7,8 +6,8 @@ pub use message::{
     append_rendered_prompt, messages_are_live_resume_safe, render_prompt, render_transcript_prompt,
 };
 pub use prompt::{
-    DefaultPromptRenderer, PromptOverrideMode, PromptRenderer, PromptSectionName,
-    PromptSectionOverride, default_prompt_renderer,
+    CORE_GUIDANCE_SECTION, MAIN_AGENT_INTRO, PromptBuiltin, PromptSlot, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, default_prompt_template,
 };
 
 use crate::ToolDefinition;
@@ -100,6 +99,11 @@ pub enum SessionEvent {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         envelope: Option<ErrorEnvelope>,
+    },
+    #[serde(rename = "injected_turn_input_accepted")]
+    InjectedTurnInputAccepted {
+        messages: Vec<PluginMessage>,
+        checkpoint: CheckpointKind,
     },
     #[serde(rename = "injected_messages_committed")]
     InjectedMessagesCommitted {

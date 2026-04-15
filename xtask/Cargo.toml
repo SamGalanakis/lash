@@ -1,7 +1,0 @@
-[package]
-name = "xtask"
-version.workspace = true
-edition = "2024"
-license.workspace = true
-
-[dependencies]

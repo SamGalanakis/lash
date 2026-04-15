@@ -6,9 +6,9 @@ use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::provider::Provider;
 use crate::{
     BackgroundExecutor, BackgroundRuntimeHost, EmbeddedRuntimeHost, LashRuntime, PathResolver,
-    PersistedSessionState, PersistentRuntimeServices, PromptRenderer, PromptSectionOverride,
-    RuntimeCoreConfig, RuntimeServices, RuntimeStore, SanitizerPolicy, SessionError, SessionPolicy,
-    SessionStoreFactory, TerminationPolicy, TurnInjectionBridge,
+    PersistedSessionState, PersistentRuntimeServices, RuntimeCoreConfig, RuntimeServices,
+    RuntimeStore, SanitizerPolicy, SessionError, SessionPolicy, SessionStoreFactory,
+    TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 
 enum PluginSource {
@@ -22,6 +22,7 @@ pub struct EmbeddedRuntimeBuilder {
     initial_state: Option<PersistedSessionState>,
     plugin_source: PluginSource,
     turn_injection_bridge: TurnInjectionBridge,
+    turn_input_injection_bridge: TurnInputInjectionBridge,
     core: RuntimeCoreConfig,
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     store: Option<Arc<dyn RuntimeStore>>,
@@ -36,6 +37,7 @@ impl Default for EmbeddedRuntimeBuilder {
             initial_state: None,
             plugin_source: PluginSource::Host(PluginHost::empty()),
             turn_injection_bridge: TurnInjectionBridge::new(),
+            turn_input_injection_bridge: TurnInputInjectionBridge::new(),
             core: RuntimeCoreConfig::default(),
             session_store_factory: None,
             store: None,
@@ -92,6 +94,11 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_turn_input_injection_bridge(mut self, bridge: TurnInputInjectionBridge) -> Self {
+        self.turn_input_injection_bridge = bridge;
+        self
+    }
+
     pub fn with_runtime_core(mut self, core: RuntimeCoreConfig) -> Self {
         self.core = core;
         self
@@ -107,13 +114,8 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_prompt_renderer(mut self, prompt_renderer: Arc<dyn PromptRenderer>) -> Self {
-        self.core = self.core.with_prompt_renderer(prompt_renderer);
-        self
-    }
-
-    pub fn with_prompt_overrides(mut self, prompt_overrides: Vec<PromptSectionOverride>) -> Self {
-        self.core = self.core.with_prompt_overrides(prompt_overrides);
+    pub fn with_prompt_template(mut self, prompt_template: crate::PromptTemplate) -> Self {
+        self.core = self.core.with_prompt_template(prompt_template);
         self
     }
 
@@ -240,6 +242,7 @@ impl EmbeddedRuntimeBuilder {
                     PersistentRuntimeServices::new_with_bridges(
                         plugins,
                         self.turn_injection_bridge,
+                        self.turn_input_injection_bridge,
                         store,
                     ),
                     state,
@@ -253,6 +256,7 @@ impl EmbeddedRuntimeBuilder {
                     PersistentRuntimeServices::new_with_bridges(
                         plugins,
                         self.turn_injection_bridge,
+                        self.turn_input_injection_bridge,
                         store,
                     ),
                     state,
@@ -263,7 +267,11 @@ impl EmbeddedRuntimeBuilder {
                 LashRuntime::from_background_state(
                     state.policy.clone(),
                     BackgroundRuntimeHost::new(embedded_host, background_executor),
-                    RuntimeServices::new_with_bridges(plugins, self.turn_injection_bridge),
+                    RuntimeServices::new_with_bridges(
+                        plugins,
+                        self.turn_injection_bridge,
+                        self.turn_input_injection_bridge,
+                    ),
                     state,
                 )
                 .await
@@ -272,7 +280,11 @@ impl EmbeddedRuntimeBuilder {
                 LashRuntime::from_embedded_state(
                     state.policy.clone(),
                     embedded_host,
-                    RuntimeServices::new_with_bridges(plugins, self.turn_injection_bridge),
+                    RuntimeServices::new_with_bridges(
+                        plugins,
+                        self.turn_injection_bridge,
+                        self.turn_input_injection_bridge,
+                    ),
                     state,
                 )
                 .await
