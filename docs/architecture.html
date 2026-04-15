@@ -91,7 +91,7 @@
   .hero {
     position: relative;
     display: grid;
-    grid-template-columns: 1.25fr 0.75fr;
+    grid-template-columns: 1.2fr 0.8fr;
     gap: 40px;
     padding: 56px;
     border-bottom: 1px solid var(--line);
@@ -147,7 +147,8 @@
   .kpi,
   .module,
   .inventory,
-  .metric {
+  .metric,
+  .pill-row {
     border: 1px solid var(--line);
     background: var(--panel);
     backdrop-filter: blur(8px);
@@ -156,7 +157,8 @@
   .meta-card,
   .note,
   .inventory,
-  .metric { padding: 18px 20px; }
+  .metric,
+  .pill-row { padding: 18px 20px; }
 
   .meta-card strong,
   .kpi strong,
@@ -170,7 +172,8 @@
   .meta-card span,
   .kpi span,
   .note p,
-  .metric span {
+  .metric span,
+  .inventory p {
     color: var(--chalk-dim);
     font-size: 0.95rem;
     line-height: 1.55;
@@ -247,7 +250,7 @@
 
   .section-header p {
     margin: 0;
-    max-width: 68ch;
+    max-width: 72ch;
     color: var(--chalk-dim);
     font-family: var(--font-body);
     line-height: 1.55;
@@ -255,7 +258,8 @@
 
   .kpi-grid,
   .module-grid,
-  .metric-grid {
+  .metric-grid,
+  .split {
     display: grid;
     gap: 18px;
   }
@@ -263,745 +267,940 @@
   .kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .split { grid-template-columns: 1.1fr 0.9fr; align-items: start; }
 
   .kpi,
-  .module { padding: 18px 20px; }
-
-  .kpi-value {
-    font-family: var(--font-display);
-    font-size: 2rem;
-    line-height: 1;
-    color: var(--chalk);
+  .metric,
+  .module {
+    padding: 20px;
   }
 
-  .kpi-label,
-  .module h3,
-  .inventory h3,
-  .note h3,
-  .file-table h3 {
-    margin: 0 0 10px;
-    font: 700 0.85rem/1.25 var(--font-display);
-    letter-spacing: 0.14em;
+  .kpi small,
+  .metric small,
+  .module small,
+  .file-table small,
+  .inventory small {
+    display: block;
+    color: var(--ash-text);
     text-transform: uppercase;
-    color: var(--chalk);
+    letter-spacing: 0.16em;
+    font-size: 0.7rem;
   }
 
-  .kpi p,
+  .kpi strong {
+    font-family: var(--font-display);
+    font-size: clamp(1.5rem, 3vw, 2.25rem);
+    letter-spacing: -0.06em;
+  }
+
+  .metric strong {
+    font-family: var(--font-display);
+    font-size: 1.2rem;
+    letter-spacing: -0.04em;
+  }
+
+  .module h3,
+  .note h3,
+  .inventory h3 {
+    margin: 0 0 12px;
+    font: 700 1rem/1.2 var(--font-display);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
   .module p,
-  .inventory p,
-  .note p {
-    margin: 0;
-    color: var(--chalk-dim);
-    font-family: var(--font-body);
-    line-height: 1.55;
+  .module li,
+  .note li,
+  .inventory li,
+  td,
+  th {
+    color: var(--chalk-mid);
+    font-size: 0.95rem;
+    line-height: 1.6;
   }
 
   .module ul,
-  .inventory ul,
-  .note ul {
-    margin: 14px 0 0;
+  .note ul,
+  .inventory ul {
+    margin: 0;
     padding-left: 18px;
-    color: var(--chalk-mid);
-    line-height: 1.55;
   }
 
-  .module li,
-  .inventory li,
-  .note li { margin-bottom: 6px; }
+  .module li + li,
+  .note li + li,
+  .inventory li + li { margin-top: 8px; }
 
   .diagram-wrap {
-    padding: 18px;
-    margin-top: 18px;
+    padding: 18px 20px 20px;
+    background: linear-gradient(180deg, rgba(20, 20, 18, 0.9), rgba(14, 13, 11, 0.92));
   }
 
-  .diagram-title {
-    margin: 0 0 14px;
-    font: 700 0.78rem/1 var(--font-display);
-    letter-spacing: 0.18em;
+  .diagram-title,
+  .table-title {
+    margin-bottom: 14px;
+    color: var(--chalk);
+    font: 700 0.88rem/1 var(--font-display);
+    letter-spacing: 0.16em;
     text-transform: uppercase;
-    color: var(--chalk-dim);
   }
 
-  .mermaid {
+  .diagram-wrap .mermaid {
     overflow-x: auto;
     padding: 8px;
-  }
-
-  .split {
-    display: grid;
-    grid-template-columns: 1.15fr 0.85fr;
-    gap: 18px;
+    border: 1px solid rgba(232, 228, 208, 0.08);
+    background: rgba(8, 8, 7, 0.55);
   }
 
   .file-table {
-    overflow: hidden;
+    overflow: auto;
   }
 
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.92rem;
   }
 
   th,
   td {
-    padding: 12px 14px;
-    border-top: 1px solid var(--line);
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
     vertical-align: top;
   }
 
   th {
-    text-align: left;
     color: var(--chalk);
-    font: 700 0.74rem/1 var(--font-display);
-    letter-spacing: 0.16em;
+    font: 700 0.8rem/1 var(--font-ui);
+    letter-spacing: 0.14em;
     text-transform: uppercase;
-    background: rgba(50, 40, 24, 0.34);
+    background: rgba(232, 163, 60, 0.05);
   }
 
-  td { color: var(--chalk-mid); line-height: 1.5; }
+  tr:last-child td { border-bottom: none; }
 
   code {
-    font-family: var(--font-ui);
-    color: var(--sodium);
-    font-size: 0.94em;
+    font-family: var(--font-display);
+    color: var(--chalk);
+    background: rgba(232, 163, 60, 0.08);
+    padding: 0.12rem 0.32rem;
   }
 
-  .chip-row {
+  .pill-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 14px;
+    gap: 10px;
   }
 
-  .chip {
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
     border: 1px solid var(--line);
-    padding: 7px 10px;
+    background: rgba(8, 8, 7, 0.4);
     color: var(--chalk-mid);
     font-size: 0.8rem;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+
+  .pill::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--sodium);
+    box-shadow: 0 0 0 1px rgba(232, 163, 60, 0.22);
   }
 
   .footer-note {
     margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
     color: var(--ash-text);
     font-size: 0.82rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
-  @media (max-width: 1080px) {
+  @media (max-width: 1120px) {
     .hero,
     .split,
     .module-grid,
-    .kpi-grid,
-    .metric-grid {
+    .metric-grid,
+    .kpi-grid {
       grid-template-columns: 1fr;
     }
   }
 
-  @media (max-width: 720px) {
-    .page { padding: 14px; }
-    .hero { padding: 28px 20px; }
-    .tab-panel { padding: 24px 16px 30px; }
-    .tabs { padding: 14px 16px; }
+  @media (max-width: 760px) {
+    .page { padding: 16px; }
+    .hero { padding: 28px; }
+    .tabs { padding: 14px; top: 0; }
+    .tab-panel { padding: 22px 18px 28px; }
   }
 </style>
 </head>
 <body>
-<div class="page">
-  <div class="frame">
-    <section class="hero">
-      <div>
-        <div class="eyebrow">Architecture / 2026-04-14</div>
-        <h1>lash<span class="slash">/</span>system</h1>
-        <p>
-          <strong>lash</strong> is a Rust workspace for running a graph-backed, plugin-driven coding
-          assistant across three layers: a pure turn machine in <code>lash-sansio</code>, an embeddable
-          runtime in <code>lash</code>, and an opinionated host in <code>lash-cli</code>. The current
-          architecture is graph-first and append-only: committed history lives in
-          <code>SessionGraph</code>, durable runtime state is checkpointed behind blob refs, live resume
-          is stored as <code>base checkpoint + graph delta</code>, and default tool bundles are opted into
-          explicitly through <code>lash-default-tools</code>.
-        </p>
-      </div>
-      <div class="hero-meta">
-        <div class="meta-card">
-          <div class="micro-label">Verification</div>
-          <strong>Current checks are green</strong>
-          <span><code>cargo check --workspace</code> and <code>cargo test -q -p lash -p lash-cli -p lash-default-tools</code> both passed while this page was updated.</span>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Current workspace architecture</div>
+          <h1>lash<span class="slash">/</span>system</h1>
+          <p>
+            <strong>lash</strong> is a terminal AI coding agent written from scratch in Rust. The codebase is organized as a layered workspace: a deterministic sans-IO turn engine, an async host runtime, first-party tool bundles, delegation tooling, dedicated terminal/UI crates, and a CLI host that drives both interactive and autonomous operation.
+          </p>
+          <div class="footer-note">Updated against the current workspace on 2026-04-15 • layered runtime • modular tool surfaces • Mermaid diagrams rerender on tab switch</div>
         </div>
-        <div class="meta-card">
-          <div class="micro-label">Current posture</div>
-          <strong>Host-owned policy, core-owned semantics</strong>
-          <span>The runtime keeps replay, session graph, checkpoint ordering, execution modes, and plugin semantics. Hosts choose transport, background execution, persistence backend, UI, and tool bundles.</span>
+        <div class="hero-meta">
+          <div class="meta-card">
+            <div class="micro-label">Architecture shape</div>
+            <strong>Layered Rust workspace</strong>
+            <span>CLI host → runtime + plugin system → sans-IO protocol core → optional lashlang execution and tool surfaces.</span>
+          </div>
+          <div class="meta-card">
+            <div class="micro-label">Execution modes</div>
+            <strong>Standard + RLM</strong>
+            <span><code>standard</code> uses provider-native tool calling; <code>rlm</code> executes persistent <code>lashlang</code> programs across turns.</span>
+          </div>
+          <div class="meta-card">
+            <div class="micro-label">Active themes</div>
+            <strong>Plugins, plans, delegation</strong>
+            <span>Recent architecture emphasis is on dynamic tool surfaces, plan tracking, observational memory, child-session delegation, and benchmark instrumentation.</span>
+          </div>
         </div>
-        <div class="meta-card">
-          <div class="micro-label">Latest rewrite</div>
-          <strong>Graph-first persistence cutover</strong>
-          <span>The CLI no longer owns direct checkpoint/head mutation logic. It now persists through <code>RuntimePersistenceState</code> and <code>Store</code> methods, with only UI-resume policy left at the host layer.</span>
+      </header>
+
+      <nav class="tabs" aria-label="Architecture sections">
+        <button class="tab-button active" data-tab="overview">Overview</button>
+        <button class="tab-button" data-tab="modules">Modules</button>
+        <button class="tab-button" data-tab="data-flow">Data Flow</button>
+        <button class="tab-button" data-tab="execution">Execution</button>
+        <button class="tab-button" data-tab="abstractions">Abstractions</button>
+        <button class="tab-button" data-tab="dependencies">Dependencies</button>
+        <button class="tab-button" data-tab="files">Files</button>
+      </nav>
+
+      <section class="tab-panel active" id="overview">
+        <div class="section-header">
+          <h2>Overview</h2>
+          <p>The workspace is broad but intentionally modular. Core protocol logic stays pure in <code>lash-sansio</code>, orchestration and persistence live in <code>lash</code>, and the end-user experience is assembled in <code>lash-cli</code> with separate UI, TUI, tool-bundle, delegation, benchmarking, and build-support crates.</p>
         </div>
-      </div>
-    </section>
 
-    <nav class="tabs" aria-label="Architecture sections">
-      <button class="tab-button active" data-tab="overview">Overview</button>
-      <button class="tab-button" data-tab="modules">Modules</button>
-      <button class="tab-button" data-tab="data-flow">Data Flow</button>
-      <button class="tab-button" data-tab="execution">Execution</button>
-      <button class="tab-button" data-tab="abstractions">Abstractions</button>
-      <button class="tab-button" data-tab="dependencies">Dependencies</button>
-      <button class="tab-button" data-tab="files">Files</button>
-    </nav>
-
-    <section class="tab-panel active" id="overview">
-      <div class="section-header">
-        <h2>Overview</h2>
-        <p>The workspace is eight Rust packages wide, with the assistant runtime concentrated in <code>lash-sansio</code>, <code>lash</code>, <code>lash-default-tools</code>, and <code>lash-cli</code>. The system now favors immutable graph history, checkpoint refs, and host-provided execution policy over ad hoc snapshot mutation.</p>
-      </div>
-
-      <div class="kpi-grid">
-        <div class="kpi">
-          <div class="kpi-value">8</div>
-          <div class="kpi-label">Workspace packages</div>
-          <p><code>lash-sansio</code>, <code>lash</code>, <code>lash-default-tools</code>, <code>lash-cli</code>, <code>lash-ui</code>, <code>lash-tui</code>, <code>lashlang</code>, <code>xtask</code>.</p>
+        <div class="kpi-grid">
+          <article class="kpi">
+            <small>Workspace members</small>
+            <strong>10</strong>
+            <span>Top-level Cargo workspace members, including the benchmark runner crate.</span>
+          </article>
+          <article class="kpi">
+            <small>Rust source files</small>
+            <strong>95</strong>
+            <span>Current Rust file count across runtime, CLI, language, UI, and support crates.</span>
+          </article>
+          <article class="kpi">
+            <small>Tracked source & docs LOC</small>
+            <strong>48.6k</strong>
+            <span>Approximate lines across Rust, Python, Shell, HTML, Markdown, TOML, YAML, and JSON in-repo.</span>
+          </article>
+          <article class="kpi">
+            <small>Resolved lock packages</small>
+            <strong>292</strong>
+            <span>Packages presently captured in <code>Cargo.lock</code>.</span>
+          </article>
         </div>
-        <div class="kpi">
-          <div class="kpi-value">147</div>
-          <div class="kpi-label">Rust source files</div>
-          <p>Across the runtime, CLI, language runtime, UI, and tool bundle crates.</p>
+
+        <div class="metric-grid" style="margin-top: 18px;">
+          <article class="metric">
+            <small>Primary language</small>
+            <strong>Rust</strong>
+            <span>~29.4k lines across 95 files. Python and HTML mainly support benchmarks, docs, and utilities.</span>
+          </article>
+          <article class="metric">
+            <small>Major crates</small>
+            <strong>9 + 1 bench runner</strong>
+            <span><code>lash</code>, <code>lash-cli</code>, <code>lash-sansio</code>, <code>lashlang</code>, UI/TUI, tool bundles, delegate tools, and benchmark runtime support.</span>
+          </article>
+          <article class="metric">
+            <small>Core differentiators</small>
+            <strong>Two turn backends</strong>
+            <span>Provider-native standard mode and persistent <code>lashlang</code>-backed RLM mode share the same host runtime and plugin seams.</span>
+          </article>
         </div>
-        <div class="kpi">
-          <div class="kpi-value">82.7k</div>
-          <div class="kpi-label">Rust LOC</div>
-          <p>Measured across <code>lash</code>, <code>lash-cli</code>, <code>lash-default-tools</code>, <code>lash-sansio</code>, and <code>lash-ui</code>/<code>lash-tui</code>.</p>
-        </div>
-        <div class="kpi">
-          <div class="kpi-value">3</div>
-          <div class="kpi-label">Persistence layers</div>
-          <p><code>SessionGraph</code>, committed checkpoint refs, and live-resume deltas. Token usage deltas are stored separately from committed checkpoints.</p>
-        </div>
-      </div>
 
-      <div class="metric-grid" style="margin-top: 18px;">
-        <div class="metric">
-          <div class="micro-label">Architectural pillars</div>
-          <strong>Graph-first state</strong>
-          <span>Conversation history and plugin nodes are append-only. Hot paths read from graph projections rather than rebuilding transcript-shaped copies.</span>
-        </div>
-        <div class="metric">
-          <div class="micro-label">Host model</div>
-          <strong>Typed runtime hosts</strong>
-          <span><code>RuntimeCoreConfig</code>, <code>EmbeddedRuntimeHost</code>, and <code>BackgroundRuntimeHost</code> separate universal runtime dependencies from optional background execution.</span>
-        </div>
-        <div class="metric">
-          <div class="micro-label">Extension model</div>
-          <strong>Plugin + bundle composition</strong>
-          <span>Core exposes plugin/tool contracts. <code>lash-default-tools</code> installs first-party bundles, and the CLI selects them via a declarative surface profile.</span>
-        </div>
-      </div>
-
-      <div class="diagram-wrap">
-        <div class="diagram-title">Workspace topology</div>
-        <div class="mermaid">
-flowchart LR
-  subgraph Pure["Pure engine"]
-    S["lash-sansio<br/>turn machine, prompt model,<br/>messages, effects"]
-    L["lashlang<br/>RLM language runtime"]
-  end
-
-  subgraph Core["Embeddable core"]
-    R["lash<br/>runtime, graph, store,<br/>plugins, session manager"]
-    D["lash-default-tools<br/>shell/files/search/web/<br/>prompt bundles"]
-  end
-
-  subgraph Hosts["Host/UI"]
-    C["lash-cli<br/>bootstrap, interactive TUI,<br/>autonomous mode, resume/fork"]
-    UI["lash-ui + lash-tui<br/>view helpers + low-level terminal"]
-  end
-
-  S --> R
-  L --> R
-  R --> D
-  R --> C
-  D --> C
-  UI --> C
-        </div>
-      </div>
-
-      <div class="footer-note">Current architectural intent: pure sansio kernel, embeddable runtime core, optional first-party tool bundles, CLI as the richest host.</div>
-    </section>
-
-    <section class="tab-panel" id="modules">
-      <div class="section-header">
-        <h2>Modules</h2>
-        <p>The workspace is deliberately layered. The crates below are the modules that matter most when changing request flow, persistence, tool wiring, or UI behavior.</p>
-      </div>
-
-      <div class="module-grid">
-        <article class="module">
-          <h3>lash-sansio</h3>
-          <p>Pure turn machine and prompt model. No async runtime, no filesystem policy, no persistence backend, and no host UI logic.</p>
-          <ul>
-            <li><code>sansio/mod.rs</code>: effect-driven turn state machine</li>
-            <li><code>session_model/</code>: messages, prompts, execution metadata</li>
-            <li>Owns the deterministic protocol layer that <code>lash</code> orchestrates</li>
-          </ul>
-        </article>
-
-        <article class="module">
-          <h3>lash</h3>
-          <p>Embeddable runtime. Owns session graph semantics, persistence contracts, host services, plugin orchestration, tool dispatch, and execution modes.</p>
-          <ul>
-            <li><code>runtime/</code>: host config, turn driver, session manager</li>
-            <li><code>session_graph.rs</code>: append-only conversation and plugin graph</li>
-            <li><code>store.rs</code>: checkpoint blobs, session head, live resume, usage deltas</li>
-          </ul>
-        </article>
-
-        <article class="module">
-          <h3>lash-default-tools</h3>
-          <p>Optional first-party tool bundle crate. Keeps default shell, file, search, web, state, and context-approach plugins out of the core constructor path.</p>
-          <ul>
-            <li><code>DefaultToolSurfaceProfile</code> maps execution mode, context approach, interactivity, and web enablement to bundle selection</li>
-            <li>Owns Rolling History / OM bundle selection on the default host path</li>
-          </ul>
-        </article>
-
-        <article class="module">
-          <h3>lash-cli</h3>
-          <p>Opinionated host. Boots providers, builds the plugin host, runs interactive or autonomous sessions, saves UI state, manages resume/fork, and exposes benchmarking/profiling utilities.</p>
-          <ul>
-            <li><code>bootstrap.rs</code>: host assembly</li>
-            <li><code>turn_runner.rs</code> + <code>persistence.rs</code>: shared turn lifecycle and host-side UI persistence policy</li>
-            <li><code>interactive/</code>, <code>autonomous.rs</code>, <code>resume.rs</code>, <code>fork.rs</code></li>
-          </ul>
-        </article>
-
-        <article class="module">
-          <h3>lash-ui + lash-tui</h3>
-          <p>Rendering support crates. <code>lash-tui</code> is the low-level terminal drawing layer, while <code>lash-ui</code> provides UI effect abstractions reused by the CLI.</p>
-          <ul>
-            <li>Separated from the runtime so core remains host-agnostic</li>
-            <li>Lets the CLI evolve without leaking UI assumptions into <code>lash</code></li>
-          </ul>
-        </article>
-
-        <article class="module">
-          <h3>lashlang</h3>
-          <p>The RLM language runtime used by the assistant’s executable mode. It is kept separate from the assistant runtime so the graph/plugin/store architecture does not depend on language internals.</p>
-          <ul>
-            <li>Lexer, parser, AST, and runtime live here</li>
-            <li>Embedded via <code>lash::embedded</code> and <code>lash::session</code></li>
-          </ul>
-        </article>
-      </div>
-    </section>
-
-    <section class="tab-panel" id="data-flow">
-      <div class="section-header">
-        <h2>Data Flow</h2>
-        <p>Request flow now has two clean boundaries: hosts build policy and services, then <code>lash</code> runs the graph-backed turn. Persistence and live resume use checkpoint refs and graph deltas instead of full transcript snapshots.</p>
-      </div>
-
-      <div class="diagram-wrap">
-        <div class="diagram-title">Runtime request flow</div>
-        <div class="mermaid">
-flowchart LR
-  User["User / benchmark / API caller"]
-  CLI["lash-cli bootstrap<br/>or embedded host"]
-  Host["Runtime host config<br/>core + optional background executor"]
-  PluginHost["PluginHost + PluginSession"]
-  Runtime["LashRuntime"]
-  Driver["turn_driver"]
-  Sansio["TurnMachine<br/>lash-sansio"]
-  LLM["LlmTransport"]
-  Dispatch["tool_dispatch"]
-  Graph["SessionGraph"]
-  Store["Store / RuntimeStore"]
-
-  User --> CLI --> Host --> Runtime
-  Host --> PluginHost
-  PluginHost --> Runtime
-  Runtime --> Driver --> Sansio
-  Sansio --> LLM
-  Sansio --> Dispatch
-  Dispatch --> PluginHost
-  Driver --> Graph
-  Runtime --> Store
-  Graph --> Store
-        </div>
-      </div>
-
-      <div class="split">
-        <div class="diagram-wrap">
-          <div class="diagram-title">Persistence shape</div>
-          <div class="mermaid">
+        <div class="split" style="margin-top: 18px;">
+          <div class="diagram-wrap">
+            <div class="diagram-title">Workspace topology</div>
+            <div class="mermaid">
 flowchart TD
-  Graph["SessionGraph<br/>append-only message + plugin nodes"]
-  Head["SessionHead / SessionHeadMeta<br/>current leaf + config + checkpoint ref"]
-  Checkpoint["SessionCheckpoint<br/>turn state + refs"]
-  Blobs["CAS blobs<br/>dynamic state / plugin snapshot / live delta"]
-  Live["LiveResumeSnapshot<br/>base graph + checkpoint ref + delta ref"]
-  Usage["usage_deltas table"]
+  subgraph Kernel[Pure protocol and execution kernel]
+    S["lash-sansio<br/>TurnMachine, Effect, Response,<br/>prompt/session model"]
+    LL["lashlang<br/>lexer, parser, AST, runtime"]
+  end
 
-  Graph --> Head
-  Head --> Checkpoint
-  Checkpoint --> Blobs
-  Live --> Blobs
-  Head --> Usage
+  subgraph Runtime[Host runtime and integration]
+    L["lash<br/>runtime, plugin host, store,<br/>session graph, provider adapters"]
+    DT["lash-default-tools<br/>bundle selection + first-party tools"]
+    DG["lash-delegate-tools<br/>child-session delegation plugin"]
+  end
+
+  subgraph Hosts[User-facing and support crates]
+    C["lash-cli<br/>bootstrap, interactive TUI,<br/>autonomous mode, resume/fork"]
+    UI["lash-ui<br/>UI extensions and commands"]
+    TUI["lash-tui<br/>terminal drawing primitives"]
+    X["xtask<br/>workspace maintenance"]
+    B["bench runner<br/>longmemeval RLM harness"]
+  end
+
+  S --> L
+  LL --> L
+  L --> DT
+  L --> DG
+  DT --> C
+  DG --> C
+  UI --> C
+  TUI --> C
+  X -. workspace tooling .-> C
+  B -. benchmark harness .-> L
+            </div>
+          </div>
+
+          <div class="inventory">
+            <h3>What matters right now</h3>
+            <ul>
+              <li><strong>Host/runtime split is real:</strong> <code>lash-cli</code> is opinionated, but the runtime is still embeddable through <code>lash</code>.</li>
+              <li><strong>Plugins are first-class:</strong> tools, prompt contributions, context approaches, planning, and delegation all hook in via plugin factories and session plugins.</li>
+              <li><strong>Execution is dual-mode:</strong> the same runtime supports provider-native tool calling and stateful <code>lashlang</code> execution.</li>
+              <li><strong>Persistence is graph-based:</strong> committed sessions, checkpoints, live resume state, and plugin snapshots are stored through the runtime/store layer.</li>
+            </ul>
           </div>
         </div>
 
-        <div class="inventory">
-          <h3>Key current flows</h3>
-          <ul>
-            <li><strong>Committed turn</strong>: runtime exports <code>RuntimePersistenceState</code>, store stamps snapshots and writes head/checkpoint state, CLI only saves UI resume state around that core call.</li>
-            <li><strong>Interrupted turn</strong>: live resume writes a base graph plus <code>LiveResumeDelta</code> instead of a full transcript snapshot.</li>
-            <li><strong>Fork without runtime</strong>: CLI materializes the latest coherent live graph, forks its current path, and carries over the right checkpoint or live delta turn state.</li>
-            <li><strong>OM background work</strong>: plugin jobs run through the background executor seam, then append memory nodes back onto the session graph.</li>
-          </ul>
+        <div class="pill-row" style="margin-top: 18px;">
+          <div class="pill">Tokio async runtime</div>
+          <div class="pill">Clap CLI surface</div>
+          <div class="pill">Reqwest provider I/O</div>
+          <div class="pill">Crossterm terminal host</div>
+          <div class="pill">SQLite optional store</div>
+          <div class="pill">Mermaid architecture docs</div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section class="tab-panel" id="execution">
-      <div class="section-header">
-        <h2>Execution</h2>
-        <p>The runtime and CLI now share one turn runner. Interactive and autonomous differ in sinks and UI policy, not in core turn execution semantics.</p>
-      </div>
-
-      <div class="diagram-wrap">
-        <div class="diagram-title">Turn lifecycle</div>
-        <div class="mermaid">
-sequenceDiagram
-  participant Host as lash-cli / embedded host
-  participant Runtime as LashRuntime
-  participant Plugins as PluginSession
-  participant Driver as turn_driver
-  participant Machine as TurnMachine
-  participant Tools as Tool dispatch / session
-  participant Store as Store
-
-  Host->>Runtime: stream_turn(TurnInput)
-  Runtime->>Plugins: before-turn hooks + context transforms
-  Runtime->>Driver: run normalized turn
-  Driver->>Machine: advance machine
-  Machine-->>Driver: LLM request or tool effect
-  Driver->>Tools: execute tool / embedded op
-  Driver->>Machine: apply tool result / stream events
-  Machine-->>Driver: final assistant turn
-  Runtime->>Plugins: after-turn hooks + runtime events
-  Runtime->>Store: persist committed or live state
-  Runtime-->>Host: AssembledTurn + updated runtime state
+      <section class="tab-panel" id="modules">
+        <div class="section-header">
+          <h2>Modules</h2>
+          <p>The workspace is best understood as a set of architectural layers rather than a pile of files. Each crate owns a clean responsibility boundary, and most changes should stay within one of these layers.</p>
         </div>
-      </div>
 
-      <div class="module-grid">
-        <article class="module">
-          <h3>Interactive path</h3>
-          <p>The TUI uses <code>interactive/mod.rs</code>, <code>interactive/runtime.rs</code>, and the app/view/render stack. It still owns UI resume state, prompt overlays, queue editing, and rendering, but it no longer owns checkpoint mutation rules.</p>
-        </article>
-        <article class="module">
-          <h3>Autonomous path</h3>
-          <p><code>autonomous.rs</code> runs the same turn runner with a stdout-oriented sink. Interactive-only tools are filtered out in bootstrap before the host is assembled.</p>
-        </article>
-        <article class="module">
-          <h3>Branching and restore</h3>
-          <p><code>resume.rs</code>, <code>resume_snapshot.rs</code>, and <code>fork.rs</code> load the live snapshot first when it is safe, then fall back to the committed head. The runtime itself stays authoritative once loaded into memory.</p>
-        </article>
-        <article class="module">
-          <h3>Performance tooling</h3>
-          <p><code>runtime_perf.rs</code> and <code>scripts/profile_runtime.py</code> provide no-inference runtime profiling, including long-chat synthetic turns and optional <code>dhat</code> heap captures.</p>
-        </article>
-      </div>
-    </section>
-
-    <section class="tab-panel" id="abstractions">
-      <div class="section-header">
-        <h2>Abstractions</h2>
-        <p>These are the types and interfaces that define the current design. They are the right starting point for most architectural work.</p>
-      </div>
-
-      <div class="file-table">
-        <table>
-          <thead>
-            <tr>
-              <th>Type / seam</th>
-              <th>Where</th>
-              <th>Purpose</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>TurnMachine</code></td>
-              <td><code>lash-sansio</code></td>
-              <td>Pure effect-driven turn machine. Owns the deterministic protocol and effect model.</td>
-            </tr>
-            <tr>
-              <td><code>LashRuntime</code></td>
-              <td><code>lash/src/runtime/mod.rs</code></td>
-              <td>Coordinates plugin hooks, prompt building, turn driving, persistence, and host services around the sansio engine.</td>
-            </tr>
-            <tr>
-              <td><code>SessionGraph</code></td>
-              <td><code>lash/src/session_graph.rs</code></td>
-              <td>Append-only graph for messages and plugin nodes, with cached active-path projections and prompt rendering.</td>
-            </tr>
-            <tr>
-              <td><code>RuntimePersistenceState</code></td>
-              <td><code>lash/src/runtime/mod.rs</code></td>
-              <td>Narrow persistence/export carrier used by stores and CLI persistence helpers instead of mutating full session state ad hoc.</td>
-            </tr>
-            <tr>
-              <td><code>RuntimeStore</code> / <code>Store</code></td>
-              <td><code>lash/src/store.rs</code></td>
-              <td>Blob storage, session head, live resume, usage delta persistence, and SQLite implementation.</td>
-            </tr>
-            <tr>
-              <td><code>PluginFactory</code> + <code>PluginSession</code></td>
-              <td><code>lash/src/plugin.rs</code></td>
-              <td>Builds session-scoped plugin registrations, tools, commands, prompt hooks, config mutators, and background jobs.</td>
-            </tr>
-            <tr>
-              <td><code>DefaultToolSurfaceProfile</code></td>
-              <td><code>lash-default-tools/src/lib.rs</code></td>
-              <td>Maps runtime mode + context approach + interactivity into explicit bundle selection.</td>
-            </tr>
-            <tr>
-              <td><code>EmbeddedRuntimeHost</code> / <code>BackgroundRuntimeHost</code></td>
-              <td><code>lash/src/runtime/host.rs</code></td>
-              <td>Typed host shapes that keep background execution optional while making the core runtime contract explicit.</td>
-            </tr>
-            <tr>
-              <td><code>ExecutionSurfaceHandle</code></td>
-              <td><code>lash/src/session.rs</code></td>
-              <td>Session-scoped canonical tool-surface artifact with lazy derived views for specs, catalogs, prompt docs, and RLM JSON.</td>
-            </tr>
-            <tr>
-              <td><code>ContextApproach</code> / <code>ContextApproachKind</code></td>
-              <td><code>lash/src/context_approach.rs</code></td>
-              <td>Per-session context strategy configuration. Rolling History and Observational Memory are selected declaratively and labeled consistently.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="diagram-wrap">
-        <div class="diagram-title">Core type relationships</div>
-        <div class="mermaid">
-classDiagram
-  class TurnMachine
-  class LashRuntime
-  class SessionGraph
-  class RuntimePersistenceState
-  class RuntimeStore
-  class PluginHost
-  class PluginSession
-  class Session
-  class ExecutionSurfaceHandle
-  class BackgroundRuntimeHost
-  class EmbeddedRuntimeHost
-
-  LashRuntime --> TurnMachine : orchestrates
-  LashRuntime --> SessionGraph : owns active state
-  LashRuntime --> PluginSession : invokes hooks
-  LashRuntime --> RuntimePersistenceState : exports for store
-  EmbeddedRuntimeHost <|-- BackgroundRuntimeHost
-  PluginHost --> PluginSession : builds
-  Session --> ExecutionSurfaceHandle : caches
-  Session --> PluginSession : reads tools / plugins
-  RuntimeStore --> RuntimePersistenceState : persists
+        <div class="diagram-wrap">
+          <div class="diagram-title">Module layers</div>
+          <div class="mermaid">
+flowchart TD
+  H["Host layer<br/>lash-cli"] --> U["Presentation layer<br/>lash-ui + lash-tui"]
+  H --> R["Runtime layer<br/>lash"]
+  R --> P["Plugin/tool composition<br/>lash-default-tools + lash-delegate-tools"]
+  R --> K["Protocol kernel<br/>lash-sansio"]
+  R --> L["Executable language runtime<br/>lashlang"]
+  H -. support .-> S["Support + benchmarking<br/>bench runner + scripts"]
+          </div>
         </div>
-      </div>
-    </section>
 
-    <section class="tab-panel" id="dependencies">
-      <div class="section-header">
-        <h2>Dependencies</h2>
-        <p>The workspace keeps the pure kernel small, then layers async runtime, persistence, UI, and network dependencies on top where they belong.</p>
-      </div>
+        <div class="module-grid" style="margin-top: 18px;">
+          <article class="module">
+            <small>Host layer</small>
+            <h3>lash-cli</h3>
+            <p>The end-user application and the most opinionated host. It owns startup, provider/config setup, interactive terminal experience, autonomous runs, resume/fork behavior, and benchmark entrypoints.</p>
+            <ul>
+              <li>Consumes the core runtime rather than redefining it</li>
+              <li>Assembles the default plugin and tool surface during bootstrap</li>
+              <li>Contains the richest host-specific policy in the workspace</li>
+            </ul>
+          </article>
 
-      <div class="diagram-wrap">
-        <div class="diagram-title">External dependency map</div>
-        <div class="mermaid">
+          <article class="module">
+            <small>Runtime layer</small>
+            <h3>lash</h3>
+            <p>The architectural center of gravity. It turns policy, plugins, tools, provider access, and persistence into a reusable agent runtime that both the CLI and embedders can use.</p>
+            <ul>
+              <li>Coordinates turns, sessions, persistence, background work, and providers</li>
+              <li>Exposes the main public APIs for embedding lash elsewhere</li>
+              <li>Keeps host concerns above the pure protocol layer</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Protocol kernel</small>
+            <h3>lash-sansio</h3>
+            <p>The pure state-machine layer. It models messages, prompts, effects, responses, and execution modes without assuming a filesystem, terminal, database, or network stack.</p>
+            <ul>
+              <li>Defines deterministic turn behavior</li>
+              <li>Forms the stable core underneath all hosts</li>
+              <li>Provides the cleanest place for protocol-only changes</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Execution language</small>
+            <h3>lashlang</h3>
+            <p>The RLM DSL runtime used when the assistant runs executable local programs across turns. It is intentionally separate from the host runtime so the language can evolve without tangling host orchestration code.</p>
+            <ul>
+              <li>Owns parsing, runtime state, values, and tool-host integration</li>
+              <li>Powers the persistent programmable mode of the agent</li>
+              <li>Acts as an optional backend rather than the only execution model</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Plugin and tool composition</small>
+            <h3>lash-default-tools + lash-delegate-tools</h3>
+            <p>These crates keep tool-surface composition out of the core runtime. One packages the default first-party bundles; the other adds controlled child-session delegation.</p>
+            <ul>
+              <li>Default bundles map runtime policy to concrete tool/plugin sets</li>
+              <li>Delegation is modeled as a plugin/tool surface, not special-case app logic</li>
+              <li>This keeps the runtime modular and embedders flexible</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Presentation layer</small>
+            <h3>lash-ui + lash-tui</h3>
+            <p>The workspace separates UI behavior from low-level terminal drawing. That keeps rendering and host interaction concerns from leaking into the runtime.</p>
+            <ul>
+              <li><code>lash-ui</code> models commands, shortcuts, and host-side UI effects</li>
+              <li><code>lash-tui</code> handles terminal drawing primitives and screen mechanics</li>
+              <li>Together they support a richer CLI without coupling the core runtime to terminal details</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Support layer</small>
+            <h3>Bench runner + scripts</h3>
+            <p>Operational tooling, profiling, release helpers, and benchmark harnesses live outside the production runtime path. This keeps evaluation and maintenance work visible without inflating the core architecture.</p>
+            <ul>
+              <li>Benchmarking and profiling stay explicit and separable</li>
+              <li>Workspace automation does not distort runtime design</li>
+              <li>Useful context when performance or release processes are under change</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+<section class="tab-panel" id="data-flow">
+        <div class="section-header">
+          <h2>Data Flow</h2>
+          <p>Data moves through a layered pipeline. Hosts create policy, plugin factories, and I/O services. The runtime normalizes a turn, the sans-IO engine emits effects, and the host layer resolves those effects through providers, tools, persistence, and plugin hooks.</p>
+        </div>
+
+        <div class="diagram-wrap">
+          <div class="diagram-title">Turn data flow</div>
+          <div class="mermaid">
 flowchart LR
-  Sansio["lash-sansio"] --> Serde["serde / serde_json / uuid / base64"]
-  Core["lash"] --> Tokio["tokio / tokio-util"]
-  Core --> Sqlite["rusqlite (feature gated)"]
-  Core --> Net["reqwest / oauth / provider adapters"]
-  Core --> Search["fff-search / globset / ignore / regex"]
-  Core --> Pseudo["portable-pty / tempfile / sha2 / tracing"]
-  CLI["lash-cli"] --> TUI["crossterm / lash-tui / lash-ui"]
-  CLI --> CLIExt["clap / arboard / tracing-subscriber / stats_alloc / dhat"]
-  DefaultTools["lash-default-tools"] --> Core
+  User["User / script / benchmark"] --> CLI["lash-cli or embedded host"]
+  CLI --> Policy["SessionPolicy + prompt overrides + context approach"]
+  CLI --> PluginHost["PluginHost built from default bundles + delegate tools + host extras"]
+  Policy --> Runtime["LashRuntime"]
+  PluginHost --> Runtime
+  Runtime --> Driver["runtime turn driver"]
+  Driver --> Machine["TurnMachine<br/>lash-sansio"]
+  Machine -->|LLM effect| Provider["Provider / LlmTransport via reqwest"]
+  Machine -->|tool effect| Tools["ToolProvider surface"]
+  Machine -->|RLM / exec effect| RLM["lashlang runtime / embedded execution"]
+  Tools --> Plugins["PluginSession / dynamic tool adapters"]
+  Provider --> Machine
+  Tools --> Machine
+  RLM --> Machine
+  Runtime --> Graph["SessionGraph + session state"]
+  Runtime --> Store["RuntimeStore / SQLite or other backing store"]
+  Graph --> Store
+  Runtime --> Output["AssembledTurn / streamed events"]
+            </div>
         </div>
-      </div>
 
-      <div class="split">
-        <div class="note">
-          <h3>Key runtime libraries</h3>
-          <ul>
-            <li><code>tokio</code> and <code>tokio-util</code> drive async execution and cancellation.</li>
-            <li><code>rusqlite</code> backs the built-in store behind the <code>sqlite-store</code> feature.</li>
-            <li><code>reqwest</code> underpins provider and web tool HTTP integration.</li>
-            <li><code>fff-search</code> powers the indexed grep backend; the workspace can also enable the <code>fff-zlob</code> feature.</li>
-            <li><code>portable-pty</code> supports shell tool execution.</li>
-          </ul>
+        <div class="split" style="margin-top: 18px;">
+          <div class="diagram-wrap">
+            <div class="diagram-title">Context and tool-surface selection</div>
+            <div class="mermaid">
+flowchart TD
+  Start["Bootstrap host"] --> ChooseContext{"Context approach"}
+  ChooseContext -->|rolling_history| RH["BuiltinRollingHistoryPluginFactory"]
+  ChooseContext -->|observational_memory| OM["BuiltinObservationalMemoryPluginFactory"]
+  Start --> Profile["DefaultToolSurfaceProfile::for_runtime()"]
+  Profile --> Core["CoreRuntime bundle"]
+  Profile --> Shell["Shell + apply_patch"]
+  Profile --> Files["read_file + glob + ls"]
+  Profile --> Search["grep"]
+  Profile --> Prompts["ask + wait + show_snippet_to_user"]
+  Profile --> Web["search_web + fetch_url when enabled"]
+  Start --> Delegate["DelegateToolsPluginFactory"]
+  RH --> Host["PluginHost"]
+  OM --> Host
+  Core --> Host
+  Shell --> Host
+  Files --> Host
+  Search --> Host
+  Prompts --> Host
+  Web --> Host
+  Delegate --> Host
+            </div>
+          </div>
+
+          <div class="inventory">
+            <h3>Current system flows</h3>
+            <ul>
+              <li><strong>Interactive turns:</strong> the TUI edits input and shows streamed events, but the runtime still owns the protocol, tool execution, and persisted session state.</li>
+              <li><strong>Autonomous turns:</strong> <code>lash -p</code> uses the same runtime path with stdout-oriented sinks and a filtered tool surface.</li>
+              <li><strong>Delegation:</strong> delegated work is just another tool surface, bound to session context and constrained by policy before child sessions run.</li>
+              <li><strong>Observational memory:</strong> background plugin work observes history and feeds memory artifacts back into the graph instead of changing the core turn protocol.</li>
+            </ul>
+          </div>
         </div>
-        <div class="note">
-          <h3>Intentional boundaries</h3>
-          <ul>
-            <li><code>lash-sansio</code> has none of the async UI / store / tool runtime dependencies.</li>
-            <li>First-party tools are not built into <code>lash</code>; they are composed through <code>lash-default-tools</code>.</li>
-            <li>The CLI is where terminal rendering, clipboard behavior, profiling flags, and setup/auth flows belong.</li>
-          </ul>
+      </section>
+
+      <section class="tab-panel" id="execution">
+        <div class="section-header">
+          <h2>Execution</h2>
+          <p>The runtime is effect-driven. Hosts supply services and presentation policy; <code>lash</code> coordinates turn execution; <code>lash-sansio</code> decides what must happen next. Standard mode and RLM mode differ in how tool/code execution is expressed, not in how sessions are hosted.</p>
         </div>
-      </div>
-    </section>
 
-    <section class="tab-panel" id="files">
-      <div class="section-header">
-        <h2>Files</h2>
-        <p>These paths are the best navigation shortcuts for understanding or changing the system.</p>
-      </div>
+        <div class="diagram-wrap">
+          <div class="diagram-title">Request lifecycle</div>
+          <div class="mermaid">
+sequenceDiagram
+  participant Host as lash-cli / embedder
+  participant Bootstrap as bootstrap + host assembly
+  participant Runtime as LashRuntime
+  participant Plugins as PluginHost / PluginSession
+  participant Machine as TurnMachine
+  participant Provider as Provider API
+  participant Tools as ToolProvider surface
+  participant Store as RuntimeStore
 
-      <div class="file-table">
-        <h3 style="padding: 18px 20px 0;">Important paths</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Path</th>
-              <th>What lives there</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>lash-sansio/src/sansio/mod.rs</code></td>
-              <td>Pure effect-driven turn machine implementation.</td>
-            </tr>
-            <tr>
-              <td><code>lash/src/runtime/mod.rs</code></td>
-              <td>Core runtime orchestration, state export/persistence seams, turn execution entrypoints.</td>
-            </tr>
-            <tr>
-              <td><code>lash/src/runtime/host.rs</code></td>
-              <td>Typed host configuration and background executor abstraction.</td>
-            </tr>
-            <tr>
-              <td><code>lash/src/session_graph.rs</code></td>
-              <td>Append-only graph, cached projections, prompt rendering cache, and internal plugin node payloads.</td>
-            </tr>
-            <tr>
-              <td><code>lash/src/store.rs</code></td>
-              <td>Blob refs, checkpoints, live resume, session head persistence, SQLite schema.</td>
-            </tr>
-            <tr>
-              <td><code>lash/src/plugin.rs</code> / <code>lash/src/plugin/runtime_impl.rs</code></td>
-              <td>Plugin contracts, plugin host, tool surface resolution, session plugin runtime implementation.</td>
-            </tr>
-            <tr>
-              <td><code>lash/src/session.rs</code></td>
-              <td>Session-scoped execution surface cache, RLM runtime integration, tool/session helpers.</td>
-            </tr>
-            <tr>
-              <td><code>lash-default-tools/src/lib.rs</code></td>
-              <td>Default bundle selection and first-party tool/plugin installation.</td>
-            </tr>
-            <tr>
-              <td><code>lash-cli/src/bootstrap.rs</code></td>
-              <td>CLI host assembly and provider/tool/context resolution.</td>
-            </tr>
-            <tr>
-              <td><code>lash-cli/src/turn_runner.rs</code> + <code>lash-cli/src/persistence.rs</code></td>
-              <td>Shared runtime turn lifecycle and host-side persistence policy.</td>
-            </tr>
-            <tr>
-              <td><code>lash-cli/src/resume.rs</code> / <code>resume_snapshot.rs</code> / <code>fork.rs</code></td>
-              <td>Resume/fork semantics and live snapshot materialization.</td>
-            </tr>
-            <tr>
-              <td><code>lash-cli/src/runtime_perf.rs</code> + <code>scripts/profile_runtime.py</code></td>
-              <td>No-inference runtime benchmark and profiler harness.</td>
-            </tr>
-            <tr>
-              <td><code>docs/architecture.html</code></td>
-              <td>This document.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+  Host->>Bootstrap: parse args / load config / choose mode
+  Bootstrap->>Plugins: assemble default bundles + delegate plugin + host extras
+  Bootstrap->>Runtime: create runtime with session policy
+  Host->>Runtime: submit TurnInput
+  Runtime->>Plugins: before-turn hooks / prompt contributions / transforms
+  Runtime->>Machine: drive turn protocol
+  alt LLM effect
+    Machine->>Provider: request completion / tool call plan
+    Provider-->>Machine: response payload
+  else Tool effect
+    Machine->>Tools: execute tool(s)
+    Tools-->>Machine: ToolResult(s)
+  else RLM effect
+    Machine->>Tools: resolve tool calls from lashlang runtime
+    Tools-->>Machine: values/events
+  end
+  Runtime->>Plugins: after-turn hooks / runtime events / background work scheduling
+  Runtime->>Store: persist checkpoints, session heads, live resume artifacts
+  Runtime-->>Host: streamed output + final AssembledTurn
+            </div>
+        </div>
 
-      <div class="chip-row">
-        <div class="chip">Graph-first runtime</div>
-        <div class="chip">Append-only history</div>
-        <div class="chip">Checkpoint refs</div>
-        <div class="chip">Live delta resume</div>
-        <div class="chip">Declarative tool bundles</div>
-        <div class="chip">Typed host config</div>
-      </div>
-    </section>
+        <div class="module-grid" style="margin-top: 18px;">
+          <article class="module">
+            <small>CLI startup</small>
+            <h3>Bootstrap path</h3>
+            <p><code>lash-cli/src/bootstrap.rs</code> wires providers, session policy, default tool bundles, delegate tools, UI extras, and runtime configuration before any turn runs.</p>
+          </article>
+          <article class="module">
+            <small>Mode handling</small>
+            <h3>Interactive vs autonomous</h3>
+            <p>Interactive mode keeps terminal and UI state alive; autonomous mode runs one or more turns and prints or records results. Both rely on the same core runtime APIs.</p>
+          </article>
+          <article class="module">
+            <small>Tool execution</small>
+            <h3>Static + dynamic surfaces</h3>
+            <p>Tools are exposed via <code>ToolProvider</code>. Some are static first-party tools; others come from plugin sessions, MCP attachments, or delegated child-session support.</p>
+          </article>
+          <article class="module">
+            <small>Benchmark paths</small>
+            <h3>Performance instrumentation</h3>
+            <p><code>runtime_perf</code>, UI benchmark flags, and scripts under <code>scripts/</code> keep runtime and UI profiling available without contaminating the main execution model.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="abstractions">
+        <div class="section-header">
+          <h2>Abstractions</h2>
+          <p>The most important abstractions in lash are architectural, not just type-level. The system is designed around a few durable seams that let protocol logic, host orchestration, tool composition, UI behavior, and persistence evolve without collapsing into one giant application layer.</p>
+        </div>
+
+        <div class="module-grid">
+          <article class="module">
+            <small>Separation of concerns</small>
+            <h3>Protocol vs host</h3>
+            <p>The deepest seam in the system is the split between the pure turn protocol and the host runtime that satisfies it. That is what allows <code>lash-sansio</code> to stay deterministic while <code>lash</code> handles I/O, async work, provider calls, and storage.</p>
+            <ul>
+              <li>Protocol logic can stay testable and portable</li>
+              <li>Host features can grow without contaminating the kernel</li>
+              <li>Embedders can reuse the runtime or go lower-level as needed</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Composition model</small>
+            <h3>Plugins over hardcoding</h3>
+            <p>Planning, memory, tool registration, prompt shaping, delegation, and session-scoped behavior are treated as composable plugins. That keeps the runtime from becoming a single giant switchboard for every feature.</p>
+            <ul>
+              <li>Features can attach at session scope instead of being globally baked in</li>
+              <li>Hosts can assemble different surfaces for interactive and autonomous runs</li>
+              <li>New behavior usually starts as a plugin seam before it becomes a core concern</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Execution model</small>
+            <h3>One runtime, two execution styles</h3>
+            <p>The architecture supports both provider-native tool calling and persistent <code>lashlang</code> execution. The important abstraction is that both are hosted by the same runtime and session model, rather than becoming two separate products.</p>
+            <ul>
+              <li><code>standard</code> mode is closer to provider-native tool orchestration</li>
+              <li><code>rlm</code> mode adds a programmable local execution layer</li>
+              <li>The surrounding session, persistence, and plugin model remains shared</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>State model</small>
+            <h3>Graph-backed sessions</h3>
+            <p>Conversation state is not treated as a single flat transcript. The runtime architecture is built around graph-like session state, checkpoints, snapshots, and plugin-owned artifacts.</p>
+            <ul>
+              <li>Better fit for resume, branching, retries, and background work</li>
+              <li>Lets plugin-produced state live alongside user/assistant turns</li>
+              <li>Supports richer lifecycle handling than transcript-only designs</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Tool surface</small>
+            <h3>Capability surfaces, not ad hoc commands</h3>
+            <p>Tools are exposed as a coherent capability layer. The default host builds a standard surface, but the architecture allows static tools, dynamic tools, MCP-style integrations, and delegated child-session workers to share the same general model.</p>
+            <ul>
+              <li>Default bundles provide consistency</li>
+              <li>Dynamic and delegated tools extend capability without changing the kernel</li>
+              <li>Tool exposure is part of host composition, not an afterthought</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Presentation boundary</small>
+            <h3>UI behavior separated from rendering</h3>
+            <p>The workspace keeps terminal rendering and UI semantics out of the runtime. That makes the CLI richer without making the core agent architecture terminal-specific.</p>
+            <ul>
+              <li>UI commands/effects live separately from screen drawing primitives</li>
+              <li>The runtime can stream events without owning how they are displayed</li>
+              <li>Presentation remains a host concern instead of a protocol concern</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="diagram-wrap" style="margin-top: 18px;">
+          <div class="diagram-title">Conceptual seams</div>
+          <div class="mermaid">
+flowchart TD
+  Protocol["Pure protocol logic"] --> Runtime["Host runtime orchestration"]
+  Runtime --> Plugins["Composable plugin behavior"]
+  Runtime --> State["Graph-backed session state"]
+  Runtime --> Tools["Capability surface"]
+  Runtime --> Presentation["Host UI / terminal presentation"]
+  Runtime --> Exec["Standard mode or RLM mode"]
+
+  Plugins --> Tools
+  Plugins --> State
+  Exec --> Tools
+  Presentation -. observes .-> State
+          </div>
+        </div>
+
+        <div class="split" style="margin-top: 18px;">
+          <div class="inventory">
+            <h3>How to reason about changes</h3>
+            <ul>
+              <li>If the change is about <strong>turn semantics</strong>, think protocol-first.</li>
+              <li>If it is about <strong>composition or feature policy</strong>, think plugin-first.</li>
+              <li>If it is about <strong>state durability or resume</strong>, think graph/store-first.</li>
+              <li>If it is about <strong>user interaction</strong>, think host/UI-first.</li>
+            </ul>
+          </div>
+
+          <div class="note">
+            <h3>Why this matters</h3>
+            <p>These seams are what make the repo manageable as it grows. They are more important than memorizing individual type names, because they tell you where a new capability belongs and what it should avoid coupling to.</p>
+          </div>
+        </div>
+      </section>
+<section class="tab-panel" id="dependencies">
+        <div class="section-header">
+          <h2>Dependencies</h2>
+          <p>The dependency story is less about specific crate names and more about where outside complexity enters the system. lash is structured so that expensive, stateful, and platform-specific concerns stay in outer layers, while the kernel remains small and portable.</p>
+        </div>
+
+        <div class="diagram-wrap">
+          <div class="diagram-title">Where external complexity enters</div>
+          <div class="mermaid">
+flowchart TD
+  Kernel["Protocol kernel<br/>lash-sansio"] --> Minimal["Minimal foundational dependencies"]
+  Runtime["lash runtime"] --> Network["Provider/network APIs"]
+  Runtime --> Storage["Persistence + local storage"]
+  Runtime --> System["Filesystem, shell, PTY, search"]
+  Host["CLI host"] --> Terminal["Terminal, clipboard, rendering"]
+  Host --> Observability["Tracing, profiling, benchmarks"]
+  Lang["lashlang"] --> Language["Parsing + runtime support"]
+
+  Runtime --> Kernel
+  Host --> Runtime
+  Runtime --> Lang
+          </div>
+        </div>
+
+        <div class="module-grid" style="margin-top: 18px;">
+          <article class="module">
+            <small>Kernel dependency posture</small>
+            <h3>Keep the center light</h3>
+            <p>The protocol core depends on foundational serialization and model types, but avoids taking on async runtimes, terminal concerns, filesystem policy, or storage engines.</p>
+            <ul>
+              <li>This preserves portability and testability</li>
+              <li>It also makes the core easier to reason about independently of the app host</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Runtime dependency posture</small>
+            <h3>Own the real-world integration layer</h3>
+            <p>The runtime is where external systems enter: network providers, persistence, search and file access, PTYs, clocks, caches, and background execution.</p>
+            <ul>
+              <li>This is the right place for I/O-heavy dependencies</li>
+              <li>It lets the kernel stay conceptually clean</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Host dependency posture</small>
+            <h3>Terminal and UX stay at the edge</h3>
+            <p>The CLI owns terminal, clipboard, rendering, markdown formatting, update checks, and user-facing instrumentation. Those dependencies are intentionally not pulled into the core protocol layer.</p>
+            <ul>
+              <li>The host can evolve quickly without destabilizing the kernel</li>
+              <li>Alternative hosts remain possible because UI assumptions are not baked into the runtime core</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Optionality</small>
+            <h3>Features gate heavyweight integrations</h3>
+            <p>Some expensive dependencies are optional or conditional, especially around persistence and tool implementations. That keeps the embeddable core smaller and lets hosts opt into richer behavior only when needed.</p>
+            <ul>
+              <li>SQLite-backed persistence is feature-gated</li>
+              <li>Tooling-heavy integrations stay out of the minimum core</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Operational ecosystem</small>
+            <h3>Benchmarks and profiling are adjacent</h3>
+            <p>Benchmark harnesses, profiling scripts, and reporting tools are part of the repo’s engineering system, but they are intentionally adjacent to the main runtime rather than tangled into it.</p>
+            <ul>
+              <li>Performance work stays visible</li>
+              <li>Production execution paths stay comparatively clean</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Architectural principle</small>
+            <h3>Push complexity outward</h3>
+            <p>The repo consistently pushes network, platform, terminal, and tooling complexity away from the center. That principle is one of the clearest organizing ideas in the codebase.</p>
+            <ul>
+              <li>Pure center, integrated edge</li>
+              <li>Reusable runtime, opinionated host</li>
+              <li>Composable features, constrained coupling</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="split" style="margin-top: 18px;">
+          <div class="inventory">
+            <h3>Dependency heuristics</h3>
+            <ul>
+              <li>If a new dependency is platform-specific, it probably belongs in the host or outer runtime layers.</li>
+              <li>If it is needed only for one optional feature, prefer gating or isolating it.</li>
+              <li>If it affects deterministic turn semantics, resist putting it in the kernel.</li>
+              <li>If it is purely for docs, profiling, or benchmarks, keep it adjacent rather than central.</li>
+            </ul>
+          </div>
+
+          <div class="note">
+            <h3>Takeaway</h3>
+            <p>The dependency architecture is designed to protect the center of the system. That is why the repo can support a rich CLI, a flexible runtime, delegated workers, and a custom DSL without turning the entire workspace into one tightly coupled crate.</p>
+          </div>
+        </div>
+      </section>
+<section class="tab-panel" id="files">
+        <div class="section-header">
+          <h2>Files</h2>
+          <p>This section intentionally stays at the high-to-medium level. The important thing in this repo is not every individual file; it is knowing which directories and surfaces own which kinds of change.</p>
+        </div>
+
+        <div class="module-grid">
+          <article class="module">
+            <small>Workspace roots</small>
+            <h3>Top-level control surfaces</h3>
+            <p>The root of the repo defines the workspace, public positioning, scripts, benchmarks, and build/release helpers.</p>
+            <ul>
+              <li><code>Cargo.toml</code> defines workspace membership and top-level build boundaries</li>
+              <li><code>README.md</code> captures the product and execution-model framing</li>
+              <li><code>scripts/</code> contains operational and benchmark support tooling</li>
+            </ul>
+          </article>
+
+          <article class="module">
+            <small>Where to change behavior</small>
+            <h3>By concern, not by file hunt</h3>
+            <p>Most work naturally falls into one architectural bucket. Start with the owning crate and only then drill into specific files.</p>
+            <ul>
+              <li><strong>Protocol behavior:</strong> start in <code>lash-sansio</code></li>
+              <li><strong>Runtime orchestration and persistence:</strong> start in <code>lash</code></li>
+              <li><strong>Default tool surface:</strong> start in <code>lash-default-tools</code></li>
+              <li><strong>Delegated workers:</strong> start in <code>lash-delegate-tools</code></li>
+              <li><strong>Interactive UX:</strong> start in <code>lash-cli</code>, then <code>lash-ui</code>/<code>lash-tui</code> as needed</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="diagram-wrap" style="margin-top: 18px;">
+          <div class="diagram-title">Directory-level map</div>
+          <div class="mermaid">
+flowchart LR
+  Root["repo root"] --> Sansio["lash-sansio/"]
+  Root --> Core["lash/"]
+  Root --> CLI["lash-cli/"]
+  Root --> Lang["lashlang/"]
+  Root --> DefaultTools["lash-default-tools/"]
+  Root --> DelegateTools["lash-delegate-tools/"]
+  Root --> UI["lash-ui/"]
+  Root --> TUI["lash-tui/"]
+  Root --> Ops["scripts/ + bench/"]
+
+  Sansio --> SansioRole["protocol + message model"]
+  Core --> CoreRole["runtime + plugins + persistence"]
+  CLI --> CLIRole["host app + terminal UX"]
+  Lang --> LangRole["RLM language runtime"]
+  DefaultTools --> DTRole["default tool bundles"]
+  DelegateTools --> DGRole["delegation surface"]
+  UI --> UIRole["commands + UI effects"]
+  TUI --> TUIRole["terminal drawing"]
+  Ops --> OpsRole["profiling + automation + benchmarks"]
+          </div>
+        </div>
+
+        <div class="split" style="margin-top: 18px;">
+          <div class="inventory">
+            <h3>Practical reading order</h3>
+            <ul>
+              <li>Start with <strong>Overview</strong> and <strong>Modules</strong> to identify the owning layer.</li>
+              <li>Use <strong>Data Flow</strong> and <strong>Execution</strong> when tracing how a request moves through the system.</li>
+              <li>Use <strong>Abstractions</strong> to find the main interface or type boundary.</li>
+              <li>Only then drill into crate internals if the change is implementation-specific.</li>
+            </ul>
+          </div>
+
+          <div class="note">
+            <h3>What this page optimizes for</h3>
+            <p>This page is biased toward system shape, ownership boundaries, and runtime flow. It deliberately avoids turning into a tedious path catalog.</p>
+            <ul>
+              <li>High-level: what the system is and how the layers fit</li>
+              <li>Medium-level: which crate owns which responsibility</li>
+              <li>Low-level details only where they clarify a major abstraction</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+</main>
   </div>
-</div>
 
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
 
-  mermaid.initialize({
-    startOnLoad: false,
-    theme: 'base',
-    themeVariables: {
-      background: '#141412',
-      primaryColor: '#141412',
-      primaryTextColor: '#e8e4d0',
-      primaryBorderColor: 'rgba(232, 163, 60, 0.38)',
-      lineColor: '#8a9e6c',
-      tertiaryColor: '#1a1916',
-      secondaryColor: '#181713',
-      clusterBkg: '#12110f',
-      clusterBorder: 'rgba(232, 228, 208, 0.14)',
-      edgeLabelBackground: '#0e0d0b',
-      fontFamily: '"Chivo Mono", monospace',
-      fontSize: '14px',
-      mainBkg: '#181713',
-      nodeBorder: 'rgba(232, 163, 60, 0.28)',
-      nodeTextColor: '#e8e4d0',
-      textColor: '#e8e4d0',
-      noteBkgColor: '#181713',
-      noteTextColor: '#c8c4b8',
-      activationBorderColor: '#e8a33c',
-      activationBkgColor: 'rgba(232, 163, 60, 0.18)',
-      sequenceNumberColor: '#0e0d0b'
-    }
-  });
-
-  const buttons = [...document.querySelectorAll('.tab-button')];
-  const panels = [...document.querySelectorAll('.tab-panel')];
-
-  async function renderVisibleMermaid() {
-    const activePanel = document.querySelector('.tab-panel.active');
-    if (!activePanel) return;
-    await mermaid.run({
-      nodes: activePanel.querySelectorAll('.mermaid')
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      themeVariables: {
+        background: '#141412',
+        primaryColor: '#1b1916',
+        primaryTextColor: '#e8e4d0',
+        primaryBorderColor: '#e8a33c',
+        lineColor: '#8a9e6c',
+        secondaryColor: '#171512',
+        secondaryTextColor: '#e8e4d0',
+        tertiaryColor: '#110f0d',
+        tertiaryTextColor: '#c8c4b8',
+        noteBkgColor: '#171512',
+        noteTextColor: '#e8e4d0',
+        noteBorderColor: '#8ca0b4',
+        activationBorderColor: '#e8a33c',
+        clusterBkg: '#110f0d',
+        clusterBorder: '#4a4a44',
+        edgeLabelBackground: '#141412',
+        mainBkg: '#171512',
+        actorBkg: '#171512',
+        actorBorder: '#e8a33c',
+        actorTextColor: '#e8e4d0',
+        actorLineColor: '#8a9e6c',
+        signalColor: '#e8a33c',
+        signalTextColor: '#e8e4d0',
+        labelBoxBkgColor: '#171512',
+        labelBoxBorderColor: '#4a4a44',
+        labelTextColor: '#e8e4d0',
+        loopTextColor: '#e8e4d0'
+      }
     });
-  }
 
-  function activate(tabId) {
+    const buttons = Array.from(document.querySelectorAll('.tab-button'));
+    const panels = Array.from(document.querySelectorAll('.tab-panel'));
+
+    async function rerenderMermaid(panel) {
+      if (!panel) return;
+      const blocks = panel.querySelectorAll('.mermaid');
+      if (!blocks.length) return;
+      blocks.forEach((el) => {
+        if (el.dataset.processed) {
+          el.removeAttribute('data-processed');
+        }
+      });
+      await mermaid.run({ nodes: blocks });
+    }
+
+    async function setActiveTab(id) {
+      buttons.forEach((button) => {
+        const active = button.dataset.tab === id;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+      });
+
+      let activePanel = null;
+      panels.forEach((panel) => {
+        const active = panel.id === id;
+        panel.classList.toggle('active', active);
+        if (active) activePanel = panel;
+      });
+
+      if (activePanel) {
+        history.replaceState(null, '', `#${id}`);
+        await rerenderMermaid(activePanel);
+      }
+    }
+
     for (const button of buttons) {
-      button.classList.toggle('active', button.dataset.tab === tabId);
+      button.setAttribute('role', 'tab');
+      button.addEventListener('click', () => {
+        setActiveTab(button.dataset.tab);
+      });
     }
-    for (const panel of panels) {
-      panel.classList.toggle('active', panel.id === tabId);
-    }
-    renderVisibleMermaid();
-  }
 
-  for (const button of buttons) {
-    button.addEventListener('click', () => activate(button.dataset.tab));
-  }
+    panels.forEach((panel) => panel.setAttribute('role', 'tabpanel'));
 
-  renderVisibleMermaid();
-</script>
+    const initial = location.hash.replace('#', '');
+    const known = panels.some((panel) => panel.id === initial) ? initial : 'overview';
+    setActiveTab(known);
+  </script>
 </body>
 </html>
