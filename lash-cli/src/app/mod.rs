@@ -989,7 +989,16 @@ impl App {
                 continue;
             }
             accepted_user_message = true;
-            let _ = self.take_matching_pending_steer(&message.content);
+            if let Some(turn) = self.take_matching_pending_steer(&message.content) {
+                self.push_prepared_user_input(&turn);
+            } else {
+                let history_text = message
+                    .user_input
+                    .as_ref()
+                    .map(|input| input.display_text.clone())
+                    .unwrap_or_else(|| message.content.clone());
+                self.push_user_input_history_text(history_text);
+            }
         }
         if accepted_user_message {
             self.keep_latest_user_block_visible();
@@ -1011,7 +1020,7 @@ impl App {
                             .as_ref()
                             .map(|input| input.display_text.clone())
                             .unwrap_or_else(|| message.content.clone());
-                        self.blocks.push(DisplayBlock::UserInput(history_text));
+                        self.push_user_input_history_text(history_text);
                     }
                 }
                 MessageRole::System => {
@@ -1032,7 +1041,11 @@ impl App {
     }
 
     pub fn push_prepared_user_input(&mut self, turn: &PreparedTurn) {
-        let history_text = turn.history_text();
+        self.push_user_input_history_text(turn.history_text());
+    }
+
+    fn push_user_input_history_text(&mut self, history_text: String) {
+        let history_text = history_text.trim().to_string();
         if history_text.is_empty() {
             return;
         }

@@ -296,6 +296,37 @@ mod tests {
     }
 
     #[test]
+    fn ui_harness_renders_accepted_injected_turn_input_during_active_turn() {
+        let mut harness = UiHarness::new(72, 18);
+        harness.user_turn("initial question");
+        harness.start_turn();
+        harness
+            .app
+            .queue_pending_steer(PreparedTurn::new("follow up now".into(), Vec::new()));
+        harness.dispatch_event(SessionEvent::InjectedTurnInputAccepted {
+            messages: vec![lash::PluginMessage::text(
+                lash::MessageRole::User,
+                "follow up now",
+            )],
+            checkpoint: lash::CheckpointKind::AfterWork,
+        });
+        harness.dispatch_event(SessionEvent::TextDelta {
+            content: "I saw the follow up.".into(),
+        });
+
+        let screen = harness.render();
+        let lines = screen.non_empty_visible_lines();
+
+        assert!(lines.iter().any(|line| line.contains("initial question")));
+        assert!(lines.iter().any(|line| line.contains("follow up now")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("I saw the follow up."))
+        );
+    }
+
+    #[test]
     fn ui_harness_renders_plugin_panel_and_mode_indicator_end_to_end() {
         let mut harness = UiHarness::new(72, 20);
         harness.dispatch_event(SessionEvent::PluginEvent {

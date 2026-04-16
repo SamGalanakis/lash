@@ -866,7 +866,7 @@ fn take_last_queued_turn_restores_explicit_queue_only() {
 }
 
 #[test]
-fn accepted_injected_turn_input_clears_matching_pending_steer_without_rendering_history() {
+fn accepted_injected_turn_input_renders_matching_pending_steer() {
     let mut app = App::new("test-model".into(), "test".into());
     let turn = PreparedTurn::new("follow up".into(), Vec::new());
     app.queue_pending_steer(turn.clone());
@@ -878,7 +878,7 @@ fn accepted_injected_turn_input_clears_matching_pending_steer_without_rendering_
 
     assert!(app.pending_steers.is_empty());
     assert!(
-        !app.blocks
+        app.blocks
             .iter()
             .any(|block| matches!(block, DisplayBlock::UserInput(text) if text == "follow up"))
     );
@@ -903,10 +903,52 @@ fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_tex
     });
 
     assert!(app.pending_steers.is_empty());
-    assert!(!app.blocks.iter().any(|block| matches!(
+    assert!(app.blocks.iter().any(|block| matches!(
         block,
         DisplayBlock::UserInput(text) if text == "/localref lash for context if needed"
     )));
+}
+
+#[test]
+fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
+    let mut app = App::new("test-model".into(), "test".into());
+
+    app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
+        messages: vec![PluginMessage {
+            role: MessageRole::User,
+            content: "runtime content".into(),
+            parts: Vec::new(),
+            images: Vec::new(),
+            user_input: Some(lash::UserInputProvenance {
+                display_text: "visible text".into(),
+                effective_text: "runtime content".into(),
+                transforms: Vec::new(),
+            }),
+        }],
+        checkpoint: lash::CheckpointKind::AfterWork,
+    });
+
+    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
+        messages: vec![PluginMessage {
+            role: MessageRole::User,
+            content: "runtime content".into(),
+            parts: Vec::new(),
+            images: Vec::new(),
+            user_input: Some(lash::UserInputProvenance {
+                display_text: "visible text".into(),
+                effective_text: "runtime content".into(),
+                transforms: Vec::new(),
+            }),
+        }],
+        checkpoint: lash::CheckpointKind::AfterWork,
+    });
+
+    let matching_blocks = app
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, DisplayBlock::UserInput(text) if text == "visible text"))
+        .count();
+    assert_eq!(matching_blocks, 1);
 }
 
 #[test]
