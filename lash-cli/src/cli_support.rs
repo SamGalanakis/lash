@@ -690,6 +690,13 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
             UiHostEffect::SwitchToNewSession { .. } => {
                 app.dirty = true;
             }
+            UiHostEffect::MountSurface { .. }
+            | UiHostEffect::UpdateSurface { .. }
+            | UiHostEffect::UnmountSurface { .. }
+            | UiHostEffect::FocusSurface { .. }
+            | UiHostEffect::BlurSurface { .. } => {
+                app.dirty = true;
+            }
         }
     }
 }

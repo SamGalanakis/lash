@@ -1,21 +1,31 @@
 pub mod llm;
+pub mod mode;
 pub mod plugin;
+pub mod prompt;
 pub mod sansio;
 pub mod session;
 pub mod session_model;
+pub mod tool_surface;
+pub mod turn;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub use mode::{
+    ModeBuildInput, ModeConfig, ModePreamble, RlmDriver, StandardDriver, build_mode_preamble,
+};
 pub use plugin::{
     CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, UserInputProvenance,
     UserInputTransform,
 };
+pub use prompt::{PreparedPrompt, PromptBuildInput, build_prompt};
 pub use sansio::{
     CheckpointResumeAction, CompletedToolCall, DriverAction, DriverContextView, Effect, EffectId,
-    LlmCallError, PendingToolCall, ProtocolDriverHandle, Response, TurnMachine, TurnMachineConfig,
-    WaitingExecState, WaitingLlmState, driver_state,
+    LlmCallError, PendingToolCall, ProtocolDriverHandle, Response, RlmTermination, TurnMachine,
+    TurnMachineConfig, WaitingExecState, WaitingLlmState, driver_state,
 };
-pub use session::ExecResponse;
+pub use session::{
+    CompletedTurn, ExecResponse, PromptUsage, SansIoSessionState, apply_completed_turn,
+};
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
     CORE_GUIDANCE_SECTION, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, MessageSequence,
@@ -24,6 +34,11 @@ pub use session_model::{
     RenderedPrompt, SessionEvent, TokenUsage, WAIT_PROMPT_RESUME_EARLY_TOKEN,
     WAIT_PROMPT_TIMEOUT_TOKEN, default_prompt_template, messages_are_live_resume_safe,
 };
+pub use tool_surface::{
+    ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceOverride,
+    build_tool_surface,
+};
+pub use turn::{PreparedTurnMachine, SansIoTurnInput, build_turn};
 
 /// Execution backend for session turns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

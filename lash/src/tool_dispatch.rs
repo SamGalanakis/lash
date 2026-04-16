@@ -4,19 +4,19 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::plugin::{
-    ExecutionSurface, PluginDirective, PluginSession, SessionManager, ToolCallHookContext,
-    ToolResultHookContext, emit_plugin_surface_events,
+    PluginDirective, PluginSession, SessionManager, ToolCallHookContext, ToolResultHookContext,
+    emit_plugin_surface_events,
 };
 use crate::{
     ProgressSender, SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider,
-    ToolResult, TurnInjectionBridge,
+    ToolResult, ToolSurface, TurnInjectionBridge,
 };
 
 #[derive(Clone)]
 pub(crate) struct ToolDispatchContext {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
-    pub surface: ExecutionSurface,
+    pub surface: ToolSurface,
     pub host: Arc<dyn SessionManager>,
     pub session_id: String,
     pub event_tx: mpsc::Sender<SessionEvent>,
@@ -323,7 +323,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(MockTools));
         let tools = plugins.tools();
-        let surface = plugins.execution_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
         ToolDispatchContext {
             plugins,
             tools,
@@ -342,7 +342,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
         let tools = plugins.tools();
-        let surface = plugins.execution_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
         ToolDispatchContext {
             plugins,
             tools,

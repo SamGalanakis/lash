@@ -1901,6 +1901,7 @@ version = "0.2.53"
 dependencies = [
  "async-trait",
  "lash",
+ "lash-tui",
  "serde_json",
 ]
 

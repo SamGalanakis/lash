@@ -1,6 +1,5 @@
 use super::*;
 use crate::llm::transport::LlmTransport;
-use sha2::{Digest, Sha256};
 
 async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: SessionEvent) {
     if !event_tx.is_closed() {
@@ -30,7 +29,6 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) session_manager: Arc<dyn SessionManager>,
     pub(super) prompt_bridge: HostPromptBridge,
     pub(super) rlm_termination: crate::RlmTermination,
-    pub(super) prompt_render_cache: Arc<std::sync::Mutex<PromptRenderCache>>,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }
 
@@ -121,7 +119,7 @@ impl RuntimeTurnDriver {
                     Effect::SyncExecutionSurface { id } => {
                         let result = self
                             .session
-                            .refresh_execution_surface()
+                            .refresh_tool_surface()
                             .await
                             .map_err(|err| err.to_string());
                         machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
@@ -193,8 +191,22 @@ impl RuntimeTurnDriver {
             }
         };
         self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
-        let mut preamble =
-            build_execution_preamble(&self.session, &session_policy, execution_mode, model);
+        let tool_surface = self.session.tool_surface(&self.session_id, execution_mode);
+        let mode_preamble = self
+            .session
+            .mode_preamble(&self.session_id, execution_mode)
+            .as_ref()
+            .clone();
+        let mut base_prompt_contributions = mode_preamble.prompt_contributions.clone();
+        base_prompt_contributions.extend(self.session.context_prompt_contributions().to_vec());
+        let base_prompt = crate::build_prompt(crate::PromptBuildInput {
+            mode: execution_mode,
+            template: self.host.core.prompt_template.clone(),
+            execution_prompt: mode_preamble.execution_prompt.clone(),
+            tool_names: mode_preamble.tool_names.clone(),
+            omitted_tool_count: mode_preamble.omitted_tool_count,
+            contributions: base_prompt_contributions,
+        });
         let prompt_state = SessionStateEnvelope {
             session_id: self.session_id.clone(),
             policy: session_policy.clone(),
@@ -207,7 +219,7 @@ impl RuntimeTurnDriver {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: self.session_id.clone(),
                 host: Arc::clone(&self.session_manager),
-                prompt: preamble.prompt.clone(),
+                prompt: base_prompt.context.clone(),
                 state: crate::SessionReadView::from_graph_projection(
                     &prompt_state,
                     self.base_graph.clone(),
@@ -231,15 +243,25 @@ impl RuntimeTurnDriver {
         };
         let mut all_prompt_contributions = self.session.context_prompt_contributions().to_vec();
         all_prompt_contributions.extend(plugin_prompt_contributions);
-        preamble.prompt = finalize_prompt_context(preamble.prompt, all_prompt_contributions);
-        self.policy = session_policy;
-        let machine_config = self.machine_config(preamble);
-        self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
-        Ok(TurnMachine::new_shared(
-            machine_config,
+        let prepared = crate::build_turn(crate::SansIoTurnInput {
+            session_id: self.session_id.clone(),
+            run_session_id: session_policy.session_id.clone(),
+            model,
+            mode: execution_mode,
             messages,
             run_offset,
-        ))
+            mode_preamble,
+            tool_surface,
+            prompt_template: self.host.core.prompt_template.clone(),
+            prompt_contributions: all_prompt_contributions,
+            max_turns: session_policy.max_turns,
+            model_variant: session_policy.model_variant.clone(),
+            emit_llm_debug_log: self.host.core.llm_log_path.is_some(),
+            rlm_termination: self.rlm_termination.clone(),
+        });
+        self.policy = session_policy;
+        self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
+        Ok(prepared.machine)
     }
 
     async fn run_llm_call(
@@ -470,56 +492,6 @@ impl RuntimeTurnDriver {
         Ok(current.unwrap_or(original))
     }
 
-    fn machine_config(
-        &self,
-        preamble: crate::session_model::ExecutionPreamble,
-    ) -> TurnMachineConfig {
-        let mode_turn = self.session.plugins().mode_execution().turn_config();
-        let system_prompt = self.render_system_prompt(&preamble.prompt);
-        TurnMachineConfig {
-            protocol_driver: std::sync::Arc::clone(&mode_turn.protocol),
-            sync_execution_surface: mode_turn.sync_execution_surface,
-            model: preamble.model,
-            max_turns: self.policy.max_turns,
-            model_variant: self.policy.model_variant.clone(),
-            run_session_id: self.policy.session_id.clone(),
-            tool_specs: Arc::clone(&preamble.tool_specs),
-            system_prompt,
-            session_id: self.session_id.clone(),
-            emit_llm_debug_log: self.host.core.llm_log_path.is_some(),
-            rlm_termination: rlm_termination_to_sansio(&self.rlm_termination),
-        }
-    }
-
-    fn render_system_prompt(&self, prompt: &crate::PromptContext) -> String {
-        struct HashWriter(Sha256);
-        impl std::io::Write for HashWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.update(buf);
-                Ok(buf.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let mut writer = HashWriter(Sha256::new());
-        let _ = serde_json::to_writer(&mut writer, &(prompt, &self.host.core.prompt_template));
-        let key: [u8; 32] = writer.0.finalize().into();
-        let mut cache = self
-            .prompt_render_cache
-            .lock()
-            .expect("prompt render cache lock");
-        if cache.last_key == Some(key) {
-            return cache.last_rendered.clone();
-        }
-        let rendered = self.host.core.prompt_template.render(prompt);
-        cache.last_key = Some(key);
-        cache.last_rendered = rendered.clone();
-        rendered
-    }
-
     async fn run_exec_code(
         &mut self,
         code: &str,
@@ -711,7 +683,7 @@ impl RuntimeTurnDriver {
             tools: self.session.tools(),
             surface: self
                 .session
-                .execution_surface(&self.session_id, self.policy.execution_mode),
+                .tool_surface(&self.session_id, self.policy.execution_mode),
             host: Arc::clone(&manager),
             session_id: self.session_id.clone(),
             event_tx: tool_event_tx,

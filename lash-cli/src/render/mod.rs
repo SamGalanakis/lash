@@ -7,6 +7,7 @@ mod tests;
 
 use lash::{SkillCatalog, collect_skill_mentions_with_ranges};
 use lash_tui::{Line, Modifier, Rect, Span, Style};
+use lash_ui::UiSurfaceSlot;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::activity::{
@@ -90,30 +91,105 @@ fn turn_status_height(app: &App) -> u16 {
     if app.live_turn.is_some() { 1 } else { 0 }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ChromeLayout {
+    history_height: u16,
+    dock_height: u16,
+    turn_height: u16,
+    queue_height: u16,
+    footer_height: u16,
+    input_height: u16,
+}
+
+fn chrome_layout(app: &App, frame_width: u16, frame_height: u16) -> ChromeLayout {
+    let surfaces = app.ui_extensions().surface_scene();
+    let turn_height = turn_status_height(app);
+    let queue_height = queue_preview_height(app, frame_width);
+    let footer_available = frame_height
+        .saturating_sub(1 + turn_height + queue_height)
+        .saturating_sub(MIN_HISTORY_HEIGHT);
+    let footer_height = surfaces.stack_height(UiSurfaceSlot::Footer, footer_available);
+    let dock_available = frame_height
+        .saturating_sub(1 + turn_height + queue_height + footer_height)
+        .saturating_sub(MIN_HISTORY_HEIGHT);
+    let dock_height = surfaces.stack_height(UiSurfaceSlot::Dock, dock_available);
+    let reserved_height = 1 + dock_height + turn_height + queue_height + footer_height;
+    let input_height = input_height(app, frame_width, frame_height, reserved_height);
+    let history_height = frame_height.saturating_sub(
+        1 + dock_height + turn_height + queue_height + footer_height + input_height,
+    );
+    ChromeLayout {
+        history_height,
+        dock_height,
+        turn_height,
+        queue_height,
+        footer_height,
+        input_height,
+    }
+}
+
 pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -> usize {
-    let status_h = turn_status_height(app);
-    let queued_h = queue_preview_height(app, frame_width);
-    let reserved_height = 1 + status_h + queued_h;
-    let input_h = input_height(app, frame_width, frame_height, reserved_height);
-    let overhead = 1 + status_h + queued_h + input_h;
-    frame_height.saturating_sub(overhead) as usize
+    chrome_layout(app, frame_width, frame_height).history_height as usize
 }
 
 pub fn history_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
-    let status_h = turn_status_height(app);
-    let queued_h = queue_preview_height(app, frame_width);
-    let reserved_height = 1 + status_h + queued_h;
-    let input_h = input_height(app, frame_width, frame_height, reserved_height);
-    let history_height = frame_height.saturating_sub(1 + status_h + queued_h + input_h);
-    Rect::new(0, 1, frame_width, history_height)
+    let layout = chrome_layout(app, frame_width, frame_height);
+    Rect::new(0, 1, frame_width, layout.history_height)
+}
+
+pub fn dock_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
+    let layout = chrome_layout(app, frame_width, frame_height);
+    Rect::new(
+        0,
+        1 + layout.history_height,
+        frame_width,
+        layout.dock_height,
+    )
+}
+
+pub fn turn_status_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
+    let layout = chrome_layout(app, frame_width, frame_height);
+    Rect::new(
+        0,
+        1 + layout.history_height + layout.dock_height,
+        frame_width,
+        layout.turn_height,
+    )
+}
+
+pub fn queue_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
+    let layout = chrome_layout(app, frame_width, frame_height);
+    Rect::new(
+        0,
+        1 + layout.history_height + layout.dock_height + layout.turn_height,
+        frame_width,
+        layout.queue_height,
+    )
+}
+
+pub fn footer_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
+    let layout = chrome_layout(app, frame_width, frame_height);
+    Rect::new(
+        0,
+        1 + layout.history_height + layout.dock_height + layout.turn_height + layout.queue_height,
+        frame_width,
+        layout.footer_height,
+    )
 }
 
 pub fn input_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
-    let history = history_area(app, frame_width, frame_height);
-    let turn_h = turn_status_height(app);
-    let queued_h = queue_preview_height(app, frame_width);
-    let y = history.bottom() + turn_h + queued_h;
-    Rect::new(0, y, frame_width, frame_height.saturating_sub(y))
+    let layout = chrome_layout(app, frame_width, frame_height);
+    let y = 1
+        + layout.history_height
+        + layout.dock_height
+        + layout.turn_height
+        + layout.queue_height
+        + layout.footer_height;
+    Rect::new(0, y, frame_width, layout.input_height)
+}
+
+pub fn body_area(_app: &App, frame_width: u16, frame_height: u16) -> Rect {
+    Rect::new(0, 1, frame_width, frame_height.saturating_sub(1))
 }
 
 pub fn input_content_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {

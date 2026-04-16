@@ -214,12 +214,12 @@ pub(super) async fn apply_pending_reconfigure(
     };
 
     if let Some(rt) = runtime.as_mut()
-        && let Err(e) = rt.refresh_session_execution_surface().await
+        && let Err(e) = rt.refresh_session_tool_surface().await
     {
         let mut rollback = previous.clone();
         rollback.base_generation = dynamic_tools.generation();
         let _ = dynamic_tools.apply_state(rollback);
-        let _ = rt.refresh_session_execution_surface().await;
+        let _ = rt.refresh_session_tool_surface().await;
         desired_dynamic.base_generation = dynamic_tools.generation();
         return Err(format!(
             "Failed to apply runtime reconfigure (state rolled back): {e}"

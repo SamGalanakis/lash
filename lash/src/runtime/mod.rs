@@ -21,11 +21,11 @@ use crate::plugin::{
     plugin_surface_event_renders_visible_output,
 };
 use crate::provider::Provider;
-use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
+use crate::sansio::{Effect, LlmCallError, Response, TurnMachine};
 use crate::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, SessionEvent, SessionPolicy, TokenUsage,
-    build_execution_preamble, finalize_prompt_context, fresh_message_id, make_error_event,
-    plugin_message_to_message, reassign_part_ids, transport_stream_events,
+    fresh_message_id, make_error_event, plugin_message_to_message, reassign_part_ids,
+    transport_stream_events,
 };
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
@@ -38,6 +38,8 @@ use crate::{
 use host::*;
 use session_manager::*;
 use turn_driver::*;
+
+pub use lash_sansio::PromptUsage;
 
 pub use builder::EmbeddedRuntimeBuilder;
 pub use host::{
@@ -94,16 +96,6 @@ pub struct TurnInput {
 enum NormalizedItem {
     Text(String),
     Image(Vec<u8>),
-}
-
-/// Exact prompt-usage snapshot from the most recent completed LLM call.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct PromptUsage {
-    pub prompt_context_tokens: usize,
-    pub input_tokens: usize,
-    pub cached_input_tokens: usize,
-    #[serde(default)]
-    pub context_budget_tokens: usize,
 }
 
 /// A single row in the token cost ledger. One per unique
@@ -549,12 +541,6 @@ impl PersistedSessionState {
 #[derive(Clone, Debug, Default)]
 struct StandardStreamFallback {
     parts: Vec<LlmOutputPart>,
-}
-
-#[derive(Default)]
-struct PromptRenderCache {
-    last_key: Option<[u8; 32]>,
-    last_rendered: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1100,17 +1086,6 @@ fn debug_rss_kb() -> Option<u64> {
     })
 }
 
-fn rlm_termination_to_sansio(termination: &crate::RlmTermination) -> crate::sansio::RlmTermination {
-    match termination {
-        crate::RlmTermination::ProseWithoutFence => {
-            crate::sansio::RlmTermination::ProseWithoutFence
-        }
-        crate::RlmTermination::Finish { schema } => crate::sansio::RlmTermination::Finish {
-            schema: schema.clone(),
-        },
-    }
-}
-
 fn normalize_prompt_usage(provider: &Provider, usage: &TokenUsage) -> Option<PromptUsage> {
     let input_tokens = usage.input_tokens.max(0) as usize;
     let output_tokens = usage.output_tokens.max(0) as usize;
@@ -1339,7 +1314,6 @@ pub struct LashRuntime {
     /// and are drained into `state.token_ledger` at turn-commit time.
     shared_token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
     background_sync_needed: Arc<AtomicBool>,
-    prompt_render_cache: Arc<std::sync::Mutex<PromptRenderCache>>,
     turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }
 
@@ -1436,7 +1410,6 @@ impl LashRuntime {
             rlm_termination: crate::RlmTermination::default(),
             shared_token_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_sync_needed: Arc::new(AtomicBool::new(false)),
-            prompt_render_cache: Arc::new(std::sync::Mutex::new(PromptRenderCache::default())),
             turn_phase_probe: None,
         })
     }
@@ -1887,14 +1860,14 @@ impl LashRuntime {
         self.notify_session_config_changed(previous).await;
     }
 
-    /// Re-register the current execution surface in the live RLM session.
-    pub async fn refresh_session_execution_surface(&mut self) -> Result<(), SessionError> {
+    /// Re-register the current tool surface in the live RLM session.
+    pub async fn refresh_session_tool_surface(&mut self) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        session.refresh_execution_surface().await
+        session.refresh_tool_surface().await
     }
 
     /// Reset the RLM session on the underlying session runtime.
@@ -2342,7 +2315,6 @@ impl LashRuntime {
             session_manager: manager,
             prompt_bridge,
             rlm_termination: self.rlm_termination.clone(),
-            prompt_render_cache: Arc::clone(&self.prompt_render_cache),
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let run_offset = self.state.iteration;

@@ -252,7 +252,7 @@ async fn apply_graph_resume_state(
     if let Some(rt) = runtime.as_mut() {
         rt.update_session_config(None, None, Some(current_model_variant.clone()), None)
             .await;
-        let _ = rt.refresh_session_execution_surface().await;
+        let _ = rt.refresh_session_tool_surface().await;
         let mut restored_policy = rt.export_state().policy;
         restored_policy.execution_mode = restored_execution_mode;
         restored_policy.model = app.model.clone();

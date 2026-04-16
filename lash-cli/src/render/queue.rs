@@ -95,6 +95,7 @@ fn push_queue_section(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_wrapped_queue_item(
     lines: &mut Vec<Line<'static>>,
     width: usize,

@@ -1,17 +1,163 @@
-use lash_sansio::llm::types::{LlmOutputPart, LlmResponse};
-use lash_sansio::sansio::{
+use std::sync::Arc;
+
+use crate::llm::types::{LlmOutputPart, LlmResponse, LlmToolSpec};
+use crate::sansio::{
     CheckpointResumeAction, CompletedToolCall, DriverAction, DriverContextView, PendingToolCall,
     ProtocolDriverHandle, RlmTermination, WaitingExecState, WaitingLlmState, driver_state,
 };
-use lash_sansio::session_model::message::{PartAttachment, data_url_for_bytes};
-use lash_sansio::session_model::{
+use crate::session_model::message::{PartAttachment, data_url_for_bytes};
+use crate::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, SessionEvent, format_tool_result_content,
     fresh_message_id, make_error_event, reassign_part_ids,
 };
-use lash_sansio::{CheckpointKind, ToolCallRecord, ToolImage};
+use crate::{
+    CheckpointKind, ExecutionMode, PromptContribution, ToolCallRecord, ToolImage, ToolSurface,
+};
 use serde_json::Value;
 
-pub type ProtocolDriverRef = std::sync::Arc<dyn ProtocolDriverHandle>;
+const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution is needed.
+
+- Work in small, concrete steps and verify each meaningful step.
+- Use `batch` for two or more independent tool calls. Serialize calls when later arguments depend on earlier results.
+- Avoid filler prose between tool calls.
+- If you are unsure, resolve the uncertainty with the smallest relevant check.
+- Before concluding, verify the concrete end-state whenever possible.
+- For direct conversational requests that need no tools, respond in prose only."#;
+
+const RLM_EXECUTION_SECTION: &str = r#"In this mode you write `lashlang` code inside your prose response and the runtime executes it. There is no native tool-call envelope — you embed code directly.
+
+Format every work step like this:
+
+````
+Brief reasoning here in plain prose (one or two sentences is fine).
+
+```lashlang
+result = call tool_name { arg: value }
+observe result
+```
+````
+
+- Wrap each work step in **exactly one** ` ```lashlang ` fenced block. Only the first block runs per turn — additional blocks are ignored.
+- Plain prose alongside the block becomes your reasoning trace; keep it short.
+- After each execution result, decide whether to write another fenced block (more work to do) or finish the turn in pure prose with no fenced block (task complete).
+- When the task is complete, reply with prose only — no fenced lashlang block — and that ends the turn.
+- Work iteratively: inspect, act, observe, continue. Most tasks take multiple lashlang steps, not one large step.
+- Verify the concrete end state before finalizing in prose when possible.
+- Do not describe what you would do instead of doing it.
+
+### RLM Language
+
+`lashlang` is a small workflow language for tool orchestration.
+
+- Values are null, booleans, numbers, strings, lists, and records.
+- List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`. Tool-argument records follow the same rule.
+- Assign with `name = expr`. Variables persist across iterations — anything you bind in one fenced block is still in scope on the next.
+- If the prompt includes a **Bound Variables** section, those names are already in scope. Access them directly in lashlang instead of rebuilding them from prose.
+- Bare expressions are valid statements. In `parallel { ... }`, a bare-expression branch contributes that value to the result list.
+- Call tools with `call tool_name { arg: expr }`.
+- Start any tool call in the background with `start call tool_name { arg: expr }`. This returns a handle value.
+- Resolve a background handle with `await handle`. If you already have a list of handles, `await handles` returns a list of results in order.
+- Stop a background handle with `cancel handle`. Cancellation is best-effort: Lash always stops waiting locally, and cooperative tools are also asked to stop their underlying work.
+- Use `parallel { ... }` only for independent tool calls. If one call needs another call's output, do not put them in the same `parallel { ... }`.
+- `parallel { ... }` returns a list of branch results in order.
+- Use ternary expressions for inline branching: `cond ? yes : no`. There is no expression-form `if`.
+- Control flow is limited to statement `if` and `for`.
+- Boolean negation supports both `!cond` and `not cond`.
+- Use `observe expr` to inspect a value and continue execution.
+- `observe` output and tool results are fed back into the next iteration (your context), so inspect first and refine on the next step if needed.
+- You must explicitly use `observe` to inspect values and make progress based on them. Do not rely on implicit inspection through tool results or execution errors.
+
+### Decomposition
+
+- Break large tasks into smaller, self-contained steps.
+- Prefer narrow checks over brute-force scanning when the input is large.
+- Use focused intermediate observations to verify subquestions before finalizing.
+- Keep each step concrete and bounded instead of attempting the whole task at once.
+- Use `start`/`await` when a long-running tool can make progress in the background while you do other work. This is especially useful for `delegate`.
+
+Example fanout pattern:
+
+```lashlang
+h1 = start call delegate { task: "Read chunk 1 and extract the key claim", intelligence: "low", output: { claim: "str" } }
+h2 = start call delegate { task: "Read chunk 2 and extract the key claim", intelligence: "low", output: { claim: "str" } }
+handles = [h1, h2]
+results = await handles
+finish results
+```"#;
+
+#[derive(Clone)]
+pub struct ModeConfig {
+    pub protocol: Arc<dyn ProtocolDriverHandle>,
+    pub sync_execution_surface: bool,
+}
+
+#[derive(Clone)]
+pub struct ModePreamble {
+    pub config: ModeConfig,
+    pub tool_specs: Arc<Vec<LlmToolSpec>>,
+    pub tool_names: Vec<String>,
+    pub omitted_tool_count: usize,
+    pub execution_prompt: String,
+    pub prompt_contributions: Vec<PromptContribution>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModeBuildInput {
+    pub mode: ExecutionMode,
+    pub tool_surface: ToolSurface,
+    pub extra_prompt_contributions: Vec<PromptContribution>,
+}
+
+pub fn build_mode_preamble(input: ModeBuildInput) -> ModePreamble {
+    match input.mode {
+        ExecutionMode::Standard => build_standard_mode_preamble(input),
+        ExecutionMode::Rlm => build_rlm_mode_preamble(input),
+    }
+}
+
+fn build_standard_mode_preamble(input: ModeBuildInput) -> ModePreamble {
+    let enabled_tools = input.tool_surface.enabled_tools();
+    ModePreamble {
+        config: ModeConfig {
+            protocol: Arc::new(StandardDriver),
+            sync_execution_surface: false,
+        },
+        tool_specs: Arc::new(input.tool_surface.model_tool_specs()),
+        tool_names: enabled_tools.into_iter().map(|tool| tool.name).collect(),
+        omitted_tool_count: 0,
+        execution_prompt: STANDARD_EXECUTION_SECTION.to_string(),
+        prompt_contributions: input.extra_prompt_contributions,
+    }
+}
+
+fn build_rlm_mode_preamble(input: ModeBuildInput) -> ModePreamble {
+    let omitted_tool_count = input.tool_surface.omitted_tool_count();
+    let mut prompt_contributions = Vec::new();
+
+    let tool_docs = input.tool_surface.prompt_tool_docs();
+    if !tool_docs.trim().is_empty() {
+        prompt_contributions.push(PromptContribution::execution("Available Tools", tool_docs));
+    }
+    if omitted_tool_count > 0 {
+        prompt_contributions.push(PromptContribution::guidance(
+            "Tool Discovery",
+            "Use `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.",
+        ));
+    }
+    prompt_contributions.extend(input.extra_prompt_contributions);
+
+    ModePreamble {
+        config: ModeConfig {
+            protocol: Arc::new(RlmDriver),
+            sync_execution_surface: true,
+        },
+        tool_specs: Arc::new(Vec::new()),
+        tool_names: input.tool_surface.tool_names(),
+        omitted_tool_count,
+        execution_prompt: RLM_EXECUTION_SECTION.to_string(),
+        prompt_contributions,
+    }
+}
 
 pub struct StandardDriver;
 pub struct RlmDriver;
@@ -234,7 +380,7 @@ impl ProtocolDriverHandle for StandardDriver {
         &self,
         _ctx: DriverContextView<'_>,
         _waiting: WaitingExecState,
-        _result: Result<lash_sansio::ExecResponse, String>,
+        _result: Result<crate::ExecResponse, String>,
     ) -> Vec<DriverAction> {
         Vec::new()
     }
@@ -335,7 +481,7 @@ impl ProtocolDriverHandle for RlmDriver {
         &self,
         ctx: DriverContextView<'_>,
         waiting: WaitingExecState,
-        result: Result<lash_sansio::ExecResponse, String>,
+        result: Result<crate::ExecResponse, String>,
     ) -> Vec<DriverAction> {
         let mut state = waiting
             .into_driver_state::<RlmDriverState>()
@@ -792,4 +938,56 @@ fn append_assistant_text_part(out: &mut String, next: &str) {
     }
 
     out.push_str(next);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ToolDefinition, ToolParam};
+
+    fn tool(name: &str, injected: bool) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("Tool {name}"),
+            params: vec![ToolParam::typed("query", "str")],
+            returns: "str".to_string(),
+            examples: Vec::new(),
+            enabled: true,
+            injected,
+            input_schema_override: None,
+            output_schema_override: None,
+        }
+    }
+
+    #[test]
+    fn rlm_mode_includes_available_tools_and_tool_discovery_notes() {
+        let surface = ToolSurface {
+            tools: vec![
+                tool("search_tools", true),
+                tool("grep", true),
+                tool("glob", false),
+            ],
+            tool_list_notes: vec!["extra note".to_string()],
+        };
+        let preamble = build_mode_preamble(ModeBuildInput {
+            mode: ExecutionMode::Rlm,
+            tool_surface: surface,
+            extra_prompt_contributions: Vec::new(),
+        });
+
+        assert!(preamble.execution_prompt.contains("lashlang"));
+        assert_eq!(preamble.omitted_tool_count, 1);
+        assert!(
+            preamble
+                .prompt_contributions
+                .iter()
+                .any(|contribution| contribution.title.as_deref() == Some("Available Tools"))
+        );
+        assert!(
+            preamble
+                .prompt_contributions
+                .iter()
+                .any(|contribution| contribution.title.as_deref() == Some("Tool Discovery"))
+        );
+    }
 }

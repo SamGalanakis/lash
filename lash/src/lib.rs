@@ -7,7 +7,6 @@ pub mod llm;
 pub mod mcp;
 pub mod model_info;
 pub mod model_variant;
-pub mod modes;
 pub mod oauth;
 pub mod plugin;
 pub mod provider;
@@ -94,14 +93,17 @@ pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::{
     CheckpointKind, Effect, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError,
-    Message, MessageOrigin, MessageRole, MessageSequence, Part, PartKind, PluginMessage,
-    PluginSurfaceEvent, PromptBuiltin, PromptContext, PromptContribution, PromptPanel,
-    PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, Response, SessionEvent,
-    TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult, TurnMachine,
-    TurnMachineConfig, UserInputProvenance, UserInputTransform, WAIT_PROMPT_RESUME_EARLY_TOKEN,
-    WAIT_PROMPT_TIMEOUT_TOKEN, default_execution_mode, default_prompt_template,
-    execution_mode_supported, messages_are_live_resume_safe,
+    Message, MessageOrigin, MessageRole, MessageSequence, ModeBuildInput, ModeConfig, ModePreamble,
+    Part, PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt, PreparedTurnMachine,
+    PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptPanel, PromptRequest,
+    PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, PruneState, RenderedPrompt, Response, RlmDriver, SansIoTurnInput,
+    SessionEvent, StandardDriver, TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam,
+    ToolResult, ToolSurface, ToolSurfaceBuildInput, TurnMachine, TurnMachineConfig,
+    UserInputProvenance, UserInputTransform, WAIT_PROMPT_RESUME_EARLY_TOKEN,
+    WAIT_PROMPT_TIMEOUT_TOKEN, build_mode_preamble, build_prompt, build_tool_surface, build_turn,
+    default_execution_mode, default_prompt_template, execution_mode_supported,
+    messages_are_live_resume_safe,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{

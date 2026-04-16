@@ -6,13 +6,12 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::plugin::{PromptHookContext, ToolSurfaceContribution, ToolSurfaceOverride};
+use crate::plugin::PromptHookContext;
 #[cfg(feature = "sqlite-store")]
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
 use crate::tools::run_blocking;
 use crate::{
-    PromptContext, PromptContribution, ToolDefinition, ToolExecutionContext, ToolParam,
-    ToolProvider, ToolResult,
+    PromptContribution, ToolDefinition, ToolExecutionContext, ToolParam, ToolProvider, ToolResult,
 };
 
 #[derive(Clone)]
@@ -191,19 +190,6 @@ impl Default for SearchToolsProvider {
     fn default() -> Self {
         Self::new()
     }
-}
-
-pub(super) fn tool_discovery_prompt_contributions(
-    context: &PromptContext,
-) -> Vec<PromptContribution> {
-    if context.omitted_tool_count == 0 {
-        return Vec::new();
-    }
-
-    vec![PromptContribution::guidance(
-        "Tool Discovery",
-        "Use `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.",
-    )]
 }
 
 pub(super) fn bound_variables_prompt_contributions(
@@ -580,38 +566,6 @@ fn singularize_segment(segment: &str) -> String {
     segment.to_string()
 }
 
-pub(super) fn tool_surface_contribution(
-    ctx: &crate::plugin::ToolSurfaceContext,
-) -> ToolSurfaceContribution {
-    let omitted_tool_count = ctx
-        .tools
-        .iter()
-        .filter(|tool| tool.enabled)
-        .filter(|tool| tool.name != "search_tools")
-        .filter(|tool| !tool.injected)
-        .count();
-    let has_search_tools = ctx.tools.iter().any(|tool| tool.name == "search_tools");
-    let mut overrides = Vec::new();
-    if has_search_tools {
-        overrides.push(ToolSurfaceOverride {
-            tool_name: "search_tools".to_string(),
-            enabled: Some(omitted_tool_count > 0),
-            injected: Some(omitted_tool_count > 0),
-        });
-    }
-    let tool_list_notes = if omitted_tool_count > 0 {
-        vec![format!(
-            "- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
-        )]
-    } else {
-        Vec::new()
-    };
-    ToolSurfaceContribution {
-        overrides,
-        tool_list_notes,
-    }
-}
-
 #[async_trait::async_trait]
 impl ToolProvider for SearchToolsProvider {
     fn definitions(&self) -> Vec<ToolDefinition> {
@@ -731,20 +685,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_contributions_only_describe_tool_discovery_when_needed() {
-        let mut prompt = PromptContext {
-            omitted_tool_count: 1,
-            ..PromptContext::default()
-        };
-        let with_omissions = tool_discovery_prompt_contributions(&prompt);
-        assert_eq!(with_omissions.len(), 1);
-        assert!(with_omissions[0].content.contains("search_tools"));
-
-        prompt.omitted_tool_count = 0;
-        assert!(tool_discovery_prompt_contributions(&prompt).is_empty());
-    }
-
-    #[test]
     fn prompt_contributions_include_bound_rlm_variables_from_graph_nodes() {
         let mut snapshot = crate::SessionStateEnvelope::default();
         snapshot.policy.execution_mode = crate::ExecutionMode::Rlm;
@@ -769,7 +709,7 @@ mod tests {
         let ctx = crate::PromptHookContext {
             session_id: "root".to_string(),
             host: Arc::new(MockSessionManager::default()),
-            prompt: PromptContext::default(),
+            prompt: crate::PromptContext::default(),
             state: crate::SessionReadView::new(snapshot),
         };
 

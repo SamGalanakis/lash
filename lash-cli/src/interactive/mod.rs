@@ -10,10 +10,10 @@ use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lash::provider::{LashConfig, ProviderKind};
 use lash::session_model::Message;
 use lash::*;
-use lash_tui::Terminal;
+use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_ui::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
-    UiCommandInvocation, UiContext, UiExtensions, UiHostEffect,
+    UiCommandInvocation, UiContext, UiExtensions, UiHostEffect, UiInputOutcome, UiSurfaceSlot,
 };
 use tokio::sync::mpsc;
 use tokio::task;
@@ -277,6 +277,30 @@ fn key_chord_from_event(key: crossterm::event::KeyEvent) -> Option<UiKeyChord> {
             alt: key.modifiers.contains(KeyModifiers::ALT),
         },
     })
+}
+
+fn handle_surface_input(
+    ui_extensions: &UiExtensions,
+    event: &TuiInputEvent,
+    plugin_host: &PluginHost,
+    session_manager: &Arc<dyn SessionManager>,
+    app: &mut App,
+) -> bool {
+    match ui_extensions.handle_input(
+        event,
+        UiContext {
+            plugin_host,
+            session_id: crate::ROOT_SESSION_ID,
+            session_manager: Arc::clone(session_manager),
+        },
+    ) {
+        UiInputOutcome::Ignored => false,
+        UiInputOutcome::Handled(effects) => {
+            apply_ui_host_effects(app, effects);
+            app.dirty = true;
+            true
+        }
+    }
 }
 
 fn current_ui_action_context(app: &App, terminal: &Terminal) -> UiActionContext {
@@ -872,7 +896,9 @@ pub(crate) async fn run_app(
             app.scroll_offset = app.scroll_offset.min(max_scroll);
 
             app.history_area = render::history_area(&app, width, height);
-            terminal.draw(|frame| scratch_tui::draw(frame, &mut app))?;
+            let capabilities = terminal.capabilities();
+            terminal
+                .draw(|frame| scratch_tui::draw_with_capabilities(frame, &mut app, capabilities))?;
             if let Some(recorder) = ui_trace.as_mut() {
                 let screen = render_screen_text(&mut app, width, height);
                 recorder.maybe_record_render_checkpoint(&screen);
@@ -927,6 +953,18 @@ pub(crate) async fn run_app(
                         &terminal,
                         UiAction::PromptInsertText(text),
                     );
+                    continue;
+                }
+
+                if let Some(event) = normalize_event(&TermEvent::Paste(text.clone()))
+                    && handle_surface_input(
+                        ui_extensions.as_ref(),
+                        &event,
+                        &plugin_host,
+                        &session_manager,
+                        &mut app,
+                    )
+                {
                     continue;
                 }
 
@@ -1613,6 +1651,18 @@ pub(crate) async fn run_app(
                     continue;
                 }
 
+                if let Some(event) = normalize_event(&TermEvent::Key(key))
+                    && handle_surface_input(
+                        ui_extensions.as_ref(),
+                        &event,
+                        &plugin_host,
+                        &session_manager,
+                        &mut app,
+                    )
+                {
+                    continue;
+                }
+
                 if let Some(chord) = key_chord_from_event(key)
                     && let Some(shortcut) = ui_extensions.shortcut_for(chord)
                 {
@@ -2120,7 +2170,11 @@ pub(crate) async fn run_app(
                 let ha = app.history_area;
                 let (term_width, term_height) = terminal.size()?;
                 let input_area = render::input_content_area(&app, term_width, term_height);
-                let in_history = mouse.row >= ha.y
+                let workspace_active = app
+                    .ui_extensions()
+                    .has_surface_in_slot(UiSurfaceSlot::Workspace);
+                let in_history = !workspace_active
+                    && mouse.row >= ha.y
                     && mouse.row < ha.y + ha.height
                     && mouse.column >= ha.x
                     && mouse.column < ha.x + ha.width;
@@ -2153,6 +2207,18 @@ pub(crate) async fn run_app(
                         }
                         _ => {}
                     }
+                }
+
+                if let Some(event) = normalize_event(&TermEvent::Mouse(mouse))
+                    && handle_surface_input(
+                        ui_extensions.as_ref(),
+                        &event,
+                        &plugin_host,
+                        &session_manager,
+                        &mut app,
+                    )
+                {
+                    continue;
                 }
 
                 match mouse.kind {
@@ -2301,18 +2367,48 @@ pub(crate) async fn run_app(
             }
             AppEvent::Terminal(TermEvent::FocusGained) => {
                 app.focused = true;
+                let _ = handle_surface_input(
+                    ui_extensions.as_ref(),
+                    &TuiInputEvent::FocusGained,
+                    &plugin_host,
+                    &session_manager,
+                    &mut app,
+                );
                 app.dirty = true;
             }
             AppEvent::Terminal(TermEvent::FocusLost) => {
                 app.focused = false;
+                let _ = handle_surface_input(
+                    ui_extensions.as_ref(),
+                    &TuiInputEvent::FocusLost,
+                    &plugin_host,
+                    &session_manager,
+                    &mut app,
+                );
                 app.dirty = true;
             }
-            AppEvent::Terminal(_) => {
+            AppEvent::Terminal(term_event) => {
                 // Resize events, etc.
+                if let Some(event) = normalize_event(&term_event) {
+                    let _ = handle_surface_input(
+                        ui_extensions.as_ref(),
+                        &event,
+                        &plugin_host,
+                        &session_manager,
+                        &mut app,
+                    );
+                }
                 app.dirty = true;
             }
             AppEvent::Tick => {
                 app.on_tick();
+                let _ = handle_surface_input(
+                    ui_extensions.as_ref(),
+                    &TuiInputEvent::Tick,
+                    &plugin_host,
+                    &session_manager,
+                    &mut app,
+                );
                 if app.wait_timed_out() {
                     app.timeout_wait();
                 }

@@ -493,6 +493,7 @@ fn default_dhat_output_path(report_out: &Path) -> PathBuf {
     report_out.with_file_name(format!("{stem}.dhat.json"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_cli(
     out: Option<PathBuf>,
     enable_dhat: bool,
