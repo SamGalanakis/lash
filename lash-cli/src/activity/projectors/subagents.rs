@@ -41,29 +41,28 @@ fn project_spawn_agent(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
         .get("capability")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    let model = model_label(&ctx.result);
     let path = ctx
         .result
         .get("path")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
+    let name = subagent_name(
+        ctx.result.get("task_name").and_then(|value| value.as_str()),
+        Some(path),
+        "subagent",
+    );
     let mut detail_lines = Vec::new();
+    detail_lines.push(format!("Task {}", inline_text(&task)));
     if !path.is_empty() {
-        detail_lines.push(format!("path {path}"));
+        detail_lines.push(format!("Path {}", inline_text(path)));
     }
-    let mut profile = Vec::new();
-    if !capability.is_empty() {
-        profile.push(capability.to_string());
-    }
-    if let Some(model) = model {
-        profile.push(model);
-    }
-    if !profile.is_empty() {
-        detail_lines.push(profile.join(" · "));
+    if let Some(profile) = profile_line((!capability.is_empty()).then_some(capability), &ctx.result)
+    {
+        detail_lines.push(format!("Profile {profile}"));
     }
     block(
         ctx,
-        format!("spawn subagent · {}", inline_text(&task)),
+        format!("spawn subagent · {}", inline_text(&name)),
         detail_lines,
         None,
     )
@@ -74,12 +73,16 @@ fn project_send_message(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
         .unwrap_or("agent")
         .to_string();
     let mut detail_lines = Vec::new();
+    detail_lines.push(format!("Target {}", inline_text(&target)));
     if let Some(message) = tool_arg_str(&ctx.args, "message") {
         detail_lines.push(format!("Message {}", inline_text(message)));
     }
     block(
         ctx,
-        format!("message subagent · {}", inline_text(&target)),
+        format!(
+            "message subagent · {}",
+            inline_text(&summary_target(&target))
+        ),
         detail_lines,
         None,
     )
@@ -90,6 +93,7 @@ fn project_followup_task(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
         .unwrap_or("agent")
         .to_string();
     let mut detail_lines = Vec::new();
+    detail_lines.push(format!("Target {}", inline_text(&target)));
     if let Some(task) = tool_arg_str(&ctx.args, "task") {
         detail_lines.push(format!("Task {}", inline_text(task)));
     }
@@ -100,7 +104,10 @@ fn project_followup_task(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
     }
     block(
         ctx,
-        format!("follow up subagent · {}", inline_text(&target)),
+        format!(
+            "follow up subagent · {}",
+            inline_text(&summary_target(&target))
+        ),
         detail_lines,
         None,
     )
@@ -153,7 +160,7 @@ fn project_wait_event(
     result: Value,
     success: bool,
     duration_ms: u64,
-    index: usize,
+    _index: usize,
     event: &Value,
 ) -> ActivityBlock {
     let status = if success {
@@ -165,14 +172,9 @@ fn project_wait_event(
         .get("kind")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
+    let tag = wait_event_tag(event);
     let summary = match kind {
-        "task_started" => {
-            let task = event
-                .get("task")
-                .and_then(|value| value.as_str())
-                .unwrap_or("task");
-            format!("subagent started · {}", inline_text(task))
-        }
+        "task_started" => "subagent started".to_string(),
         "message" => {
             let from = event
                 .get("from")
@@ -184,28 +186,18 @@ fn project_wait_event(
                 .unwrap_or("agent");
             format!(
                 "subagent message · {} → {}",
-                inline_text(from),
-                inline_text(to)
+                inline_text(&summary_target(from)),
+                inline_text(&summary_target(to))
             )
         }
-        "task_completed" => {
-            let task = event
-                .get("task")
-                .and_then(|value| value.as_str())
-                .unwrap_or("task");
-            let status = event
+        "task_completed" => completion_label(
+            event
                 .get("status")
                 .and_then(|value| value.as_str())
-                .unwrap_or("completed");
-            format!("{} · {}", completion_label(status), inline_text(task))
-        }
-        "agent_closed" => {
-            let path = event
-                .get("path")
-                .and_then(|value| value.as_str())
-                .unwrap_or("agent");
-            format!("subagent closed · {}", inline_text(path))
-        }
+                .unwrap_or("completed"),
+        )
+        .to_string(),
+        "agent_closed" => "subagent closed".to_string(),
         _ => "subagent event".to_string(),
     };
 
@@ -220,7 +212,7 @@ fn project_wait_event(
         result,
         duration_ms,
     );
-    block.call.tag = Some(format!("SUBAGENT {}", index + 1));
+    block.call.tag = tag;
     block.result.detail_lines = detail_lines;
     block.result.artifact = artifact;
     block
@@ -244,7 +236,7 @@ fn project_close_agent(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
         .unwrap_or_default();
     block(
         ctx,
-        format!("close subagent · {}", inline_text(&target)),
+        format!("close subagent · {}", inline_text(&summary_target(&target))),
         detail_lines,
         None,
     )
@@ -296,7 +288,7 @@ fn project_list_agents(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
         .unwrap_or_default();
     block(
         ctx,
-        format!("list subagents · {}", inline_text(&prefix)),
+        format!("list subagents · {}", inline_text(&summary_target(&prefix))),
         detail_lines,
         None,
     )
@@ -309,6 +301,10 @@ fn wait_event_detail_lines(event: &Value) -> Vec<String> {
         .unwrap_or_default()
     {
         "task_started" => {
+            let task = event
+                .get("task")
+                .and_then(|value| value.as_str())
+                .unwrap_or("task");
             let path = event
                 .get("path")
                 .and_then(|value| value.as_str())
@@ -317,29 +313,35 @@ fn wait_event_detail_lines(event: &Value) -> Vec<String> {
                 .get("capability")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            let mut parts = Vec::new();
+            let mut lines = vec![format!("Task {}", inline_text(task))];
             if !path.is_empty() {
-                parts.push(path.to_string());
+                lines.push(format!("Path {}", inline_text(path)));
             }
-            if !capability.is_empty() {
-                parts.push(capability.to_string());
+            if let Some(profile) =
+                profile_line((!capability.is_empty()).then_some(capability), event)
+            {
+                lines.push(format!("Profile {profile}"));
             }
-            if let Some(model) = model_label(event) {
-                parts.push(model);
-            }
-            if parts.is_empty() {
-                Vec::new()
-            } else {
-                vec![parts.join(" · ")]
-            }
+            lines
         }
-        "message" => event
-            .get("message")
-            .and_then(|value| value.as_str())
-            .map(|text| vec![format!("Message {}", inline_text(text))])
-            .unwrap_or_default(),
+        "message" => {
+            let mut lines = Vec::new();
+            if let Some(from) = event.get("from").and_then(|value| value.as_str()) {
+                lines.push(format!("From {}", inline_text(from)));
+            }
+            if let Some(to) = event.get("to").and_then(|value| value.as_str()) {
+                lines.push(format!("To {}", inline_text(to)));
+            }
+            if let Some(text) = event.get("message").and_then(|value| value.as_str()) {
+                lines.push(format!("Message {}", inline_text(text)));
+            }
+            lines
+        }
         "task_completed" => {
             let mut lines = Vec::new();
+            if let Some(task) = event.get("task").and_then(|value| value.as_str()) {
+                lines.push(format!("Task {}", inline_text(task)));
+            }
             if let Some(error) = event.get("error").and_then(|value| value.as_str())
                 && !error.trim().is_empty()
             {
@@ -370,14 +372,19 @@ fn wait_event_detail_lines(event: &Value) -> Vec<String> {
                     ));
                 }
                 if !parts.is_empty() {
-                    lines.push(parts.join(" · "));
+                    lines.push(format!("Run {}", parts.join(" · ")));
                 }
                 if let Some(tokens) = token_usage_line(session) {
-                    lines.push(tokens);
+                    lines.push(format!("Tokens {tokens}"));
                 }
             }
             lines
         }
+        "agent_closed" => event
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(|path| vec![format!("Path {}", inline_text(path))])
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -396,6 +403,25 @@ fn completion_label(status: &str) -> &'static str {
         "interrupted" => "subagent stopped",
         "failed" => "subagent failed",
         _ => "subagent finished",
+    }
+}
+
+fn wait_event_tag(event: &Value) -> Option<String> {
+    match event
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+    {
+        "task_started" | "task_completed" | "agent_closed" => Some(subagent_name(
+            None,
+            event.get("path").and_then(|value| value.as_str()),
+            "subagent",
+        )),
+        "message" => event
+            .get("from")
+            .and_then(|value| value.as_str())
+            .map(summary_target),
+        _ => None,
     }
 }
 
@@ -426,7 +452,7 @@ fn token_usage_line(meta: &Value) -> Option<String> {
 
     let mut parts = Vec::new();
     if let Some(total) = total {
-        parts.push(format!("{total} total tokens"));
+        parts.push(format!("{total} total"));
     }
     if let Some(input) = input {
         parts.push(format!("{input} in"));
@@ -459,6 +485,60 @@ fn model_label(value: &Value) -> Option<String> {
     } else {
         Some(format!("{model} ({variant})"))
     }
+}
+
+fn profile_line(capability: Option<&str>, value: &Value) -> Option<String> {
+    let model = value.get("model").and_then(|item| item.as_str());
+    let variant = value
+        .get("model_variant")
+        .and_then(|item| item.as_str())
+        .filter(|item| !item.is_empty());
+    let capability = capability.filter(|item| !item.is_empty());
+
+    let mut parts = Vec::new();
+    if let Some(capability) = capability {
+        parts.push(format!("{capability} capability"));
+    }
+    if let Some(model) = model {
+        let rendered_model = match (variant, capability) {
+            (Some(variant), Some(capability)) if variant.eq_ignore_ascii_case(capability) => {
+                model.to_string()
+            }
+            (Some(variant), _) => format!("{model} ({variant})"),
+            (None, _) => model.to_string(),
+        };
+        parts.push(rendered_model);
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn subagent_name(task_name: Option<&str>, path: Option<&str>, fallback: &str) -> String {
+    task_name
+        .filter(|value| !value.trim().is_empty())
+        .map(inline_text)
+        .or_else(|| path.and_then(path_leaf))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn summary_target(target: &str) -> String {
+    let compact = inline_text(target);
+    if compact == "/root" || compact == "root" {
+        "/root".to_string()
+    } else {
+        path_leaf(target).unwrap_or(compact)
+    }
+}
+
+fn path_leaf(path: &str) -> Option<String> {
+    path.trim_matches('/')
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(str::to_string)
 }
 
 fn result_preview(value: &Value) -> Option<String> {

@@ -1,4 +1,6 @@
 /target/
+*.perf
+*.old
 /dist/
 target-bookworm/
 target-bullseye/
@@ -23,3 +25,6 @@ Thumbs.db
 /.agents/lash/
 /.lash/
 /.tmp/
+autoresearch.jsonl
+autoresearch.md
+autoresearch.html

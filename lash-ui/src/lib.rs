@@ -89,6 +89,8 @@ pub struct SlashCommandSpec {
     pub aliases: &'static [&'static str],
     pub usage: &'static str,
     pub description: &'static str,
+    pub argument_hint: Option<&'static str>,
+    pub argument_options: &'static [&'static str],
     pub takes_argument: bool,
     pub allow_while_running: bool,
     pub action: &'static str,
@@ -324,6 +326,13 @@ impl UiExtensions {
 
     pub fn command_specs(&self) -> Vec<SlashCommandSpec> {
         self.commands.iter().map(|entry| entry.spec).collect()
+    }
+
+    pub fn command_spec(&self, cmd: &str) -> Option<SlashCommandSpec> {
+        self.commands
+            .iter()
+            .find(|entry| command_matches(cmd, entry.spec))
+            .map(|entry| entry.spec)
     }
 
     pub fn shortcut_specs(&self) -> Vec<ShortcutSpec> {
@@ -663,6 +672,8 @@ const PLAN_MODE_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
     aliases: &[],
     usage: "/plan",
     description: "Toggle plan mode",
+    argument_hint: None,
+    argument_options: &[],
     takes_argument: false,
     allow_while_running: true,
     action: "toggle",

@@ -1,5 +1,5 @@
 use crate::llm::types::LlmToolSpec;
-use crate::session_model::model_tool_specs;
+use crate::session_model::model_tool_specs_iter;
 use crate::{ExecutionMode, ToolDefinition};
 
 #[derive(Clone, Debug)]
@@ -42,26 +42,33 @@ impl ToolSurface {
         }
     }
 
-    pub fn enabled_tools(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .iter()
-            .filter(|tool| tool.enabled)
-            .cloned()
-            .collect()
+    pub fn enabled_tools_iter(&self) -> impl Iterator<Item = &ToolDefinition> {
+        self.tools.iter().filter(|tool| tool.enabled)
     }
 
-    pub fn prompt_tools(&self) -> Vec<ToolDefinition> {
+    pub fn enabled_tools(&self) -> Vec<ToolDefinition> {
+        self.enabled_tools_iter().cloned().collect()
+    }
+
+    pub fn prompt_tools_iter(&self) -> impl Iterator<Item = &ToolDefinition> {
         self.tools
             .iter()
             .filter(|tool| tool.enabled && tool.injected)
-            .cloned()
-            .collect()
+    }
+
+    pub fn prompt_tools(&self) -> Vec<ToolDefinition> {
+        self.prompt_tools_iter().cloned().collect()
+    }
+
+    pub fn has_enabled_tool(&self, tool_name: &str) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| tool.enabled && tool.name == tool_name)
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        self.enabled_tools()
-            .into_iter()
-            .map(|tool| tool.name)
+        self.enabled_tools_iter()
+            .map(|tool| tool.name.clone())
             .collect()
     }
 
@@ -74,11 +81,11 @@ impl ToolSurface {
     }
 
     pub fn model_tool_specs(&self) -> Vec<LlmToolSpec> {
-        model_tool_specs(self.enabled_tools().as_slice())
+        model_tool_specs_iter(self.enabled_tools_iter())
     }
 
     pub fn prompt_tool_docs(&self) -> String {
-        let mut docs = ToolDefinition::format_tool_docs(self.prompt_tools().as_slice());
+        let mut docs = ToolDefinition::format_tool_docs_iter(self.prompt_tools_iter());
         for note in &self.tool_list_notes {
             let note = note.trim();
             if note.is_empty() {

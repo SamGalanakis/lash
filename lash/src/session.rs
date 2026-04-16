@@ -13,7 +13,7 @@ use crate::tool_dispatch::{
 };
 use crate::{
     ExecResponse, PluginMessage, PromptContribution, RuntimeServices, SandboxMessage, SessionEvent,
-    SessionManager, ToolCallRecord, ToolDefinition, ToolExecutionContext, ToolImage, ToolProvider,
+    SessionManager, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider,
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
@@ -29,7 +29,6 @@ struct ToolSurfaceCacheKey {
 
 #[derive(Debug, Default)]
 struct ToolSurfaceDerived {
-    enabled_tools: OnceLock<Arc<Vec<ToolDefinition>>>,
     catalog: OnceLock<Arc<Vec<serde_json::Value>>>,
     rlm_tools_json: OnceLock<Arc<String>>,
 }
@@ -52,19 +51,10 @@ impl ToolSurfaceHandle {
         Arc::clone(&self.0.preamble)
     }
 
-    fn enabled_tools(&self) -> Arc<Vec<ToolDefinition>> {
-        Arc::clone(
-            self.0
-                .derived
-                .enabled_tools
-                .get_or_init(|| Arc::new(self.0.surface.enabled_tools())),
-        )
-    }
-
     fn catalog(&self) -> Arc<Vec<serde_json::Value>> {
         Arc::clone(self.0.derived.catalog.get_or_init(|| {
             Arc::new(crate::tools::project_tool_catalog(
-                self.enabled_tools().iter().cloned(),
+                self.0.surface.enabled_tools_iter(),
             ))
         }))
     }
@@ -1226,7 +1216,8 @@ mod tests {
     use crate::plugin::StaticPluginFactory;
     use crate::tools::UpdatePlanTool;
     use crate::{
-        PluginError, PluginHost, PluginSpec, SessionHandle, SessionSnapshot, ToolResult, TurnInput,
+        PluginError, PluginHost, PluginSpec, SessionHandle, SessionSnapshot, ToolDefinition,
+        ToolResult, TurnInput,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;

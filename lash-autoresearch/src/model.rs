@@ -276,7 +276,9 @@ pub fn compute_summary(
         .filter(|entry| entry.status == ExperimentStatus::Keep)
         .count();
     let best_delta_percent = match (config.as_ref(), baseline, best_metric) {
-        (Some(cfg), Some(base), Some(best)) => cfg.direction.delta_percent(base, best),
+        (Some(cfg), Some(base), Some(best)) if (best - base).abs() > f64::EPSILON => {
+            cfg.direction.delta_percent(base, best)
+        }
         _ => None,
     };
 
@@ -522,15 +524,22 @@ fn current_results(entries: &[JournalEntry], segment: Option<u64>) -> Vec<Result
 
 fn best_metric(config: Option<&ConfigEntry>, results: &[ResultEntry]) -> Option<f64> {
     let config = config?;
+    let baseline = results
+        .iter()
+        .find(|entry| entry.metric.is_finite())
+        .map(|entry| entry.metric)?;
     let mut best = None;
-    for result in results.iter().filter(|entry| entry.metric.is_finite()) {
+    for result in results
+        .iter()
+        .filter(|entry| entry.status == ExperimentStatus::Keep && entry.metric.is_finite())
+    {
         best = Some(match best {
             Some(current) if config.direction.is_better(result.metric, current) => result.metric,
             Some(current) => current,
             None => result.metric,
         });
     }
-    best
+    best.or(Some(baseline))
 }
 
 fn compute_confidence(config: Option<&ConfigEntry>, results: &[ResultEntry]) -> Option<f64> {
@@ -679,5 +688,58 @@ mod tests {
         assert!(text.contains("speed up tests"));
         assert!(text.contains("20.0%"));
         assert!(text.contains("Confidence: 2.3x"));
+    }
+
+    #[test]
+    fn summary_uses_baseline_until_a_keep_exists() {
+        let summary = compute_summary(
+            &ModeSnapshot {
+                active: true,
+                objective: Some("speed up tests".to_string()),
+            },
+            &[
+                JournalEntry::Config(ConfigEntry {
+                    segment: 1,
+                    created_at_ms: 1,
+                    name: "segment".to_string(),
+                    metric_name: "total_ms".to_string(),
+                    metric_unit: "ms".to_string(),
+                    direction: Direction::Lower,
+                }),
+                JournalEntry::Result(ResultEntry {
+                    segment: 1,
+                    timestamp_ms: 2,
+                    commit: "aaaaaaa".to_string(),
+                    metric: 10.0,
+                    metrics: BTreeMap::new(),
+                    status: ExperimentStatus::Discard,
+                    description: "baseline".to_string(),
+                    duration_seconds: Some(1.0),
+                    exit_code: Some(0),
+                    checks_pass: Some(true),
+                    command: Some("bench".to_string()),
+                    confidence: None,
+                }),
+                JournalEntry::Result(ResultEntry {
+                    segment: 1,
+                    timestamp_ms: 3,
+                    commit: "bbbbbbb".to_string(),
+                    metric: 8.0,
+                    metrics: BTreeMap::new(),
+                    status: ExperimentStatus::Discard,
+                    description: "faster but discarded".to_string(),
+                    duration_seconds: Some(1.0),
+                    exit_code: Some(0),
+                    checks_pass: Some(true),
+                    command: Some("bench".to_string()),
+                    confidence: None,
+                }),
+            ],
+            None,
+            None,
+        );
+
+        assert_eq!(summary.best_metric, Some(10.0));
+        assert_eq!(summary.best_delta_percent, None);
     }
 }

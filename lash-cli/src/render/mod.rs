@@ -264,19 +264,49 @@ pub(crate) fn input_render_snapshot(app: &App, area: Rect) -> InputRenderSnapsho
             Span::styled("Message · / for commands", theme::text_faint_style()),
         ]));
     } else {
+        let inline_hint = inline_command_argument_hint(app);
         for (i, logical_line) in app.input().split('\n').enumerate() {
+            let hinted_line = if i == 0 {
+                inline_hint
+                    .as_ref()
+                    .map(|hint| format!("{logical_line}{hint}"))
+            } else {
+                None
+            };
+            let display_line = hinted_line.as_deref().unwrap_or(logical_line);
             // Compute image markers per-line so ranges are relative
             // to the logical line, not the full multi-line input.
             let line_image_markers = image_marker_ranges(logical_line);
-            let segments = wrap_line(logical_line, prefix_w, prefix_w, total_width);
+            let segments = wrap_line(display_line, prefix_w, prefix_w, total_width);
             for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
-                let seg_spans = styled_input_segment(
-                    logical_line,
-                    seg_start,
-                    seg_end,
-                    &line_image_markers,
-                    &app.skills,
-                );
+                let seg_spans = if i == 0 {
+                    if let Some(hint) = inline_hint.as_deref() {
+                        styled_input_segment_with_hint(
+                            logical_line,
+                            hint,
+                            seg_start,
+                            seg_end,
+                            &line_image_markers,
+                            &app.skills,
+                        )
+                    } else {
+                        styled_input_segment(
+                            logical_line,
+                            seg_start,
+                            seg_end,
+                            &line_image_markers,
+                            &app.skills,
+                        )
+                    }
+                } else {
+                    styled_input_segment(
+                        logical_line,
+                        seg_start,
+                        seg_end,
+                        &line_image_markers,
+                        &app.skills,
+                    )
+                };
                 let prefix = if i == 0 && j == 0 {
                     Span::styled(format!("{} ", theme::PROMPT_CHAR), theme::prompt())
                 } else {
@@ -304,6 +334,40 @@ pub(crate) fn input_render_snapshot(app: &App, area: Rect) -> InputRenderSnapsho
         scroll_offset,
         badge: build_input_badge(app),
     }
+}
+
+fn inline_command_argument_hint(app: &App) -> Option<String> {
+    if app.cursor_pos() != app.input().len() || app.input().contains('\n') {
+        return None;
+    }
+    let trimmed = app.input().trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+
+    let rest = &trimmed[1..];
+    let (command, arg) = match rest.split_once(' ') {
+        Some((command, arg)) => (command, Some(arg.trim())),
+        None => (rest, None),
+    };
+
+    if arg.is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+
+    let hint = crate::command::argument_hint(
+        &format!("/{command}"),
+        &app.skills,
+        &app.plugin_commands,
+        app.ui_extensions(),
+    )?;
+
+    let needs_leading_space = !app.input().chars().last().is_some_and(char::is_whitespace);
+    Some(if needs_leading_space {
+        format!(" {hint}")
+    } else {
+        hint
+    })
 }
 
 pub(crate) fn input_byte_offset_for_screen_position(
@@ -660,6 +724,45 @@ fn styled_input_segment(
             theme::user_input(),
             theme::slash_command_slash(),
         ));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), theme::user_input()));
+    }
+    spans
+}
+
+fn styled_input_segment_with_hint(
+    logical_line: &str,
+    hint: &str,
+    seg_start: usize,
+    seg_end: usize,
+    image_markers: &[(std::ops::Range<usize>, usize)],
+    skills: &SkillCatalog,
+) -> Vec<Span<'static>> {
+    let input_end = logical_line.len();
+    let mut spans = Vec::new();
+
+    if seg_start < input_end {
+        let actual_end = seg_end.min(input_end);
+        spans.extend(styled_input_segment(
+            logical_line,
+            seg_start,
+            actual_end,
+            image_markers,
+            skills,
+        ));
+    }
+
+    if seg_end > input_end {
+        let hint_start = seg_start.saturating_sub(input_end);
+        let hint_end = (seg_end - input_end).min(hint.len());
+        if hint_start < hint_end {
+            spans.push(Span::styled(
+                hint[hint_start..hint_end].to_string(),
+                theme::text_faint_style(),
+            ));
+        }
     }
 
     if spans.is_empty() {

@@ -179,8 +179,12 @@ impl DynamicToolProvider {
         let inprocess = Arc::new(InProcessToolExecutionAdapter::new("inprocess"));
 
         let mut tools = BTreeMap::new();
+        let mut enabled_tools = BTreeSet::new();
         for def in provider.definitions() {
             let tool_name = def.name.clone();
+            if def.enabled {
+                enabled_tools.insert(tool_name.clone());
+            }
             let delegate = Arc::clone(&provider);
             let delegate_name = tool_name.clone();
             let handler: InProcessToolHandler = Arc::new(move |args, context, progress| {
@@ -222,7 +226,6 @@ impl DynamicToolProvider {
             Arc::clone(&inprocess) as Arc<dyn ToolExecutionAdapter>,
         );
 
-        let enabled_tools = tools.keys().cloned().collect();
         Ok(Self {
             adapters: Arc::new(RwLock::new(adapters)),
             inprocess,
@@ -307,7 +310,9 @@ impl DynamicToolProvider {
                 actual: state.generation,
             });
         }
-        state.tools = next.tools;
+        let mut tools = next.tools;
+        sync_tool_enabled_flags(&mut tools, &next.enabled_tools);
+        state.tools = tools;
         state.enabled_tools = next.enabled_tools;
         state.generation += 1;
 
@@ -320,11 +325,6 @@ impl DynamicToolProvider {
     ) -> Result<u64, ReconfigureError> {
         let adapter_id = adapter.id().to_string();
         let advertised_tools = adapter.advertised_tools();
-        let advertised_names: BTreeSet<String> = advertised_tools
-            .iter()
-            .map(|def| def.name.clone())
-            .collect();
-
         {
             let mut adapters = self.adapters.write().expect("adapters lock poisoned");
             adapters.insert(adapter_id.clone(), adapter);
@@ -338,8 +338,10 @@ impl DynamicToolProvider {
             .enabled_tools
             .retain(|name| remaining_tool_names.contains(name));
 
-        for def in advertised_tools {
+        for mut def in advertised_tools {
             let name = def.name.clone();
+            let enabled = previously_enabled.contains(&name) || def.enabled;
+            def.enabled = enabled;
             state.tools.insert(
                 name.clone(),
                 DynamicToolSpec {
@@ -347,13 +349,11 @@ impl DynamicToolProvider {
                     adapter_id: adapter_id.clone(),
                 },
             );
-            if previously_enabled.contains(&name) || !state.enabled_tools.contains(&name) {
+            if enabled {
                 state.enabled_tools.insert(name);
+            } else {
+                state.enabled_tools.remove(&name);
             }
-        }
-
-        for name in advertised_names {
-            state.enabled_tools.insert(name);
         }
 
         state.generation += 1;
@@ -428,6 +428,15 @@ impl DynamicToolProvider {
                 enabled_tools: snapshot.enabled_tools,
             })),
         })
+    }
+}
+
+fn sync_tool_enabled_flags(
+    tools: &mut BTreeMap<String, DynamicToolSpec>,
+    enabled_tools: &BTreeSet<String>,
+) {
+    for (name, spec) in tools.iter_mut() {
+        spec.definition.enabled = enabled_tools.contains(name);
     }
 }
 
@@ -558,7 +567,9 @@ mod tests {
     use crate::ToolParam;
 
     struct MockTool;
+    struct MixedEnabledTool;
     struct ExternalMockAdapter;
+    struct DisabledExternalMockAdapter;
 
     #[async_trait::async_trait]
     impl ToolProvider for MockTool {
@@ -574,6 +585,40 @@ mod tests {
                 input_schema_override: None,
                 output_schema_override: None,
             }]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+            ToolResult::ok(serde_json::json!("ok"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolProvider for MixedEnabledTool {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            vec![
+                ToolDefinition {
+                    name: "enabled_tool".to_string(),
+                    description: "enabled".to_string(),
+                    params: vec![],
+                    returns: "str".to_string(),
+                    examples: vec![],
+                    enabled: true,
+                    injected: false,
+                    input_schema_override: None,
+                    output_schema_override: None,
+                },
+                ToolDefinition {
+                    name: "disabled_tool".to_string(),
+                    description: "disabled".to_string(),
+                    params: vec![],
+                    returns: "str".to_string(),
+                    examples: vec![],
+                    enabled: false,
+                    injected: false,
+                    input_schema_override: None,
+                    output_schema_override: None,
+                },
+            ]
         }
 
         async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
@@ -622,8 +667,56 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl ToolExecutionAdapter for DisabledExternalMockAdapter {
+        fn id(&self) -> &str {
+            "external-disabled"
+        }
+
+        fn advertised_tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "mcp__demo__disabled".to_string(),
+                description: "disabled".to_string(),
+                params: vec![],
+                returns: "dict".to_string(),
+                examples: vec![],
+                enabled: false,
+                injected: true,
+                input_schema_override: None,
+                output_schema_override: None,
+            }]
+        }
+
+        async fn execute(
+            &self,
+            tool: &str,
+            args: &serde_json::Value,
+            _context: Option<ToolExecutionContext>,
+            _progress: Option<&ProgressSender>,
+        ) -> ToolResult {
+            ToolResult::ok(json!({
+                "tool": tool,
+                "args": args
+            }))
+        }
+    }
+
     #[test]
-    fn dynamic_registry_enables_all_tools_by_default() {
+    fn dynamic_registry_honors_initial_enabled_state() {
+        let registry = DynamicToolProvider::from_tool_provider(Arc::new(MixedEnabledTool))
+            .expect("dynamic registry");
+        let defs = registry.definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "enabled_tool");
+        assert!(registry.enabled_tools().contains("enabled_tool"));
+        assert!(!registry.enabled_tools().contains("disabled_tool"));
+        let snapshot = registry.export_state();
+        assert_eq!(snapshot.tools["enabled_tool"].definition.enabled, true);
+        assert_eq!(snapshot.tools["disabled_tool"].definition.enabled, false);
+    }
+
+    #[test]
+    fn dynamic_registry_enables_all_tools_by_default_when_requested() {
         let registry =
             DynamicToolProvider::from_tool_provider(Arc::new(MockTool)).expect("dynamic registry");
         let defs = registry.definitions();
@@ -660,6 +753,21 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.result["tool"], json!("mcp__demo__search"));
         assert_eq!(result.result["args"]["query"], json!("hello"));
+    }
+
+    #[test]
+    fn upsert_adapter_respects_disabled_advertised_tools() {
+        let registry =
+            DynamicToolProvider::from_tool_provider(Arc::new(MockTool)).expect("dynamic registry");
+        registry
+            .upsert_adapter(Arc::new(DisabledExternalMockAdapter))
+            .expect("adapter registered");
+
+        let defs = registry.definitions();
+        assert!(!defs.iter().any(|def| def.name == "mcp__demo__disabled"));
+        assert!(!registry.enabled_tools().contains("mcp__demo__disabled"));
+        let snapshot = registry.export_state();
+        assert!(!snapshot.tools["mcp__demo__disabled"].definition.enabled);
     }
 
     #[test]

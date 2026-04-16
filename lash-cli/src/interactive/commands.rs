@@ -1,3 +1,4 @@
+use super::runtime::sync_runtime_tool_surface;
 use super::runtime::{parse_kv_args, register_builtin_tool, send_user_message};
 use super::*;
 use crate::app::projected_blocks_from_state;
@@ -42,6 +43,7 @@ async fn handle_ui_command(
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
     session_manager: &Arc<dyn SessionManager>,
+    runtime: &mut Option<LashRuntime>,
 ) {
     match ui_extensions
         .invoke_command(
@@ -54,7 +56,12 @@ async fn handle_ui_command(
         )
         .await
     {
-        Ok(effects) => apply_ui_host_effects(app, effects),
+        Ok(effects) => {
+            if let Err(err) = sync_runtime_tool_surface(runtime).await {
+                push_system_message(app, format!("Failed to sync tool surface: {err}"));
+            }
+            apply_ui_host_effects(app, effects)
+        }
         Err(err) => push_system_message(app, err),
     }
 }
@@ -258,7 +265,15 @@ pub(super) async fn handle_parsed_slash_command(
             .await
         }
         ParsedSlashCommand::Ui(command) => {
-            handle_ui_command(command, app, ui_extensions, plugin_host, session_manager).await;
+            handle_ui_command(
+                command,
+                app,
+                ui_extensions,
+                plugin_host,
+                session_manager,
+                runtime,
+            )
+            .await;
             Ok(false)
         }
     }
@@ -1159,10 +1174,20 @@ async fn handle_slash_command(
                 .invoke_command(&name, argument, Arc::clone(session_manager))
                 .await
             {
-                Ok(lash::CommandOutcome::Handled) => {}
-                Ok(lash::CommandOutcome::Message(msg)) => push_system_message(app, msg),
-                Ok(lash::CommandOutcome::Error(msg)) => {
-                    push_system_message(app, format!("Plugin command `{name}` failed: {msg}"));
+                Ok(outcome) => {
+                    if let Err(err) = sync_runtime_tool_surface(runtime).await {
+                        push_system_message(app, format!("Failed to sync tool surface: {err}"));
+                    }
+                    match outcome {
+                        lash::CommandOutcome::Handled => {}
+                        lash::CommandOutcome::Message(msg) => push_system_message(app, msg),
+                        lash::CommandOutcome::Error(msg) => {
+                            push_system_message(
+                                app,
+                                format!("Plugin command `{name}` failed: {msg}"),
+                            );
+                        }
+                    }
                 }
                 Err(err) => {
                     push_system_message(app, format!("Plugin command `{name}` error: {err}"));

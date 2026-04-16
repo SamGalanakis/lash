@@ -32,6 +32,7 @@ const OUTPUT_MAX_BYTES: usize = 4 * 1024;
 const OUTPUT_MAX_LINES: usize = 12;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_CHECKS_TIMEOUT_SECONDS: u64 = 300;
+const AUTORESEARCH_TOOL_NAMES: [&str; 3] = ["init_experiment", "run_experiment", "log_experiment"];
 
 pub struct AutoresearchPluginFactory;
 
@@ -49,12 +50,23 @@ impl PluginFactory for AutoresearchPluginFactory {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistedPluginState {
+    #[serde(default)]
+    touched: bool,
     mode: ModeSnapshot,
     last_run: Option<LastRunSummary>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct RuntimeState {
+    touched: bool,
+    mode: ModeSnapshot,
+    running: Option<RunningStatus>,
+    last_run: Option<LastRunSummary>,
+}
+
+#[derive(Clone, Debug)]
+struct SummaryState {
+    touched: bool,
     mode: ModeSnapshot,
     running: Option<RunningStatus>,
     last_run: Option<LastRunSummary>,
@@ -97,7 +109,7 @@ impl SessionPlugin for AutoresearchPlugin {
                 let prompt_root = prompt_root.clone();
                 let prompt_state = Arc::clone(&prompt_state);
                 Box::pin(async move {
-                    let summary = summary_from_runtime(&prompt_root, &prompt_state)?;
+                    let summary = session_summary_from_runtime(&prompt_root, &prompt_state)?;
                     if !summary.active {
                         return Ok(Vec::new());
                     }
@@ -122,6 +134,7 @@ impl SessionPlugin for AutoresearchPlugin {
                         let mut state = before_state.lock().map_err(|_| {
                             PluginError::Session("autoresearch state poisoned".to_string())
                         })?;
+                        state.touched = true;
                         state.running = Some(RunningStatus {
                             command: command.to_string(),
                             started_at_ms: now_ms(),
@@ -153,7 +166,7 @@ impl SessionPlugin for AutoresearchPlugin {
                     ) {
                         return Ok(Vec::new());
                     }
-                    let summary = summary_from_runtime(&after_root, &after_state)?;
+                    let summary = full_summary_from_runtime(&after_root, &after_state)?;
                     Ok(vec![PluginDirective::emit_events(vec![status_event(
                         &summary,
                     )?])])
@@ -218,10 +231,10 @@ impl SessionPlugin for AutoresearchPlugin {
             Arc::new({
                 let root = self.workdir.clone();
                 let state = Arc::clone(&self.state);
-                move |_ctx: ExternalInvokeContext, args: Value| {
+                move |ctx: ExternalInvokeContext, args: Value| {
                     let root = root.clone();
                     let state = Arc::clone(&state);
-                    Box::pin(async move { start_mode(&root, &state, args) })
+                    Box::pin(async move { start_mode_command(ctx, &root, &state, args).await })
                 }
             }),
         )?;
@@ -230,10 +243,10 @@ impl SessionPlugin for AutoresearchPlugin {
             Arc::new({
                 let root = self.workdir.clone();
                 let state = Arc::clone(&self.state);
-                move |_ctx: ExternalInvokeContext, _args: Value| {
+                move |ctx: ExternalInvokeContext, _args: Value| {
                     let root = root.clone();
                     let state = Arc::clone(&state);
-                    Box::pin(async move { stop_mode(&root, &state) })
+                    Box::pin(async move { stop_mode_command(ctx, &root, &state).await })
                 }
             }),
         )?;
@@ -242,10 +255,10 @@ impl SessionPlugin for AutoresearchPlugin {
             Arc::new({
                 let root = self.workdir.clone();
                 let state = Arc::clone(&self.state);
-                move |_ctx: ExternalInvokeContext, _args: Value| {
+                move |ctx: ExternalInvokeContext, _args: Value| {
                     let root = root.clone();
                     let state = Arc::clone(&state);
-                    Box::pin(async move { clear_mode(&root, &state) })
+                    Box::pin(async move { clear_mode_command(ctx, &root, &state).await })
                 }
             }),
         )?;
@@ -274,6 +287,7 @@ impl SessionPlugin for AutoresearchPlugin {
             .lock()
             .map_err(|_| PluginError::Snapshot("autoresearch state poisoned".to_string()))?;
         let persisted = PersistedPluginState {
+            touched: state.touched,
             mode: state.mode.clone(),
             last_run: state.last_run.clone(),
         };
@@ -307,6 +321,10 @@ impl SessionPlugin for AutoresearchPlugin {
             .state
             .lock()
             .map_err(|_| PluginError::Snapshot("autoresearch state poisoned".to_string()))?;
+        state.touched = restored.touched
+            || restored.mode.active
+            || restored.mode.objective.is_some()
+            || restored.last_run.is_some();
         state.mode = restored.mode;
         state.last_run = restored.last_run;
         state.running = None;
@@ -349,7 +367,7 @@ impl ToolProvider for AutoresearchTools {
                 ],
                 returns: "json".into(),
                 examples: vec![],
-                enabled: true,
+                enabled: false,
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
@@ -377,7 +395,7 @@ impl ToolProvider for AutoresearchTools {
                 ],
                 returns: "json".into(),
                 examples: vec![],
-                enabled: true,
+                enabled: false,
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
@@ -415,7 +433,7 @@ impl ToolProvider for AutoresearchTools {
                 ],
                 returns: "json".into(),
                 examples: vec![],
-                enabled: true,
+                enabled: false,
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
@@ -488,6 +506,9 @@ impl AutoresearchTools {
         });
         if let Err(err) = append_journal_entry(&self.workdir, &entry) {
             return ToolResult::err_fmt(err);
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.touched = true;
         }
         let summary = match self.summary() {
             Ok(value) => value,
@@ -565,6 +586,9 @@ impl AutoresearchTools {
         });
         if let Err(err) = append_journal_entry(&self.workdir, &entry) {
             return ToolResult::err_fmt(err);
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.touched = true;
         }
         entries.push(entry);
         let summary = {
@@ -693,6 +717,7 @@ impl AutoresearchTools {
 
     fn finish_run(&self, last_run: Option<LastRunSummary>) {
         if let Ok(mut state) = self.state.lock() {
+            state.touched = true;
             state.running = None;
             if let Some(last_run) = last_run {
                 state.last_run = Some(last_run);
@@ -701,7 +726,7 @@ impl AutoresearchTools {
     }
 
     fn summary(&self) -> Result<StatusSummary, String> {
-        summary_from_runtime(&self.workdir, &self.state).map_err(|err| err.to_string())
+        full_summary_from_runtime(&self.workdir, &self.state).map_err(|err| err.to_string())
     }
 }
 
@@ -837,27 +862,126 @@ fn status_event(summary: &StatusSummary) -> Result<PluginSurfaceEvent, PluginErr
     })
 }
 
-fn summary_from_runtime(
-    root: &Path,
-    state: &Arc<Mutex<RuntimeState>>,
-) -> Result<StatusSummary, PluginError> {
-    let entries = load_journal(root).map_err(PluginError::Session)?;
+fn summary_state(state: &Arc<Mutex<RuntimeState>>) -> Result<SummaryState, PluginError> {
     let state = state
         .lock()
         .map_err(|_| PluginError::Session("autoresearch state poisoned".to_string()))?;
+    Ok(SummaryState {
+        touched: state.touched,
+        mode: state.mode.clone(),
+        running: state.running.clone(),
+        last_run: state.last_run.clone(),
+    })
+}
+
+fn compute_summary_from_state(
+    root: &Path,
+    state: SummaryState,
+) -> Result<StatusSummary, PluginError> {
+    let entries = load_journal(root).map_err(PluginError::Session)?;
     Ok(compute_summary(
         &state.mode,
         &entries,
-        state.running.clone(),
-        state.last_run.clone(),
+        state.running,
+        state.last_run,
     ))
 }
 
+fn full_summary_from_runtime(
+    root: &Path,
+    state: &Arc<Mutex<RuntimeState>>,
+) -> Result<StatusSummary, PluginError> {
+    compute_summary_from_state(root, summary_state(state)?)
+}
+
+fn session_summary_from_runtime(
+    root: &Path,
+    state: &Arc<Mutex<RuntimeState>>,
+) -> Result<StatusSummary, PluginError> {
+    let state = summary_state(state)?;
+    if !state.touched && !state.mode.active {
+        return Ok(StatusSummary::default());
+    }
+    compute_summary_from_state(root, state)
+}
+
 fn status_tool_result(root: &Path, state: &Arc<Mutex<RuntimeState>>) -> ToolResult {
-    match summary_from_runtime(root, state) {
+    match session_summary_from_runtime(root, state) {
         Ok(summary) => ToolResult::ok(json!(summary)),
         Err(err) => ToolResult::err_fmt(err.to_string()),
     }
+}
+
+fn autoresearch_tool_names() -> Vec<String> {
+    AUTORESEARCH_TOOL_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+async fn set_autoresearch_tools_enabled(
+    ctx: &ExternalInvokeContext,
+    enabled: bool,
+) -> Result<(), ToolResult> {
+    let Some(session_id) = ctx.session_id.as_deref() else {
+        return Err(ToolResult::err_fmt(
+            "autoresearch commands require a session-scoped invocation",
+        ));
+    };
+    ctx.host
+        .set_tools_enabled(session_id, &autoresearch_tool_names(), enabled)
+        .await
+        .map_err(|err| {
+            let action = if enabled { "enable" } else { "disable" };
+            ToolResult::err_fmt(format_args!("failed to {action} autoresearch tools: {err}"))
+        })?;
+    Ok(())
+}
+
+async fn start_mode_command(
+    ctx: ExternalInvokeContext,
+    root: &Path,
+    state: &Arc<Mutex<RuntimeState>>,
+    args: Value,
+) -> ToolResult {
+    if let Err(result) = set_autoresearch_tools_enabled(&ctx, true).await {
+        return result;
+    }
+    let result = start_mode(root, state, args);
+    if !result.success {
+        let _ = set_autoresearch_tools_enabled(&ctx, false).await;
+    }
+    result
+}
+
+async fn stop_mode_command(
+    ctx: ExternalInvokeContext,
+    root: &Path,
+    state: &Arc<Mutex<RuntimeState>>,
+) -> ToolResult {
+    if let Err(result) = set_autoresearch_tools_enabled(&ctx, false).await {
+        return result;
+    }
+    let result = stop_mode(root, state);
+    if !result.success {
+        let _ = set_autoresearch_tools_enabled(&ctx, true).await;
+    }
+    result
+}
+
+async fn clear_mode_command(
+    ctx: ExternalInvokeContext,
+    root: &Path,
+    state: &Arc<Mutex<RuntimeState>>,
+) -> ToolResult {
+    if let Err(result) = set_autoresearch_tools_enabled(&ctx, false).await {
+        return result;
+    }
+    let result = clear_mode(root, state);
+    if !result.success {
+        let _ = set_autoresearch_tools_enabled(&ctx, true).await;
+    }
+    result
 }
 
 fn start_mode(root: &Path, state: &Arc<Mutex<RuntimeState>>, args: Value) -> ToolResult {
@@ -872,6 +996,7 @@ fn start_mode(root: &Path, state: &Arc<Mutex<RuntimeState>>, args: Value) -> Too
             Ok(value) => value,
             Err(_) => return ToolResult::err_fmt("autoresearch state poisoned"),
         };
+        state.touched = true;
         state.mode.active = true;
         if let Some(objective) = objective.clone() {
             state.mode.objective = Some(objective);
@@ -934,6 +1059,7 @@ fn clear_mode(root: &Path, state: &Arc<Mutex<RuntimeState>>) -> ToolResult {
             Ok(value) => value,
             Err(_) => return ToolResult::err_fmt("autoresearch state poisoned"),
         };
+        state.touched = false;
         state.mode = ModeSnapshot::default();
         state.running = None;
         state.last_run = None;
@@ -946,7 +1072,7 @@ fn clear_mode(root: &Path, state: &Arc<Mutex<RuntimeState>>) -> ToolResult {
 }
 
 fn export_summary(root: &Path, state: &Arc<Mutex<RuntimeState>>) -> ToolResult {
-    let summary = match summary_from_runtime(root, state) {
+    let summary = match full_summary_from_runtime(root, state) {
         Ok(value) => value,
         Err(err) => return ToolResult::err_fmt(err.to_string()),
     };
@@ -1117,11 +1243,48 @@ fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_metrics_reads_metric_lines() {
         let metrics = parse_metric_lines("hello\nMETRIC total_ms=12.5\nMETRIC score=99\n");
         assert_eq!(metrics.get("total_ms"), Some(&12.5));
         assert_eq!(metrics.get("score"), Some(&99.0));
+    }
+
+    #[test]
+    fn session_summary_short_circuits_when_untouched() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(JOURNAL_FILE), "{not valid json").expect("write journal");
+
+        let summary = session_summary_from_runtime(
+            dir.path(),
+            &Arc::new(Mutex::new(RuntimeState::default())),
+        )
+        .expect("untouched session should not read journal");
+
+        assert_eq!(summary, StatusSummary::default());
+    }
+
+    #[test]
+    fn full_summary_reads_journal_when_explicitly_requested() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(JOURNAL_FILE), "{not valid json").expect("write journal");
+
+        let err =
+            full_summary_from_runtime(dir.path(), &Arc::new(Mutex::new(RuntimeState::default())))
+                .expect_err("explicit summary should read journal");
+
+        assert!(err.to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn autoresearch_tools_start_disabled() {
+        let dir = tempdir().expect("tempdir");
+        let tools = AutoresearchTools {
+            workdir: dir.path().to_path_buf(),
+            state: Arc::new(Mutex::new(RuntimeState::default())),
+        };
+        assert!(tools.definitions().into_iter().all(|tool| !tool.enabled));
     }
 }

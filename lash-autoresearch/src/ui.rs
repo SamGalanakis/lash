@@ -21,12 +21,15 @@ use crate::model::{
 const WORKSPACE_KEY: &str = "workspace";
 const FOOTER_KEY: &str = "footer";
 const OVERLAY_KEY: &str = "overlay";
+const AUTORESEARCH_ARGUMENT_HINT: &str = "[objective|help|off|clear|export]";
 
 const AUTORESEARCH_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
     name: "/autoresearch",
     aliases: &[],
-    usage: "/autoresearch [objective|off|clear|export]",
+    usage: "/autoresearch [objective|help|off|clear|export]",
     description: "Toggle or control autoresearch mode",
+    argument_hint: Some(AUTORESEARCH_ARGUMENT_HINT),
+    argument_options: &["help", "off", "clear", "export"],
     takes_argument: true,
     allow_while_running: true,
     action: "command",
@@ -244,6 +247,12 @@ impl AutoresearchUiExtension {
         ctx: UiContext<'_>,
     ) -> Result<Vec<UiHostEffect>, String> {
         match arg.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(raw) if raw.eq_ignore_ascii_case("help") => {
+                let state = self.lock_state()?;
+                let mut effects = surface_effects(&state);
+                effects.push(UiHostEffect::PushSystemMessage(autoresearch_help_text()));
+                Ok(effects)
+            }
             Some(raw) if raw.eq_ignore_ascii_case("off") => {
                 let result =
                     invoke_command_op(ctx, "autoresearch.stop", serde_json::json!({})).await?;
@@ -324,6 +333,29 @@ impl AutoresearchUiExtension {
             .lock()
             .map_err(|_| "autoresearch UI state poisoned".to_string())
     }
+}
+
+fn autoresearch_help_text() -> String {
+    [
+        "Autoresearch",
+        "",
+        "Commands:",
+        "  /autoresearch <objective>  Start autoresearch or update the objective",
+        "  /autoresearch help         Show this help",
+        "  /autoresearch off          Stop autoresearch mode",
+        "  /autoresearch clear        Clear autoresearch state and UI",
+        "  /autoresearch export       Export the current summary",
+        "",
+        "Shortcuts:",
+        "  Ctrl+X         Toggle the autoresearch table",
+        "  Ctrl+Shift+X   Toggle the autoresearch overlay",
+        "",
+        "Workflow:",
+        "  1. Start with /autoresearch <objective>.",
+        "  2. Let the agent iterate with init_experiment, run_experiment, and log_experiment.",
+        "  3. Use export when you want a written summary artifact.",
+    ]
+    .join("\n")
 }
 
 async fn fetch_status(ctx: UiContext<'_>) -> Result<StatusSummary, String> {
@@ -584,22 +616,27 @@ fn build_table(summary: &StatusSummary) -> Table<'static> {
                     TableCell {
                         content: Line::from(row.run.to_string()),
                         style: dim_fg(),
+                        wrap: false,
                     },
                     TableCell {
                         content: Line::from(row.commit.clone()),
                         style: dim_fg(),
+                        wrap: false,
                     },
                     TableCell {
                         content: Line::from(metric),
                         style: metric_style(summary.direction),
+                        wrap: false,
                     },
                     TableCell {
                         content: Line::from(status),
                         style: status_style(row.status),
+                        wrap: false,
                     },
                     TableCell {
                         content: Line::from(row.description.clone()),
                         style: text_fg(),
+                        wrap: true,
                     },
                 ]);
                 table_row.style = row_style(row.status);
@@ -617,17 +654,21 @@ fn footer_line(summary: &StatusSummary) -> Line<'static> {
     let mut spans = vec![
         Span::styled(" autoresearch ", badge_style()),
         Span::raw(" "),
+        Span::styled(
+            format!("{} runs {} kept", summary.run_count, summary.kept_count),
+            text_fg(),
+        ),
     ];
     if let Some(running) = summary.running.as_ref() {
+        spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("running {}", elapsed_since(running)),
             warning_fg(),
         ));
-    } else {
-        spans.push(Span::styled(
-            format!("{} runs {} kept", summary.run_count, summary.kept_count),
-            text_fg(),
-        ));
+        if summary.run_count == 0 {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("waiting for first logged result", dim_fg()));
+        }
     }
     if let (Some(metric_name), Some(best_metric)) =
         (summary.metric_name.as_deref(), summary.best_metric)
@@ -674,17 +715,20 @@ fn title_line(summary: &StatusSummary) -> Line<'static> {
 
 fn summary_line(summary: &StatusSummary) -> Line<'static> {
     let objective = summary.objective.as_deref().unwrap_or("No objective set.");
+    let status = if let Some(running) = summary.running.as_ref() {
+        format!(
+            "{} runs  {} kept  running {}",
+            summary.run_count,
+            summary.kept_count,
+            elapsed_since(running)
+        )
+    } else {
+        format!("{} runs  {} kept", summary.run_count, summary.kept_count)
+    };
     Line::from(vec![
         Span::styled(objective.to_string(), text_fg()),
         Span::raw("  "),
-        Span::styled(
-            if let Some(running) = summary.running.as_ref() {
-                format!("running {}", elapsed_since(running))
-            } else {
-                format!("{} runs", summary.run_count)
-            },
-            dim_fg(),
-        ),
+        Span::styled(status, dim_fg()),
     ])
 }
 
@@ -921,7 +965,7 @@ fn border_style() -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Direction;
+    use crate::model::{Direction, RunningStatus};
 
     fn summary(active: bool) -> StatusSummary {
         StatusSummary {
@@ -935,6 +979,13 @@ mod tests {
             kept_count: 1,
             ..StatusSummary::default()
         }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 
     #[test]
@@ -990,5 +1041,39 @@ mod tests {
         assert_eq!(table.selection.selected, Some(3));
         page_selection(&mut table, 0, 1);
         assert_eq!(table.selection.selected, None);
+    }
+
+    #[test]
+    fn footer_keeps_counts_visible_while_running() {
+        let mut status = summary(true);
+        status.running = Some(RunningStatus {
+            command: "bash autoresearch.sh".to_string(),
+            started_at_ms: crate::model::now_ms().saturating_sub(5_000),
+        });
+        let rendered = line_text(&footer_line(&status));
+        assert!(rendered.contains("3 runs 1 kept"));
+        assert!(rendered.contains("running"));
+    }
+
+    #[test]
+    fn footer_mentions_waiting_before_first_logged_result() {
+        let mut status = summary(true);
+        status.run_count = 0;
+        status.kept_count = 0;
+        status.running = Some(RunningStatus {
+            command: "bash autoresearch.sh".to_string(),
+            started_at_ms: crate::model::now_ms().saturating_sub(5_000),
+        });
+        let rendered = line_text(&footer_line(&status));
+        assert!(rendered.contains("0 runs 0 kept"));
+        assert!(rendered.contains("waiting for first logged result"));
+    }
+
+    #[test]
+    fn help_text_mentions_commands_and_shortcuts() {
+        let help = autoresearch_help_text();
+        assert!(help.contains("/autoresearch help"));
+        assert!(help.contains("Ctrl+X"));
+        assert!(help.contains("Ctrl+Shift+X"));
     }
 }

@@ -1,4 +1,6 @@
-use crate::{Line, Rect, ScrollState, SelectionState, Style, Viewport};
+use unicode_width::UnicodeWidthChar;
+
+use crate::{Line, Rect, ScrollState, SelectionState, Span, Style, Viewport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnWidth {
@@ -17,6 +19,14 @@ pub struct Column<'a> {
 pub struct TableCell<'a> {
     pub content: Line<'a>,
     pub style: Style,
+    pub wrap: bool,
+}
+
+impl<'a> TableCell<'a> {
+    pub fn wrapped(mut self) -> Self {
+        self.wrap = true;
+        self
+    }
 }
 
 impl<'a> From<Line<'a>> for TableCell<'a> {
@@ -24,6 +34,7 @@ impl<'a> From<Line<'a>> for TableCell<'a> {
         Self {
             content,
             style: Style::default(),
+            wrap: false,
         }
     }
 }
@@ -69,11 +80,15 @@ impl<'a> Table<'a> {
         let widths = self.column_widths(area.width);
         let body_height = area.height.saturating_sub(1) as usize;
         state.selection.clamp(self.rows.len());
-        state.scroll.clamp(self.rows.len(), body_height);
-        if let Some(selected) = state.selection.selected {
-            state
-                .scroll
-                .ensure_visible(selected, selected + 1, body_height, self.rows.len());
+        if self.rows.is_empty() {
+            state.scroll.offset = 0;
+        } else {
+            state.scroll.offset = state.scroll.offset.min(self.rows.len() - 1);
+        }
+        if body_height > 0 {
+            if let Some(selected) = state.selection.selected {
+                self.ensure_row_visible(&widths, body_height, selected, &mut state.scroll);
+            }
         }
 
         self.render_header(viewport, &widths);
@@ -81,12 +96,9 @@ impl<'a> Table<'a> {
             return;
         }
 
-        for visible_row in 0..body_height {
-            let row_index = state.scroll.offset + visible_row;
-            if row_index >= self.rows.len() {
-                break;
-            }
-            let y = visible_row as u16 + 1;
+        let mut row_index = state.scroll.offset;
+        let mut y = 1u16;
+        while row_index < self.rows.len() && y < area.height {
             let selected_style = if state.selection.selected == Some(row_index) {
                 Some(if state.focused {
                     self.focused_selected_row_style
@@ -96,7 +108,14 @@ impl<'a> Table<'a> {
             } else {
                 None
             };
-            self.render_row(viewport, y, &self.rows[row_index], &widths, selected_style);
+            let prepared = self.prepare_row(&self.rows[row_index], &widths, selected_style);
+            let visible_height = prepared.height.min(area.height.saturating_sub(y));
+            if visible_height == 0 {
+                break;
+            }
+            self.render_prepared_row(viewport, y, &prepared, &widths, visible_height);
+            y = y.saturating_add(visible_height);
+            row_index += 1;
         }
     }
 
@@ -169,19 +188,110 @@ impl<'a> Table<'a> {
         }
     }
 
-    fn render_row(
+    fn ensure_row_visible(
         &self,
-        viewport: &mut Viewport<'_>,
-        y: u16,
+        widths: &[u16],
+        body_height: usize,
+        selected: usize,
+        scroll: &mut ScrollState,
+    ) {
+        if self.rows.is_empty() {
+            scroll.offset = 0;
+            return;
+        }
+        if selected < scroll.offset {
+            scroll.offset = selected;
+            return;
+        }
+        let mut used = 0usize;
+        let mut row_index = scroll.offset;
+        while row_index < self.rows.len() && used < body_height {
+            let row_height = self.row_height(&self.rows[row_index], widths).max(1) as usize;
+            if used != 0 && used + row_height > body_height {
+                break;
+            }
+            used = used.saturating_add(row_height);
+            row_index += 1;
+            if used >= body_height {
+                break;
+            }
+        }
+        if selected >= row_index {
+            scroll.offset = selected;
+            let mut used = self.row_height(&self.rows[selected], widths).max(1) as usize;
+            while scroll.offset > 0 {
+                let previous_height = self
+                    .row_height(&self.rows[scroll.offset - 1], widths)
+                    .max(1) as usize;
+                if used + previous_height > body_height {
+                    break;
+                }
+                scroll.offset -= 1;
+                used += previous_height;
+            }
+        }
+    }
+
+    fn row_height(&self, row: &TableRow<'_>, widths: &[u16]) -> u16 {
+        widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > 0)
+            .map(|(index, width)| {
+                row.cells
+                    .get(index)
+                    .map(|cell| wrap_cell_lines(cell, *width).len().max(1) as u16)
+                    .unwrap_or(1)
+            })
+            .max()
+            .unwrap_or(1)
+    }
+
+    fn prepare_row(
+        &self,
         row: &TableRow<'_>,
         widths: &[u16],
         selected_style: Option<Style>,
-    ) {
-        let area = viewport.area();
+    ) -> PreparedRow {
         let row_style = self.row_style.merge(row.style);
         let row_style = selected_style.map_or(row_style, |selected| row_style.merge(selected));
-        if style_needs_fill(row_style) {
-            viewport.fill(Rect::new(0, y, area.width, 1), ' ', row_style);
+        let cells = widths
+            .iter()
+            .enumerate()
+            .map(|(index, width)| match row.cells.get(index) {
+                Some(cell) => PreparedCell {
+                    lines: wrap_cell_lines(cell, *width),
+                    style: cell.style,
+                },
+                None => PreparedCell {
+                    lines: Vec::new(),
+                    style: Style::default(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let height = cells
+            .iter()
+            .map(|cell| cell.lines.len().max(1) as u16)
+            .max()
+            .unwrap_or(1);
+        PreparedRow {
+            cells,
+            style: row_style,
+            height,
+        }
+    }
+
+    fn render_prepared_row(
+        &self,
+        viewport: &mut Viewport<'_>,
+        y: u16,
+        row: &PreparedRow,
+        widths: &[u16],
+        visible_height: u16,
+    ) {
+        let area = viewport.area();
+        if style_needs_fill(row.style) {
+            viewport.fill(Rect::new(0, y, area.width, visible_height), ' ', row.style);
         }
         let mut x = 0u16;
         for (index, width) in widths.iter().copied().enumerate() {
@@ -189,7 +299,15 @@ impl<'a> Table<'a> {
                 continue;
             }
             if let Some(cell) = row.cells.get(index) {
-                viewport.write_line_styled(x, y, &cell.content, row_style.merge(cell.style), width);
+                let cell_style = row.style.merge(cell.style);
+                if style_needs_fill(cell_style) {
+                    viewport.fill(Rect::new(x, y, width, visible_height), ' ', cell_style);
+                }
+                for (line_index, line) in
+                    cell.lines.iter().take(visible_height as usize).enumerate()
+                {
+                    viewport.write_line_styled(x, y + line_index as u16, line, cell_style, width);
+                }
             }
             x = x.saturating_add(width);
         }
@@ -207,11 +325,119 @@ fn style_needs_fill(style: Style) -> bool {
     style.bg.is_some() || style.bold || style.dim || style.italic || style.underlined
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreparedCell {
+    lines: Vec<Line<'static>>,
+    style: Style,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreparedRow {
+    cells: Vec<PreparedCell>,
+    style: Style,
+    height: u16,
+}
+
+fn wrap_cell_lines(cell: &TableCell<'_>, width: u16) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    if !cell.wrap {
+        return vec![cell.content.clone().into_owned()];
+    }
+    wrap_line(&cell.content, width)
+}
+
+fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
+    let max_width = width as usize;
+    if max_width == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_text = String::new();
+    let mut current_style = Style::default();
+    let mut current_style_set = false;
+    let mut current_width = 0usize;
+
+    let flush_span = |spans: &mut Vec<Span<'static>>,
+                      text: &mut String,
+                      style: &mut Style,
+                      style_set: &mut bool| {
+        if text.is_empty() {
+            return;
+        }
+        spans.push(Span::styled(std::mem::take(text), *style));
+        *style_set = false;
+    };
+
+    let push_line = |lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>| {
+        lines.push(Line::from(std::mem::take(spans)));
+    };
+
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            if ch == '\n' {
+                flush_span(
+                    &mut current_spans,
+                    &mut current_text,
+                    &mut current_style,
+                    &mut current_style_set,
+                );
+                push_line(&mut lines, &mut current_spans);
+                current_width = 0;
+                continue;
+            }
+
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width > 0 && ch_width > 0 && current_width + ch_width > max_width {
+                flush_span(
+                    &mut current_spans,
+                    &mut current_text,
+                    &mut current_style,
+                    &mut current_style_set,
+                );
+                push_line(&mut lines, &mut current_spans);
+                current_width = 0;
+            }
+
+            if current_style_set && current_style != span.style {
+                flush_span(
+                    &mut current_spans,
+                    &mut current_text,
+                    &mut current_style,
+                    &mut current_style_set,
+                );
+            }
+
+            if !current_style_set {
+                current_style = span.style;
+                current_style_set = true;
+            }
+
+            current_text.push(ch);
+            current_width += ch_width;
+        }
+    }
+
+    flush_span(
+        &mut current_spans,
+        &mut current_text,
+        &mut current_style,
+        &mut current_style_set,
+    );
+    if !current_spans.is_empty() || lines.is_empty() {
+        push_line(&mut lines, &mut current_spans);
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{Color, Line, Style, render_snapshot};
 
-    use super::{Column, ColumnWidth, Table, TableRow, TableState};
+    use super::{Column, ColumnWidth, Table, TableCell, TableRow, TableState};
 
     fn sample_table<'a>() -> Table<'a> {
         Table {
@@ -315,6 +541,33 @@ mod tests {
         });
         assert_eq!(snapshot.visible_line_trimmed(0), "very");
         assert_eq!(snapshot.visible_line_trimmed(1), "abcd");
+    }
+
+    #[test]
+    fn table_wraps_opt_in_cell_content_to_multiple_lines() {
+        let table = Table {
+            columns: vec![Column {
+                header: Line::from("desc"),
+                width: ColumnWidth::Length(4),
+            }],
+            rows: vec![
+                TableRow::new(vec![TableCell::from(Line::from("abcdefgh")).wrapped()]),
+                TableRow::new(vec!["done".into()]),
+            ],
+            header_style: Style::default(),
+            row_style: Style::default(),
+            selected_row_style: Style::default(),
+            focused_selected_row_style: Style::default(),
+        };
+        let mut state = TableState::default();
+        let snapshot = render_snapshot(4, 4, |frame| {
+            let mut viewport = frame.viewport(crate::Rect::new(0, 0, 4, 4));
+            table.render(&mut viewport, &mut state);
+        });
+        assert_eq!(snapshot.visible_line_trimmed(0), "desc");
+        assert_eq!(snapshot.visible_line_trimmed(1), "abcd");
+        assert_eq!(snapshot.visible_line_trimmed(2), "efgh");
+        assert_eq!(snapshot.visible_line_trimmed(3), "done");
     }
 
     #[test]

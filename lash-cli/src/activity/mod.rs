@@ -721,6 +721,72 @@ mod tests {
     }
 
     #[test]
+    fn spawn_agent_projects_compact_headline_and_labeled_details() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "spawn_agent",
+            json!({
+                "task_name":"probe_repo_shape",
+                "task":"In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary."
+            }),
+            json!({
+                "task_name":"probe_repo_shape",
+                "path":"/root/probe_repo_shape",
+                "capability":"low",
+                "model":"gpt-5.4-mini",
+                "model_variant":"low"
+            }),
+            true,
+            12,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].call.summary, "spawn subagent · probe_repo_shape");
+        assert_eq!(
+            blocks[0].result.detail_lines,
+            vec![
+                "Task In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary.".to_string(),
+                "Path /root/probe_repo_shape".to_string(),
+                "Profile low capability · gpt-5.4-mini".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn wait_agent_task_started_uses_compact_name_and_wrapped_metadata() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "wait_agent",
+            json!({"targets":["/root/probe_repo_shape"]}),
+            json!({
+                "timed_out": false,
+                "events": [{
+                    "kind":"task_started",
+                    "path":"/root/probe_repo_shape",
+                    "task":"In /home/sam/code/lash, inspect the repo shape only.",
+                    "capability":"low",
+                    "model":"gpt-5.4-mini",
+                    "model_variant":"low"
+                }]
+            }),
+            true,
+            12,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].call.summary, "subagent started");
+        assert_eq!(blocks[0].call.tag.as_deref(), Some("probe_repo_shape"));
+        assert_eq!(
+            blocks[0].result.detail_lines,
+            vec![
+                "Task In /home/sam/code/lash, inspect the repo shape only.".to_string(),
+                "Path /root/probe_repo_shape".to_string(),
+                "Profile low capability · gpt-5.4-mini".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn wait_agent_projects_task_completion_and_token_usage() {
         let mut state = ActivityState::default();
         let blocks = state.blocks_for_tool_call(
@@ -761,16 +827,15 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
-        assert_eq!(
-            blocks[0].call.summary,
-            "subagent stopped · inspect queue rendering"
-        );
+        assert_eq!(blocks[0].call.summary, "subagent stopped");
+        assert_eq!(blocks[0].call.tag.as_deref(), Some("inspect_queue"));
         assert_eq!(
             blocks[0].result.detail_lines,
             vec![
+                "Task inspect queue rendering".to_string(),
                 "Path /root/inspect_queue".to_string(),
-                "gpt-5.4 (high) · 2 iterations · 1 tool call".to_string(),
-                "135 total tokens · 101 in · 22 out · 7 reasoning · 5 cached".to_string(),
+                "Run gpt-5.4 (high) · 2 iterations · 1 tool call".to_string(),
+                "Tokens 135 total · 101 in · 22 out · 7 reasoning · 5 cached".to_string(),
             ]
         );
         assert!(blocks[0].children.is_empty());
@@ -809,16 +874,15 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
-        assert_eq!(
-            blocks[0].call.summary,
-            "subagent failed · inspect queue rendering"
-        );
+        assert_eq!(blocks[0].call.summary, "subagent failed");
+        assert_eq!(blocks[0].call.tag.as_deref(), Some("inspect_queue"));
         assert_eq!(
             blocks[0].result.detail_lines,
             vec![
+                "Task inspect queue rendering".to_string(),
                 "Error LLM error: Codex request failed with 400".to_string(),
                 "Path /root/inspect_queue".to_string(),
-                "gpt-5.4-mini (low) · 24 iterations · 49 tool calls".to_string(),
+                "Run gpt-5.4-mini (low) · 24 iterations · 49 tool calls".to_string(),
             ]
         );
     }

@@ -177,8 +177,14 @@ impl ToolDefinition {
     }
 
     pub fn format_tool_docs(tools: &[ToolDefinition]) -> String {
+        Self::format_tool_docs_iter(tools.iter())
+    }
+
+    pub fn format_tool_docs_iter<'a>(
+        tools: impl IntoIterator<Item = &'a ToolDefinition>,
+    ) -> String {
         tools
-            .iter()
+            .into_iter()
             .map(|tool| {
                 let mut sections = vec![format!("### `{}`", tool.signature())];
                 if !tool.description.trim().is_empty() {

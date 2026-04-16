@@ -8,7 +8,6 @@ license.workspace = true
 default = []
 dhat-heap = ["dep:dhat"]
 fff-zlob = ["lash/fff-zlob"]
-autoresearch = ["dep:lash-autoresearch"]
 
 [[bin]]
 name = "lash"
@@ -20,7 +19,7 @@ lash-default-tools = { path = "../lash-default-tools" }
 lash-subagents = { path = "../lash-subagents" }
 lash-ui = { path = "../lash-ui" }
 lash-tui = { path = "../lash-tui" }
-lash-autoresearch = { path = "../lash-autoresearch", optional = true }
+lash-autoresearch = { path = "../lash-autoresearch" }
 crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }

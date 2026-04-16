@@ -204,31 +204,32 @@ pub(super) async fn apply_pending_reconfigure(
         return Ok(dynamic_tools.generation());
     }
 
-    let previous = dynamic_tools.export_state();
-    let generation = match dynamic_tools.apply_state(desired_dynamic.clone()) {
-        Ok(g) => g,
-        Err(e) => {
-            desired_dynamic.base_generation = dynamic_tools.generation();
-            return Err(e.to_string());
-        }
+    let generation = if let Some(rt) = runtime.as_mut() {
+        rt.apply_dynamic_tool_state(desired_dynamic.clone())
+            .await
+            .map_err(|err| err.to_string())?
+    } else {
+        dynamic_tools
+            .apply_state(desired_dynamic.clone())
+            .map_err(|err| err.to_string())?
     };
 
-    if let Some(rt) = runtime.as_mut()
-        && let Err(e) = rt.refresh_session_tool_surface().await
-    {
-        let mut rollback = previous.clone();
-        rollback.base_generation = dynamic_tools.generation();
-        let _ = dynamic_tools.apply_state(rollback);
-        let _ = rt.refresh_session_tool_surface().await;
-        desired_dynamic.base_generation = dynamic_tools.generation();
-        return Err(format!(
-            "Failed to apply runtime reconfigure (state rolled back): {e}"
-        ));
-    }
+    sync_runtime_tool_surface(runtime).await?;
 
     *desired_dynamic = dynamic_tools.export_state();
     *pending_reconfigure = false;
     Ok(generation)
+}
+
+pub(super) async fn sync_runtime_tool_surface(
+    runtime: &mut Option<LashRuntime>,
+) -> Result<(), String> {
+    if let Some(rt) = runtime.as_mut() {
+        rt.refresh_session_tool_surface()
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(())
 }
 
 /// Send a user message to the runtime: push display block and spawn turn run.

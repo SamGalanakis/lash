@@ -704,6 +704,39 @@ pub trait SessionManager: Send + Sync {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError>;
     async fn snapshot_session(&self, session_id: &str) -> Result<SessionSnapshot, PluginError>;
     async fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError>;
+    async fn dynamic_tool_state(
+        &self,
+        _session_id: &str,
+    ) -> Result<crate::DynamicStateSnapshot, PluginError> {
+        Err(PluginError::Session(
+            "dynamic tool state is unavailable in this session".to_string(),
+        ))
+    }
+    async fn apply_dynamic_tool_state(
+        &self,
+        _session_id: &str,
+        _snapshot: crate::DynamicStateSnapshot,
+    ) -> Result<u64, PluginError> {
+        Err(PluginError::Session(
+            "dynamic tool state mutation is unavailable in this session".to_string(),
+        ))
+    }
+    async fn set_tools_enabled(
+        &self,
+        session_id: &str,
+        tool_names: &[String],
+        enabled: bool,
+    ) -> Result<u64, PluginError> {
+        let mut snapshot = self.dynamic_tool_state(session_id).await?;
+        for name in tool_names {
+            if enabled {
+                snapshot.enabled_tools.insert(name.clone());
+            } else {
+                snapshot.enabled_tools.remove(name);
+            }
+        }
+        self.apply_dynamic_tool_state(session_id, snapshot).await
+    }
     async fn create_session(
         &self,
         request: SessionCreateRequest,
@@ -940,6 +973,8 @@ pub struct CommandDef {
     pub name: &'static str,
     pub usage: &'static str,
     pub description: &'static str,
+    pub argument_hint: Option<&'static str>,
+    pub argument_options: &'static [&'static str],
     pub takes_argument: bool,
     /// When true, the host may invoke this command while a turn is
     /// streaming instead of queueing it behind the turn. Plugins should

@@ -233,7 +233,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tokio-util",
 ]
@@ -1838,6 +1837,7 @@ dependencies = [
  "lash-ui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
@@ -1904,9 +1904,7 @@ dependencies = [
  "lash",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
- "tokio-util",
  "uuid",
 ]
 

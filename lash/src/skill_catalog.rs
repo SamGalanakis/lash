@@ -4,6 +4,8 @@ use std::path::PathBuf;
 pub struct LoadedSkill {
     pub name: String,
     pub description: String,
+    pub argument_hint: Option<String>,
+    pub argument_options: Vec<String>,
     pub instructions: String,
     pub path_to_skill_md: PathBuf,
 }
@@ -11,6 +13,14 @@ pub struct LoadedSkill {
 #[derive(Clone, Debug, Default)]
 pub struct SkillCatalog {
     skills: Vec<LoadedSkill>,
+}
+
+struct ParsedFrontmatter {
+    name: String,
+    description: String,
+    argument_hint: Option<String>,
+    argument_options: Option<Vec<String>>,
+    instructions: String,
 }
 
 impl SkillCatalog {
@@ -39,7 +49,13 @@ impl SkillCatalog {
                     Ok(text) => text,
                     Err(_) => continue,
                 };
-                let (mut name, description, instructions) = match parse_frontmatter(&text) {
+                let ParsedFrontmatter {
+                    mut name,
+                    description,
+                    argument_hint,
+                    argument_options: explicit_argument_options,
+                    instructions,
+                } = match parse_frontmatter(&text) {
                     Some(parsed) => parsed,
                     None => continue,
                 };
@@ -59,10 +75,21 @@ impl SkillCatalog {
                     Err(_) => continue,
                 };
 
+                let argument_options = explicit_argument_options
+                    .filter(|options| !options.is_empty())
+                    .unwrap_or_else(|| {
+                        argument_hint
+                            .as_deref()
+                            .map(parse_argument_options)
+                            .unwrap_or_default()
+                    });
+
                 skills.retain(|skill: &LoadedSkill| skill.name != name);
                 skills.push(LoadedSkill {
                     name,
                     description,
+                    argument_hint,
+                    argument_options,
                     instructions,
                     path_to_skill_md,
                 });
@@ -84,9 +111,20 @@ impl SkillCatalog {
     pub fn iter(&self) -> impl Iterator<Item = &LoadedSkill> {
         self.skills.iter()
     }
+
+    pub fn argument_hint(&self, name: &str) -> Option<&str> {
+        self.get(name)
+            .and_then(|skill| skill.argument_hint.as_deref())
+    }
+
+    pub fn argument_options(&self, name: &str) -> &[String] {
+        self.get(name)
+            .map(|skill| skill.argument_options.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
-fn parse_frontmatter(text: &str) -> Option<(String, String, String)> {
+fn parse_frontmatter(text: &str) -> Option<ParsedFrontmatter> {
     let text = text.trim_start();
     if !text.starts_with("---") {
         return None;
@@ -100,17 +138,70 @@ fn parse_frontmatter(text: &str) -> Option<(String, String, String)> {
 
     let mut name = String::new();
     let mut description = String::new();
+    let mut argument_hint = None;
+    let mut argument_options = None;
 
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(value) = line.strip_prefix("name:") {
-            name = value.trim().to_string();
+            name = parse_frontmatter_value(value);
         } else if let Some(value) = line.strip_prefix("description:") {
-            description = value.trim().to_string();
+            description = parse_frontmatter_value(value);
+        } else if let Some(value) = line.strip_prefix("argument-hint:") {
+            let parsed = parse_frontmatter_value(value);
+            if !parsed.is_empty() {
+                argument_hint = Some(parsed);
+            }
+        } else if let Some(value) = line.strip_prefix("argument-options:") {
+            let parsed = parse_argument_options(&parse_frontmatter_value(value));
+            if !parsed.is_empty() {
+                argument_options = Some(parsed);
+            }
         }
     }
 
-    Some((name, description, body))
+    Some(ParsedFrontmatter {
+        name,
+        description,
+        argument_hint,
+        argument_options,
+        instructions: body,
+    })
+}
+
+fn parse_frontmatter_value(value: &str) -> String {
+    let trimmed = value.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    unquoted.trim().to_string()
+}
+
+fn parse_argument_options(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let separator = if inner.contains('|') {
+        '|'
+    } else if inner.contains(',') {
+        ','
+    } else {
+        return Vec::new();
+    };
+    inner
+        .split(separator)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn is_valid_skill_name(name: &str) -> bool {
@@ -166,5 +257,40 @@ mod tests {
         let skill = catalog.get("demo").expect("skill");
         assert!(skill.path_to_skill_md.ends_with("SKILL.md"));
         assert!(skill.path_to_skill_md.is_absolute());
+    }
+
+    #[test]
+    fn parses_argument_hint_from_frontmatter() {
+        let root = TempDir::new().unwrap();
+        write_skill(
+            root.path(),
+            "demo",
+            "---\nname: demo\ndescription: demo\nargument-hint: \"[alpha|beta]\"\n---\n# demo\n",
+        );
+
+        let catalog = SkillCatalog::from_dirs(&[root.path().to_path_buf()]);
+        let skill = catalog.get("demo").expect("skill");
+        assert_eq!(skill.argument_hint.as_deref(), Some("[alpha|beta]"));
+        assert_eq!(catalog.argument_hint("demo"), Some("[alpha|beta]"));
+        assert_eq!(
+            catalog.argument_options("demo"),
+            &["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_argument_options_override_derived_hint_options() {
+        let root = TempDir::new().unwrap();
+        write_skill(
+            root.path(),
+            "demo",
+            "---\nname: demo\ndescription: demo\nargument-hint: \"[placeholder]\"\nargument-options: \"alpha, beta\"\n---\n# demo\n",
+        );
+
+        let catalog = SkillCatalog::from_dirs(&[root.path().to_path_buf()]);
+        assert_eq!(
+            catalog.argument_options("demo"),
+            &["alpha".to_string(), "beta".to_string()]
+        );
     }
 }

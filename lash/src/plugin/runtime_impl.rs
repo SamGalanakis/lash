@@ -1057,7 +1057,8 @@ impl PluginSession {
     }
 
     pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
-        crate::tools::project_tool_catalog(self.tool_surface(session_id, mode).enabled_tools())
+        let surface = self.tool_surface(session_id, mode);
+        crate::tools::project_tool_catalog(surface.enabled_tools_iter())
     }
 
     pub fn resolve_tool_surface(

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -86,7 +86,7 @@ impl Grep {
         backend
     }
 
-    fn initialize_backend(&self, base_path: &PathBuf) -> Result<GrepBackend, String> {
+    fn initialize_backend(&self, base_path: &Path) -> Result<GrepBackend, String> {
         let picker = SharedPicker::default();
         FilePicker::new_with_shared_state(
             picker.clone(),
@@ -348,9 +348,10 @@ struct GrepBackend {
     picker: SharedPicker,
 }
 
-fn shared_backend_cache() -> &'static Mutex<HashMap<PathBuf, Result<Arc<GrepBackend>, String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Result<Arc<GrepBackend>, String>>>> =
-        OnceLock::new();
+type SharedBackendCache = Mutex<HashMap<PathBuf, Result<Arc<GrepBackend>, String>>>;
+
+fn shared_backend_cache() -> &'static SharedBackendCache {
+    static CACHE: OnceLock<SharedBackendCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

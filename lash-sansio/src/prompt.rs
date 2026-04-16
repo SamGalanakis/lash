@@ -36,7 +36,7 @@ pub fn build_prompt(input: PromptBuildInput) -> PreparedPrompt {
 fn merge_prompt_contributions(contributions: Vec<PromptContribution>) -> Vec<PromptContribution> {
     let mut merged = contributions
         .into_iter()
-        .filter_map(|contribution| normalize_contribution(contribution))
+        .filter_map(normalize_contribution)
         .collect::<Vec<_>>();
 
     merged.sort_by(|left, right| {

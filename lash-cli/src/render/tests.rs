@@ -5,11 +5,14 @@ use crate::activity::ActivityState;
 use crate::app::projected_blocks_from_state;
 use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
+use async_trait::async_trait;
 use lash::ToolProvider;
 use lash::tools::ShowSnippetToUser;
 use lash::{Part, PartKind, PromptRequest, SkillCatalog};
+use lash_ui::{SlashCommandSpec, UiContext, UiExtension, UiExtensions, UiHostEffect};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc;
 
 fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
@@ -21,6 +24,27 @@ fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
         std::fs::write(
             dir.join("SKILL.md"),
             format!("---\nname: {name}\ndescription: {description}\n---\n\nbody\n"),
+        )
+        .expect("skill file");
+    }
+    let catalog = SkillCatalog::from_dirs(&[PathBuf::from(&root)]);
+    let _ = std::fs::remove_dir_all(root);
+    catalog
+}
+
+fn skill_catalog_with_hints(entries: &[(&str, &str, Option<&str>)]) -> SkillCatalog {
+    let root =
+        std::env::temp_dir().join(format!("lash-render-skills-hints-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("temp root");
+    for (name, description, argument_hint) in entries {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).expect("skill dir");
+        let hint_line = argument_hint
+            .map(|hint| format!("argument-hint: \"{hint}\"\n"))
+            .unwrap_or_default();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n{hint_line}---\n\nbody\n"),
         )
         .expect("skill file");
     }
@@ -85,6 +109,60 @@ fn single_op_exploration_renders_as_one_line() {
 
     assert_eq!(rendered[0], "· Read README.md");
     assert_eq!(rendered.len(), 1, "single-op should not emit detail lines");
+}
+
+#[test]
+fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
+    let mut state = crate::activity::ActivityState::default();
+    let blocks = state.blocks_for_tool_call(
+        "spawn_agent",
+        serde_json::json!({
+            "task_name":"probe_repo_shape",
+            "task":"In /home/sam/code/lash, inspect the repo shape only. Reply with 1) top-level directories/files summary and 2) whether the workspace looks healthy."
+        }),
+        serde_json::json!({
+            "task_name":"probe_repo_shape",
+            "path":"/root/probe_repo_shape",
+            "capability":"low",
+            "model":"gpt-5.4-mini",
+            "model_variant":"low"
+        }),
+        true,
+        0,
+    );
+    let display_blocks = vec![DisplayBlock::Activity(Box::new(blocks[0].clone()))];
+    let rendered = render_block(&display_blocks, 0, 1, 56, 20)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().all(|line| line.chars().count() <= 56));
+    assert_eq!(rendered[0], "◆ spawn subagent · probe_repo_shape");
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.starts_with("    Task In /home/sam/code/lash,"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("workspace looks healthy."))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line == "    Path /root/probe_repo_shape")
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line == "    Profile low capability · gpt-5.4-mini")
+    );
 }
 
 #[test]
@@ -529,6 +607,84 @@ fn input_box_highlights_slash_command_slash() {
             span.content.contains('/') && span.style == theme::slash_command_slash()
         })
     );
+}
+
+#[test]
+fn input_box_shows_skill_argument_hint_inline() {
+    let mut app = App::new("gpt-5.4".into(), "test".into());
+    app.skills =
+        skill_catalog_with_hints(&[("impeccable", "design helper", Some("[craft|teach|extract]"))]);
+    app.set_input("/impeccable ".into());
+    app.editor.cursor_pos = app.input().len();
+
+    let snapshot = input_render_snapshot(&app, Rect::new(0, 0, 60, 4));
+    let first_line = snapshot.lines.first().expect("input line");
+    let rendered = first_line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert!(rendered.contains("/impeccable [craft|teach|extract]"));
+    assert!(first_line.spans.iter().any(|span| {
+        span.content.contains("[craft|teach|extract]") && span.style == theme::text_faint_style()
+    }));
+}
+
+#[test]
+fn input_box_shows_ui_command_argument_hint_inline() {
+    struct DemoUiExtension;
+
+    const DEMO_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
+        name: "/demo",
+        aliases: &[],
+        usage: "/demo [alpha|beta]",
+        description: "Demo command",
+        argument_hint: Some("[alpha|beta]"),
+        argument_options: &["alpha", "beta"],
+        takes_argument: true,
+        allow_while_running: true,
+        action: "demo",
+    }];
+
+    #[async_trait]
+    impl UiExtension for DemoUiExtension {
+        fn id(&self) -> &'static str {
+            "demo_ui"
+        }
+
+        fn commands(&self) -> &'static [SlashCommandSpec] {
+            DEMO_COMMANDS
+        }
+
+        async fn invoke_action(
+            &self,
+            _action: &str,
+            _arg: Option<&str>,
+            _ctx: UiContext<'_>,
+        ) -> Result<Vec<UiHostEffect>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let ui_extensions = UiExtensions::new(vec![Arc::new(DemoUiExtension)]).expect("ui extensions");
+    app.set_ui_extensions(Arc::new(ui_extensions));
+    app.set_input("/demo ".into());
+    app.editor.cursor_pos = app.input().len();
+
+    let snapshot = input_render_snapshot(&app, Rect::new(0, 0, 40, 4));
+    let first_line = snapshot.lines.first().expect("input line");
+    let rendered = first_line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert!(rendered.contains("/demo [alpha|beta]"));
+    assert!(first_line.spans.iter().any(|span| {
+        span.content.contains("[alpha|beta]") && span.style == theme::text_faint_style()
+    }));
 }
 
 #[test]
