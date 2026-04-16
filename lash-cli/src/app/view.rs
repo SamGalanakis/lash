@@ -297,7 +297,6 @@ impl App {
                 | DisplayBlock::Activity(_)
                 | DisplayBlock::ShellOutput { .. }
                 | DisplayBlock::Error(_)
-                | DisplayBlock::PlanContent(_)
                 | DisplayBlock::PluginPanel(_)
         )
     }

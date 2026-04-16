@@ -29,13 +29,11 @@ use crate::text_layout;
 use crate::theme;
 
 use self::activity::render_activity_block;
-use self::artifact::{
-    render_plan_block, render_question_panel_artifact, render_section_panel_block,
-};
+use self::artifact::{render_question_panel_artifact, render_section_panel_block};
 use self::prompt::prompt_height;
 
-pub(crate) use self::prompt::prompt_content_lines_snapshot;
 pub(crate) use self::prompt::prompt_max_scroll;
+pub(crate) use self::prompt::prompt_render_snapshot;
 pub(crate) use self::queue::queue_preview_lines_snapshot;
 
 const INPUT_HORIZONTAL_PADDING: u16 = 1;
@@ -1023,7 +1021,6 @@ fn render_block_into(
                 )));
             }
         }
-        DisplayBlock::PlanContent(content) => render_plan_block(content, lines, viewport_width),
         DisplayBlock::PluginPanel(panel) => {
             render_section_panel_block(&panel.title, &panel.content, lines, viewport_width);
         }

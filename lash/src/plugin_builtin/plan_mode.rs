@@ -49,7 +49,6 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "read_file",
         "search_tools",
         "search_web",
-        "show_snippet_to_user",
         "apply_patch",
         "plan_exit",
     ]
@@ -89,10 +88,6 @@ fn plan_exit_fresh_context_input(display: &str) -> String {
 
 fn fresh_context_session_id() -> String {
     format!("plan-{}", uuid::Uuid::new_v4().simple())
-}
-
-fn plan_file_exists(path: &Path) -> bool {
-    path.is_file()
 }
 
 fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
@@ -135,14 +130,23 @@ struct PlanReport {
 }
 
 impl PlanReport {
-    fn panel_content(&self) -> String {
-        format!("Entered plan mode.\n\n`{}`", self.display_path)
+    fn preview_content(&self) -> String {
+        format!("Path: `{}`", self.display_path)
+    }
+
+    fn approval_content(&self) -> String {
+        self.content
+            .as_deref()
+            .map(str::trim_end)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.preview_content())
     }
 }
 
 fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     let display_path = plan_display_path(path);
-    if !plan_file_exists(path) {
+    if !path.is_file() {
         return Ok(PlanReport {
             display_path,
             ..Default::default()
@@ -157,7 +161,7 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     })?;
     Ok(PlanReport {
         display_path,
-        content: Some(content.clone()),
+        content: Some(content),
     })
 }
 
@@ -165,7 +169,7 @@ fn plan_panel_event(report: &PlanReport) -> crate::plugin::PluginSurfaceEvent {
     crate::plugin::PluginSurfaceEvent::PanelUpsert {
         key: PLAN_MODE_PANEL_KEY.to_string(),
         title: PLAN_MODE_PANEL_TITLE.to_string(),
-        content: report.panel_content(),
+        content: report.preview_content(),
     }
 }
 
@@ -180,7 +184,7 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     PluginMessage::text(
         crate::MessageRole::System,
         format!(
-            "Plan mode: work in `{display}` only. Use read/search/list, web, `ask(...)`, and `show_snippet_to_user(...)` as needed. When you're done planning, call `plan_exit()` to leave plan mode."
+            "Plan mode: use `{display}` as the single source of truth. Read/search/list, web, and `ask(...)` as needed, and update only that file with `apply_patch`. Do not present the plan with snippets, showcases, or prose checklists; the panel only shows the file path while planning. When the plan is ready for review, call `plan_exit()`."
         ),
     )
 }
@@ -188,10 +192,10 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
 fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
     match plan_path {
         Some(path) => format!(
-            "Plan mode tools: read/search/list, web search/fetch, `ask`, `show_snippet_to_user`, `apply_patch` for `{}`, `plan_exit()`.",
+            "Plan mode tools: read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, `plan_exit()`. The panel shows the plan file path; full review happens in `plan_exit()`.",
             plan_display_path(path)
         ),
-        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, `show_snippet_to_user`, plan-file `apply_patch`, `plan_exit()`.".to_string(),
+        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, `plan_exit()`. The panel shows the plan file path; full review happens in `plan_exit()`.".to_string(),
     }
 }
 
@@ -257,10 +261,6 @@ impl PlanModeState {
             self.active_turn_applied_generation = None;
         }
         self.snapshot()
-    }
-
-    fn toggle(&mut self) -> PlanModeSnapshot {
-        self.set_enabled(!self.enabled)
     }
 
     fn prepare_turn(&mut self) -> bool {
@@ -363,6 +363,53 @@ async fn ensure_plan_report(
     read_plan_report(&path).map_err(PluginError::Session)
 }
 
+fn dynamic_tool_state_unavailable(err: &PluginError) -> bool {
+    matches!(err, PluginError::Session(message) if message.contains("dynamic tool state"))
+}
+
+async fn sync_plan_exit_tool_state(
+    host: &Arc<dyn crate::SessionManager>,
+    session_id: &str,
+    enabled: bool,
+) -> Result<(), PluginError> {
+    match host
+        .set_tool_state(session_id, "plan_exit", Some(enabled), Some(enabled))
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(err) if dynamic_tool_state_unavailable(&err) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+async fn set_plan_mode_enabled_state(
+    state: &Arc<Mutex<PlanModeState>>,
+    session_id: &str,
+    host: &Arc<dyn crate::SessionManager>,
+    enabled: bool,
+) -> Result<bool, PluginError> {
+    let previous = {
+        let mut guard = state
+            .lock()
+            .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
+        let previous = guard.enabled;
+        if previous != enabled {
+            guard.set_enabled(enabled);
+        }
+        previous
+    };
+    if let Err(err) = sync_plan_exit_tool_state(host, session_id, enabled).await {
+        if previous != enabled {
+            let mut guard = state
+                .lock()
+                .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
+            guard.set_enabled(previous);
+        }
+        return Err(err);
+    }
+    Ok(enabled)
+}
+
 fn plan_status_payload(
     session_id: &str,
     enabled: bool,
@@ -373,7 +420,11 @@ fn plan_status_payload(
         "enabled": enabled,
         "plan_path": report.map(|value| value.display_path.clone()),
         "panel_title": enabled.then_some(PLAN_MODE_PANEL_TITLE.to_string()),
-        "panel_content": if enabled { report.map(|value| value.panel_content()) } else { None },
+        "panel_content": if enabled {
+            report.map(|value| value.preview_content())
+        } else {
+            None
+        },
     })
 }
 
@@ -436,17 +487,14 @@ impl PlanModeTools {
             .host
             .prompt_user(
                 PromptRequest::single(
-                    format!("Exit plan mode for `{}`?", report.display_path),
+                    format!("Review the plan in `{}`. What next?", report.display_path),
                     vec![
-                        "Execute plan now".to_string(),
-                        "Iterate on plan with lash".to_string(),
-                        "Execute with fresh context".to_string(),
+                        "Start implementing now".to_string(),
+                        "Keep planning".to_string(),
+                        "Start in fresh context".to_string(),
                     ],
                 )
-                .with_markdown_panel(
-                    "PLAN",
-                    report.content.as_deref().unwrap_or(&report.panel_content()),
-                )
+                .with_markdown_panel("PLAN", &report.approval_content())
                 .with_optional_note(),
             )
             .await
@@ -457,9 +505,9 @@ impl PlanModeTools {
 
         let selection = match &answer {
             PromptResponse::Single { selection, .. } => selection.as_str(),
-            _ => "Iterate on plan with lash",
+            _ => "Keep planning",
         };
-        if selection == "Iterate on plan with lash" {
+        if selection == "Keep planning" {
             return ToolResult::ok(json!({
                 "approved": false,
                 "plan_path": report.display_path,
@@ -472,14 +520,14 @@ impl PlanModeTools {
             _ => None,
         };
 
-        match self.state.lock() {
-            Ok(mut guard) => {
-                guard.set_enabled(false);
-            }
-            Err(_) => return ToolResult::err(json!("plan mode state poisoned")),
+        if let Err(err) =
+            set_plan_mode_enabled_state(&self.state, &context.session_id, &context.host, false)
+                .await
+        {
+            return ToolResult::err(json!(err.to_string()));
         }
 
-        if selection == "Execute with fresh context" {
+        if selection == "Start in fresh context" {
             return ToolResult::ok(json!({
                 "approved": true,
                 "plan_path": report.display_path,
@@ -917,14 +965,25 @@ impl SessionPlugin for PlanModePlugin {
                                 "{op_name} requires session_id"
                             )));
                         };
-                        let enabled = match state.lock() {
-                            Ok(mut guard) => match op_name.as_str() {
-                                "plan_mode.enable" => guard.set_enabled(true).enabled,
-                                "plan_mode.disable" => guard.set_enabled(false).enabled,
-                                "plan_mode.toggle" => guard.toggle().enabled,
+                        let target_enabled = match state.lock() {
+                            Ok(guard) => match op_name.as_str() {
+                                "plan_mode.enable" => true,
+                                "plan_mode.disable" => false,
+                                "plan_mode.toggle" => !guard.enabled,
                                 _ => unreachable!(),
                             },
                             Err(_) => return ToolResult::err(json!("plan mode state poisoned")),
+                        };
+                        let enabled = match set_plan_mode_enabled_state(
+                            &state,
+                            &session_id,
+                            &ctx.host,
+                            target_enabled,
+                        )
+                        .await
+                        {
+                            Ok(enabled) => enabled,
+                            Err(err) => return ToolResult::err(json!(err.to_string())),
                         };
                         let report = match ensure_plan_report(&state, &session_id, &ctx.host, enabled)
                             .await

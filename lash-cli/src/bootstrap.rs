@@ -58,7 +58,6 @@ fn plugin_factories_for_surface(
         PromptContextPluginConfig::default(),
     )) as Arc<dyn PluginFactory>);
     if profile.interactive_extras {
-        plugin_factories.push(Arc::new(BuiltinPlanTrackerPluginFactory));
         plugin_factories.push(Arc::new(BuiltinPlanModePluginFactory::new(
             Default::default(),
         )));
@@ -76,10 +75,8 @@ fn plugin_factories_for_surface(
 }
 
 fn autonomous_tool_allowed(name: &str) -> bool {
-    !matches!(
-        name,
-        "ask" | "wait" | "show_snippet_to_user" | "update_plan" | "showcase"
-    ) && !name.starts_with("plan_")
+    !matches!(name, "ask" | "wait" | "show_snippet_to_user" | "showcase")
+        && !name.starts_with("plan_")
         && name != "request_user_input"
 }
 
@@ -617,7 +614,6 @@ mod tests {
             vec![
                 dummy_tool("read_file"),
                 dummy_tool("ask"),
-                dummy_tool("update_plan"),
                 dummy_tool("plan_exit"),
                 dummy_tool("showcase"),
             ]
@@ -638,7 +634,6 @@ mod tests {
         let enabled = dynamic_tools.enabled_tools();
         assert!(enabled.contains("read_file"));
         assert!(!enabled.contains("ask"));
-        assert!(!enabled.contains("update_plan"));
         assert!(!enabled.contains("plan_exit"));
         assert!(!enabled.contains("showcase"));
     }

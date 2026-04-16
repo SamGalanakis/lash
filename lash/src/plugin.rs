@@ -737,6 +737,32 @@ pub trait SessionManager: Send + Sync {
         }
         self.apply_dynamic_tool_state(session_id, snapshot).await
     }
+    async fn set_tool_state(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        enabled: Option<bool>,
+        injected: Option<bool>,
+    ) -> Result<u64, PluginError> {
+        let mut snapshot = self.dynamic_tool_state(session_id).await?;
+        let Some(spec) = snapshot.tools.get_mut(tool_name) else {
+            return Err(PluginError::Session(format!(
+                "unknown dynamic tool `{tool_name}`"
+            )));
+        };
+        if let Some(enabled) = enabled {
+            spec.definition.enabled = enabled;
+            if enabled {
+                snapshot.enabled_tools.insert(tool_name.to_string());
+            } else {
+                snapshot.enabled_tools.remove(tool_name);
+            }
+        }
+        if let Some(injected) = injected {
+            spec.definition.injected = injected;
+        }
+        self.apply_dynamic_tool_state(session_id, snapshot).await
+    }
     async fn create_session(
         &self,
         request: SessionCreateRequest,
@@ -1491,8 +1517,8 @@ mod builtin;
 
 #[cfg(feature = "sqlite-store")]
 pub use builtin::{
-    BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
-    BuiltinPromptContextPluginFactory, BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
+    BuiltinPlanModePluginFactory, BuiltinPromptContextPluginFactory,
+    BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
 };
 
 #[cfg(test)]

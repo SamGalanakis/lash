@@ -290,6 +290,20 @@ impl App {
         }
     }
 
+    pub fn prompt_has_options(&self) -> bool {
+        match &self.overlay {
+            Some(OverlayState::Prompt(prompt)) => prompt.has_options(),
+            _ => false,
+        }
+    }
+
+    pub fn prompt_uses_split_layout(&self) -> bool {
+        match &self.overlay {
+            Some(OverlayState::Prompt(prompt)) => prompt.uses_split_layout(),
+            _ => false,
+        }
+    }
+
     /// Whether the prompt allows selecting multiple options.
     pub fn is_prompt_multi_select(&self) -> bool {
         match &self.overlay {

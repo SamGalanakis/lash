@@ -287,11 +287,6 @@ impl ActivityState {
                 return blocks;
             }
         }
-        // Plan content block already renders the full checklist, so no activity line needed.
-        if name == "update_plan" {
-            return Vec::new();
-        }
-
         let status = if success {
             ActivityStatus::Completed
         } else {
@@ -626,8 +621,8 @@ mod tests {
             json!({"query":"planning"}),
             json!([
                 {
-                    "name":"update_plan",
-                    "description":"Update the active execution plan with concrete steps."
+                    "name":"plan_exit",
+                    "description":"Open the plan review prompt for the current plan file."
                 }
             ]),
             true,
@@ -647,7 +642,7 @@ mod tests {
         );
         assert_eq!(
             search_blocks[0].result.detail_lines,
-            vec!["update_plan: Update the active execution plan with concrete steps."]
+            vec!["plan_exit: Open the plan review prompt for the current plan file."]
         );
         assert_eq!(ask_blocks[0].call.summary, "Question");
         assert_eq!(

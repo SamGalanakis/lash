@@ -299,20 +299,6 @@ pub fn subagent_child() -> Style {
     Style::default().fg(text_subtle())
 }
 
-pub fn plan_done_marker() -> Style {
-    Style::default().fg(state_ok()).add_modifier(Modifier::Bold)
-}
-
-pub fn plan_active_marker() -> Style {
-    Style::default().fg(brand()).add_modifier(Modifier::Bold)
-}
-
-pub fn plan_pending_marker() -> Style {
-    Style::default()
-        .fg(text_subtle())
-        .add_modifier(Modifier::Bold)
-}
-
 pub fn turn_separator() -> Style {
     Style::default().fg(rule())
 }

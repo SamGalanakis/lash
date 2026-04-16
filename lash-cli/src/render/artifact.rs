@@ -83,25 +83,6 @@ pub(super) fn render_snippet_preview_with_indent(
     }
 }
 
-pub(super) fn render_plan_block(
-    content: &str,
-    lines: &mut Vec<Line<'static>>,
-    viewport_width: usize,
-) {
-    let content_lines = content.lines().map(str::to_string).collect::<Vec<_>>();
-    render_bordered_styled_block(
-        "PLAN",
-        &content_lines,
-        lines,
-        viewport_width,
-        Style::default().fg(theme::border_faint()),
-        Style::default()
-            .fg(theme::brand())
-            .add_modifier(Modifier::Bold),
-        styled_plan_chunk,
-    );
-}
-
 pub(super) fn render_section_panel_block(
     title_text: &str,
     content: &str,
@@ -209,31 +190,6 @@ fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
                     .fg(theme::brand())
                     .add_modifier(Modifier::Bold),
             ),
-            Span::raw(" "),
-            Span::styled(rest.to_string(), theme::assistant_text()),
-        ];
-    }
-    vec![Span::styled(chunk.to_string(), theme::assistant_text())]
-}
-
-fn styled_plan_chunk(chunk: &str) -> Vec<Span<'static>> {
-    if let Some(rest) = chunk.strip_prefix("✓ ") {
-        return vec![
-            Span::styled("✓", theme::plan_done_marker()),
-            Span::raw(" "),
-            Span::styled(rest.to_string(), theme::assistant_text()),
-        ];
-    }
-    if let Some(rest) = chunk.strip_prefix("▸ ") {
-        return vec![
-            Span::styled("▸", theme::plan_active_marker()),
-            Span::raw(" "),
-            Span::styled(rest.to_string(), theme::assistant_text()),
-        ];
-    }
-    if let Some(rest) = chunk.strip_prefix("○ ") {
-        return vec![
-            Span::styled("○", theme::plan_pending_marker()),
             Span::raw(" "),
             Span::styled(rest.to_string(), theme::assistant_text()),
         ];

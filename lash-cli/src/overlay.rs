@@ -28,6 +28,14 @@ pub struct PromptState {
 }
 
 impl PromptState {
+    pub fn has_review_content(&self) -> bool {
+        self.request.panel.is_some() || !self.request.question.trim().is_empty()
+    }
+
+    pub fn uses_split_layout(&self) -> bool {
+        self.has_review_content() && (self.has_options() || self.shows_text_input())
+    }
+
     pub fn has_options(&self) -> bool {
         !self.request.options.is_empty()
     }
