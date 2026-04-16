@@ -1214,7 +1214,6 @@ fn restore_files(root: &Path, files: &HashMap<String, String>) -> std::io::Resul
 mod tests {
     use super::*;
     use crate::plugin::StaticPluginFactory;
-    use crate::tools::UpdatePlanTool;
     use crate::{
         PluginError, PluginHost, PluginSpec, SessionHandle, SessionSnapshot, ToolDefinition,
         ToolResult, TurnInput,
@@ -1372,7 +1371,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn run_code_reports_finish_as_an_error_after_tool_call() {
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(UpdatePlanTool::new());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snippet_path = temp.path().join("note.md");
+        std::fs::write(&snippet_path, "# Note\nship it\n").expect("write snippet");
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::tools::ShowSnippetToUser::new());
         let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
             "test_tools",
             PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
@@ -1401,13 +1403,17 @@ mod tests {
                 "root",
                 manager,
                 &event_tx,
-                r#"
-call update_plan {
-  explanation: "done",
-  plan: [{ step: "ship it", status: "completed" }]
-}
+                &format!(
+                    r#"
+call show_snippet_to_user {{
+  path: "{}",
+  start_line: 1,
+  end_line: 1
+}}
 finish "ok"
 "#,
+                    snippet_path.display()
+                ),
                 false,
             )
             .await
@@ -1420,7 +1426,7 @@ finish "ok"
             )
         );
         assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].tool, "update_plan");
+        assert_eq!(response.tool_calls[0].tool, "show_snippet_to_user");
         assert!(response.tool_calls[0].success);
     }
 

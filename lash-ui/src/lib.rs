@@ -671,7 +671,7 @@ const PLAN_MODE_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
     name: "/plan",
     aliases: &[],
     usage: "/plan",
-    description: "Toggle plan mode",
+    description: "Open file-backed planning mode",
     argument_hint: None,
     argument_options: &[],
     takes_argument: false,
@@ -681,7 +681,7 @@ const PLAN_MODE_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
 
 const PLAN_MODE_SHORTCUTS: &[ShortcutSpec] = &[ShortcutSpec {
     chord: KeyChord::SHIFT_TAB,
-    description: "Toggle plan mode",
+    description: "Open file-backed planning mode",
     action: "toggle",
 }];
 
@@ -759,6 +759,19 @@ impl UiExtension for PlanModeUiExtension {
             if result
                 .get("execution_mode")
                 .and_then(|value| value.as_str())
+                == Some("current_session")
+                && let Some(input) = result
+                    .get("next_turn_input")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+            {
+                effects.push(UiHostEffect::QueueTurn {
+                    input: input.to_string(),
+                });
+            }
+            if result
+                .get("execution_mode")
+                .and_then(|value| value.as_str())
                 == Some("fresh_context")
                 && let Some(session_id) = result.get("session_id").and_then(|value| value.as_str())
             {
@@ -791,7 +804,10 @@ mod tests {
         assert!(extensions.shortcut_for(KeyChord::SHIFT_TAB).is_some());
         assert_eq!(
             extensions.completions("/pl"),
-            vec![("/plan".to_string(), "Toggle plan mode".to_string())]
+            vec![(
+                "/plan".to_string(),
+                "Open file-backed planning mode".to_string(),
+            )]
         );
     }
 
@@ -801,7 +817,7 @@ mod tests {
             plan_mode_effects(&PlanModeStatus {
                 enabled: true,
                 panel_title: Some("PLAN".to_string()),
-                panel_content: Some("- Path: `.lash/plans/root.md`".to_string()),
+                panel_content: Some("Path: `.lash/plans/root.md`".to_string()),
             }),
             vec![
                 UiHostEffect::UpsertModeIndicator {
@@ -812,7 +828,7 @@ mod tests {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string(),
                     title: "PLAN".to_string(),
-                    content: "- Path: `.lash/plans/root.md`".to_string(),
+                    content: "Path: `.lash/plans/root.md`".to_string(),
                 }
             ]
         );
@@ -869,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_exit_event_clears_plan_ui_without_queueing_turn() {
+    fn plan_exit_event_queues_current_session_follow_up() {
         let extensions = UiExtensions::builtin().expect("builtin extensions");
 
         let effects = extensions.effects_for_session_event(&SessionEvent::ToolCall {
@@ -894,6 +910,9 @@ mod tests {
                 UiHostEffect::ClearPanel {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string()
+                },
+                UiHostEffect::QueueTurn {
+                    input: "Execute the approved plan.".to_string()
                 }
             ]
         );

@@ -287,8 +287,6 @@ pub enum DisplayBlock {
     Error(String),
     /// Informational message from the system (e.g. /help output).
     SystemMessage(String),
-    /// Rendered plan content from update_plan (bordered markdown).
-    PlanContent(String),
     PluginPanel(PluginPanelBlock),
     Splash,
 }
@@ -619,11 +617,6 @@ impl App {
         self.blocks.push(DisplayBlock::UserInput(display));
         self.invalidate_height_cache();
         self.keep_latest_user_block_visible();
-    }
-
-    fn push_plan_content(&mut self, content: String) {
-        self.blocks.push(DisplayBlock::PlanContent(content));
-        self.invalidate_height_cache_from(self.blocks.len() - 1);
     }
 
     pub fn new(model: String, session_name: String) -> Self {
@@ -1100,11 +1093,6 @@ impl App {
             } => {
                 self.finalize_live_assistant();
                 self.clear_live_tool_output();
-                let plan_content = if success && name == "update_plan" {
-                    render_plan_content_from_args(&args)
-                } else {
-                    None
-                };
                 let activities = self.activity_state.blocks_for_tool_call(
                     &name,
                     args,
@@ -1128,9 +1116,6 @@ impl App {
                 }
                 for activity in activities {
                     self.push_activity_block(activity);
-                }
-                if let Some(content) = plan_content {
-                    self.push_plan_content(content);
                 }
                 if !matches!(self.blocks.last(), Some(DisplayBlock::Splash)) {
                     self.mark_visible_output();
@@ -1355,35 +1340,4 @@ pub fn format_tokens(n: i64) -> String {
     } else {
         format!("{}", n)
     }
-}
-
-pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<String> {
-    let items = args.get("plan").and_then(|value| value.as_array())?;
-    if items.is_empty() {
-        return None;
-    }
-
-    let mut lines = Vec::new();
-    if let Some(explanation) = args
-        .get("explanation")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(explanation.to_string());
-        lines.push(String::new());
-    }
-
-    for item in items {
-        let step = item.get("step").and_then(|value| value.as_str())?;
-        let status = item.get("status").and_then(|value| value.as_str())?;
-        let marker = match status {
-            "completed" => "\u{2713}",
-            "in_progress" => "\u{25b8}",
-            _ => "\u{25cb}",
-        };
-        lines.push(format!("{marker} {step}"));
-    }
-
-    Some(lines.join("\n"))
 }

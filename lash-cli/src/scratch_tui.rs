@@ -715,22 +715,56 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner_width = area
         .width
         .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize;
-    let lines = render::prompt_content_lines_snapshot(prompt, inner_width.max(1));
     let visible = area.height as usize;
-    let max_scroll = lines.len().saturating_sub(visible);
-    let scroll = if prompt.is_text_entry() {
+    let snapshot = render::prompt_render_snapshot(prompt, inner_width.max(1), visible);
+    let max_scroll = render::prompt_max_scroll(prompt, inner_width.max(1), visible);
+    let scroll = if prompt.is_text_entry() && !snapshot.split_layout {
         max_scroll
     } else {
         prompt.scroll_offset.min(max_scroll)
     };
-    for (idx, line) in lines.iter().skip(scroll).take(visible).enumerate() {
-        frame.write_line(
-            area.x + PROMPT_HORIZONTAL_PADDING,
-            area.y + idx as u16,
-            line,
-            area.width
-                .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)),
-        );
+    let content_width = area
+        .width
+        .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2));
+    if snapshot.split_layout {
+        for (idx, line) in snapshot
+            .review_lines
+            .iter()
+            .skip(scroll)
+            .take(snapshot.review_viewport_height)
+            .enumerate()
+        {
+            frame.write_line(
+                area.x + PROMPT_HORIZONTAL_PADDING,
+                area.y + idx as u16,
+                line,
+                content_width,
+            );
+        }
+        let interaction_y = area.y + snapshot.review_viewport_height as u16;
+        for (idx, line) in snapshot.interaction_lines.iter().enumerate() {
+            frame.write_line(
+                area.x + PROMPT_HORIZONTAL_PADDING,
+                interaction_y + idx as u16,
+                line,
+                content_width,
+            );
+        }
+    } else {
+        for (idx, line) in snapshot
+            .combined_lines
+            .iter()
+            .skip(scroll)
+            .take(visible)
+            .enumerate()
+        {
+            frame.write_line(
+                area.x + PROMPT_HORIZONTAL_PADDING,
+                area.y + idx as u16,
+                line,
+                content_width,
+            );
+        }
     }
 }
 
@@ -1223,7 +1257,7 @@ mod tests {
                 ),
             focus: PromptFocus::Options,
             cursor: 0,
-            scroll_offset: 5,
+            scroll_offset: 7,
             selected: Default::default(),
             reply_text: String::new(),
             reply_cursor: 0,
@@ -1234,6 +1268,8 @@ mod tests {
         let visible = snapshot.visible_lines_trimmed().join("\n");
         assert!(!visible.contains("line 1"));
         assert!(visible.contains("line 6") || visible.contains("line 7"));
+        assert!(visible.contains("Choices"));
+        assert!(visible.contains("Exit"));
     }
 
     #[test]

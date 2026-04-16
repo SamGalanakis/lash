@@ -12,26 +12,9 @@ fn other_variant_name(block: &DisplayBlock) -> &'static str {
         DisplayBlock::ShellOutput { .. } => "ShellOutput",
         DisplayBlock::Error(_) => "Error",
         DisplayBlock::SystemMessage(_) => "SystemMessage",
-        DisplayBlock::PlanContent(_) => "PlanContent",
         DisplayBlock::PluginPanel(_) => "PluginPanel",
         DisplayBlock::Splash => "Splash",
     }
-}
-
-#[test]
-fn renders_plan_content_from_update_plan_args() {
-    let content = render_plan_content_from_args(&serde_json::json!({
-        "explanation": "Found the renderer.",
-        "plan": [
-            {"step":"Inspect UI", "status":"completed"},
-            {"step":"Patch layout", "status":"in_progress"}
-        ]
-    }))
-    .expect("plan content");
-    assert!(content.contains("Found the renderer."));
-    assert!(content.contains("\u{2713} Inspect UI"));
-    assert!(content.contains("\u{25b8} Patch layout"));
-    assert!(!content.contains("1."));
 }
 
 #[test]
@@ -643,7 +626,7 @@ fn plugin_panel_events_upsert_and_clear_blocks() {
 }
 
 #[test]
-fn plan_exit_tool_does_not_queue_follow_up_turn() {
+fn plan_exit_tool_queues_follow_up_turn() {
     let mut app = App::new("test-model".into(), "test".into());
     let ui_extensions = lash_ui::UiExtensions::builtin().expect("builtin ui extensions");
     crate::apply_ui_host_effects(
@@ -655,6 +638,7 @@ fn plan_exit_tool_does_not_queue_follow_up_turn() {
             result: serde_json::json!({
                 "approved": true,
                 "plan_path": ".lash/plans/session.md",
+                "execution_mode": "current_session",
                 "next_turn_input": "Execute the plan in `.lash/plans/session.md`."
             }),
             success: true,
@@ -662,7 +646,12 @@ fn plan_exit_tool_does_not_queue_follow_up_turn() {
         }),
     );
 
-    assert!(app.take_next_queued_turn().is_none());
+    let (queued, was_pending) = app.take_next_queued_turn().expect("queued turn");
+    assert!(!was_pending);
+    assert_eq!(
+        queued.display_text,
+        "Execute the plan in `.lash/plans/session.md`."
+    );
 }
 
 #[test]

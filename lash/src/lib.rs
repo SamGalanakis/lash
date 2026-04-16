@@ -136,8 +136,8 @@ pub use plugin::{
 };
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{
-    BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
-    BuiltinPromptContextPluginFactory, BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
+    BuiltinPlanModePluginFactory, BuiltinPromptContextPluginFactory,
+    BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
 };
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{

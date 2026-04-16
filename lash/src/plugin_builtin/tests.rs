@@ -5,7 +5,6 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use super::plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
-use super::plan_tracker::PlanTrackerPluginFactory;
 use super::*;
 use crate::instructions::InstructionSource;
 use crate::plugin::{
@@ -13,10 +12,10 @@ use crate::plugin::{
     SessionStartPoint, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContext,
 };
 use crate::{
-    AssembledTurn, ExecutionMode, MessageRole, PersistedSessionState, PluginHost,
-    PluginSurfaceEvent, PromptSlot, SessionCreateRequest, SessionHandle, SessionManager,
-    SessionPolicy, SessionReadView, SessionSnapshot, SessionStateEnvelope, ToolDefinition,
-    ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
+    AssembledTurn, DynamicToolProvider, ExecutionMode, MessageRole, PersistedSessionState,
+    PluginHost, PluginSurfaceEvent, PromptSlot, SessionCreateRequest, SessionHandle,
+    SessionManager, SessionPolicy, SessionReadView, SessionSnapshot, SessionStateEnvelope,
+    ToolDefinition, ToolProvider, ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
 };
 
 use crate::test_support::{MockSessionManager, mock_assembled_turn};
@@ -38,10 +37,37 @@ fn mock_read_view(run_session_id: &str) -> SessionReadView {
     SessionReadView::from_persisted_state(&snapshot)
 }
 
+struct PlanModeDynamicTools;
+
+#[async_trait::async_trait]
+impl ToolProvider for PlanModeDynamicTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "plan_exit".to_string(),
+            description: "Ask whether to exit plan mode.".to_string(),
+            params: Vec::new(),
+            returns: "dict".to_string(),
+            examples: vec!["plan_exit()".to_string()],
+            enabled: false,
+            injected: false,
+            input_schema_override: None,
+            output_schema_override: None,
+        }]
+    }
+
+    async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
+        ToolResult::err_fmt(format_args!("unexpected tool call: {name}"))
+    }
+}
+
 fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
     MockSessionManager::default()
         .with_snapshot(mock_snapshot(run_session_id))
         .with_turn(mock_assembled_turn(run_session_id, ""))
+        .with_dynamic_tool_provider(
+            DynamicToolProvider::from_tool_provider(Arc::new(PlanModeDynamicTools))
+                .expect("plan mode dynamic tools"),
+        )
 }
 
 struct StaticInstructionSource {
@@ -349,46 +375,6 @@ fn rlm_tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
 }
 
 #[tokio::test]
-async fn plan_tracker_plugin_registers_update_plan_and_restores_state() {
-    let host = PluginHost::new(vec![Arc::new(PlanTrackerPluginFactory)]);
-    let session = host.build_standard_session("root", None).expect("session");
-    let tracker = session.tools();
-
-    let result = tracker
-        .execute(
-            "update_plan",
-            &json!({
-                "explanation": "Mapped the runtime/plugin seam.",
-                "plan": [
-                    {"step":"Inspect planning hooks","status":"completed"},
-                    {"step":"Split plugin ownership","status":"in_progress"}
-                ]
-            }),
-        )
-        .await;
-    assert!(result.success);
-    assert_eq!(result.result.as_str(), Some("Plan updated"));
-
-    let snapshot = session.snapshot().expect("snapshot");
-    let restored = host
-        .build_standard_session("restored", Some(&snapshot))
-        .expect("restored");
-    let restored_tracker = restored.tools();
-    let second_result = restored_tracker
-        .execute(
-            "update_plan",
-            &json!({
-                "plan": [
-                    {"step":"Inspect planning hooks","status":"completed"},
-                    {"step":"Split plugin ownership","status":"completed"}
-                ]
-            }),
-        )
-        .await;
-    assert!(second_result.success);
-}
-
-#[tokio::test]
 async fn plan_mode_plugin_toggle_and_status_round_trip() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
@@ -473,6 +459,68 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
 }
 
 #[tokio::test]
+async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
+    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager = Arc::new(mock_session_manager("run-session"));
+    let manager_host: Arc<dyn SessionManager> = manager.clone();
+
+    let initial = manager
+        .dynamic_tool_state("root")
+        .await
+        .expect("initial dynamic tool state");
+    assert!(
+        initial
+            .tools
+            .get("plan_exit")
+            .is_some_and(|tool| !tool.definition.enabled && !tool.definition.injected)
+    );
+
+    session
+        .invoke_external(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager_host.clone(),
+        )
+        .await
+        .expect("enable");
+
+    let enabled = manager
+        .dynamic_tool_state("root")
+        .await
+        .expect("enabled dynamic tool state");
+    assert!(
+        enabled
+            .tools
+            .get("plan_exit")
+            .is_some_and(|tool| tool.definition.enabled && tool.definition.injected)
+    );
+    assert!(enabled.enabled_tools.contains("plan_exit"));
+
+    session
+        .invoke_external("plan_mode.disable", json!({}), None, true, manager_host)
+        .await
+        .expect("disable");
+
+    let disabled = manager
+        .dynamic_tool_state("root")
+        .await
+        .expect("disabled dynamic tool state");
+    assert!(
+        disabled
+            .tools
+            .get("plan_exit")
+            .is_some_and(|tool| !tool.definition.enabled && !tool.definition.injected)
+    );
+    assert!(!disabled.enabled_tools.contains("plan_exit"));
+}
+
+#[tokio::test]
 async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
@@ -508,7 +556,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     && message.content.contains("Plan mode:")
                     && message.content.contains(".lash/plans/run-session.md")
                     && message.content.contains("plan_exit()")
-                    && message.content.contains("When you're done planning, call `plan_exit()` to leave plan mode."))
+                    && message.content.contains("single source of truth")
+                    && message.content.contains("panel only shows the file path"))
     )));
     assert!(before_turn.iter().any(|emitted| {
         emitted.plugin_id == "plan_mode"
@@ -529,8 +578,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 PluginDirective::EmitEvents { events }
                     if events.iter().any(|event| matches!(
                         event,
-                        crate::plugin::PluginSurfaceEvent::PanelUpsert { title, .. }
+                        crate::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
                             if title == "PLAN"
+                                && content.contains("Path: `.lash/plans/run-session.md`")
                     ))
             )
     }));
@@ -575,10 +625,10 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     output_schema_override: None,
                 },
                 ToolDefinition {
-                    name: "update_plan".to_string(),
-                    description: "Update plan".to_string(),
+                    name: "show_snippet_to_user".to_string(),
+                    description: "Show a snippet".to_string(),
                     params: vec![],
-                    returns: "str".to_string(),
+                    returns: "dict".to_string(),
                     examples: vec![],
                     enabled: true,
                     injected: true,
@@ -636,7 +686,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         surface
             .tools
             .iter()
-            .find(|tool| tool.name == "update_plan")
+            .find(|tool| tool.name == "show_snippet_to_user")
             .is_some_and(|tool| !tool.enabled && !tool.injected)
     );
     assert!(
@@ -660,18 +710,20 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             .any(|note| note.contains(".lash/plans/run-session.md"))
     );
 
-    let checklist_blocked = session
+    let snippet_blocked = session
         .before_tool_call(ToolCallHookContext {
             session_id: "root".to_string(),
-            tool_name: "update_plan".to_string(),
+            tool_name: "show_snippet_to_user".to_string(),
             args: json!({
-                "plan": [{"step":"Inspect planning hooks","status":"in_progress"}]
+                "path":"lash/src/plugin_builtin/plan_mode.rs",
+                "start_line": 1,
+                "end_line": 20
             }),
             host: Arc::clone(&manager),
         })
         .await
         .expect("before_tool_call");
-    assert!(checklist_blocked.iter().any(|emitted| matches!(
+    assert!(snippet_blocked.iter().any(|emitted| matches!(
         &emitted.value,
         PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
     )));
@@ -769,7 +821,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             if messages.iter().any(|message|
                 message.content.contains(".lash/plans/run-session.md")
                     && message.content.contains("plan_exit()")
-                    && message.content.contains("When you're done planning, call `plan_exit()` to leave plan mode."))
+                    && message.content.contains("single source of truth")
+                    && message.content.contains("panel only shows the file path"))
     )));
 
     session
@@ -876,9 +929,11 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
     let blocked = session
         .before_tool_call(ToolCallHookContext {
             session_id: "root".to_string(),
-            tool_name: "update_plan".to_string(),
+            tool_name: "show_snippet_to_user".to_string(),
             args: json!({
-                "plan": [{"step":"Inspect planning hooks","status":"in_progress"}]
+                "path":"lash/src/plugin_builtin/plan_mode.rs",
+                "start_line": 1,
+                "end_line": 20
             }),
             host: Arc::clone(&manager),
         })
@@ -905,39 +960,53 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
 
 #[tokio::test]
 async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
-    struct PromptingSessionManager;
+    struct PromptingSessionManager {
+        base: MockSessionManager,
+    }
 
     #[async_trait::async_trait]
     impl SessionManager for PromptingSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-            Ok(mock_snapshot("run-session"))
+            self.base.snapshot_current().await
         }
 
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<SessionSnapshot, PluginError> {
-            Ok(mock_snapshot("run-session"))
+        async fn snapshot_session(&self, session_id: &str) -> Result<SessionSnapshot, PluginError> {
+            self.base.snapshot_session(session_id).await
         }
 
         async fn tool_catalog(
             &self,
-            _session_id: &str,
+            session_id: &str,
         ) -> Result<Vec<serde_json::Value>, PluginError> {
-            Ok(Vec::new())
+            self.base.tool_catalog(session_id).await
+        }
+
+        async fn dynamic_tool_state(
+            &self,
+            session_id: &str,
+        ) -> Result<crate::DynamicStateSnapshot, PluginError> {
+            self.base.dynamic_tool_state(session_id).await
+        }
+
+        async fn apply_dynamic_tool_state(
+            &self,
+            session_id: &str,
+            snapshot: crate::DynamicStateSnapshot,
+        ) -> Result<u64, PluginError> {
+            self.base
+                .apply_dynamic_tool_state(session_id, snapshot)
+                .await
         }
 
         async fn create_session(
             &self,
             request: SessionCreateRequest,
         ) -> Result<SessionHandle, PluginError> {
-            let base = mock_session_manager("run-session");
-            base.create_session(request).await
+            self.base.create_session(request).await
         }
 
         async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
-            let base = mock_session_manager("run-session");
-            base.close_session(session_id).await
+            self.base.close_session(session_id).await
         }
 
         async fn start_turn_stream(
@@ -945,18 +1014,15 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             session_id: &str,
             input: TurnInput,
         ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-            let base = mock_session_manager("run-session");
-            base.start_turn_stream(session_id, input).await
+            self.base.start_turn_stream(session_id, input).await
         }
 
         async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            let base = mock_session_manager("run-session");
-            base.await_turn(turn_id).await
+            self.base.await_turn(turn_id).await
         }
 
         async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-            let base = mock_session_manager("run-session");
-            base.cancel_turn(turn_id).await
+            self.base.cancel_turn(turn_id).await
         }
 
         async fn prompt_user(
@@ -967,9 +1033,9 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             assert!(request.allows_note());
             let panel = request.panel.expect("plan review panel");
             assert_eq!(panel.title, "PLAN");
-            assert_eq!(panel.markdown, ready_plan_markdown());
+            assert_eq!(panel.markdown, ready_plan_markdown().trim_end());
             Ok(crate::PromptResponse::Single {
-                selection: "Exit plan mode".to_string(),
+                selection: "Start implementing now".to_string(),
                 note: Some("start with the safe slice".to_string()),
             })
         }
@@ -994,7 +1060,10 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         PlanModePluginConfig::default(),
     ))]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(PromptingSessionManager);
+    let manager = Arc::new(PromptingSessionManager {
+        base: mock_session_manager("run-session"),
+    });
+    let manager_host: Arc<dyn SessionManager> = manager.clone();
 
     session
         .invoke_external(
@@ -1002,7 +1071,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             json!({}),
             None,
             true,
-            Arc::clone(&manager),
+            Arc::clone(&manager_host),
         )
         .await
         .expect("enable");
@@ -1010,7 +1079,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: Arc::clone(&manager),
+            host: Arc::clone(&manager_host),
         })
         .await
         .expect("before_turn");
@@ -1022,7 +1091,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             &json!({}),
             &crate::ToolExecutionContext {
                 session_id: "root".to_string(),
-                host: Arc::clone(&manager),
+                host: Arc::clone(&manager_host),
                 cancellation_token: None,
                 async_task_id: None,
             },
@@ -1050,7 +1119,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     );
 
     let status = session
-        .invoke_external("plan_mode.status", json!({}), None, true, manager)
+        .invoke_external("plan_mode.status", json!({}), None, true, manager_host)
         .await
         .expect("status");
     assert_eq!(
@@ -1060,6 +1129,17 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             .and_then(|value| value.as_bool()),
         Some(false)
     );
+    let dynamic = manager
+        .dynamic_tool_state("root")
+        .await
+        .expect("dynamic tool state");
+    assert!(
+        dynamic
+            .tools
+            .get("plan_exit")
+            .is_some_and(|tool| !tool.definition.enabled && !tool.definition.injected)
+    );
+    assert!(!dynamic.enabled_tools.contains("plan_exit"));
 }
 
 #[tokio::test]
@@ -1124,13 +1204,13 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
         ) -> Result<crate::PromptResponse, PluginError> {
             assert_eq!(
                 request.question,
-                "Exit plan mode for `.lash/plans/run-session.md`?"
+                "Review the plan in `.lash/plans/run-session.md`. What next?"
             );
             let panel = request.panel.expect("plan review panel");
             assert_eq!(panel.title, "PLAN");
             assert!(panel.markdown.contains("# Plan"));
             Ok(crate::PromptResponse::Single {
-                selection: "Execute plan now".to_string(),
+                selection: "Start implementing now".to_string(),
                 note: None,
             })
         }
@@ -1254,7 +1334,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             _request: crate::PromptRequest,
         ) -> Result<crate::PromptResponse, PluginError> {
             Ok(crate::PromptResponse::Single {
-                selection: "Execute with fresh context".to_string(),
+                selection: "Start in fresh context".to_string(),
                 note: None,
             })
         }

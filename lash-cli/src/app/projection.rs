@@ -299,12 +299,6 @@ fn append_tool_result_blocks(
         return;
     };
 
-    let plan_content = if record.success && record.tool == "update_plan" {
-        render_plan_content_from_args(&record.args)
-    } else {
-        None
-    };
-
     for activity in activity_state.blocks_for_tool_call(
         &record.tool,
         record.args.clone(),
@@ -313,10 +307,6 @@ fn append_tool_result_blocks(
         record.duration_ms,
     ) {
         append_activity_block(blocks, activity);
-    }
-
-    if let Some(content) = plan_content {
-        blocks.push(DisplayBlock::PlanContent(content));
     }
 }
 

@@ -70,6 +70,7 @@ pub struct MockSessionManager {
     pub snapshot: SessionSnapshot,
     pub tool_catalog: Vec<serde_json::Value>,
     pub turn: AssembledTurn,
+    pub dynamic_tools: Option<crate::DynamicToolProvider>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
     pub cancelled: Mutex<Vec<String>>,
     pub closed: Mutex<Vec<String>>,
@@ -81,6 +82,7 @@ impl Default for MockSessionManager {
             snapshot: PersistedSessionState::default(),
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
+            dynamic_tools: None,
             created: Mutex::new(Vec::new()),
             cancelled: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
@@ -105,6 +107,12 @@ impl MockSessionManager {
         self
     }
 
+    #[allow(dead_code)]
+    pub fn with_dynamic_tool_provider(mut self, dynamic_tools: crate::DynamicToolProvider) -> Self {
+        self.dynamic_tools = Some(dynamic_tools);
+        self
+    }
+
     /// Snapshot of the requests captured by `create_session`. Panics if
     /// the lock is poisoned (a panic from another test thread).
     pub fn created_snapshot(&self) -> Vec<SessionCreateRequest> {
@@ -124,6 +132,35 @@ impl SessionManager for MockSessionManager {
 
     async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
         Ok(self.tool_catalog.clone())
+    }
+
+    async fn dynamic_tool_state(
+        &self,
+        _session_id: &str,
+    ) -> Result<crate::DynamicStateSnapshot, PluginError> {
+        self.dynamic_tools
+            .as_ref()
+            .map(crate::DynamicToolProvider::export_state)
+            .ok_or_else(|| {
+                PluginError::Session(
+                    "dynamic tool state is unavailable in this session".to_string(),
+                )
+            })
+    }
+
+    async fn apply_dynamic_tool_state(
+        &self,
+        _session_id: &str,
+        snapshot: crate::DynamicStateSnapshot,
+    ) -> Result<u64, PluginError> {
+        let Some(dynamic_tools) = self.dynamic_tools.as_ref() else {
+            return Err(PluginError::Session(
+                "dynamic tool state mutation is unavailable in this session".to_string(),
+            ));
+        };
+        dynamic_tools
+            .apply_state(snapshot)
+            .map_err(|err| PluginError::Session(err.to_string()))
     }
 
     async fn create_session(

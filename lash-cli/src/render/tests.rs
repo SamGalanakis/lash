@@ -839,7 +839,7 @@ fn plugin_panel_renders_as_section_header_without_box() {
         plugin_id: "plan_mode".into(),
         key: "panel".into(),
         title: "PLAN".into(),
-        content: "Entered plan mode.\n\n`.lash/plans/demo.md`".into(),
+        content: "Path: `.lash/plans/demo.md`".into(),
     })];
 
     let rendered = render_block(&blocks, 0, 1, 72, 20)
@@ -856,12 +856,7 @@ fn plugin_panel_renders_as_section_header_without_box() {
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("Entered plan mode."))
-    );
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains(".lash/plans/demo.md"))
+            .any(|line| line.contains("Path: .lash/plans/demo.md"))
     );
     assert!(!rendered.iter().any(|line| line.contains("┌")));
     assert!(!rendered.iter().any(|line| line.contains("└")));

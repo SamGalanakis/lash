@@ -1,5 +1,13 @@
 use super::*;
 
+pub(crate) struct PromptRenderSnapshot {
+    pub combined_lines: Vec<Line<'static>>,
+    pub review_lines: Vec<Line<'static>>,
+    pub interaction_lines: Vec<Line<'static>>,
+    pub split_layout: bool,
+    pub review_viewport_height: usize,
+}
+
 pub(crate) fn prompt_height(app: &App, frame_width: u16, frame_height: u16) -> u16 {
     let Some(prompt) = app.prompt_state() else {
         return 3;
@@ -22,8 +30,41 @@ pub(crate) fn prompt_max_scroll(
     inner_w: usize,
     visible_height: usize,
 ) -> usize {
-    let total_lines = prompt_content_lines(prompt, inner_w).len();
-    total_lines.saturating_sub(visible_height)
+    let snapshot = prompt_render_snapshot(prompt, inner_w, visible_height);
+    if snapshot.split_layout {
+        snapshot
+            .review_lines
+            .len()
+            .saturating_sub(snapshot.review_viewport_height)
+    } else {
+        snapshot.combined_lines.len().saturating_sub(visible_height)
+    }
+}
+
+pub(crate) fn prompt_render_snapshot(
+    prompt: &PromptState,
+    inner_w: usize,
+    visible_height: usize,
+) -> PromptRenderSnapshot {
+    let review_lines = prompt_review_lines(prompt, inner_w);
+    let interaction_lines = prompt_interaction_lines(prompt, inner_w);
+    let combined_lines = join_prompt_sections(&review_lines, &interaction_lines);
+    let split_layout = prompt.uses_split_layout()
+        && !review_lines.is_empty()
+        && !interaction_lines.is_empty()
+        && visible_height > interaction_lines.len();
+    let review_viewport_height = if split_layout {
+        visible_height.saturating_sub(interaction_lines.len())
+    } else {
+        visible_height
+    };
+    PromptRenderSnapshot {
+        combined_lines,
+        review_lines,
+        interaction_lines,
+        split_layout,
+        review_viewport_height,
+    }
 }
 
 pub(crate) fn prompt_section_label(text: &str, inner_w: usize) -> Line<'static> {
@@ -231,18 +272,15 @@ fn render_prompt_panel_lines(
     lines
 }
 
-fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
-    let has_options = prompt.has_options();
-    let show_text_input = prompt.shows_text_input();
+fn prompt_review_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-
     if let Some(panel) = prompt.request.panel.as_ref() {
         lines.extend(render_prompt_panel_lines(
             &panel.title,
             &panel.markdown,
             inner_w,
         ));
-        if !prompt.request.question.is_empty() || has_options || show_text_input {
+        if !prompt.request.question.is_empty() {
             lines.push(Line::from(""));
         }
     }
@@ -255,9 +293,13 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
             Style::default().fg(theme::text_primary()),
         );
     }
-    if !lines.is_empty() && (has_options || show_text_input) {
-        lines.push(Line::from(""));
-    }
+    lines
+}
+
+fn prompt_interaction_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
+    let has_options = prompt.has_options();
+    let show_text_input = prompt.shows_text_input();
+    let mut lines = Vec::new();
 
     if has_options {
         lines.push(prompt_section_label(
@@ -320,8 +362,10 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
     }
 
     if show_text_input {
-        if prompt.supports_note() {
+        if has_options {
             lines.push(Line::from(""));
+        }
+        if prompt.supports_note() {
             lines.push(prompt_section_label("Note", inner_w));
         }
         let (input_text, is_placeholder) = prompt_input_text(prompt);
@@ -351,4 +395,22 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
     }
     lines.push(prompt_help_line(prompt));
     lines
+}
+
+fn join_prompt_sections(
+    review_lines: &[Line<'static>],
+    interaction_lines: &[Line<'static>],
+) -> Vec<Line<'static>> {
+    let mut lines = review_lines.to_vec();
+    if !lines.is_empty() && !interaction_lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines.extend(interaction_lines.iter().cloned());
+    lines
+}
+
+fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
+    let review_lines = prompt_review_lines(prompt, inner_w);
+    let interaction_lines = prompt_interaction_lines(prompt, inner_w);
+    join_prompt_sections(&review_lines, &interaction_lines)
 }

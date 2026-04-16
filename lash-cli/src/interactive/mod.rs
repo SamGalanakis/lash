@@ -308,12 +308,9 @@ fn current_ui_action_context(app: &App, terminal: &Terminal) -> UiActionContext 
     let (width, height) = terminal.size().unwrap_or((80, 24));
     let viewport_height = render::history_viewport_height(app, width, height);
     let prompt_max_scroll = if let Some(prompt) = app.prompt_state() {
-        let input_area_height = height.saturating_sub(
-            1 + if app.live_turn.is_some() { 1 } else { 0 }
-                + render::queue_preview_lines_snapshot(app, width).len() as u16,
-        );
-        let visible_height = input_area_height as usize;
-        let inner_width = width.saturating_sub(2) as usize;
+        let prompt_area = render::input_area(app, width, height);
+        let visible_height = prompt_area.height as usize;
+        let inner_width = prompt_area.width.saturating_sub(2) as usize;
         render::prompt_max_scroll(prompt, inner_width.max(1), visible_height)
     } else {
         0
@@ -1341,7 +1338,8 @@ pub(crate) async fn run_app(
                         continue;
                     }
 
-                    if app.has_prompt() && !app.is_prompt_text_entry() {
+                    if app.has_prompt() && !app.is_prompt_text_entry() && !app.prompt_has_options()
+                    {
                         if key.code == KeyCode::Up {
                             let _ = apply_terminal_action(
                                 &mut app,
@@ -2179,6 +2177,7 @@ pub(crate) async fn run_app(
                 app.dirty = true;
                 let ha = app.history_area;
                 let (term_width, term_height) = terminal.size()?;
+                let prompt_area = render::input_area(&app, term_width, term_height);
                 let input_area = render::input_content_area(&app, term_width, term_height);
                 let workspace_active = app
                     .ui_extensions()
@@ -2196,8 +2195,25 @@ pub(crate) async fn run_app(
                     && mouse.column < input_area.x + input_area.width;
 
                 if app.has_prompt() {
+                    let prompt_review_height = app.prompt_state().map_or(0, |prompt| {
+                        let inner_width = prompt_area.width.saturating_sub(2) as usize;
+                        render::prompt_render_snapshot(
+                            prompt,
+                            inner_width.max(1),
+                            prompt_area.height as usize,
+                        )
+                        .review_viewport_height
+                    });
+                    let in_prompt_review = prompt_area.width > 0
+                        && prompt_area.height > 0
+                        && mouse.row >= prompt_area.y
+                        && mouse.row < prompt_area.y + prompt_review_height as u16
+                        && mouse.column >= prompt_area.x
+                        && mouse.column < prompt_area.x + prompt_area.width;
                     match mouse.kind {
-                        MouseEventKind::ScrollUp => {
+                        MouseEventKind::ScrollUp
+                            if !app.prompt_uses_split_layout() || in_prompt_review =>
+                        {
                             let _ = apply_terminal_action(
                                 &mut app,
                                 &terminal,
@@ -2206,7 +2222,9 @@ pub(crate) async fn run_app(
                             app.dirty = true;
                             continue;
                         }
-                        MouseEventKind::ScrollDown => {
+                        MouseEventKind::ScrollDown
+                            if !app.prompt_uses_split_layout() || in_prompt_review =>
+                        {
                             let _ = apply_terminal_action(
                                 &mut app,
                                 &terminal,
