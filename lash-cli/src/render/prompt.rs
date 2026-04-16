@@ -18,6 +18,7 @@ pub(crate) fn prompt_height(app: &App, frame_width: u16, frame_height: u16) -> u
     content_h.max(1).min(max_height)
 }
 
+#[cfg(test)]
 pub(crate) fn prompt_content_lines_snapshot(
     prompt: &PromptState,
     inner_w: usize,
