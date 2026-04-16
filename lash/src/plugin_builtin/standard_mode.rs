@@ -3,22 +3,12 @@ use std::sync::Arc;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use crate::plugin::{
-    ModeExecutionPlugin, ModeExecutionPreamble, ModeNativeToolsPlugin, ModeSessionPlugin,
-    ModeTurnConfig, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
-    SessionPlugin,
+    ModeNativeToolsPlugin, ModeSessionPlugin, PluginError, PluginFactory, PluginRegistrar,
+    PluginSessionContext, SessionPlugin,
 };
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::tools::batch::batch_tool_definition;
 use crate::{ExecutionMode, ProgressSender, SessionError, ToolImage, ToolResult};
-
-const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution is needed.
-
-- Work in small, concrete steps and verify each meaningful step.
-- Use `batch` for two or more independent tool calls. Serialize calls when later arguments depend on earlier results.
-- Avoid filler prose between tool calls.
-- If you are unsure, resolve the uncertainty with the smallest relevant check.
-- Before concluding, verify the concrete end-state whenever possible.
-- For direct conversational requests that need no tools, respond in prose only."#;
 
 pub(crate) struct StandardModePluginFactory;
 
@@ -47,35 +37,9 @@ impl SessionPlugin for StandardModePlugin {
         if !self.active {
             return Ok(());
         }
-        reg.mode().execution(Arc::new(StandardModeExecution))?;
         reg.mode().session(Arc::new(StandardModeSession))?;
         reg.mode().native_tools(Arc::new(StandardModeNativeTools))?;
         Ok(())
-    }
-}
-
-struct StandardModeExecution;
-
-impl ModeExecutionPlugin for StandardModeExecution {
-    fn build_execution_preamble(
-        &self,
-        surface: &crate::plugin::ExecutionSurface,
-    ) -> ModeExecutionPreamble {
-        let enabled_tools = surface.enabled_tools();
-        ModeExecutionPreamble {
-            tool_specs: Arc::new(lash_sansio::session_model::model_tool_specs(&enabled_tools)),
-            tool_names: enabled_tools.iter().map(|tool| tool.name.clone()).collect(),
-            omitted_tool_count: 0,
-            execution_prompt: STANDARD_EXECUTION_SECTION.to_string(),
-            prompt_contributions: Vec::new(),
-        }
-    }
-
-    fn turn_config(&self) -> ModeTurnConfig {
-        ModeTurnConfig {
-            protocol: std::sync::Arc::new(crate::modes::StandardDriver),
-            sync_execution_surface: false,
-        }
     }
 }
 

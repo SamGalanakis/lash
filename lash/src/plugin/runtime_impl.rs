@@ -261,7 +261,6 @@ pub struct PluginRegistrar {
     commands: BTreeMap<String, RegisteredCommand>,
     turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
-    mode_execution: Option<RegisteredExclusiveHook<Arc<dyn ModeExecutionPlugin>>>,
     mode_session: Option<RegisteredExclusiveHook<Arc<dyn ModeSessionPlugin>>>,
     mode_native_tools: Option<RegisteredExclusiveHook<Arc<dyn ModeNativeToolsPlugin>>>,
     registering_plugin_id: Option<String>,
@@ -416,13 +415,6 @@ pub(crate) struct ModeRegistrations<'a> {
 }
 
 impl ModeRegistrations<'_> {
-    pub(crate) fn execution(
-        self,
-        provider: Arc<dyn ModeExecutionPlugin>,
-    ) -> Result<(), PluginError> {
-        self.reg.add_mode_execution(provider)
-    }
-
     pub(crate) fn session(self, provider: Arc<dyn ModeSessionPlugin>) -> Result<(), PluginError> {
         self.reg.add_mode_session(provider)
     }
@@ -457,7 +449,6 @@ impl PluginRegistrar {
             commands: BTreeMap::new(),
             turn_context_transforms: Vec::new(),
             history_rewriters: Vec::new(),
-            mode_execution: None,
             mode_session: None,
             mode_native_tools: None,
             registering_plugin_id: None,
@@ -658,19 +649,6 @@ impl PluginRegistrar {
         Ok(())
     }
 
-    fn add_mode_execution(
-        &mut self,
-        provider: Arc<dyn ModeExecutionPlugin>,
-    ) -> Result<(), PluginError> {
-        register_singleton_hook(
-            &mut self.mode_execution,
-            &self.registering_plugin_id,
-            "mode execution capability",
-            "mode_execution",
-            provider,
-        )
-    }
-
     fn add_mode_session(
         &mut self,
         provider: Arc<dyn ModeSessionPlugin>,
@@ -813,16 +791,6 @@ impl PluginHost {
             reg.registering_plugin_id = None;
             plugins.push(plugin);
         }
-        let mode_execution = reg
-            .mode_execution
-            .take()
-            .ok_or_else(|| {
-                PluginError::Registration(format!(
-                    "missing mode execution capability for {:?}",
-                    execution_mode
-                ))
-            })?
-            .hook;
         let mode_session = reg
             .mode_session
             .take()
@@ -920,7 +888,6 @@ impl PluginHost {
                 list.sort_by(|a, b| b.0.cmp(&a.0));
                 list.into_iter().map(|(_, r)| r).collect()
             },
-            mode_execution,
             mode_session,
             mode_native_tools,
         });
@@ -1040,7 +1007,6 @@ pub struct PluginSession {
     commands: BTreeMap<String, RegisteredCommand>,
     turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
     history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
-    mode_execution: Arc<dyn ModeExecutionPlugin>,
     mode_session: Arc<dyn ModeSessionPlugin>,
     mode_native_tools: Arc<dyn ModeNativeToolsPlugin>,
 }
@@ -1066,10 +1032,6 @@ impl PluginSession {
         self.dynamic_tools.clone()
     }
 
-    pub(crate) fn mode_execution(&self) -> &Arc<dyn ModeExecutionPlugin> {
-        &self.mode_execution
-    }
-
     pub(crate) fn mode_session(&self) -> &Arc<dyn ModeSessionPlugin> {
         &self.mode_session
     }
@@ -1078,7 +1040,7 @@ impl PluginSession {
         &self.mode_native_tools
     }
 
-    pub fn execution_surface(&self, session_id: &str, mode: ExecutionMode) -> ExecutionSurface {
+    pub fn tool_surface(&self, session_id: &str, mode: ExecutionMode) -> crate::ToolSurface {
         let mut tools = self.tools.definitions();
         if mode == self.execution_mode {
             tools.extend(self.mode_native_tools.definitions());
@@ -1090,80 +1052,36 @@ impl PluginSession {
         })
         .unwrap_or_else(|err| {
             tracing::warn!("failed to resolve tool surface: {err}");
-            ExecutionSurface::from_tools(tools)
+            crate::ToolSurface::from_tools(tools)
         })
     }
 
     pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
-        crate::tools::project_tool_catalog(self.execution_surface(session_id, mode).enabled_tools())
+        crate::tools::project_tool_catalog(self.tool_surface(session_id, mode).enabled_tools())
     }
 
     pub fn resolve_tool_surface(
         &self,
         ctx: ToolSurfaceContext,
-    ) -> Result<ExecutionSurface, PluginError> {
-        let mode = ctx.mode;
-        let mut resolved = ExecutionSurface::from_tools(ctx.tools.clone());
-        for owned in collect_owned_sync(
+    ) -> Result<crate::ToolSurface, PluginError> {
+        let mut contributions = collect_owned_sync(
             &self.tool_surface_contributors,
             ToolSurfaceContext {
                 session_id: ctx.session_id.clone(),
-                mode,
-                tools: resolved.tools.clone(),
+                mode: ctx.mode,
+                tools: ctx.tools.clone(),
             },
             |hook, ctx| hook(ctx),
-        )? {
-            let contribution = owned.value;
-            for override_ in contribution.overrides {
-                if let Some(tool) = resolved
-                    .tools
-                    .iter_mut()
-                    .find(|tool| tool.name == override_.tool_name)
-                {
-                    if let Some(enabled) = override_.enabled {
-                        tool.enabled = enabled;
-                    }
-                    if let Some(injected) = override_.injected {
-                        tool.injected = injected;
-                    }
-                    if !tool.enabled {
-                        tool.injected = false;
-                    }
-                }
-            }
-            resolved.tool_list_notes.extend(
-                contribution
-                    .tool_list_notes
-                    .into_iter()
-                    .map(|note| note.trim().to_string())
-                    .filter(|note| !note.is_empty()),
-            );
-        }
-        for override_ in &self.tool_surface_overlay.overrides {
-            if let Some(tool) = resolved
-                .tools
-                .iter_mut()
-                .find(|tool| tool.name == override_.tool_name)
-            {
-                if let Some(enabled) = override_.enabled {
-                    tool.enabled = enabled;
-                }
-                if let Some(injected) = override_.injected {
-                    tool.injected = injected;
-                }
-                if !tool.enabled {
-                    tool.injected = false;
-                }
-            }
-        }
-        resolved.tool_list_notes.extend(
-            self.tool_surface_overlay
-                .tool_list_notes
-                .iter()
-                .map(|note| note.trim().to_string())
-                .filter(|note| !note.is_empty()),
-        );
-        Ok(resolved)
+        )?
+        .into_iter()
+        .map(|owned| owned.value)
+        .collect::<Vec<_>>();
+        contributions.push(self.tool_surface_overlay.clone());
+        Ok(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
+            tools: ctx.tools,
+            mode: ctx.mode,
+            contributions,
+        }))
     }
 
     pub fn external_ops(&self) -> Vec<ExternalOpDef> {

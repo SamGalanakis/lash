@@ -1,18 +1,13 @@
-use std::sync::Arc;
-
 pub mod context;
 pub use lash_sansio::session_model::message;
 pub use lash_sansio::session_model::prompt;
 
 use tokio::sync::mpsc;
 
-use crate::PromptContext;
-use crate::ToolDefinition;
 use crate::llm::factory::adapter_for;
-use crate::llm::types::{LlmEventSender, LlmStreamEvent, LlmToolSpec};
-use crate::plugin::{PluginMessage, PromptContribution};
+use crate::llm::types::{LlmEventSender, LlmStreamEvent};
+use crate::plugin::PluginMessage;
 use crate::provider::Provider;
-use crate::session::Session;
 use crate::{ContextApproach, ExecutionMode};
 
 pub use lash_sansio::session_model::{
@@ -113,12 +108,6 @@ impl Default for SessionPolicy {
     }
 }
 
-pub(crate) struct ExecutionPreamble {
-    pub(crate) model: String,
-    pub(crate) tool_specs: Arc<Vec<LlmToolSpec>>,
-    pub(crate) prompt: PromptContext,
-}
-
 pub(crate) fn transport_stream_events(
     provider: &Provider,
     requested: Option<tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>>,
@@ -143,54 +132,4 @@ fn make_stream_event_sender(
     LlmEventSender::new(move |event| {
         let _ = tx.send(event);
     })
-}
-
-pub(crate) fn build_execution_preamble(
-    session: &Session,
-    policy: &SessionPolicy,
-    mode: ExecutionMode,
-    model: String,
-) -> ExecutionPreamble {
-    let session_id = policy.session_id.as_deref().unwrap_or("root");
-    let preamble = session.mode_execution_preamble(session_id, mode);
-    let prompt = PromptContext {
-        mode,
-        execution_prompt: preamble.execution_prompt.clone(),
-        tool_names: preamble.tool_names.clone(),
-        omitted_tool_count: preamble.omitted_tool_count,
-        contributions: preamble.prompt_contributions.clone(),
-    };
-
-    tracing::debug!(
-        session_id,
-        ?mode,
-        model,
-        enabled_tool_count = prompt.tool_names.len(),
-        omitted_tool_count = prompt.omitted_tool_count,
-        tool_names = ?prompt.tool_names,
-        execution_prompt_preview = %prompt.execution_prompt.chars().take(400).collect::<String>(),
-        "built execution preamble"
-    );
-
-    ExecutionPreamble {
-        model,
-        tool_specs: Arc::clone(&preamble.tool_specs),
-        prompt,
-    }
-}
-
-pub(crate) fn finalize_prompt_context(
-    mut prompt: PromptContext,
-    plugin_prompt_contributions: Vec<PromptContribution>,
-) -> PromptContext {
-    prompt.contributions.extend(plugin_prompt_contributions);
-    prompt
-}
-
-pub(crate) fn count_prompt_omitted_tools(all_tools: &[ToolDefinition]) -> usize {
-    all_tools
-        .iter()
-        .filter(|t| t.enabled)
-        .filter(|t| !t.injected)
-        .count()
 }

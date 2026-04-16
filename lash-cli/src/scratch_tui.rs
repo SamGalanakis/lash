@@ -1,4 +1,5 @@
-use lash_tui::{Frame, Line, Modifier, Rect, Span, Style};
+use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, TermCapabilities};
+use lash_ui::{UiRenderContext, UiSurfaceScene, UiSurfaceSlot};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, format_tokens};
@@ -9,6 +10,14 @@ const INPUT_HORIZONTAL_PADDING: u16 = 1;
 const PROMPT_HORIZONTAL_PADDING: u16 = 1;
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
+    draw_with_capabilities(frame, app, TermCapabilities::default());
+}
+
+pub fn draw_with_capabilities(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    capabilities: TermCapabilities,
+) {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -17,26 +26,48 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     frame.clear(bg(theme::surface_base()));
 
     let history = render::history_area(app, area.width, area.height);
-    let turn_height = if app.live_turn.is_some() { 1 } else { 0 };
+    let dock_area = render::dock_area(app, area.width, area.height);
+    let turn_area = render::turn_status_area(app, area.width, area.height);
     let queue_lines = render::queue_preview_lines_snapshot(app, area.width);
-    let queue_height = queue_lines.len() as u16;
-    let turn_area = Rect::new(0, history.bottom(), area.width, turn_height);
-    let queue_area = Rect::new(0, turn_area.bottom(), area.width, queue_height);
-    let input_area = Rect::new(
-        0,
-        queue_area.bottom(),
-        area.width,
-        area.height.saturating_sub(queue_area.bottom()),
-    );
+    let queue_area = render::queue_area(app, area.width, area.height);
+    let footer_area = render::footer_area(app, area.width, area.height);
+    let input_area = render::input_area(app, area.width, area.height);
+    let body_area = render::body_area(app, area.width, area.height);
 
+    let surfaces = app.ui_extensions().surface_scene();
     draw_status_bar(frame, app, Rect::new(0, 0, area.width, 1));
-    draw_history(frame, app, history);
-    apply_selection_highlight(frame, app, history);
-    if turn_height > 0 {
+    let surfaces = sync_surface_areas(app, surfaces, history, dock_area, footer_area, body_area);
+    if surfaces.has_slot(UiSurfaceSlot::Workspace) {
+        draw_workspace_surface(frame, app, &surfaces, history, capabilities);
+    } else {
+        draw_history(frame, app, history);
+        apply_selection_highlight(frame, app, history);
+    }
+    if dock_area.height > 0 {
+        draw_surface_stack(
+            frame,
+            app,
+            &surfaces,
+            UiSurfaceSlot::Dock,
+            dock_area,
+            capabilities,
+        );
+    }
+    if turn_area.height > 0 {
         draw_turn_status(frame, app, turn_area);
     }
-    if queue_height > 0 {
+    if queue_area.height > 0 {
         draw_lines_region(frame, queue_area, &queue_lines, bg(theme::surface_raised()));
+    }
+    if footer_area.height > 0 {
+        draw_surface_stack(
+            frame,
+            app,
+            &surfaces,
+            UiSurfaceSlot::Footer,
+            footer_area,
+            capabilities,
+        );
     }
     if app.has_prompt() {
         draw_overlay_scrim(frame, history);
@@ -48,6 +79,153 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_session_picker(frame, app, history);
     draw_tree(frame, app, history);
     draw_skill_picker(frame, app, history);
+    draw_overlay_surface(frame, app, &surfaces, body_area, capabilities);
+}
+
+fn sync_surface_areas(
+    app: &App,
+    mut surfaces: UiSurfaceScene,
+    history_area: Rect,
+    dock_area: Rect,
+    footer_area: Rect,
+    body_area: Rect,
+) -> UiSurfaceScene {
+    let mut assignments = Vec::new();
+    if let Some(surface) = surfaces.workspace.last_mut() {
+        surface.area = Some(history_area);
+        assignments.push((surface.id.clone(), history_area));
+    }
+    let mut dock_y = dock_area.y;
+    let mut dock_remaining = dock_area.height;
+    for surface in &mut surfaces.dock {
+        if dock_remaining == 0 {
+            break;
+        }
+        let height = surface.size.height().min(dock_remaining);
+        if height == 0 {
+            continue;
+        }
+        let area = Rect::new(dock_area.x, dock_y, dock_area.width, height);
+        surface.area = Some(area);
+        assignments.push((surface.id.clone(), area));
+        dock_y = dock_y.saturating_add(height);
+        dock_remaining = dock_remaining.saturating_sub(height);
+    }
+    let mut footer_y = footer_area.y;
+    let mut footer_remaining = footer_area.height;
+    for surface in &mut surfaces.footer {
+        if footer_remaining == 0 {
+            break;
+        }
+        let height = surface.size.height().min(footer_remaining);
+        if height == 0 {
+            continue;
+        }
+        let area = Rect::new(footer_area.x, footer_y, footer_area.width, height);
+        surface.area = Some(area);
+        assignments.push((surface.id.clone(), area));
+        footer_y = footer_y.saturating_add(height);
+        footer_remaining = footer_remaining.saturating_sub(height);
+    }
+    if let Some(surface) = surfaces.overlay.last_mut()
+        && body_area.width > 0
+        && body_area.height > 0
+    {
+        let width = surface
+            .size
+            .width()
+            .unwrap_or_else(|| body_area.width.saturating_sub(4).max(1))
+            .min(body_area.width);
+        let height = surface.size.height().min(body_area.height).max(1);
+        let x = body_area.x + body_area.width.saturating_sub(width) / 2;
+        let y = body_area.y + body_area.height.saturating_sub(height) / 2;
+        let area = Rect::new(x, y, width, height);
+        surface.area = Some(area);
+        assignments.push((surface.id.clone(), area));
+    }
+    app.ui_extensions().sync_surface_areas(assignments);
+    surfaces
+}
+
+fn draw_workspace_surface(
+    frame: &mut Frame<'_>,
+    app: &App,
+    surfaces: &UiSurfaceScene,
+    area: Rect,
+    capabilities: TermCapabilities,
+) {
+    let Some(surface) = surfaces.workspace.last() else {
+        return;
+    };
+    let mut viewport = frame.viewport(area);
+    app.ui_extensions().render_mounted_surface(
+        surface,
+        UiRenderContext {
+            session_id: crate::ROOT_SESSION_ID,
+            capabilities,
+            surface_id: &surface.id,
+            focused: surfaces.focused.as_deref() == Some(surface.id.as_str()),
+        },
+        &mut viewport,
+    );
+}
+
+fn draw_surface_stack(
+    frame: &mut Frame<'_>,
+    app: &App,
+    surfaces: &UiSurfaceScene,
+    slot: UiSurfaceSlot,
+    area: Rect,
+    capabilities: TermCapabilities,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    for surface in surfaces.surfaces(slot) {
+        let Some(surface_area) = surface.area else {
+            continue;
+        };
+        let mut viewport = frame.viewport(surface_area);
+        viewport.clear(bg(theme::surface_raised()));
+        app.ui_extensions().render_mounted_surface(
+            surface,
+            UiRenderContext {
+                session_id: crate::ROOT_SESSION_ID,
+                capabilities,
+                surface_id: &surface.id,
+                focused: surfaces.focused.as_deref() == Some(surface.id.as_str()),
+            },
+            &mut viewport,
+        );
+    }
+}
+
+fn draw_overlay_surface(
+    frame: &mut Frame<'_>,
+    app: &App,
+    surfaces: &UiSurfaceScene,
+    area: Rect,
+    capabilities: TermCapabilities,
+) {
+    let Some(surface) = surfaces.overlay.last() else {
+        return;
+    };
+    let Some(surface_area) = surface.area else {
+        return;
+    };
+    draw_overlay_scrim(frame, area);
+    let mut viewport = frame.viewport(surface_area);
+    viewport.clear(bg(theme::surface_base()));
+    app.ui_extensions().render_mounted_surface(
+        surface,
+        UiRenderContext {
+            session_id: crate::ROOT_SESSION_ID,
+            capabilities,
+            surface_id: &surface.id,
+            focused: surfaces.focused.as_deref() == Some(surface.id.as_str()),
+        },
+        &mut viewport,
+    );
 }
 
 // ─── Status bar slot grammar ─────────────────────────────────────────────────
@@ -81,6 +259,54 @@ fn fit_slots(slots: &[StatusSlot], budget: usize) -> Vec<Span<'static>> {
     if budget == 0 || slots.is_empty() {
         return Vec::new();
     }
+    if slots.len() > u64::BITS as usize {
+        return fit_slots_fallback(slots, budget);
+    }
+
+    let mut included = 0u64;
+    let mut visited = 0u64;
+    let mut used = 0usize;
+    while (visited.count_ones() as usize) < slots.len() {
+        let mut best_idx = None;
+        let mut best_priority = 0u8;
+        for (idx, slot) in slots.iter().enumerate() {
+            let bit = 1u64 << idx;
+            if visited & bit != 0 {
+                continue;
+            }
+            if best_idx.is_none() || slot.priority > best_priority {
+                best_idx = Some(idx);
+                best_priority = slot.priority;
+            }
+        }
+        let Some(idx) = best_idx else {
+            break;
+        };
+        let bit = 1u64 << idx;
+        visited |= bit;
+        let width = slots[idx].width();
+        if width > 0 && used + width <= budget {
+            included |= bit;
+            used += width;
+        }
+    }
+
+    let span_count = slots
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| included & (1u64 << idx) != 0)
+        .map(|(_, slot)| slot.spans.len())
+        .sum();
+    let mut spans = Vec::with_capacity(span_count);
+    for (idx, slot) in slots.iter().enumerate() {
+        if included & (1u64 << idx) != 0 {
+            spans.extend(slot.spans.iter().cloned());
+        }
+    }
+    spans
+}
+
+fn fit_slots_fallback(slots: &[StatusSlot], budget: usize) -> Vec<Span<'static>> {
     let mut indices: Vec<usize> = (0..slots.len()).collect();
     indices.sort_by(|a, b| slots[*b].priority.cmp(&slots[*a].priority));
 
@@ -97,7 +323,13 @@ fn fit_slots(slots: &[StatusSlot], budget: usize) -> Vec<Span<'static>> {
         }
     }
 
-    let mut spans = Vec::new();
+    let span_count = slots
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| included[*idx])
+        .map(|(_, slot)| slot.spans.len())
+        .sum();
+    let mut spans = Vec::with_capacity(span_count);
     for (idx, slot) in slots.iter().enumerate() {
         if included[idx] {
             spans.extend(slot.spans.iter().cloned());
@@ -888,6 +1120,11 @@ fn bg(color: lash_tui::Color) -> Style {
 mod tests {
     use super::*;
     use lash::{PromptRequest, PromptUsage};
+    use lash_ui::{
+        UiExtension, UiExtensions, UiHostEffect, UiRenderContext, UiSurfaceSize, UiSurfaceSlot,
+        UiSurfaceSpec,
+    };
+    use std::sync::Arc;
     use std::sync::mpsc;
 
     use crate::overlay::{PromptFocus, PromptState, WaitState};
@@ -1085,5 +1322,127 @@ mod tests {
                 .and_then(|cell| cell.style.bg),
             Some(theme::SELECTION_BG)
         );
+    }
+
+    struct SurfaceTestExtension;
+
+    #[async_trait::async_trait]
+    impl UiExtension for SurfaceTestExtension {
+        fn id(&self) -> &'static str {
+            "surface_test"
+        }
+
+        async fn invoke_action(
+            &self,
+            _action: &str,
+            _arg: Option<&str>,
+            _ctx: lash_ui::UiContext<'_>,
+        ) -> Result<Vec<UiHostEffect>, String> {
+            Ok(Vec::new())
+        }
+
+        fn render_surface(
+            &self,
+            surface_key: &str,
+            _ctx: UiRenderContext<'_>,
+            frame: &mut Frame<'_>,
+        ) {
+            let label = match surface_key {
+                "workspace" => "WORKSPACE",
+                "footer" => "FOOTER",
+                "overlay" => "OVERLAY",
+                other => other,
+            };
+            frame.write_text(0, 0, label, Style::default(), frame.area().width);
+        }
+
+        fn handle_session_event(&self, event: &lash::SessionEvent) -> Vec<UiHostEffect> {
+            match event {
+                lash::SessionEvent::TextDelta { content } if content == "mount" => vec![
+                    UiHostEffect::MountSurface {
+                        spec: UiSurfaceSpec {
+                            key: "workspace".to_string(),
+                            slot: UiSurfaceSlot::Workspace,
+                            size: UiSurfaceSize::Auto,
+                            order: 0,
+                            focusable: true,
+                            visible: true,
+                            modal: false,
+                        },
+                    },
+                    UiHostEffect::MountSurface {
+                        spec: UiSurfaceSpec {
+                            key: "footer".to_string(),
+                            slot: UiSurfaceSlot::Footer,
+                            size: UiSurfaceSize::Lines(1),
+                            order: 0,
+                            focusable: false,
+                            visible: true,
+                            modal: false,
+                        },
+                    },
+                ],
+                lash::SessionEvent::TextDelta { content } if content == "overlay" => vec![
+                    UiHostEffect::MountSurface {
+                        spec: UiSurfaceSpec {
+                            key: "overlay".to_string(),
+                            slot: UiSurfaceSlot::Overlay,
+                            size: UiSurfaceSize::Fixed {
+                                width: 16,
+                                height: 3,
+                            },
+                            order: 10,
+                            focusable: true,
+                            visible: true,
+                            modal: true,
+                        },
+                    },
+                    UiHostEffect::FocusSurface {
+                        key: "overlay".to_string(),
+                    },
+                ],
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_surface_replaces_history_and_footer_renders_above_input() {
+        let mut app = App::new("gpt-5.4".into(), "test".into());
+        app.blocks = vec![crate::app::DisplayBlock::UserInput("history line".into())];
+        let ui_extensions = Arc::new(
+            UiExtensions::new(vec![Arc::new(SurfaceTestExtension)]).expect("surface extensions"),
+        );
+        ui_extensions.effects_for_session_event(&lash::SessionEvent::TextDelta {
+            content: "mount".to_string(),
+        });
+        app.set_ui_extensions(Arc::clone(&ui_extensions));
+
+        let snapshot = lash_tui::render_snapshot(40, 10, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+
+        assert!(visible.contains("WORKSPACE"));
+        assert!(visible.contains("FOOTER"));
+        assert!(!visible.contains("history line"));
+    }
+
+    #[test]
+    fn overlay_surface_renders_last_on_centered_scrim() {
+        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let ui_extensions = Arc::new(
+            UiExtensions::new(vec![Arc::new(SurfaceTestExtension)]).expect("surface extensions"),
+        );
+        ui_extensions.effects_for_session_event(&lash::SessionEvent::TextDelta {
+            content: "mount".to_string(),
+        });
+        ui_extensions.effects_for_session_event(&lash::SessionEvent::TextDelta {
+            content: "overlay".to_string(),
+        });
+        app.set_ui_extensions(Arc::clone(&ui_extensions));
+
+        let snapshot = lash_tui::render_snapshot(40, 12, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+
+        assert!(visible.contains("OVERLAY"));
     }
 }

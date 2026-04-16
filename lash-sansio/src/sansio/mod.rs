@@ -328,7 +328,8 @@ pub struct TurnMachineConfig {
 /// How a RLM session terminates. Mirrors `lash::RlmTermination`;
 /// duplicated here so the sans-io layer doesn't depend on the lash
 /// host crate.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RlmTermination {
     /// Prose with no fenced lashlang block terminates the turn.
     #[default]

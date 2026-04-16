@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-use crate::llm::types::{LlmResponse, LlmToolSpec};
+use crate::llm::types::LlmResponse;
 use crate::runtime::{AssembledTurn, PersistedSessionState};
 use crate::{
     ContextApproachKind, ExecutionMode, MessageRole, SessionPolicy, SessionStateEnvelope,
@@ -12,7 +12,10 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-pub use lash_sansio::{CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution};
+pub use lash_sansio::{
+    CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, RlmTermination,
+    ToolSurfaceContribution, ToolSurfaceOverride,
+};
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
 pub type PluginRuntimeEventHook = Arc<dyn Fn(PluginRuntimeEvent) -> PluginFuture<()> + Send + Sync>;
@@ -48,26 +51,6 @@ pub type AssistantResponseHook = Arc<
 >;
 pub type CommandHandler =
     Arc<dyn Fn(CommandInvocation) -> PluginFuture<CommandOutcome> + Send + Sync>;
-
-#[derive(Clone, Debug)]
-pub struct ModeExecutionPreamble {
-    pub tool_specs: Arc<Vec<LlmToolSpec>>,
-    pub tool_names: Vec<String>,
-    pub omitted_tool_count: usize,
-    pub execution_prompt: String,
-    pub prompt_contributions: Vec<PromptContribution>,
-}
-
-#[derive(Clone)]
-pub struct ModeTurnConfig {
-    pub protocol: std::sync::Arc<dyn crate::sansio::ProtocolDriverHandle>,
-    pub sync_execution_surface: bool,
-}
-
-pub trait ModeExecutionPlugin: Send + Sync {
-    fn build_execution_preamble(&self, surface: &ExecutionSurface) -> ModeExecutionPreamble;
-    fn turn_config(&self) -> ModeTurnConfig;
-}
 
 #[async_trait::async_trait]
 pub trait ModeSessionPlugin: Send + Sync {
@@ -592,88 +575,11 @@ impl SessionAppendNode {
     }
 }
 
-/// How a RLM session ends. Top-level chat sessions use
-/// `ProseWithoutFence` (today's behavior); typed sub-sessions spawned
-/// via `delegate` use `Finish` so the captured value is the terminal
-/// result.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[derive(Default)]
-pub enum RlmTermination {
-    /// Terminate when the model writes prose with no fenced lashlang
-    /// block. The prose IS the assistant's final reply. lashlang
-    /// `finish` inside a fenced block continues to be an error in this
-    /// mode (the model shouldn't end the session from inside the
-    /// language).
-    #[default]
-    ProseWithoutFence,
-    /// Terminate when the model calls `finish <expr>` from inside a
-    /// fenced lashlang block. The captured value is the terminal
-    /// result. Prose-without-fence becomes a soft error that loops the
-    /// model with a "you must call finish" reminder. When `schema` is
-    /// `Some`, the captured value is validated against the JSON Schema
-    /// before being accepted; mismatches loop with an explanation.
-    Finish {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<serde_json::Value>,
-    },
-}
-
 #[derive(Clone, Debug)]
 pub struct ToolSurfaceContext {
     pub session_id: String,
     pub mode: ExecutionMode,
     pub tools: Vec<ToolDefinition>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ToolSurfaceContribution {
-    pub overrides: Vec<ToolSurfaceOverride>,
-    pub tool_list_notes: Vec<String>,
-}
-
-impl ToolSurfaceContribution {
-    pub fn is_empty(&self) -> bool {
-        self.overrides.is_empty() && self.tool_list_notes.is_empty()
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ToolSurfaceOverride {
-    pub tool_name: String,
-    pub enabled: Option<bool>,
-    pub injected: Option<bool>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ExecutionSurface {
-    pub tools: Vec<ToolDefinition>,
-    pub tool_list_notes: Vec<String>,
-}
-
-impl ExecutionSurface {
-    pub fn from_tools(tools: Vec<ToolDefinition>) -> Self {
-        Self {
-            tools,
-            tool_list_notes: Vec::new(),
-        }
-    }
-
-    pub fn enabled_tools(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .iter()
-            .filter(|tool| tool.enabled)
-            .cloned()
-            .collect()
-    }
-
-    pub fn prompt_tools(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .iter()
-            .filter(|tool| tool.enabled && tool.injected)
-            .cloned()
-            .collect()
-    }
 }
 
 #[derive(Clone, Debug)]

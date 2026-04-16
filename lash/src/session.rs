@@ -19,7 +19,7 @@ use crate::{
 const REPL_SNAPSHOT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ExecutionSurfaceCacheKey {
+struct ToolSurfaceCacheKey {
     mode: crate::ExecutionMode,
     include_base_tools: bool,
     context_surface_revision: u64,
@@ -34,22 +34,21 @@ struct ToolSurfaceDerived {
     rlm_tools_json: OnceLock<Arc<String>>,
 }
 
-#[derive(Debug)]
 struct ToolSurfaceArtifact {
-    surface: Arc<crate::plugin::ExecutionSurface>,
-    preamble: Arc<crate::plugin::ModeExecutionPreamble>,
+    surface: Arc<crate::ToolSurface>,
+    preamble: Arc<crate::ModePreamble>,
     derived: ToolSurfaceDerived,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ExecutionSurfaceHandle(Arc<ToolSurfaceArtifact>);
+#[derive(Clone)]
+pub(crate) struct ToolSurfaceHandle(Arc<ToolSurfaceArtifact>);
 
-impl ExecutionSurfaceHandle {
-    fn surface(&self) -> Arc<crate::plugin::ExecutionSurface> {
+impl ToolSurfaceHandle {
+    fn surface(&self) -> Arc<crate::ToolSurface> {
         Arc::clone(&self.0.surface)
     }
 
-    fn preamble(&self) -> Arc<crate::plugin::ModeExecutionPreamble> {
+    fn preamble(&self) -> Arc<crate::ModePreamble> {
         Arc::clone(&self.0.preamble)
     }
 
@@ -221,8 +220,7 @@ pub struct Session {
     message_tx: Option<UnboundedSender<SandboxMessage>>,
     scratch_dir: tempfile::TempDir,
     rlm_observe_projection_config: crate::ToolResultProjectionPluginConfig,
-    execution_surface_cache:
-        std::sync::Mutex<Vec<(ExecutionSurfaceCacheKey, ExecutionSurfaceHandle)>>,
+    tool_surface_cache: std::sync::Mutex<Vec<(ToolSurfaceCacheKey, ToolSurfaceHandle)>>,
     async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
 }
 
@@ -248,7 +246,7 @@ impl Session {
             message_tx: None,
             scratch_dir,
             rlm_observe_projection_config: crate::ToolResultProjectionPluginConfig::default(),
-            execution_surface_cache: std::sync::Mutex::new(Vec::new()),
+            tool_surface_cache: std::sync::Mutex::new(Vec::new()),
             async_tool_handles: Arc::new(StdMutex::new(HashMap::new())),
         };
 
@@ -277,13 +275,34 @@ impl Session {
         self.rlm_observe_projection_config = config;
     }
 
+    pub(crate) fn mode_extra_prompt_contributions(
+        &self,
+        mode: crate::ExecutionMode,
+    ) -> Vec<PromptContribution> {
+        match mode {
+            crate::ExecutionMode::Standard => Vec::new(),
+            crate::ExecutionMode::Rlm => vec![PromptContribution::execution(
+                "Observe Output",
+                format!(
+                    "Observe output is capped before reinjection using the current RLM observe limit (mode: `{}`, limit: {}, max_lines: {}). If you see a cap/truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
+                    match self.rlm_observe_projection_config.mode {
+                        crate::ToolResultProjectionMode::Bytes => "bytes",
+                        crate::ToolResultProjectionMode::Tokens => "tokens",
+                    },
+                    self.rlm_observe_projection_config.limit,
+                    self.rlm_observe_projection_config.max_lines,
+                ),
+            )],
+        }
+    }
+
     pub(crate) async fn start_rlm_runtime(&mut self, session_id: &str) -> Result<(), SessionError> {
         if self.rlm_runtime.is_some() {
             return Ok(());
         }
         let runtime = LashlangRuntime::start()?;
         self.rlm_runtime = Some(runtime);
-        self.initialize_execution_surface(session_id).await
+        self.initialize_tool_surface(session_id).await
     }
 
     pub fn tools(&self) -> Arc<dyn ToolProvider> {
@@ -315,9 +334,9 @@ impl Session {
         self.context_surface_revision = self.context_surface_revision.wrapping_add(1);
         self.context_tools = tool_providers;
         self.context_prompt_contributions = prompt_contributions;
-        self.execution_surface_cache
+        self.tool_surface_cache
             .lock()
-            .expect("execution surface cache lock")
+            .expect("tool surface cache lock")
             .clear();
     }
 
@@ -329,8 +348,8 @@ impl Session {
         self.services.store.clone()
     }
 
-    fn execution_surface_cache_key(&self, mode: crate::ExecutionMode) -> ExecutionSurfaceCacheKey {
-        ExecutionSurfaceCacheKey {
+    fn tool_surface_cache_key(&self, mode: crate::ExecutionMode) -> ToolSurfaceCacheKey {
+        ToolSurfaceCacheKey {
             mode,
             include_base_tools: self.include_base_tools,
             context_surface_revision: self.context_surface_revision,
@@ -339,11 +358,11 @@ impl Session {
         }
     }
 
-    fn build_execution_surface_entry(
+    fn build_tool_surface_entry(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> ExecutionSurfaceHandle {
+    ) -> ToolSurfaceHandle {
         let mut tools = self.tools().definitions();
         if self.include_base_tools && mode == self.plugins().execution_mode() {
             tools.extend(self.plugins().mode_native_tools().definitions());
@@ -358,56 +377,52 @@ impl Session {
             })
             .unwrap_or_else(|err| {
                 tracing::warn!("failed to resolve tool surface: {err}");
-                crate::plugin::ExecutionSurface::from_tools(fallback_tools)
+                crate::ToolSurface::from_tools(fallback_tools)
             });
-        let preamble = self
-            .plugins()
-            .mode_execution()
-            .build_execution_preamble(&surface);
+        let preamble = crate::build_mode_preamble(crate::ModeBuildInput {
+            mode,
+            tool_surface: surface.clone(),
+            extra_prompt_contributions: self.mode_extra_prompt_contributions(mode),
+        });
         let surface = Arc::new(surface);
-        ExecutionSurfaceHandle(Arc::new(ToolSurfaceArtifact {
+        ToolSurfaceHandle(Arc::new(ToolSurfaceArtifact {
             surface,
             preamble: Arc::new(preamble),
             derived: ToolSurfaceDerived::default(),
         }))
     }
 
-    fn execution_surface_cache_entry(
+    fn tool_surface_cache_entry(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> ExecutionSurfaceHandle {
-        let key = self.execution_surface_cache_key(mode);
+    ) -> ToolSurfaceHandle {
+        let key = self.tool_surface_cache_key(mode);
         let mut cache = self
-            .execution_surface_cache
+            .tool_surface_cache
             .lock()
-            .expect("execution surface cache lock");
+            .expect("tool surface cache lock");
         if let Some((_, entry)) = cache.iter().find(|(entry_key, _)| *entry_key == key) {
             return entry.clone();
         }
-        let entry = self.build_execution_surface_entry(session_id, mode);
+        let entry = self.build_tool_surface_entry(session_id, mode);
         cache.push((key, entry.clone()));
         entry
     }
 
-    pub fn execution_surface(
-        &self,
-        session_id: &str,
-        mode: crate::ExecutionMode,
-    ) -> crate::plugin::ExecutionSurface {
-        self.execution_surface_cache_entry(session_id, mode)
+    pub fn tool_surface(&self, session_id: &str, mode: crate::ExecutionMode) -> crate::ToolSurface {
+        self.tool_surface_cache_entry(session_id, mode)
             .surface()
             .as_ref()
             .clone()
     }
 
-    pub(crate) fn mode_execution_preamble(
+    pub(crate) fn mode_preamble(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> Arc<crate::plugin::ModeExecutionPreamble> {
-        self.execution_surface_cache_entry(session_id, mode)
-            .preamble()
+    ) -> Arc<crate::ModePreamble> {
+        self.tool_surface_cache_entry(session_id, mode).preamble()
     }
 
     pub(crate) fn shared_tool_catalog(
@@ -415,8 +430,7 @@ impl Session {
         session_id: &str,
         mode: crate::ExecutionMode,
     ) -> Arc<Vec<serde_json::Value>> {
-        self.execution_surface_cache_entry(session_id, mode)
-            .catalog()
+        self.tool_surface_cache_entry(session_id, mode).catalog()
     }
 
     pub fn tool_catalog(
@@ -428,7 +442,7 @@ impl Session {
     }
 
     fn rlm_tools_json(&self, session_id: &str) -> String {
-        let entry = self.execution_surface_cache_entry(session_id, crate::ExecutionMode::Rlm);
+        let entry = self.tool_surface_cache_entry(session_id, crate::ExecutionMode::Rlm);
         let catalog = entry.catalog();
         tracing::debug!(
             session_id,
@@ -815,7 +829,7 @@ impl Session {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
             tools: self.tools(),
-            surface: self.execution_surface(session_id, crate::ExecutionMode::Rlm),
+            surface: self.tool_surface(session_id, crate::ExecutionMode::Rlm),
             host,
             session_id: session_id.to_string(),
             event_tx: event_tx.clone(),
@@ -998,9 +1012,9 @@ impl Session {
         }
 
         self.last_repl_tools_json = None;
-        self.execution_surface_cache
+        self.tool_surface_cache
             .lock()
-            .expect("execution surface cache lock")
+            .expect("tool surface cache lock")
             .clear();
         Ok(())
     }
@@ -1040,7 +1054,7 @@ impl Session {
 
     /// Re-register the current tool definitions in the live RLM.
     /// This is intended for turn-boundary runtime reconfiguration.
-    pub async fn refresh_execution_surface(&mut self) -> Result<(), SessionError> {
+    pub async fn refresh_tool_surface(&mut self) -> Result<(), SessionError> {
         if !self.supports_repl() {
             return Ok(());
         }
@@ -1050,7 +1064,7 @@ impl Session {
             session_id = self.session_id,
             generation = self.tools().dynamic_generation().unwrap_or(0),
             tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
-            "refreshing RLM execution surface"
+            "refreshing RLM tool surface"
         );
         if self.last_repl_tools_json.as_deref() == Some(tools_json.as_str()) {
             return Ok(());
@@ -1086,12 +1100,12 @@ impl Session {
         Ok(())
     }
 
-    async fn initialize_execution_surface(&mut self, session_id: &str) -> Result<(), SessionError> {
+    async fn initialize_tool_surface(&mut self, session_id: &str) -> Result<(), SessionError> {
         let tools_json = self.rlm_tools_json(session_id);
         tracing::debug!(
             session_id,
             tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
-            "initializing RLM execution surface"
+            "initializing RLM tool surface"
         );
         self.runtime()?.send(LashlangRequest::Init {
             tools_json: tools_json.clone(),

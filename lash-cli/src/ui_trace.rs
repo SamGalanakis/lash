@@ -4,7 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use lash::{PluginSurfaceEvent, PromptRequest, SessionEvent};
-use lash_tui::ScreenSnapshot;
+use lash_tui::{PerfCounters, ScreenSnapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{App, PreparedTurn};
@@ -327,6 +327,15 @@ impl TracePluginSurfaceEvent {
 }
 
 pub(crate) fn render_screen_snapshot(app: &mut App, width: u16, height: u16) -> ScreenSnapshot {
+    render_screen_snapshot_with_perf(app, width, height, None).0
+}
+
+pub(crate) fn render_screen_snapshot_with_perf(
+    app: &mut App,
+    width: u16,
+    height: u16,
+    previous: Option<&ScreenSnapshot>,
+) -> (ScreenSnapshot, PerfCounters) {
     let viewport_height = render::history_viewport_height(app, width, height);
     let viewport_width = width as usize;
     app.ensure_height_cache_pub(viewport_width, viewport_height);
@@ -335,7 +344,7 @@ pub(crate) fn render_screen_snapshot(app: &mut App, width: u16, height: u16) -> 
     let max_scroll = total.saturating_sub(viewport_height);
     app.scroll_offset = app.scroll_offset.min(max_scroll);
     app.history_area = render::history_area(app, width, height);
-    lash_tui::render_snapshot(width, height, |frame| {
+    lash_tui::render_snapshot_with_perf(width, height, previous, |frame| {
         scratch_tui::draw(frame, app);
     })
 }
