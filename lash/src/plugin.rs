@@ -514,8 +514,8 @@ pub struct SessionCreateRequest {
     pub mode_extras: ModeExtras,
     /// Label for the token-cost ledger. When this session's turns
     /// complete, their token usage is accumulated under this label on
-    /// the parent session's `token_ledger`. Examples: `"delegate"`,
-    /// `"delegate"`. Defaults to `"child"` if unset.
+    /// the parent session's `token_ledger`. Examples: `"subagent"`,
+    /// `"compaction"`. Defaults to `"child"` if unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
 }

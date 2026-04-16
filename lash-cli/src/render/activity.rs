@@ -42,14 +42,14 @@ fn activity_prefix(activity: &ActivityBlock) -> (&'static str, Style, Style) {
         ),
         ActivityKind::Ask => (
             "◆ ",
-            theme::delegate_marker(),
+            theme::subagent_marker(),
             Style::default()
                 .fg(theme::brand())
                 .add_modifier(Modifier::Bold),
         ),
-        ActivityKind::Delegate => (
+        ActivityKind::Subagent => (
             "◆ ",
-            theme::delegate_marker(),
+            theme::subagent_marker(),
             Style::default().fg(theme::text_muted()),
         ),
         _ => match activity.result.status {
@@ -179,7 +179,7 @@ pub(super) fn render_activity_block(
             }
         }
 
-        if activity.call.kind == ActivityKind::Delegate {
+        if activity.call.kind == ActivityKind::Subagent {
             for child in &activity.children {
                 push_wrapped_prefixed(
                     lines,
@@ -189,7 +189,7 @@ pub(super) fn render_activity_block(
                     if child.result.status == ActivityStatus::Failed {
                         theme::error()
                     } else {
-                        theme::delegate_child()
+                        theme::subagent_child()
                     },
                     viewport_width,
                 );

@@ -13,7 +13,6 @@ impl App {
         self.clear_streaming_output();
         self.pending_steers.clear();
         self.queued_turns.clear();
-        self.active_delegate = None;
         self.overlay = None;
         self.activity_state.reset();
         self.token_usage = TokenUsage::default();

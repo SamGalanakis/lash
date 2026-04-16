@@ -25,7 +25,7 @@ use lash::{
     TokioBackgroundExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
-use lash_delegate_tools::{DelegateToolConfig, DelegateToolsPluginFactory};
+use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentToolConfig, SubagentsPluginFactory};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -749,15 +749,17 @@ fn build_plugin_session(
             factories.push(Arc::new(BuiltinObservationalMemoryPluginFactory));
         }
     }
-    let delegate_models = Some(AgentModels {
+    let subagent_models = Some(AgentModels {
         low: Some(session_policy.model.clone()),
         medium: Some(session_policy.model.clone()),
         high: Some(session_policy.model.clone()),
     });
-    factories.push(Arc::new(DelegateToolsPluginFactory::new(
+    let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
+    factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy.clone(),
-        DelegateToolConfig::default(),
-        delegate_models,
+        SubagentToolConfig::default(),
+        subagent_models,
+        subagent_host,
     )));
     if session_tools {
         factories.push(Arc::new(StaticPluginFactory::new(
@@ -827,7 +829,7 @@ fn build_prompt(
     );
     if !session_tools {
         prompt.push_str(
-            "\n- do not invent retrieval or search tools\n- start by judging the size of the provided history and plan accordingly\n- if the history is large, narrow to likely sessions or date ranges before inspecting details\n- use `delegate` for focused subproblems; keep each delegate bounded and concrete\n- avoid observing or printing the entire history unless it is already small",
+            "\n- do not invent retrieval or search tools\n- start by judging the size of the provided history and plan accordingly\n- if the history is large, narrow to likely sessions or date ranges before inspecting details\n- use `spawn_agent` for focused subproblems; keep each child task bounded and concrete\n- avoid observing or printing the entire history unless it is already small",
         );
     }
     if let Some(extra) = profile_guidance {
@@ -871,8 +873,9 @@ Format each work step like this:
 Brief reasoning here in plain prose.
 
 ```lashlang
-candidate = call delegate { task: "narrow the search to likely sessions", intelligence: "low" }
-observe candidate
+candidate = call spawn_agent { task_name: "narrow_candidates", task: "narrow the search to likely sessions", capability: "low" }
+result = call wait_agent { targets: [candidate.path], timeout_ms: 30000 }
+observe result
 ```
 ````
 
@@ -882,12 +885,12 @@ observe candidate
 - When you are done, reply with plain prose only.
 - Variables persist across iterations.
 - If the prompt includes bound variables, use them directly.
-- In this run, do not assume any retrieval or search tools exist. The only helper tool is `delegate`.
+- In this run, do not assume any retrieval or search tools exist. The only helper tools are the subagent tools.
 - If there is no Available Tools section, do not invent tool names.
 - Start by checking the size and shape of the bound input so you can plan the search.
 - If the history is large, work hierarchically: narrow candidate sessions or date ranges first, then inspect those candidates, then verify the final answer.
-- Use `delegate` for focused recursive subproblems such as narrowing candidate sessions, extracting date candidates, or verifying one hypothesis.
-- Keep each delegate bounded and concrete. Do not fan out one delegate per session unless the narrowed candidate set is already small.
+- Use `spawn_agent` for focused recursive subproblems such as narrowing candidate sessions, extracting date candidates, or verifying one hypothesis.
+- Keep each child task bounded and concrete. Do not fan out one agent per session unless the narrowed candidate set is already small.
 - Use `observe expr` to inspect values before deciding the next step.
 - Avoid observing or printing the entire haystack unless it is already small."#
     })];

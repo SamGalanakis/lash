@@ -160,7 +160,7 @@ pub(super) fn text_preview_artifact(
 }
 
 /// Render a limited list of `{name, description}` entries as
-/// `"name: description"` detail lines. Used by the delegate and
+/// `"name: description"` detail lines. Used by the subagent and
 /// search_tools projectors.
 pub(super) fn named_description_detail_lines(result: &Value, limit: usize) -> Vec<String> {
     result
@@ -232,11 +232,20 @@ pub(super) fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "search_web" => tool_arg_str(args, "query")
             .map(|query| format!("web \"{}\"", inline_text(query)))
             .unwrap_or_else(|| "search web".to_string()),
-        "delegate" => tool_arg_str(args, "task")
-            .map(|task| format!("delegate · {}", inline_text(task)))
-            .unwrap_or_else(|| "delegate task".to_string()),
-        "delegate_result" => "delegate done".to_string(),
-        "delegate_kill" => "delegate stopped".to_string(),
+        "spawn_agent" => tool_arg_str(args, "task")
+            .map(|task| format!("spawn subagent · {}", inline_text(task)))
+            .unwrap_or_else(|| "spawn subagent".to_string()),
+        "send_message" => tool_arg_str(args, "target")
+            .map(|target| format!("message subagent · {}", inline_text(target)))
+            .unwrap_or_else(|| "message subagent".to_string()),
+        "followup_task" => tool_arg_str(args, "target")
+            .map(|target| format!("follow up subagent · {}", inline_text(target)))
+            .unwrap_or_else(|| "follow up subagent".to_string()),
+        "wait_agent" => "waited on subagents".to_string(),
+        "close_agent" => tool_arg_str(args, "target")
+            .map(|target| format!("close subagent · {}", inline_text(target)))
+            .unwrap_or_else(|| "close subagent".to_string()),
+        "list_agents" => "list subagents".to_string(),
         "show_snippet_to_user" => tool_arg_str(args, "path")
             .map(|path| {
                 let start = args

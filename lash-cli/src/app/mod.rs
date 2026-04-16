@@ -445,8 +445,6 @@ pub struct App {
     ui_extensions: Arc<UiExtensions>,
     /// Current working directory with ~ substitution.
     pub cwd: String,
-    /// Active delegate child session: (name, task description, started_at).
-    pub active_delegate: Option<(String, String, std::time::Instant)>,
     /// Handle state used to derive semantic activity rows from raw tool calls.
     pub activity_state: ActivityState,
     /// Set only when this local UI requested cancellation via Esc.
@@ -486,7 +484,6 @@ impl App {
         self.live_assistant = None;
         self.assistant_text_finalized = false;
         self.clear_live_tool_output();
-        self.active_delegate = None;
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
         self.live_turn = Some(LiveTurnState::new("starting", None));
@@ -498,7 +495,6 @@ impl App {
         self.manual_interrupt_requested = false;
         self.commit_live_assistant_block();
         self.clear_live_tool_output();
-        self.active_delegate = None;
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
         if self.follow_mode == FollowOutputMode::Contextual {
@@ -686,7 +682,6 @@ impl App {
             plugin_mode_indicators: BTreeMap::new(),
             ui_extensions: Arc::new(UiExtensions::default()),
             cwd,
-            active_delegate: None,
             activity_state: ActivityState::default(),
             manual_interrupt_requested: false,
             selection: TextSelection::default(),
@@ -872,7 +867,7 @@ impl App {
                         activity.call.kind,
                         ActivityKind::ShellCommand
                             | ActivityKind::ShellInteraction
-                            | ActivityKind::Delegate
+                            | ActivityKind::Subagent
                     ) =>
                 {
                     Some(idx)
@@ -1092,9 +1087,6 @@ impl App {
             } => {
                 self.finalize_live_assistant();
                 self.clear_live_tool_output();
-                if matches!(name.as_str(), "delegate_result" | "delegate_kill") {
-                    self.active_delegate = None;
-                }
                 let plan_content = if success && name == "update_plan" {
                     render_plan_content_from_args(&args)
                 } else {
@@ -1133,66 +1125,15 @@ impl App {
                 self.scroll_to_bottom();
             }
             SessionEvent::Message { text, kind } => {
-                if kind == "delegate_start" {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                        let model = v
-                            .get("model")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default();
-                        let variant = v
-                            .get("model_variant")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default();
-                        let name = v
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("delegate")
-                            .to_string();
-                        let task = v
-                            .get("task")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        self.active_delegate = Some((name, task, std::time::Instant::now()));
-                        let model_detail = if model.is_empty() {
-                            None
-                        } else if variant.is_empty() {
-                            Some(model.to_string())
-                        } else {
-                            Some(format!("{model} ({variant})"))
-                        };
-                        let details = match (
-                            self.active_delegate
-                                .as_ref()
-                                .map(|(_, task, _)| task.clone())
-                                .filter(|value| !value.is_empty()),
-                            model_detail,
-                        ) {
-                            (Some(task), Some(model)) => Some(format!("{task} · {model}")),
-                            (Some(task), None) => Some(task),
-                            (None, Some(model)) => Some(model),
-                            (None, None) => Some("delegate".to_string()),
-                        };
-                        self.set_status("delegating", details, true);
-                    }
-                    self.scroll_to_bottom();
-                } else if kind == "tool_output" {
+                if kind == "tool_output" {
                     // Explicit policy:
                     // - live tool output can be disabled via env var
-                    // - shell + delegate result streams can render text to the TUI
+                    // - shell result streams can render text to the TUI
                     let current_status = self
                         .live_turn
                         .as_ref()
                         .map(|turn| turn.status_text.as_str());
-                    let is_delegate_stream =
-                        matches!(current_status, Some("delegating") | Some("delegate"));
-                    if is_delegate_stream {
-                        self.live_output_chars_estimate += text.chars().count() as i64;
-                        self.live_output_tokens_estimate =
-                            estimate_tokens_from_char_count(self.live_output_chars_estimate);
-                    }
                     let stream_active = self.running
-                        || self.active_delegate.is_some()
                         || current_status.is_some_and(|status| status.contains("shell"));
                     if stream_active {
                         self.push_streaming_output_text(&text);

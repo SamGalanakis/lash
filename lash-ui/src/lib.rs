@@ -256,6 +256,12 @@ pub struct UiExtensions {
 }
 
 impl UiExtensions {
+    pub fn with_builtins(mut extra: Vec<Arc<dyn UiExtension>>) -> Result<Self, String> {
+        let mut extensions: Vec<Arc<dyn UiExtension>> = vec![Arc::new(PlanModeUiExtension)];
+        extensions.append(&mut extra);
+        Self::new(extensions)
+    }
+
     pub fn new(extensions: Vec<Arc<dyn UiExtension>>) -> Result<Self, String> {
         let mut command_names = BTreeMap::<String, &'static str>::new();
         let mut extension_map = BTreeMap::<String, Arc<dyn UiExtension>>::new();
@@ -313,7 +319,7 @@ impl UiExtensions {
     }
 
     pub fn builtin() -> Result<Self, String> {
-        Self::new(vec![Arc::new(PlanModeUiExtension)])
+        Self::with_builtins(Vec::new())
     }
 
     pub fn command_specs(&self) -> Vec<SlashCommandSpec> {

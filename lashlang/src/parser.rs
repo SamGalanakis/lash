@@ -704,7 +704,7 @@ mod tests {
     fn parses_async_tool_syntax() {
         let program = parse(
             r#"
-            handle = start call delegate { task: "inspect" }
+            handle = start call wait_agent { timeout_ms: 1000 }
             result = await handle
             cancel handle
             finish result

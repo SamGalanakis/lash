@@ -291,11 +291,11 @@ pub fn patch_diff_meta_line() -> Style {
         .add_modifier(Modifier::Dim)
 }
 
-pub fn delegate_marker() -> Style {
+pub fn subagent_marker() -> Style {
     Style::default().fg(state_ok()).add_modifier(Modifier::Bold)
 }
 
-pub fn delegate_child() -> Style {
+pub fn subagent_child() -> Style {
     Style::default().fg(text_subtle())
 }
 

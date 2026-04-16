@@ -21,7 +21,7 @@ pub enum ActivityKind {
     WebSearch,
     WebFetch,
     Edit,
-    Delegate,
+    Subagent,
     Parallel,
     Ask,
     GenericTool,
@@ -222,7 +222,6 @@ impl ActivityBlock {
 #[derive(Clone)]
 pub struct ActivityState {
     shell_handles: HashMap<String, String>,
-    delegate_handles: HashMap<String, String>,
     /// Tool-name → projector registry, populated once at construction via
     /// `projectors::register_builtins`. Dispatch walks this map before
     /// falling through to the legacy match (during the refactor) or the
@@ -243,7 +242,6 @@ impl std::fmt::Debug for ActivityState {
         // summarize the registry instead of recursing into it.
         f.debug_struct("ActivityState")
             .field("shell_handles", &self.shell_handles)
-            .field("delegate_handles", &self.delegate_handles)
             .field("registry_len", &self.registry.len())
             .finish()
     }
@@ -253,7 +251,6 @@ impl ActivityState {
     pub fn new() -> Self {
         let mut state = Self {
             shell_handles: HashMap::new(),
-            delegate_handles: HashMap::new(),
             registry: HashMap::new(),
         };
         projectors::register_builtins(&mut state);
@@ -273,7 +270,6 @@ impl ActivityState {
 
     pub fn reset(&mut self) {
         self.shell_handles.clear();
-        self.delegate_handles.clear();
     }
 
     pub fn blocks_for_tool_call(
@@ -308,7 +304,6 @@ impl ActivityState {
             success,
             duration_ms,
             shell_handles: &mut self.shell_handles,
-            delegate_handles: &mut self.delegate_handles,
         };
         if let Some(projector) = self.registry.get(name).cloned() {
             return projector.project(&mut ctx);
@@ -726,41 +721,39 @@ mod tests {
     }
 
     #[test]
-    fn delegate_result_uses_child_status_and_token_usage() {
+    fn wait_agent_projects_task_completion_and_token_usage() {
         let mut state = ActivityState::default();
-        state.blocks_for_tool_call(
-            "delegate",
-            json!({"task":"inspect queue rendering"}),
-            json!({"id":"child-1","model":"gpt-5.4","model_variant":"high"}),
-            true,
-            3,
-        );
-
         let blocks = state.blocks_for_tool_call(
-            "delegate_result",
-            json!({"id":"child-1"}),
+            "wait_agent",
+            json!({"targets":["/root/inspect_queue"]}),
             json!({
-                "result":"delegate result",
-                "status":"interrupted",
-                "session":{
-                    "id":"child-1",
-                    "parent_session_id":"root",
+                "timed_out": false,
+                "events": [{
+                    "kind":"task_completed",
+                    "path":"/root/inspect_queue",
                     "task":"inspect queue rendering",
-                    "model":"gpt-5.4",
-                    "model_variant":"high",
-                    "iterations":2,
-                    "tool_calls":1,
-                    "tool_call_details":[
-                        {"tool":"read_file","success":true,"duration_ms":12}
-                    ],
-                    "token_usage":{
-                        "input_tokens":101,
-                        "output_tokens":22,
-                        "cached_input_tokens":5,
-                        "reasoning_tokens":7,
-                        "total_tokens":135
+                    "status":"interrupted",
+                    "result":"delegate result",
+                    "session":{
+                        "id":"child-1",
+                        "parent_session_id":"root",
+                        "task":"inspect queue rendering",
+                        "model":"gpt-5.4",
+                        "model_variant":"high",
+                        "iterations":2,
+                        "tool_calls":1,
+                        "tool_call_details":[
+                            {"tool":"read_file","success":true,"duration_ms":12}
+                        ],
+                        "token_usage":{
+                            "input_tokens":101,
+                            "output_tokens":22,
+                            "cached_input_tokens":5,
+                            "reasoning_tokens":7,
+                            "total_tokens":135
+                        }
                     }
-                }
+                }]
             }),
             true,
             12,
@@ -770,11 +763,12 @@ mod tests {
         assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
         assert_eq!(
             blocks[0].call.summary,
-            "delegate stopped · inspect queue rendering"
+            "subagent stopped · inspect queue rendering"
         );
         assert_eq!(
             blocks[0].result.detail_lines,
             vec![
+                "Path /root/inspect_queue".to_string(),
                 "gpt-5.4 (high) · 2 iterations · 1 tool call".to_string(),
                 "135 total tokens · 101 in · 22 out · 7 reasoning · 5 cached".to_string(),
             ]
@@ -783,33 +777,31 @@ mod tests {
     }
 
     #[test]
-    fn delegate_result_surfaces_child_error_details() {
+    fn wait_agent_surfaces_child_error_details() {
         let mut state = ActivityState::default();
-        state.blocks_for_tool_call(
-            "delegate",
-            json!({"task":"inspect queue rendering"}),
-            json!({"id":"child-1","model":"gpt-5.4-mini","model_variant":"low"}),
-            true,
-            3,
-        );
-
         let blocks = state.blocks_for_tool_call(
-            "delegate_result",
-            json!({"id":"child-1"}),
+            "wait_agent",
+            json!({"targets":["/root/inspect_queue"]}),
             json!({
-                "result":"",
-                "status":"failed",
-                "error":"LLM error: Codex request failed with 400",
-                "session":{
-                    "id":"child-1",
-                    "parent_session_id":"root",
+                "timed_out": false,
+                "events": [{
+                    "kind":"task_completed",
+                    "path":"/root/inspect_queue",
                     "task":"inspect queue rendering",
-                    "model":"gpt-5.4-mini",
-                    "model_variant":"low",
-                    "iterations":24,
-                    "tool_calls":49,
-                    "tool_call_details":[]
-                }
+                    "status":"failed",
+                    "result":"",
+                    "error":"LLM error: Codex request failed with 400",
+                    "session":{
+                        "id":"child-1",
+                        "parent_session_id":"root",
+                        "task":"inspect queue rendering",
+                        "model":"gpt-5.4-mini",
+                        "model_variant":"low",
+                        "iterations":24,
+                        "tool_calls":49,
+                        "tool_call_details":[]
+                    }
+                }]
             }),
             true,
             12,
@@ -819,12 +811,13 @@ mod tests {
         assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
         assert_eq!(
             blocks[0].call.summary,
-            "delegate failed · inspect queue rendering"
+            "subagent failed · inspect queue rendering"
         );
         assert_eq!(
             blocks[0].result.detail_lines,
             vec![
                 "Error LLM error: Codex request failed with 400".to_string(),
+                "Path /root/inspect_queue".to_string(),
                 "gpt-5.4-mini (low) · 24 iterations · 49 tool calls".to_string(),
             ]
         );

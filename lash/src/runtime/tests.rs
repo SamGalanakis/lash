@@ -1794,7 +1794,7 @@ impl crate::ToolProvider for ChildSessionTool {
         let child = match context
             .host
             .create_session(crate::SessionCreateRequest {
-                session_id: Some("delegate-child".to_string()),
+                session_id: Some("subagent-child".to_string()),
                 parent_session_id: Some(context.session_id.clone()),
                 start: crate::SessionStartPoint::Empty,
                 policy: None,
@@ -1802,7 +1802,7 @@ impl crate::ToolProvider for ChildSessionTool {
                 initial_nodes: Vec::new(),
                 context_surface: crate::SessionContextSurface::default(),
                 mode_extras: crate::ModeExtras::default(),
-                usage_source: Some("delegate".to_string()),
+                usage_source: Some("subagent".to_string()),
             })
             .await
         {
@@ -1969,8 +1969,8 @@ async fn parent_turn_receives_live_child_token_usage_events() {
             _ => None,
         })
         .unwrap_or_else(|| panic!("child token usage event missing from {events:?}"));
-    assert_eq!(child_usage_event.0, "delegate-child");
-    assert_eq!(child_usage_event.1, "delegate");
+    assert_eq!(child_usage_event.0, "subagent-child");
+    assert_eq!(child_usage_event.1, "subagent");
     assert_eq!(child_usage_event.2, "mock-model");
     assert_eq!(child_usage_event.3.input_tokens, 7);
     assert_eq!(child_usage_event.3.output_tokens, 2);
@@ -1979,10 +1979,10 @@ async fn parent_turn_receives_live_child_token_usage_events() {
     assert_eq!(child_usage_event.4.cached_input_tokens, 4);
 
     let usage = runtime.usage_report();
-    assert_eq!(usage.by_source["delegate"].input_tokens, 7);
-    assert_eq!(usage.by_source["delegate"].output_tokens, 2);
-    assert_eq!(usage.by_source["delegate"].cached_input_tokens, 4);
-    assert_eq!(usage.by_source["delegate"].reasoning_tokens, 1);
+    assert_eq!(usage.by_source["subagent"].input_tokens, 7);
+    assert_eq!(usage.by_source["subagent"].output_tokens, 2);
+    assert_eq!(usage.by_source["subagent"].cached_input_tokens, 4);
+    assert_eq!(usage.by_source["subagent"].reasoning_tokens, 1);
 }
 
 #[tokio::test]
@@ -2068,10 +2068,10 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
     assert_eq!(child_usage_event.1.cached_input_tokens, 9);
 
     let usage = runtime.usage_report();
-    assert_eq!(usage.by_source["delegate"].input_tokens, 0);
-    assert_eq!(usage.by_source["delegate"].output_tokens, 0);
-    assert_eq!(usage.by_source["delegate"].cached_input_tokens, 9);
-    assert_eq!(usage.by_source["delegate"].reasoning_tokens, 0);
+    assert_eq!(usage.by_source["subagent"].input_tokens, 0);
+    assert_eq!(usage.by_source["subagent"].output_tokens, 0);
+    assert_eq!(usage.by_source["subagent"].cached_input_tokens, 9);
+    assert_eq!(usage.by_source["subagent"].reasoning_tokens, 0);
 }
 
 #[test]
