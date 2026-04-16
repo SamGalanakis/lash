@@ -62,7 +62,7 @@ pub async fn switch_to_tree_selection(
     app.token_usage = state.token_usage.clone();
     app.last_prompt_usage = state.last_prompt_usage.clone();
     // Branching to a different leaf means the handle maps from the
-    // old path (shell sessions, delegate tasks) are no longer valid
+    // old path (shell sessions, subagent tasks) are no longer valid
     // — reset them so a stale id from the abandoned branch doesn't
     // leak into the new branch's projector dispatch.
     app.activity_state.reset();

@@ -5,7 +5,7 @@ use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
-use lash_delegate_tools::{DelegateToolConfig, DelegateToolsPluginFactory};
+use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentToolConfig, SubagentsPluginFactory};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -29,12 +29,13 @@ fn plugin_factories_for_surface(
     session_policy: SessionPolicy,
     lash_config: &LashConfig,
 ) -> Vec<Arc<dyn PluginFactory>> {
-    let delegate_tool_config = DelegateToolConfig {
+    let subagent_tool_config = SubagentToolConfig {
         low_tier_execution_mode: lash_config
             .runtime
-            .low_tier_delegate_execution_mode
+            .low_tier_subagent_execution_mode
             .unwrap_or(ExecutionMode::Standard),
     };
+    let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
 
     let profile = DefaultToolSurfaceProfile::for_runtime(
         &session_policy.context_approach,
@@ -63,11 +64,14 @@ fn plugin_factories_for_surface(
         )));
         plugin_factories.push(Arc::new(lash::BuiltinUiActivityPluginFactory));
     }
+    #[cfg(feature = "autoresearch")]
+    plugin_factories.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
     plugin_factories.push(Arc::new(crate::rlm_stream_mask::RlmStreamMaskPluginFactory));
-    plugin_factories.push(Arc::new(DelegateToolsPluginFactory::new(
+    plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy,
-        delegate_tool_config,
+        subagent_tool_config,
         lash_config.agent_models.clone(),
+        subagent_host,
     )));
     plugin_factories
 }

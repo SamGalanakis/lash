@@ -177,7 +177,7 @@ pub use store::{BuiltinBlobProfile, SqliteStore, Store, StoreGcPolicy, StoreOpti
 #[derive(Clone, Debug)]
 pub struct SandboxMessage {
     pub text: String,
-    /// "final", "tool_output", or other host-rendered progress events such as "delegate_start"
+    /// "final", "tool_output", or other host-rendered progress events.
     pub kind: String,
 }
 

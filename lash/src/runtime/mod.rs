@@ -102,8 +102,8 @@ enum NormalizedItem {
 /// `(source, model)` pair — accumulated, not per-call.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenLedgerEntry {
-    /// Caller-supplied label: `"turn"`, `"delegate"`, `"compaction"`,
-    /// `"observer"`, `"reflector"`, `"delegate"`, or any plugin-defined
+    /// Caller-supplied label: `"turn"`, `"subagent"`, `"compaction"`,
+    /// `"observer"`, `"reflector"`, or any plugin-defined
     /// string. Core doesn't interpret the value; the UI uses it for
     /// grouping and display.
     pub source: String,
@@ -383,8 +383,8 @@ pub struct PersistedSessionState {
     pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_state_snapshot: Option<Vec<u8>>,
-    /// Cost-accounting ledger. Every LLM call (parent turns, delegate
-    /// children, compaction, observers, delegate) contributes an
+    /// Cost-accounting ledger. Every LLM call (parent turns, subagent
+    /// children, compaction, observers, background helpers) contributes an
     /// entry keyed by `(source, model)`. Separate from `token_usage`
     /// which tracks context-window accounting only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1472,9 +1472,9 @@ impl LashRuntime {
     }
 
     /// Override the RLM termination contract for this session. Defaults
-    /// to `ProseWithoutFence` (today's chat-style behavior). Sub-sessions
-    /// spawned via the typed `delegate` path call this with
-    /// `Finish { schema }` to require typed termination.
+    /// to `ProseWithoutFence` (today's chat-style behavior). Typed
+    /// subagent sessions call this with `Finish { schema }` to require
+    /// typed termination.
     pub(crate) fn set_repl_termination(&mut self, termination: crate::RlmTermination) {
         self.rlm_termination = termination;
     }

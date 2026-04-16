@@ -414,53 +414,6 @@ fn late_text_deltas_after_authoritative_final_output_are_ignored() {
 }
 
 #[test]
-fn delegate_start_enables_streaming_output_until_delegate_result_arrives() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.handle_session_event(SessionEvent::Message {
-        text: serde_json::json!({
-            "name":"delegate",
-            "task":"inspect queue rendering",
-            "model":"gpt-5.4",
-            "model_variant":"high"
-        })
-        .to_string(),
-        kind: "delegate_start".into(),
-    });
-    assert!(app.active_delegate.is_some());
-    assert_eq!(
-        app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
-        Some("delegating")
-    );
-    assert_eq!(
-        app.live_turn
-            .as_ref()
-            .and_then(|turn| turn.status_detail.as_deref()),
-        Some("inspect queue rendering · gpt-5.4 (high)")
-    );
-
-    app.handle_session_event(SessionEvent::Message {
-        text: "delegate stream\n".into(),
-        kind: "tool_output".into(),
-    });
-    assert_eq!(app.streaming_output, vec!["delegate stream".to_string()]);
-
-    app.handle_session_event(SessionEvent::ToolCall {
-        call_id: Some("tc-delegate".into()),
-        name: "delegate_result".into(),
-        args: serde_json::json!({"id":"child-1"}),
-        result: serde_json::json!({
-            "result":"done",
-            "status":"completed",
-            "session":{"task":"inspect queue rendering"}
-        }),
-        success: true,
-        duration_ms: 5,
-    });
-    assert!(app.active_delegate.is_none());
-    assert!(app.streaming_output.is_empty());
-}
-
-#[test]
 fn tool_output_renders_during_generic_running_turn() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();

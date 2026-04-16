@@ -13,13 +13,13 @@
 use super::ActivityState;
 
 pub(crate) mod ask;
-pub(crate) mod delegate;
 pub(crate) mod edit;
 pub(crate) mod exploration;
 pub(crate) mod generic;
 pub(crate) mod lashlang;
 pub(crate) mod shell;
 pub(crate) mod snippet;
+pub(crate) mod subagents;
 pub(crate) mod web;
 
 /// Register every built-in projector with the given `ActivityState`.
@@ -30,12 +30,12 @@ pub(crate) mod web;
 /// projector.
 pub(super) fn register_builtins(state: &mut ActivityState) {
     state.register(ask::AskProjector);
-    state.register(delegate::DelegateProjector);
     state.register(edit::EditProjector);
     state.register(exploration::ExplorationProjector);
     state.register(generic::GenericProjector);
     state.register(lashlang::LashlangProjector);
     state.register(shell::ShellProjector);
     state.register(snippet::SnippetProjector);
+    state.register(subagents::SubagentProjector);
     state.register(web::WebProjector);
 }

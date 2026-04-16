@@ -351,8 +351,20 @@ pub(crate) async fn run_app(
     startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
     let mut app = App::new(model, session_name);
+    let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = {
+        #[cfg(feature = "autoresearch")]
+        {
+            vec![Arc::new(
+                lash_autoresearch::AutoresearchUiExtension::default(),
+            )]
+        }
+        #[cfg(not(feature = "autoresearch"))]
+        {
+            Vec::new()
+        }
+    };
     let ui_extensions = Arc::new(
-        UiExtensions::builtin()
+        UiExtensions::with_builtins(extra_ui_extensions)
             .map_err(|err| anyhow::anyhow!("failed to build UI extensions: {err}"))?,
     );
     app.set_ui_extensions(Arc::clone(&ui_extensions));

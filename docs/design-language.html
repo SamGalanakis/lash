@@ -506,7 +506,7 @@
     color: var(--sodium);
   }
 
-  .lane-marker.delegate,
+  .lane-marker.subagent,
   .lane-marker.task {
     color: var(--lichen);
   }
@@ -1066,26 +1066,26 @@ flowchart LR
                     </div>
                   </div>
                   <div class="lane-row">
-                    <span class="lane-marker delegate">├─</span>
+                    <span class="lane-marker subagent">├─</span>
                     <div class="lane-copy">
-                      <strong>delegate done · inspect queue rendering · 4.2s</strong>
-                      <span>Delegate results use tree connectors (├─/╰─) to show the child agent's tool call activity as nested items beneath the summary rail.</span>
+                      <strong>agent done · inspect queue rendering · 4.2s</strong>
+                      <span>Subagent results use tree connectors (├─/╰─) to show the child agent's tool call activity as nested items beneath the summary rail.</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">│</span>
                     <div class="lane-copy">
                       <span style="color: var(--ash-text);">claude-sonnet · 3 iterations · 5 tool calls</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">├─</span>
                     <div class="lane-copy">
                       <span style="color: var(--chalk-dim);">read_file · 12ms</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">╰─</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">╰─</span>
                     <div class="lane-copy">
                       <span style="color: var(--chalk-dim);">exec_command · 340ms</span>
                     </div>
@@ -1140,71 +1140,71 @@ flowchart LR
             </article>
             <article class="mock" style="grid-column: 1 / -1;">
               <div class="mock-bar">
-                <span>delegate lifecycle</span>
+                <span>subagent lifecycle</span>
                 <span class="accent">agent tree</span>
               </div>
               <div class="mock-body">
                 <div class="lane-stack">
                   <div class="lane-row">
-                    <span class="lane-marker delegate">◆</span>
+                    <span class="lane-marker subagent">◆</span>
                     <div class="lane-copy">
-                      <strong>delegate · inspect queue rendering · 52ms</strong>
+                      <strong>spawn agent · inspect queue rendering · 52ms</strong>
                       <span>The spawn event uses a filled diamond (◆) when standalone, or a tree connector (├─) when child details follow. Model and tier are shown as detail lines.</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">│</span>
                     <div class="lane-copy">
                       <span style="color: var(--ash-text);">claude-sonnet (medium)</span>
                     </div>
                   </div>
                   <div class="lane-row" style="margin-top: 8px;">
-                    <span class="lane-marker delegate">├─</span>
+                    <span class="lane-marker subagent">├─</span>
                     <div class="lane-copy">
-                      <strong>delegate done · inspect queue rendering · 4.2s</strong>
+                      <strong>agent done · inspect queue rendering · 4.2s</strong>
                       <span>The result block shows a summary stats line (model · iterations · tool calls), then renders each child tool call as a nested tree branch.</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">│</span>
                     <div class="lane-copy">
                       <span style="color: var(--ash-text);">claude-sonnet · 3 iterations · 5 tool calls</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">├─</span>
                     <div class="lane-copy">
                       <span style="color: var(--chalk-dim);">read_file · 12ms</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">├─</span>
                     <div class="lane-copy">
                       <span style="color: var(--chalk-dim);">exec_command · 340ms</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">├─</span>
                     <div class="lane-copy">
                       <span style="color: var(--chalk-dim);">search_files · 89ms</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">├─</span>
                     <div class="lane-copy">
                       <span style="color: var(--chalk-dim);">read_file · 8ms</span>
                     </div>
                   </div>
                   <div class="lane-row" style="padding-left: 22px;">
-                    <span class="lane-marker delegate" style="opacity: 0.7;">╰─</span>
+                    <span class="lane-marker subagent" style="opacity: 0.7;">╰─</span>
                     <div class="lane-copy">
                       <span style="color: var(--chalk-dim);">edit_file · 45ms</span>
                     </div>
                   </div>
                   <div class="lane-row" style="margin-top: 8px;">
-                    <span class="lane-marker delegate" style="color: var(--error);">◆</span>
+                    <span class="lane-marker subagent" style="color: var(--error);">◆</span>
                     <div class="lane-copy">
-                      <strong style="color: var(--error);">delegate stopped · inspect queue rendering · 1.8s</strong>
+                      <strong style="color: var(--error);">agent stopped · inspect queue rendering · 1.8s</strong>
                       <span>Kill events use the standalone diamond and the error color to signal forced interruption.</span>
                     </div>
                   </div>
@@ -1326,7 +1326,7 @@ flowchart TD
           </article>
           <article class="principle">
             <strong>Semantic First, Transport on Demand</strong>
-            <p>The first line should name the user-meaningful action: command, query, delegate task, task transition, patch result. Transport details belong in expansion or failure states, not as default transcript filler.</p>
+            <p>The first line should name the user-meaningful action: command, query, agent task, task transition, patch result. Transport details belong in expansion or failure states, not as default transcript filler.</p>
           </article>
           <article class="principle">
             <strong>Edits Should Read Like Revisions</strong>

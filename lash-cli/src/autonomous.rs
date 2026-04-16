@@ -83,36 +83,6 @@ impl AutonomousRenderer {
                         }
                     }
                 }
-                "delegate_start" => {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                        let task = value
-                            .get("task")
-                            .and_then(|item| item.as_str())
-                            .unwrap_or("delegate");
-                        let model = value
-                            .get("model")
-                            .and_then(|item| item.as_str())
-                            .unwrap_or_default();
-                        let variant = value
-                            .get("model_variant")
-                            .and_then(|item| item.as_str())
-                            .unwrap_or_default();
-                        let model_label = if model.is_empty() {
-                            String::new()
-                        } else if variant.is_empty() {
-                            model.to_string()
-                        } else {
-                            format!("{model} ({variant})")
-                        };
-                        if model_label.is_empty() {
-                            eprintln!("[delegate] {task}");
-                        } else {
-                            eprintln!("[delegate] {task} · {model_label}");
-                        }
-                    } else if !text.trim().is_empty() {
-                        eprintln!("[delegate] {}", text.trim());
-                    }
-                }
                 _ => {}
             },
             SessionEvent::LlmRequest { iteration, .. } => {

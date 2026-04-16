@@ -157,7 +157,6 @@ const ASYNC_TOOL_HANDLE_KIND: &str = "task";
 
 #[derive(Clone)]
 struct AsyncToolHandleEntry {
-    tool_name: String,
     state: Arc<StdMutex<AsyncToolHandleState>>,
     done_notify: Arc<Notify>,
     progress_notify: Arc<Notify>,
@@ -503,40 +502,6 @@ impl Session {
         }
     }
 
-    fn synthesize_delegate_result_record(
-        &mut self,
-        call_id: String,
-        handle_id: &str,
-        outcome: &ToolDispatchOutcome,
-    ) {
-        let record_result = match outcome.record.result.as_object() {
-            Some(_) => outcome.record.result.clone(),
-            None => json!({
-                "result": outcome.record.result.clone(),
-                "status": if outcome.record.success { "completed" } else { "failed" },
-            }),
-        };
-        self.tool_calls.push(ToolCallRecord {
-            call_id: Some(call_id),
-            tool: "delegate_result".into(),
-            args: json!({ "id": handle_id }),
-            result: record_result,
-            success: outcome.record.success,
-            duration_ms: outcome.record.duration_ms,
-        });
-    }
-
-    fn synthesize_delegate_kill_record(&mut self, call_id: String, handle_id: &str) {
-        self.tool_calls.push(ToolCallRecord {
-            call_id: Some(call_id),
-            tool: "delegate_kill".into(),
-            args: json!({ "id": handle_id }),
-            result: serde_json::Value::Null,
-            success: true,
-            duration_ms: 0,
-        });
-    }
-
     async fn start_async_tool_call(
         &mut self,
         call_id: String,
@@ -554,7 +519,6 @@ impl Session {
         let progress_notify = Arc::new(Notify::new());
         let cancellation = CancellationToken::new();
         let entry = AsyncToolHandleEntry {
-            tool_name: tool_name.clone(),
             state: Arc::clone(&state),
             done_notify: Arc::clone(&done_notify),
             progress_notify: Arc::clone(&progress_notify),
@@ -625,8 +589,8 @@ impl Session {
         AsyncToolReply::success(handle_value).into_wire()
     }
 
-    async fn await_async_tool_handle(&mut self, call_id: String, handle: String) -> String {
-        let (handle_id, hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
+    async fn await_async_tool_handle(&mut self, _call_id: String, handle: String) -> String {
+        let (handle_id, _hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => return AsyncToolReply::error(json!(err)).into_wire(),
         };
@@ -675,10 +639,6 @@ impl Session {
         match terminal {
             Some(AsyncToolTerminal::Completed(outcome)) => {
                 self.tool_images.extend(outcome.images.clone());
-                let tool_name = hinted_tool_name.unwrap_or_else(|| entry.tool_name.clone());
-                if tool_name == "delegate" {
-                    self.synthesize_delegate_result_record(call_id, &handle_id, &outcome);
-                }
                 if outcome.record.success {
                     AsyncToolReply::success(outcome.record.result).into_wire()
                 } else {
@@ -693,8 +653,8 @@ impl Session {
         }
     }
 
-    async fn cancel_async_tool_handle(&mut self, call_id: String, handle: String) -> String {
-        let (handle_id, hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
+    async fn cancel_async_tool_handle(&mut self, _call_id: String, handle: String) -> String {
+        let (handle_id, _hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => return AsyncToolReply::error(json!(err)).into_wire(),
         };
@@ -732,10 +692,6 @@ impl Session {
         entry.done_notify.notify_waiters();
         self.flush_async_tool_messages(&entry);
 
-        let tool_name = hinted_tool_name.unwrap_or_else(|| entry.tool_name.clone());
-        if tool_name == "delegate" {
-            self.synthesize_delegate_kill_record(call_id, &handle_id);
-        }
         AsyncToolReply::success(serde_json::Value::Null).into_wire()
     }
 

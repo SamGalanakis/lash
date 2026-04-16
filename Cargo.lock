@@ -228,7 +228,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "lash",
- "lash-delegate-tools",
+ "lash-subagents",
  "regex",
  "reqwest",
  "serde",
@@ -1821,6 +1821,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-autoresearch"
+version = "0.2.52"
+dependencies = [
+ "async-trait",
+ "lash",
+ "lash-tui",
+ "lash-ui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "lash-cli"
 version = "0.2.52"
 dependencies = [
@@ -1834,8 +1848,9 @@ dependencies = [
  "dhat",
  "image",
  "lash",
+ "lash-autoresearch",
  "lash-default-tools",
- "lash-delegate-tools",
+ "lash-subagents",
  "lash-tui",
  "lash-ui",
  "pulldown-cmark",
@@ -1864,25 +1879,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-delegate-tools"
-version = "0.2.52"
-dependencies = [
- "async-trait",
- "lash",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
 name = "lash-sansio"
 version = "0.2.52"
 dependencies = [
  "base64",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "lash-subagents"
+version = "0.2.52"
+dependencies = [
+ "async-trait",
+ "lash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
  "uuid",
 ]
 

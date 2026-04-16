@@ -31,10 +31,10 @@ pub trait ToolProjector: Send + Sync {
 /// Mutable context passed to every `ToolProjector::project` call.
 ///
 /// `args` and `result` are owned so projectors can move them into the
-/// `ActivityBlock` they construct (no clone on the hot path). The two
-/// stateful handle maps are split out of `ActivityState` as disjoint
-/// mutable borrows so projectors can mutate them without holding a
-/// reference to the whole state.
+/// `ActivityBlock` they construct (no clone on the hot path). The
+/// stateful shell handle map is split out of `ActivityState` as a
+/// disjoint mutable borrow so projectors can mutate it without holding
+/// a reference to the whole state.
 pub struct ProjectCtx<'a> {
     /// Normalized tool name (after `activity_tool_name` prefix stripping).
     pub name: &'a str,
@@ -46,8 +46,4 @@ pub struct ProjectCtx<'a> {
     /// `exec_command` (insert on running start) and `write_stdin`
     /// (remove on exit, or_insert if still running).
     pub shell_handles: &'a mut HashMap<String, String>,
-    /// Delegate handles: delegate_id → task description. Used by
-    /// `delegate` (insert on success) and `delegate_result` / `delegate_kill`
-    /// (remove to recover the task label).
-    pub delegate_handles: &'a mut HashMap<String, String>,
 }

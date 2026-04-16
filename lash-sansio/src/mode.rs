@@ -73,15 +73,19 @@ observe result
 - Prefer narrow checks over brute-force scanning when the input is large.
 - Use focused intermediate observations to verify subquestions before finalizing.
 - Keep each step concrete and bounded instead of attempting the whole task at once.
-- Use `start`/`await` when a long-running tool can make progress in the background while you do other work. This is especially useful for `delegate`.
+- Use `start`/`await` when a long-running tool can make progress in the background while you do other work. This is especially useful for `wait_agent`.
 
 Example fanout pattern:
 
 ```lashlang
-h1 = start call delegate { task: "Read chunk 1 and extract the key claim", intelligence: "low", output: { claim: "str" } }
-h2 = start call delegate { task: "Read chunk 2 and extract the key claim", intelligence: "low", output: { claim: "str" } }
-handles = [h1, h2]
-results = await handles
+h1 = call spawn_agent { task_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "low", output: { claim: "str" } }
+h2 = call spawn_agent { task_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "low", output: { claim: "str" } }
+handles = [
+  start call wait_agent { targets: [h1.path], timeout_ms: 30000 },
+  start call wait_agent { targets: [h2.path], timeout_ms: 30000 }
+]
+events = await handles
+results = [events[0].events[0].result, events[1].events[0].result]
 finish results
 ```"#;
 

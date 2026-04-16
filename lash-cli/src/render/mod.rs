@@ -1128,7 +1128,7 @@ fn render_live_tool_output_inline(
         return;
     }
 
-    let (prefix, prefix_style, content_style) = if *activity_kind == ActivityKind::Delegate {
+    let (prefix, prefix_style, content_style) = if *activity_kind == ActivityKind::Subagent {
         (
             "    │ ",
             Style::default()

@@ -448,13 +448,13 @@
           <p>
             <strong>lash</strong> is a Rust workspace for an embeddable terminal coding agent. The current shape is a layered system: <code>lash-sansio</code> provides the deterministic turn protocol, <code>lash</code> hosts runtime, plugins, persistence, providers, and sessions, and <code>lash-cli</code> assembles the default application experience. Prompt customization is now template-driven through typed <code>PromptTemplate</code> slots rather than renderer or override escape hatches.
           </p>
-          <div class="footer-note">Updated against the current workspace on 2026-04-15 • prompt-template architecture • plugins and delegation • Mermaid rerenders on tab switch</div>
+          <div class="footer-note">Updated against the current workspace on 2026-04-15 • prompt-template architecture • plugins and subagents • Mermaid rerenders on tab switch</div>
         </div>
         <div class="hero-meta">
           <div class="meta-card">
             <div class="micro-label">Architecture shape</div>
             <strong>Layered Rust workspace</strong>
-            <span>Sans-IO protocol core → async runtime + plugin host → tool bundles and delegate tools → CLI/TUI host and benchmarks.</span>
+            <span>Sans-IO protocol core → async runtime + plugin host → tool bundles and subagent tools → CLI/TUI host and benchmarks.</span>
           </div>
           <div class="meta-card">
             <div class="micro-label">Execution modes</div>
@@ -489,7 +489,7 @@
           <article class="kpi">
             <small>Workspace members</small>
             <strong>10</strong>
-            <span><code>lash</code>, <code>lash-cli</code>, <code>lash-sansio</code>, <code>lashlang</code>, UI/TUI, default/delegate tools, and the benchmark runner.</span>
+            <span><code>lash</code>, <code>lash-cli</code>, <code>lash-sansio</code>, <code>lashlang</code>, UI/TUI, default/subagent tools, and the benchmark runner.</span>
           </article>
           <article class="kpi">
             <small>Rust source files</small>
@@ -522,7 +522,7 @@
           <article class="metric">
             <small>Architectural hinge</small>
             <strong>Plugin/session runtime</strong>
-            <span>Most extension seams—tools, prompt contributions, history policies, turn hooks, delegation, mode behavior—flow through the plugin/session layer.</span>
+            <span>Most extension seams—tools, prompt contributions, history policies, turn hooks, subagents, mode behavior—flow through the plugin/session layer.</span>
           </article>
         </div>
 
@@ -539,7 +539,7 @@ flowchart TD
   subgraph Runtime[Host runtime and integration]
     L["lash<br/>runtime, session manager, store,<br/>provider adapters, plugin host"]
     DT["lash-default-tools<br/>tool bundles + instruction-aware tools"]
-    DG["lash-delegate-tools<br/>delegate tool + child session policy"]
+    DG["lash-subagents<br/>subagent tool + child session policy"]
   end
 
   subgraph Hosts[Applications and support]
@@ -567,7 +567,7 @@ flowchart TD
             <ul>
               <li><strong>Prompt composition is typed:</strong> hosts supply ordered template sections and plugins emit slot content rather than mutating sections with overrides.</li>
               <li><strong>Runtime stays embeddable:</strong> the CLI is the main app, but core hosting APIs still live in <code>lash</code>.</li>
-              <li><strong>Sessions are first-class:</strong> root sessions, delegate children, compaction sessions, and benchmark sessions all reuse the same session manager/runtime machinery.</li>
+              <li><strong>Sessions are first-class:</strong> root sessions, subagent children, compaction sessions, and benchmark sessions all reuse the same session manager/runtime machinery.</li>
               <li><strong>Dual execution remains central:</strong> standard and RLM mode share policy, plugin, and persistence infrastructure.</li>
             </ul>
           </div>
@@ -646,13 +646,13 @@ flowchart TD
           </article>
 
           <article class="module">
-            <small>Delegation layer</small>
-            <h3>lash-delegate-tools</h3>
-            <p>Provides the <code>delegate</code> tool and the policy for spawning filtered child sessions with scoped tool visibility and separate usage accounting.</p>
+            <small>Subagent layer</small>
+            <h3>lash-subagents</h3>
+            <p>Provides the <code>spawn_agent</code> tool family and the policy for host-backed child sessions with capability-scoped tool visibility and separate usage accounting.</p>
             <ul>
               <li>Creates child <code>SessionCreateRequest</code> values with tier-specific tool surfaces</li>
-              <li>Adds delegation guidance via prompt contributions</li>
-              <li>Bridges standard and RLM delegate semantics</li>
+              <li>Adds subagent guidance via prompt contributions</li>
+              <li>Bridges standard and RLM subagent semantics</li>
             </ul>
           </article>
 
@@ -737,7 +737,7 @@ flowchart LR
       <section class="tab-panel" id="execution">
         <div class="section-header">
           <h2>Execution</h2>
-          <p>The host runtime is asynchronous and session-oriented. The same machinery handles the root CLI session, autonomous runs, delegate child sessions, and internal compaction/benchmark helper sessions.</p>
+          <p>The host runtime is asynchronous and session-oriented. The same machinery handles the root CLI session, autonomous runs, subagent child sessions, and internal compaction/benchmark helper sessions.</p>
         </div>
 
         <div class="diagram-wrap">
@@ -981,7 +981,7 @@ flowchart TD
               <tr><td><code>lash-cli/src/main.rs</code></td><td>CLI entrypoint and autonomous/default prompt template selection.</td></tr>
               <tr><td><code>lash/src/plugin_builtin/prompt_context.rs</code></td><td>Built-in prompt-context plugin that emits runtime-context and project-instructions slot content.</td></tr>
               <tr><td><code>lash-default-tools/src/lib.rs</code></td><td>Default tool bundle/plugin surface assembly.</td></tr>
-              <tr><td><code>lash-delegate-tools/src/lib.rs</code></td><td>Delegate tool plugin factory and child-session execution logic.</td></tr>
+              <tr><td><code>lash-subagents/src/lib.rs</code></td><td>Subagent tool plugin factory and host-backed child-session orchestration logic.</td></tr>
               <tr><td><code>bench/longmemeval-rlm/runner/src/main.rs</code></td><td>Benchmark harness using a custom prompt template for memory-evaluation runs.</td></tr>
               <tr><td><code>docs/architecture.html</code></td><td>This document.</td></tr>
             </tbody>
