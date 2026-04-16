@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
-
 use crate::plugin::{
     ModeNativeToolsPlugin, ModeSessionPlugin, PluginError, PluginFactory, PluginRegistrar,
     PluginSessionContext, SessionPlugin,
 };
-use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
+use crate::tool_dispatch::{
+    ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
+};
 use crate::tools::batch::batch_tool_definition;
-use crate::{ExecutionMode, ProgressSender, SessionError, ToolImage, ToolResult};
+use crate::{ExecutionMode, ProgressSender, SessionError, ToolResult};
 
 pub(crate) struct StandardModePluginFactory;
 
@@ -85,15 +85,6 @@ struct BatchCallSpec {
     parameters: serde_json::Value,
 }
 
-struct BatchCallOutcome {
-    index: usize,
-    tool: String,
-    success: bool,
-    duration_ms: u64,
-    result: serde_json::Value,
-    images: Vec<ToolImage>,
-}
-
 const BATCH_MAX_TOOL_CALLS: usize = 25;
 
 async fn execute_batch_tool_call(
@@ -106,46 +97,52 @@ async fn execute_batch_tool_call(
         Err(err) => return err,
     };
 
-    let progress = progress.cloned();
     let mut immediate_outcomes = Vec::new();
-    let mut pending = FuturesUnordered::new();
+    let mut parallel_specs = Vec::new();
 
     for spec in specs.into_iter().take(BATCH_MAX_TOOL_CALLS) {
         if spec.tool == "batch" {
-            immediate_outcomes.push(BatchCallOutcome {
-                index: spec.index,
-                tool: spec.tool,
-                success: false,
-                duration_ms: 0,
-                result: serde_json::json!("Tool 'batch' is not allowed inside batch"),
-                images: Vec::new(),
-            });
+            immediate_outcomes.push(serde_json::json!({
+                "index": spec.index,
+                "tool": spec.tool,
+                "success": false,
+                "duration_ms": 0,
+                "error": "Tool 'batch' is not allowed inside batch",
+            }));
             continue;
         }
-
-        let dispatch = context.clone();
-        let progress = progress.clone();
-        pending.push(async move {
-            let outcome = dispatch_tool_call(
-                &dispatch,
-                spec.tool.clone(),
-                spec.parameters,
-                progress.as_ref(),
-            )
-            .await;
-            BatchCallOutcome {
-                index: spec.index,
-                tool: outcome.record.tool,
-                success: outcome.record.success,
-                duration_ms: outcome.record.duration_ms,
-                result: outcome.record.result,
-                images: outcome.images,
-            }
+        parallel_specs.push(ParallelToolCallSpec {
+            index: spec.index,
+            tool_name: spec.tool,
+            args: spec.parameters,
         });
     }
 
-    while let Some(outcome) = pending.next().await {
-        immediate_outcomes.push(outcome);
+    let mut images = Vec::new();
+    let mut parallel_outcomes =
+        dispatch_parallel_tool_calls(Arc::new(context.clone()), parallel_specs, progress).await;
+    for outcome in parallel_outcomes.drain(..) {
+        images.extend(outcome.images);
+        let mut record = serde_json::Map::new();
+        record.insert("index".to_string(), serde_json::json!(outcome.index));
+        record.insert("tool".to_string(), serde_json::json!(outcome.record.tool));
+        record.insert(
+            "success".to_string(),
+            serde_json::json!(outcome.record.success),
+        );
+        record.insert(
+            "duration_ms".to_string(),
+            serde_json::json!(outcome.record.duration_ms),
+        );
+        record.insert(
+            if outcome.record.success {
+                "result".to_string()
+            } else {
+                "error".to_string()
+            },
+            outcome.record.result,
+        );
+        immediate_outcomes.push(serde_json::Value::Object(record));
     }
 
     for overflow_index in BATCH_MAX_TOOL_CALLS
@@ -155,72 +152,31 @@ async fn execute_batch_tool_call(
             .map(|value| value.len())
             .unwrap_or_default()
     {
-        immediate_outcomes.push(BatchCallOutcome {
-            index: overflow_index,
-            tool: args
+        immediate_outcomes.push(serde_json::json!({
+            "index": overflow_index,
+            "tool": args
                 .get("tool_calls")
                 .and_then(|value| value.as_array())
                 .and_then(|items| items.get(overflow_index))
                 .and_then(|item| item.get("tool"))
                 .and_then(|value| value.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            success: false,
-            duration_ms: 0,
-            result: serde_json::json!("Maximum of 25 tool calls allowed in batch"),
-            images: Vec::new(),
-        });
+                .unwrap_or("unknown"),
+            "success": false,
+            "duration_ms": 0,
+            "error": "Maximum of 25 tool calls allowed in batch",
+        }));
     }
 
-    immediate_outcomes.sort_by_key(|outcome| outcome.index);
-    let successful = immediate_outcomes
-        .iter()
-        .filter(|outcome| outcome.success)
-        .count();
-    let failed = immediate_outcomes.len().saturating_sub(successful);
-    let summary = if failed == 0 {
-        format!("All {successful} tools executed successfully.")
-    } else {
-        format!(
-            "Executed {successful}/{} tools successfully. {failed} failed.",
-            immediate_outcomes.len()
-        )
-    };
-    let images = immediate_outcomes
-        .iter()
-        .flat_map(|outcome| outcome.images.clone())
-        .collect::<Vec<_>>();
-    let results = immediate_outcomes
-        .into_iter()
-        .map(|outcome| {
-            let mut record = serde_json::Map::new();
-            record.insert("index".to_string(), serde_json::json!(outcome.index));
-            record.insert("tool".to_string(), serde_json::json!(outcome.tool));
-            record.insert("success".to_string(), serde_json::json!(outcome.success));
-            record.insert(
-                "duration_ms".to_string(),
-                serde_json::json!(outcome.duration_ms),
-            );
-            record.insert(
-                if outcome.success {
-                    "result".to_string()
-                } else {
-                    "error".to_string()
-                },
-                outcome.result,
-            );
-            serde_json::Value::Object(record)
-        })
-        .collect::<Vec<_>>();
-
+    immediate_outcomes.sort_by_key(|outcome| {
+        outcome
+            .get("index")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(u64::MAX)
+    });
     ToolResult::with_images(
         true,
         serde_json::json!({
-            "summary": summary,
-            "total": results.len(),
-            "successful": successful,
-            "failed": failed,
-            "results": results,
+            "results": immediate_outcomes,
         }),
         images,
     )

@@ -89,6 +89,13 @@ enum UndoAction {
     Bulk,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorClass {
+    Whitespace,
+    Word,
+    Other,
+}
+
 /// Cap on how many undo entries we keep. 100 entries × ~200 chars of
 /// typical draft content is ~20 KB — cheap, and plenty for a session's
 /// worth of edits.
@@ -666,6 +673,74 @@ impl EditorState {
         }
     }
 
+    fn cursor_class(ch: char) -> CursorClass {
+        if ch.is_whitespace() {
+            CursorClass::Whitespace
+        } else if ch.is_alphanumeric() || ch == '_' {
+            CursorClass::Word
+        } else {
+            CursorClass::Other
+        }
+    }
+
+    fn prev_char_start(&self, pos: usize) -> usize {
+        self.input[..pos]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+
+    fn next_char_start(&self, pos: usize) -> usize {
+        self.input[pos..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| pos + i)
+            .unwrap_or(self.input.len())
+    }
+
+    pub fn move_cursor_word_left(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor_pos = range.start;
+            self.clear_selection();
+            return;
+        }
+        if self.cursor_pos == 0 {
+            return;
+        }
+
+        let mut pos = self.cursor_pos;
+        while pos > 0 {
+            let prev = self.prev_char_start(pos);
+            let ch = self.input[prev..pos].chars().next().unwrap_or_default();
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = prev;
+        }
+        if pos == 0 {
+            self.cursor_pos = 0;
+            return;
+        }
+
+        let prev = self.prev_char_start(pos);
+        let ch = self.input[prev..pos].chars().next().unwrap_or_default();
+        let class = Self::cursor_class(ch);
+        pos = prev;
+        while pos > 0 {
+            let candidate = self.prev_char_start(pos);
+            let ch = self.input[candidate..pos]
+                .chars()
+                .next()
+                .unwrap_or_default();
+            if Self::cursor_class(ch) != class {
+                break;
+            }
+            pos = candidate;
+        }
+        self.cursor_pos = pos;
+    }
+
     pub fn move_cursor_right(&mut self) {
         if let Some(range) = self.selected_range() {
             self.cursor_pos = range.end;
@@ -673,12 +748,47 @@ impl EditorState {
             return;
         }
         if self.cursor_pos < self.input.len() {
-            self.cursor_pos = self.input[self.cursor_pos..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor_pos + i)
-                .unwrap_or(self.input.len());
+            self.cursor_pos = self.next_char_start(self.cursor_pos);
         }
+    }
+
+    pub fn move_cursor_word_right(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor_pos = range.end;
+            self.clear_selection();
+            return;
+        }
+        if self.cursor_pos >= self.input.len() {
+            return;
+        }
+
+        let mut pos = self.cursor_pos;
+        while pos < self.input.len() {
+            let next = self.next_char_start(pos);
+            let ch = self.input[pos..next].chars().next().unwrap_or_default();
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = next;
+        }
+        if pos >= self.input.len() {
+            self.cursor_pos = self.input.len();
+            return;
+        }
+
+        let next = self.next_char_start(pos);
+        let ch = self.input[pos..next].chars().next().unwrap_or_default();
+        let class = Self::cursor_class(ch);
+        pos = next;
+        while pos < self.input.len() {
+            let next = self.next_char_start(pos);
+            let ch = self.input[pos..next].chars().next().unwrap_or_default();
+            if Self::cursor_class(ch) != class {
+                break;
+            }
+            pos = next;
+        }
+        self.cursor_pos = pos;
     }
 
     pub fn move_cursor_home(&mut self) {
@@ -1068,6 +1178,47 @@ mod tests {
         // from "hello". First undo drops "world".
         assert!(editor.undo());
         assert_eq!(editor.input, "hello ");
+    }
+
+    #[test]
+    fn move_cursor_word_left_skips_whitespace_and_word_groups() {
+        let mut editor = EditorState::default();
+        editor.input = "alpha beta_gamma-delta  omega".into();
+        editor.cursor_pos = editor.input.len();
+
+        editor.move_cursor_word_left();
+        assert_eq!(&editor.input[editor.cursor_pos..], "omega");
+
+        editor.move_cursor_word_left();
+        assert_eq!(&editor.input[editor.cursor_pos..], "delta  omega");
+
+        editor.move_cursor_word_left();
+        assert_eq!(&editor.input[editor.cursor_pos..], "-delta  omega");
+
+        editor.move_cursor_word_left();
+        assert_eq!(
+            &editor.input[editor.cursor_pos..],
+            "beta_gamma-delta  omega"
+        );
+    }
+
+    #[test]
+    fn move_cursor_word_right_skips_whitespace_and_word_groups() {
+        let mut editor = EditorState::default();
+        editor.input = "alpha beta_gamma-delta  omega".into();
+        editor.cursor_pos = 0;
+
+        editor.move_cursor_word_right();
+        assert_eq!(editor.cursor_pos, "alpha".len());
+
+        editor.move_cursor_word_right();
+        assert_eq!(editor.cursor_pos, "alpha beta_gamma".len());
+
+        editor.move_cursor_word_right();
+        assert_eq!(editor.cursor_pos, "alpha beta_gamma-".len());
+
+        editor.move_cursor_word_right();
+        assert_eq!(editor.cursor_pos, "alpha beta_gamma-delta".len());
     }
 
     #[test]

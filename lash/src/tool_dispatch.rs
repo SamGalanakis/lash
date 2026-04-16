@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::plugin::{
@@ -25,6 +26,20 @@ pub(crate) struct ToolDispatchContext {
 
 #[derive(Clone)]
 pub(crate) struct ToolDispatchOutcome {
+    pub record: ToolCallRecord,
+    pub images: Vec<ToolImage>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ParallelToolCallSpec {
+    pub index: usize,
+    pub tool_name: String,
+    pub args: serde_json::Value,
+}
+
+#[derive(Clone)]
+pub(crate) struct ParallelToolCallOutcome {
+    pub index: usize,
     pub record: ToolCallRecord,
     pub images: Vec<ToolImage>,
 }
@@ -189,6 +204,43 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
 
     outcome(tool_name, args, result, duration_ms)
 }
+
+pub(crate) async fn dispatch_parallel_tool_call(
+    context: Arc<ToolDispatchContext>,
+    spec: ParallelToolCallSpec,
+    progress: Option<ProgressSender>,
+) -> ParallelToolCallOutcome {
+    let outcome = dispatch_tool_call(&context, spec.tool_name, spec.args, progress.as_ref()).await;
+    ParallelToolCallOutcome {
+        index: spec.index,
+        record: outcome.record,
+        images: outcome.images,
+    }
+}
+
+pub(crate) async fn dispatch_parallel_tool_calls(
+    context: Arc<ToolDispatchContext>,
+    specs: Vec<ParallelToolCallSpec>,
+    progress: Option<&ProgressSender>,
+) -> Vec<ParallelToolCallOutcome> {
+    let progress = progress.cloned();
+    let mut pending = FuturesUnordered::new();
+    for spec in specs {
+        pending.push(dispatch_parallel_tool_call(
+            Arc::clone(&context),
+            spec,
+            progress.clone(),
+        ));
+    }
+
+    let mut outcomes = Vec::new();
+    while let Some(outcome) = pending.next().await {
+        outcomes.push(outcome);
+    }
+    outcomes.sort_by_key(|outcome| outcome.index);
+    outcomes
+}
+
 fn outcome(
     tool_name: String,
     args: serde_json::Value,
@@ -371,8 +423,6 @@ mod tests {
 
         assert!(outcome.record.success);
         assert_eq!(outcome.record.tool, "batch");
-        assert_eq!(outcome.record.result.get("successful"), Some(&json!(2)));
-        assert_eq!(outcome.record.result.get("failed"), Some(&json!(1)));
         let results = outcome
             .record
             .result
@@ -380,6 +430,13 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("results");
         assert_eq!(results.len(), 3);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|item| item.get("success").and_then(|value| value.as_bool()) == Some(true))
+                .count(),
+            2
+        );
         assert_eq!(results[0].get("tool"), Some(&json!("alpha")));
         assert_eq!(results[2].get("error"), Some(&json!("beta failed")));
     }
@@ -399,7 +456,6 @@ mod tests {
         .await;
 
         assert!(outcome.record.success);
-        assert_eq!(outcome.record.result.get("failed"), Some(&json!(1)));
         let first = outcome
             .record
             .result
@@ -428,8 +484,6 @@ mod tests {
         .await;
 
         assert!(outcome.record.success);
-        assert_eq!(outcome.record.result.get("successful"), Some(&json!(25)));
-        assert_eq!(outcome.record.result.get("failed"), Some(&json!(1)));
         let results = outcome
             .record
             .result
@@ -437,6 +491,13 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("results");
         assert_eq!(results.len(), 26);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|item| item.get("success").and_then(|value| value.as_bool()) == Some(true))
+                .count(),
+            25
+        );
         assert_eq!(
             results[25].get("error"),
             Some(&json!("Maximum of 25 tool calls allowed in batch"))
@@ -462,7 +523,17 @@ mod tests {
 
         assert!(outcome.record.success);
         assert_eq!(started.load(Ordering::SeqCst), 2);
-        assert_eq!(outcome.record.result.get("successful"), Some(&json!(2)));
-        assert_eq!(outcome.record.result.get("failed"), Some(&json!(0)));
+        let results = outcome
+            .record
+            .result
+            .get("results")
+            .and_then(|value| value.as_array())
+            .expect("results");
+        assert_eq!(results.len(), 2);
+        assert!(
+            results
+                .iter()
+                .all(|item| item.get("success").and_then(|value| value.as_bool()) == Some(true))
+        );
     }
 }

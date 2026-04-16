@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime};
 use crate::tool_dispatch::{
-    ToolDispatchContext, ToolDispatchOutcome, dispatch_tool_call,
+    ParallelToolCallSpec, ToolDispatchContext, ToolDispatchOutcome, dispatch_parallel_tool_call,
     dispatch_tool_call_with_execution_context,
 };
 use crate::{
@@ -814,8 +814,16 @@ impl Session {
                             "PARALLEL: task #{tc_num} '{name}' executing at t+{:.3}s",
                             run_start.elapsed().as_secs_f64()
                         );
-                        let outcome =
-                            dispatch_tool_call(&dispatch, name, parsed_args, msg_tx.as_ref()).await;
+                        let outcome = dispatch_parallel_tool_call(
+                            Arc::clone(&dispatch),
+                            ParallelToolCallSpec {
+                                index: tc_num,
+                                tool_name: name,
+                                args: parsed_args,
+                            },
+                            msg_tx,
+                        )
+                        .await;
 
                         // Send the tool result back to the embedded lashlang runtime.
                         let result_json = json!({

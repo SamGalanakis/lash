@@ -179,10 +179,7 @@ fn truncate_tool_result_preview(
     };
     let unit = if hit_bytes { "bytes" } else { "lines" };
     let retained_hint = match output_path {
-        Some(path) => format!(
-            "The tool call succeeded but the output was truncated. Full output saved to: {}\nUse `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.",
-            path.display()
-        ),
+        Some(path) => retained_output_hint(path),
         None => "The tool output was truncated. No separate full-output file was written for this result.".to_string(),
     };
     match direction {
@@ -197,6 +194,13 @@ fn truncate_tool_result_preview(
 
 fn tool_result_needs_truncation(text: &str) -> bool {
     text.lines().count() > TOOL_RESULT_MAX_LINES || text.len() > TOOL_RESULT_MAX_BYTES
+}
+
+fn retained_output_hint(path: &Path) -> String {
+    format!(
+        "Full output saved to: {}\nUse `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.",
+        path.display()
+    )
 }
 
 fn normalize_tool_result_content(record: &ToolCallRecord) -> String {
@@ -253,6 +257,15 @@ fn spill_tool_output_to_dir(
     Some(path)
 }
 
+fn existing_tool_output_path(record: &ToolCallRecord) -> Option<PathBuf> {
+    record
+        .result
+        .get("full_output_path")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+}
+
 fn render_tool_result_preview(record: &ToolCallRecord) -> String {
     let normalized = normalize_tool_result_content(record);
     truncate_tool_result_preview(
@@ -264,16 +277,21 @@ fn render_tool_result_preview(record: &ToolCallRecord) -> String {
 
 fn render_tool_result_preview_for_session(record: &ToolCallRecord) -> String {
     let normalized = normalize_tool_result_content(record);
-    let output_path = if tool_result_needs_truncation(&normalized) {
-        spill_tool_output_to_dir(&lash_cache_dir(), record, &normalized)
-    } else {
-        None
-    };
-    truncate_tool_result_preview(
-        &normalized,
-        tool_result_truncation_direction(&record.tool),
-        output_path.as_deref(),
-    )
+    let existing_output_path = existing_tool_output_path(record);
+    if tool_result_needs_truncation(&normalized) {
+        let output_path = existing_output_path
+            .or_else(|| spill_tool_output_to_dir(&lash_cache_dir(), record, &normalized));
+        return truncate_tool_result_preview(
+            &normalized,
+            tool_result_truncation_direction(&record.tool),
+            output_path.as_deref(),
+        );
+    }
+
+    match existing_output_path {
+        Some(path) => format!("{normalized}\n\n{}", retained_output_hint(&path)),
+        None => normalized,
+    }
 }
 
 fn tool_record_map(tool_calls: &[ToolCallRecord]) -> HashMap<String, ToolCallRecord> {
@@ -1023,6 +1041,24 @@ mod tests {
         );
         assert!(preview.contains(path.to_string_lossy().as_ref()));
         assert!(preview.contains("Full output saved to:"));
+    }
+
+    #[test]
+    fn render_tool_result_preview_for_session_reuses_existing_output_path() {
+        let record = ToolCallRecord {
+            call_id: Some("call-123".to_string()),
+            tool: "exec_command".to_string(),
+            args: json!({"cmd":"cat giant.log"}),
+            result: json!({
+                "output": format!("{}\nend", "line\n".repeat(2_500)),
+                "full_output_path": "/tmp/existing-shell-output.log",
+            }),
+            success: true,
+            duration_ms: 5,
+        };
+
+        let preview = render_tool_result_preview_for_session(&record);
+        assert!(preview.contains("Full output saved to: /tmp/existing-shell-output.log"));
     }
 
     use crate::test_support::{MockSessionManager, mock_assembled_turn as empty_turn};
