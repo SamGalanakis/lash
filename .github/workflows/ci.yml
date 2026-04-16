@@ -180,9 +180,9 @@ jobs:
           from pathlib import Path
 
           report = json.loads(Path(".benchmarks/ui-perf/ci.json").read_text())
-          summary = report["summary"]
+          lines = ["## UI Perf", ""]
 
-          def metric(name, unit="ms"):
+          def metric(summary, name, unit="ms"):
               item = summary[name]
               return (
                   f"- `{name}`: min `{item['min']}{unit}`, "
@@ -190,20 +190,38 @@ jobs:
                   f"mean `{item['mean']}{unit}`"
               )
 
-          lines = [
-              "## UI Perf",
-              "",
-              f"- viewport: `{report['width']}x{report['height']}`",
-              f"- turns: `{report['turn_count']}`",
-              f"- measured runs: `{report['runs']}`",
-              metric("build_case_ms"),
-              metric("initial_render_ms"),
-              metric("height_cache_rebuild_ms"),
-              metric("scroll_render_avg_ms"),
-              metric("scroll_render_max_ms"),
-              metric("selection_render_avg_ms"),
-              metric("selection_render_max_ms"),
-          ]
+          if "summary" in report:
+              summary = report["summary"]
+              lines.extend([
+                  f"- viewport: `{report['width']}x{report['height']}`",
+                  f"- turns: `{report['turn_count']}`",
+                  f"- measured runs: `{report['runs']}`",
+                  metric(summary, "build_case_ms"),
+                  metric(summary, "initial_render_ms"),
+                  metric(summary, "height_cache_rebuild_ms"),
+                  metric(summary, "scroll_render_avg_ms"),
+                  metric(summary, "scroll_render_max_ms"),
+                  metric(summary, "selection_render_avg_ms"),
+                  metric(summary, "selection_render_max_ms"),
+              ])
+          else:
+              scenarios = report.get("scenarios", [])
+              lines.append(f"- scenarios: `{', '.join(item['scenario'] for item in scenarios)}`")
+              for item in scenarios:
+                  summary = item["summary"]
+                  lines.extend([
+                      "",
+                      f"### {item['scenario']}",
+                      "",
+                      f"- measured runs: `{summary['runs']}`",
+                      metric(summary, "build_case_ms"),
+                      metric(summary, "initial_render_ms"),
+                      metric(summary, "height_cache_rebuild_ms"),
+                      metric(summary, "scroll_render_avg_ms"),
+                      metric(summary, "scroll_render_max_ms"),
+                      metric(summary, "selection_render_avg_ms"),
+                      metric(summary, "selection_render_max_ms"),
+                  ])
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
           PY
 
