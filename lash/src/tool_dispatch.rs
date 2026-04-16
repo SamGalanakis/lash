@@ -52,8 +52,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     progress: Option<&ProgressSender>,
     tool_context: ToolExecutionContext,
 ) -> ToolDispatchOutcome {
-    let enabled_tools = context.surface.enabled_tools();
-    if !enabled_tools.iter().any(|tool| tool.name == tool_name) {
+    if !context.surface.has_enabled_tool(&tool_name) {
         return outcome(
             tool_name,
             args,

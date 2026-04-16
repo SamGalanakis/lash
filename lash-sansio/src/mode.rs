@@ -120,14 +120,13 @@ pub fn build_mode_preamble(input: ModeBuildInput) -> ModePreamble {
 }
 
 fn build_standard_mode_preamble(input: ModeBuildInput) -> ModePreamble {
-    let enabled_tools = input.tool_surface.enabled_tools();
     ModePreamble {
         config: ModeConfig {
             protocol: Arc::new(StandardDriver),
             sync_execution_surface: false,
         },
         tool_specs: Arc::new(input.tool_surface.model_tool_specs()),
-        tool_names: enabled_tools.into_iter().map(|tool| tool.name).collect(),
+        tool_names: input.tool_surface.tool_names(),
         omitted_tool_count: 0,
         execution_prompt: STANDARD_EXECUTION_SECTION.to_string(),
         prompt_contributions: input.extra_prompt_contributions,

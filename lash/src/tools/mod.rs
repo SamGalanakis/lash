@@ -157,22 +157,29 @@ pub(crate) fn parse_optional_usize_arg(
     }
 }
 
-pub(crate) fn project_tool_catalog(
-    definitions: impl IntoIterator<Item = crate::ToolDefinition>,
-) -> Vec<serde_json::Value> {
+use std::borrow::Borrow;
+
+pub(crate) fn project_tool_catalog<I, T>(definitions: I) -> Vec<serde_json::Value>
+where
+    I: IntoIterator<Item = T>,
+    T: Borrow<crate::ToolDefinition>,
+{
     definitions
         .into_iter()
-        .filter(|d| d.enabled)
-        .map(|d| {
-            serde_json::json!({
-                "name": d.name,
-                "description": d.description,
-                "params": d.params,
-                "returns": d.returns,
-                "examples": d.examples,
+        .filter_map(|definition| {
+            let d = definition.borrow();
+            if !d.enabled {
+                return None;
+            }
+            Some(serde_json::json!({
+                "name": &d.name,
+                "description": &d.description,
+                "params": &d.params,
+                "returns": &d.returns,
+                "examples": &d.examples,
                 "injected": d.injected,
                 "enabled": d.enabled,
-            })
+            }))
         })
         .collect()
 }

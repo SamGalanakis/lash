@@ -1318,6 +1318,27 @@ pub struct LashRuntime {
 }
 
 impl LashRuntime {
+    fn stamp_live_plugin_state(&mut self) {
+        if let Some(session) = self.session.as_ref() {
+            if let Some(dynamic_tools) = session.plugins().dynamic_tools() {
+                let snapshot = dynamic_tools.export_state();
+                self.state.dynamic_state_generation = Some(snapshot.base_generation);
+                self.state.dynamic_state_snapshot = Some(snapshot);
+            } else {
+                self.state.dynamic_state_generation = None;
+                self.state.dynamic_state_snapshot = None;
+            }
+            self.state.plugin_snapshot = session.plugins().snapshot().ok();
+            self.state.plugin_snapshot_revision =
+                Some(session.plugins().snapshot_revision_fingerprint());
+        } else {
+            self.state.dynamic_state_generation = None;
+            self.state.dynamic_state_snapshot = None;
+            self.state.plugin_snapshot = None;
+            self.state.plugin_snapshot_revision = None;
+        }
+    }
+
     fn has_overflow_error(assembled: &AssembledTurn) -> bool {
         assembled.errors.iter().any(|issue| {
             let lower = issue.message.to_lowercase();
@@ -1347,6 +1368,20 @@ impl LashRuntime {
                 session.shared_tool_catalog(&self.state.session_id, self.policy.execution_mode)
             })
             .unwrap_or_else(|| Arc::new(Vec::new()))
+    }
+
+    pub fn dynamic_tool_state(&self) -> Result<crate::DynamicStateSnapshot, SessionError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let Some(dynamic_tools) = session.plugins().dynamic_tools() else {
+            return Err(SessionError::Protocol(
+                "dynamic tools are unavailable in this runtime session".to_string(),
+            ));
+        };
+        Ok(dynamic_tools.export_state())
     }
 
     async fn from_host_state(
@@ -1540,6 +1575,7 @@ impl LashRuntime {
         if self.background_sync_needed.swap(false, Ordering::AcqRel) {
             self.refresh_session_graph_from_store().await;
         }
+        self.refresh_session_tool_surface().await?;
         Ok(())
     }
 
@@ -1867,7 +1903,31 @@ impl LashRuntime {
                 "runtime session not available".to_string(),
             ));
         };
-        session.refresh_tool_surface().await
+        session.refresh_tool_surface().await?;
+        self.stamp_live_plugin_state();
+        Ok(())
+    }
+
+    pub async fn apply_dynamic_tool_state(
+        &mut self,
+        snapshot: crate::DynamicStateSnapshot,
+    ) -> Result<u64, SessionError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let Some(dynamic_tools) = session.plugins().dynamic_tools() else {
+            return Err(SessionError::Protocol(
+                "dynamic tools are unavailable in this runtime session".to_string(),
+            ));
+        };
+
+        let generation = dynamic_tools.apply_state(snapshot).map_err(|err| {
+            SessionError::Protocol(format!("dynamic tool reconfigure failed: {err}"))
+        })?;
+        self.stamp_live_plugin_state();
+        Ok(generation)
     }
 
     /// Reset the RLM session on the underlying session runtime.

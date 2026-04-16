@@ -420,9 +420,11 @@ pub fn reassign_part_ids(message_id: &str, parts: &mut [Part]) {
     }
 }
 
-pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {
+pub fn model_tool_specs_iter<'a>(
+    tools: impl IntoIterator<Item = &'a ToolDefinition>,
+) -> Vec<LlmToolSpec> {
     tools
-        .iter()
+        .into_iter()
         .map(|tool| {
             let model_tool = tool.model_tool();
             LlmToolSpec {
@@ -433,4 +435,8 @@ pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {
             }
         })
         .collect()
+}
+
+pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {
+    model_tool_specs_iter(tools.iter())
 }

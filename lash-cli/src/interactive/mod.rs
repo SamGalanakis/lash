@@ -52,6 +52,7 @@ use self::commands::{
 pub(crate) use self::runtime::injected_image_part_indices;
 use self::runtime::{
     apply_pending_reconfigure, copy_selected_text_or_last_response, send_user_message,
+    sync_runtime_tool_surface,
 };
 pub(crate) use self::runtime::{
     generate_session_name, make_injected_plugin_message, notify_desktop,
@@ -351,18 +352,9 @@ pub(crate) async fn run_app(
     startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
     let mut app = App::new(model, session_name);
-    let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = {
-        #[cfg(feature = "autoresearch")]
-        {
-            vec![Arc::new(
-                lash_autoresearch::AutoresearchUiExtension::default(),
-            )]
-        }
-        #[cfg(not(feature = "autoresearch"))]
-        {
-            Vec::new()
-        }
-    };
+    let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = vec![Arc::new(
+        lash_autoresearch::AutoresearchUiExtension::default(),
+    )];
     let ui_extensions = Arc::new(
         UiExtensions::with_builtins(extra_ui_extensions)
             .map_err(|err| anyhow::anyhow!("failed to build UI extensions: {err}"))?,
@@ -659,6 +651,12 @@ pub(crate) async fn run_app(
                         ui_trace.as_mut(),
                     );
                     runtime = Some(done.runtime);
+                    if let Err(err) = sync_runtime_tool_surface(&mut runtime).await {
+                        push_system_message(
+                            &mut app,
+                            format!("Failed to sync tool surface after turn: {err}"),
+                        );
+                    }
                     if done.stream_id != active_stream_id || pending_clear_after_return {
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.export_state().policy;

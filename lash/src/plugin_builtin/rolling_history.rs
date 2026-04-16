@@ -708,6 +708,8 @@ impl SessionPlugin for RollingHistoryPlugin {
                 name: "/compact",
                 usage: "/compact [focus instructions]",
                 description: "Summarize older messages to free up context.",
+                argument_hint: Some("[focus instructions]"),
+                argument_options: &[],
                 takes_argument: true,
                 runs_out_of_band: false,
             },

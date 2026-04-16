@@ -1,4 +1,5 @@
 use lash::{CommandDef, SkillCatalog};
+use lash_ui::UiExtensions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -6,6 +7,8 @@ pub struct CommandSpec {
     pub aliases: &'static [&'static str],
     pub usage: &'static str,
     pub description: &'static str,
+    pub argument_hint: Option<&'static str>,
+    pub argument_options: &'static [&'static str],
     pub takes_argument: bool,
     /// When true, the dispatch loop may invoke this command while a
     /// turn is streaming instead of queueing it. Reserved for handlers
@@ -20,6 +23,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &["/new"],
         usage: "/clear",
         description: "Reset conversation",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: false,
     },
@@ -28,6 +33,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/controls",
         description: "Show keyboard shortcuts",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: true,
     },
@@ -36,6 +43,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/fork",
         description: "Open a forked session in a new terminal",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: true,
     },
@@ -44,6 +53,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/tree",
         description: "Browse and switch branches in the current session",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: false,
     },
@@ -52,6 +63,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/version",
         description: "Show lash-cli and lash-sansio versions",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: true,
     },
@@ -60,6 +73,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/info",
         description: "Show current session/runtime info",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: true,
     },
@@ -68,6 +83,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/model [name]",
         description: "Show or switch LLM model",
+        argument_hint: Some("[name]"),
+        argument_options: &[],
         takes_argument: true,
         runs_out_of_band: false,
     },
@@ -76,6 +93,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/variant [name]",
         description: "Show or switch model variant",
+        argument_hint: Some("[name]"),
+        argument_options: &[],
         takes_argument: true,
         runs_out_of_band: false,
     },
@@ -84,6 +103,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/mode [name]",
         description: "Show current execution mode",
+        argument_hint: Some("[name]"),
+        argument_options: &[],
         takes_argument: true,
         runs_out_of_band: false,
     },
@@ -92,6 +113,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &["/login"],
         usage: "/provider",
         description: "Switch, add, or re-authenticate providers",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: false,
     },
@@ -100,6 +123,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/logout",
         description: "Remove stored credentials for active provider",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: false,
     },
@@ -108,6 +133,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/retry",
         description: "Replay the previous turn payload",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: false,
     },
@@ -116,6 +143,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &["/continue"],
         usage: "/resume [name]",
         description: "Browse or load a previous session",
+        argument_hint: Some("[name]"),
+        argument_options: &[],
         takes_argument: true,
         runs_out_of_band: false,
     },
@@ -124,6 +153,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/skills",
         description: "Browse loaded skills",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: true,
     },
@@ -132,6 +163,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/tools ...",
         description: "Inspect or edit dynamic tools",
+        argument_hint: Some("..."),
+        argument_options: &[],
         takes_argument: true,
         runs_out_of_band: false,
     },
@@ -140,6 +173,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         usage: "/reconfigure ...",
         description: "Apply or inspect pending runtime reconfigure",
+        argument_hint: Some("..."),
+        argument_options: &[],
         takes_argument: true,
         runs_out_of_band: false,
     },
@@ -148,6 +183,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &["/?"],
         usage: "/help",
         description: "Show commands and shortcuts",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: true,
     },
@@ -156,6 +193,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &["/quit"],
         usage: "/exit",
         description: "Quit",
+        argument_hint: None,
+        argument_options: &[],
         takes_argument: false,
         runs_out_of_band: true,
     },
@@ -163,6 +202,12 @@ pub const COMMANDS: &[CommandSpec] = &[
 
 pub fn catalog() -> &'static [CommandSpec] {
     COMMANDS
+}
+
+fn builtin_command_spec(name: &str) -> Option<&'static CommandSpec> {
+    COMMANDS
+        .iter()
+        .find(|spec| spec.name == name || spec.aliases.contains(&name))
 }
 
 /// Return commands matching the given prefix.
@@ -201,13 +246,63 @@ pub fn completions(
     results
 }
 
+pub fn argument_hint(
+    name: &str,
+    skills: &SkillCatalog,
+    plugin_commands: &[CommandDef],
+    ui_extensions: &UiExtensions,
+) -> Option<String> {
+    if let Some(spec) = builtin_command_spec(name) {
+        return spec.argument_hint.map(str::to_string);
+    }
+    if let Some(spec) = ui_extensions.command_spec(name) {
+        return spec.argument_hint.map(str::to_string);
+    }
+    if let Some(def) = plugin_commands.iter().find(|def| def.name == name) {
+        return def.argument_hint.map(str::to_string);
+    }
+    let skill_name = name.strip_prefix('/')?;
+    skills.argument_hint(skill_name).map(str::to_string)
+}
+
+pub fn argument_completions(
+    name: &str,
+    prefix: &str,
+    skills: &SkillCatalog,
+    plugin_commands: &[CommandDef],
+    ui_extensions: &UiExtensions,
+) -> Vec<(String, String)> {
+    let (options, description) = if let Some(spec) = builtin_command_spec(name) {
+        (spec.argument_options, spec.description)
+    } else if let Some(spec) = ui_extensions.command_spec(name) {
+        (spec.argument_options, spec.description)
+    } else if let Some(def) = plugin_commands.iter().find(|def| def.name == name) {
+        (def.argument_options, def.description)
+    } else if let Some(skill_name) = name.strip_prefix('/') {
+        let options = skills.argument_options(skill_name);
+        return options
+            .iter()
+            .filter(|option| option.starts_with(prefix))
+            .map(|option| (option.clone(), format!("Argument for {name}")))
+            .collect();
+    } else {
+        return Vec::new();
+    };
+
+    options
+        .iter()
+        .filter(|option| option.starts_with(prefix))
+        .map(|option| ((*option).to_string(), description.to_string()))
+        .collect()
+}
+
 /// Whether accepting autocomplete should append a trailing space.
 pub fn completion_inserts_space(
     cmd: &str,
     skills: &SkillCatalog,
     plugin_commands: &[CommandDef],
 ) -> bool {
-    if let Some(spec) = COMMANDS.iter().find(|spec| spec.name == cmd) {
+    if let Some(spec) = builtin_command_spec(cmd) {
         return spec.takes_argument;
     }
     if let Some(def) = plugin_commands.iter().find(|def| def.name == cmd) {
@@ -356,7 +451,10 @@ pub fn parse(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use lash_ui::{SlashCommandSpec, UiContext, UiExtension, UiExtensions, UiHostEffect};
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
         let root =
@@ -368,6 +466,29 @@ mod tests {
             std::fs::write(
                 dir.join("SKILL.md"),
                 format!("---\nname: {name}\ndescription: {description}\n---\n\nbody\n"),
+            )
+            .expect("skill file");
+        }
+        let catalog = SkillCatalog::from_dirs(&[PathBuf::from(&root)]);
+        let _ = std::fs::remove_dir_all(root);
+        catalog
+    }
+
+    fn skill_catalog_with_hints(entries: &[(&str, &str, Option<&str>)]) -> SkillCatalog {
+        let root = std::env::temp_dir().join(format!(
+            "lash-command-skills-hints-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        for (name, description, argument_hint) in entries {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).expect("skill dir");
+            let hint_line = argument_hint
+                .map(|hint| format!("argument-hint: \"{hint}\"\n"))
+                .unwrap_or_default();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {description}\n{hint_line}---\n\nbody\n"),
             )
             .expect("skill file");
         }
@@ -471,6 +592,8 @@ mod tests {
             name: "/compact",
             usage: "/compact [focus]",
             description: "Summarize older messages",
+            argument_hint: Some("[focus]"),
+            argument_options: &[],
             takes_argument: true,
             runs_out_of_band: false,
         }];
@@ -556,6 +679,8 @@ mod tests {
             name: "/peek",
             usage: "/peek",
             description: "read-only",
+            argument_hint: None,
+            argument_options: &[],
             takes_argument: false,
             runs_out_of_band: true,
         }];
@@ -563,6 +688,8 @@ mod tests {
             name: "/peek",
             usage: "/peek",
             description: "stateful",
+            argument_hint: None,
+            argument_options: &[],
             takes_argument: false,
             runs_out_of_band: false,
         }];
@@ -593,6 +720,8 @@ mod tests {
             name: "/compact",
             usage: "/compact [focus]",
             description: "Summarize older messages",
+            argument_hint: Some("[focus]"),
+            argument_options: &[],
             takes_argument: true,
             runs_out_of_band: false,
         }];
@@ -613,5 +742,69 @@ mod tests {
             Some("/yolopush merge staging")
         );
         assert!(slash_skill_prompt("/skills", &skills).is_none());
+    }
+
+    #[test]
+    fn argument_completions_include_ui_command_options() {
+        struct DemoUiExtension;
+
+        const DEMO_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
+            name: "/demo",
+            aliases: &[],
+            usage: "/demo [alpha|beta]",
+            description: "Demo command",
+            argument_hint: Some("[alpha|beta]"),
+            argument_options: &["alpha", "beta"],
+            takes_argument: true,
+            allow_while_running: true,
+            action: "demo",
+        }];
+
+        #[async_trait]
+        impl UiExtension for DemoUiExtension {
+            fn id(&self) -> &'static str {
+                "demo_ui"
+            }
+
+            fn commands(&self) -> &'static [SlashCommandSpec] {
+                DEMO_COMMANDS
+            }
+
+            async fn invoke_action(
+                &self,
+                _action: &str,
+                _arg: Option<&str>,
+                _ctx: UiContext<'_>,
+            ) -> Result<Vec<UiHostEffect>, String> {
+                Ok(Vec::new())
+            }
+        }
+
+        let skills = SkillCatalog::default();
+        let ui_extensions = UiExtensions::new(vec![Arc::new(DemoUiExtension)]).expect("ui");
+        let results = argument_completions("/demo", "a", &skills, &[], &ui_extensions);
+        assert_eq!(
+            results,
+            vec![("alpha".to_string(), "Demo command".to_string())]
+        );
+        assert_eq!(
+            argument_hint("/demo", &skills, &[], &ui_extensions).as_deref(),
+            Some("[alpha|beta]")
+        );
+    }
+
+    #[test]
+    fn argument_completions_include_skill_options_from_hint() {
+        let skills = skill_catalog_with_hints(&[(
+            "impeccable",
+            "design helper",
+            Some("[craft|teach|extract]"),
+        )]);
+        let ui_extensions = UiExtensions::builtin().expect("builtin ui");
+        let results = argument_completions("/impeccable", "te", &skills, &[], &ui_extensions);
+        assert_eq!(
+            results,
+            vec![("teach".to_string(), "Argument for /impeccable".to_string())]
+        );
     }
 }

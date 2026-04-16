@@ -23,7 +23,21 @@ pub struct PendingImage {
 pub enum SuggestionKind {
     None,
     Command,
+    CommandArgument,
     Path,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SlashCompletionContext {
+    CommandName {
+        slash_pos: usize,
+        prefix: String,
+    },
+    CommandArgument {
+        command: String,
+        arg_start: usize,
+        prefix: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -718,18 +732,34 @@ impl EditorState {
         ui_extensions: &UiExtensions,
         plugin_commands: &[lash::CommandDef],
     ) {
-        if let Some((_slash_pos, prefix)) = self.slash_token_at_cursor() {
-            self.suggestions = command::completions(&prefix, skills, plugin_commands);
-            for completion in ui_extensions.completions(&prefix) {
-                if !self
-                    .suggestions
-                    .iter()
-                    .any(|(existing, _)| existing == &completion.0)
-                {
-                    self.suggestions.push(completion);
+        if let Some(context) = self.slash_completion_context() {
+            match context {
+                SlashCompletionContext::CommandName { prefix, .. } => {
+                    self.suggestions = command::completions(&prefix, skills, plugin_commands);
+                    for completion in ui_extensions.completions(&prefix) {
+                        if !self
+                            .suggestions
+                            .iter()
+                            .any(|(existing, _)| existing == &completion.0)
+                        {
+                            self.suggestions.push(completion);
+                        }
+                    }
+                    self.suggestion_kind = SuggestionKind::Command;
+                }
+                SlashCompletionContext::CommandArgument {
+                    command, prefix, ..
+                } => {
+                    self.suggestions = command::argument_completions(
+                        &command,
+                        &prefix,
+                        skills,
+                        plugin_commands,
+                        ui_extensions,
+                    );
+                    self.suggestion_kind = SuggestionKind::CommandArgument;
                 }
             }
-            self.suggestion_kind = SuggestionKind::Command;
             if self.suggestions.is_empty() {
                 self.suggestion_idx = 0;
             } else {
@@ -768,7 +798,7 @@ impl EditorState {
         Some((at_byte, partial.to_string()))
     }
 
-    fn slash_token_at_cursor(&self) -> Option<(usize, String)> {
+    fn slash_completion_context(&self) -> Option<SlashCompletionContext> {
         let before = &self.input[..self.cursor_pos];
         let slash_byte = before.rfind('/')?;
         if slash_byte > 0 {
@@ -777,11 +807,30 @@ impl EditorState {
                 return None;
             }
         }
-        let prefix = &self.input[slash_byte..self.cursor_pos];
-        if prefix.contains(' ') || prefix.contains('\n') {
+        let suffix = &before[slash_byte + 1..];
+        if suffix.contains('\n') {
             return None;
         }
-        Some((slash_byte, prefix.to_string()))
+        if let Some(space_offset) = suffix.find(' ') {
+            let command = format!("/{}", &suffix[..space_offset]);
+            let raw_arg = &suffix[space_offset + 1..];
+            let trimmed_arg = raw_arg.trim_start_matches(' ');
+            let leading_spaces = raw_arg.len().saturating_sub(trimmed_arg.len());
+            if trimmed_arg.contains(char::is_whitespace) {
+                return None;
+            }
+            let arg_start = slash_byte + 1 + space_offset + 1 + leading_spaces;
+            Some(SlashCompletionContext::CommandArgument {
+                command,
+                arg_start,
+                prefix: trimmed_arg.to_string(),
+            })
+        } else {
+            Some(SlashCompletionContext::CommandName {
+                slash_pos: slash_byte,
+                prefix: format!("/{}", suffix),
+            })
+        }
     }
 
     pub fn has_suggestions(&self) -> bool {
@@ -808,7 +857,8 @@ impl EditorState {
     ) {
         match self.suggestion_kind {
             SuggestionKind::Command => {
-                if let Some((slash_pos, _prefix)) = self.slash_token_at_cursor()
+                if let Some(SlashCompletionContext::CommandName { slash_pos, .. }) =
+                    self.slash_completion_context()
                     && let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned()
                 {
                     self.record_undo(UndoAction::Bulk);
@@ -823,6 +873,21 @@ impl EditorState {
                     let after = self.input[self.cursor_pos..].to_string();
                     self.input = format!("{}{}{}", before, replacement, after);
                     self.cursor_pos = slash_pos + replacement.len();
+                }
+                self.suggestions.clear();
+                self.suggestion_idx = 0;
+                self.suggestion_kind = SuggestionKind::None;
+            }
+            SuggestionKind::CommandArgument => {
+                if let Some(SlashCompletionContext::CommandArgument { arg_start, .. }) =
+                    self.slash_completion_context()
+                    && let Some((value, _)) = self.suggestions.get(self.suggestion_idx).cloned()
+                {
+                    self.record_undo(UndoAction::Bulk);
+                    let before = self.input[..arg_start].to_string();
+                    let after = self.input[self.cursor_pos..].to_string();
+                    self.input = format!("{}{}{}", before, value, after);
+                    self.cursor_pos = arg_start + value.len();
                 }
                 self.suggestions.clear();
                 self.suggestion_idx = 0;

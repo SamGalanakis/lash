@@ -1,5 +1,8 @@
 use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
+use async_trait::async_trait;
+use lash_ui::{SlashCommandSpec, UiContext, UiExtension, UiExtensions, UiHostEffect};
+use std::sync::Arc;
 fn other_variant_name(block: &DisplayBlock) -> &'static str {
     match block {
         DisplayBlock::TurnStart(_) => "TurnStart",
@@ -93,12 +96,65 @@ fn text_delta_stays_in_live_assistant_until_committed() {
 fn ui_extension_commands_appear_in_editor_suggestions() {
     let mut app = App::new("test-model".into(), "test".into());
     let ui_extensions = lash_ui::UiExtensions::builtin().expect("ui extensions");
-    app.set_ui_extensions(std::sync::Arc::new(ui_extensions));
+    app.set_ui_extensions(Arc::new(ui_extensions));
     app.set_input("/pl".into());
 
     app.update_suggestions();
 
     assert!(app.suggestions().iter().any(|(name, _)| name == "/plan"));
+}
+
+#[test]
+fn ui_extension_argument_suggestions_complete_second_token() {
+    struct DemoUiExtension;
+
+    const DEMO_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
+        name: "/demo",
+        aliases: &[],
+        usage: "/demo [help|off]",
+        description: "Demo command",
+        argument_hint: Some("[help|off]"),
+        argument_options: &["help", "off"],
+        takes_argument: true,
+        allow_while_running: true,
+        action: "demo",
+    }];
+
+    #[async_trait]
+    impl UiExtension for DemoUiExtension {
+        fn id(&self) -> &'static str {
+            "demo_ui"
+        }
+
+        fn commands(&self) -> &'static [SlashCommandSpec] {
+            DEMO_COMMANDS
+        }
+
+        async fn invoke_action(
+            &self,
+            _action: &str,
+            _arg: Option<&str>,
+            _ctx: UiContext<'_>,
+        ) -> Result<Vec<UiHostEffect>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    let mut app = App::new("test-model".into(), "test".into());
+    let ui_extensions = UiExtensions::new(vec![Arc::new(DemoUiExtension)]).expect("ui extensions");
+    app.set_ui_extensions(Arc::new(ui_extensions));
+    app.set_input("/demo h".into());
+    app.editor.cursor_pos = app.input().len();
+
+    app.update_suggestions();
+
+    assert_eq!(
+        app.suggestions().first().map(|value| value.0.as_str()),
+        Some("help")
+    );
+    app.complete_suggestion();
+
+    assert_eq!(app.input(), "/demo help");
 }
 
 #[test]

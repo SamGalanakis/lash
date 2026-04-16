@@ -61,13 +61,17 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
 #[test]
 fn runtime_commit_rejects_different_session_id_on_single_session_store() {
     let store = Store::memory().expect("store");
-    let mut alpha = PersistedSessionState::default();
-    alpha.session_id = "alpha".to_string();
+    let alpha = PersistedSessionState {
+        session_id: "alpha".to_string(),
+        ..PersistedSessionState::default()
+    };
     let first = store.apply_runtime_commit(RuntimeCommit::persisted_state(&alpha, &[]));
     assert!(first.is_ok());
 
-    let mut beta = PersistedSessionState::default();
-    beta.session_id = "beta".to_string();
+    let beta = PersistedSessionState {
+        session_id: "beta".to_string(),
+        ..PersistedSessionState::default()
+    };
     let err = store
         .apply_runtime_commit(RuntimeCommit::persisted_state(&beta, &[]))
         .expect_err("mismatched session commit should fail");
