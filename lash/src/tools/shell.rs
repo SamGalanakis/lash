@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -6,7 +7,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI32, Ordering},
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::json;
@@ -23,11 +24,13 @@ struct ShellProcess {
     _master: Box<dyn MasterPty + Send>,
     writer: Arc<StdMutex<Option<Box<dyn Write + Send>>>>,
     buffer: Arc<StdMutex<Vec<u8>>>,
+    buffer_start: Arc<StdMutex<usize>>,
     truncated: Arc<AtomicBool>,
     read_cursor: Arc<StdMutex<usize>>,
     exit_code: Arc<StdMutex<Option<i32>>>,
     exit_notify: Arc<Notify>,
     output_notify: Arc<Notify>,
+    spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
 }
 
 pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
@@ -46,12 +49,19 @@ pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
 #[derive(Clone)]
 struct ProcessState {
     buffer: Arc<StdMutex<Vec<u8>>>,
+    buffer_start: Arc<StdMutex<usize>>,
     exit_code: Arc<StdMutex<Option<i32>>>,
     exit_notify: Arc<Notify>,
     output_notify: Arc<Notify>,
 }
 
+struct ShellOutputSpill {
+    path: PathBuf,
+    file: File,
+}
+
 const MAX_OUTPUT: usize = 512_000;
+const SPILL_OUTPUT_THRESHOLD: usize = 50 * 1024;
 const DEFAULT_EXEC_YIELD_MS: u64 = 10_000;
 const DEFAULT_WRITE_STDIN_YIELD_MS: u64 = 250;
 const OUTPUT_QUIET_PERIOD_MS: u64 = 75;
@@ -182,16 +192,21 @@ impl ShellRuntime {
         drop(pair.slave);
 
         let buffer = Arc::new(StdMutex::new(Vec::new()));
+        let buffer_start = Arc::new(StdMutex::new(0usize));
         let truncated = Arc::new(AtomicBool::new(false));
         let read_cursor = Arc::new(StdMutex::new(0usize));
         let exit_code = Arc::new(StdMutex::new(None));
         let exit_notify = Arc::new(Notify::new());
         let output_notify = Arc::new(Notify::new());
+        let spill = Arc::new(StdMutex::new(None));
 
         spawn_reader_thread(
+            id.clone(),
             reader,
             Arc::clone(&buffer),
+            Arc::clone(&buffer_start),
             Arc::clone(&truncated),
+            Arc::clone(&spill),
             Arc::clone(&output_notify),
         );
         spawn_wait_thread(
@@ -205,11 +220,13 @@ impl ShellRuntime {
             _master: pair.master,
             writer: Arc::new(StdMutex::new(Some(writer))),
             buffer,
+            buffer_start,
             truncated,
             read_cursor,
             exit_code,
             exit_notify,
             output_notify,
+            spill,
         };
         self.processes.lock().unwrap().insert(id, process);
         Ok(())
@@ -228,6 +245,7 @@ impl ShellRuntime {
             .ok_or_else(|| format!("No process with id: {id}"))?;
         Ok(ProcessState {
             buffer: Arc::clone(&proc.buffer),
+            buffer_start: Arc::clone(&proc.buffer_start),
             exit_code: Arc::clone(&proc.exit_code),
             exit_notify: Arc::clone(&proc.exit_notify),
             output_notify: Arc::clone(&proc.output_notify),
@@ -240,39 +258,55 @@ impl ShellRuntime {
             .get(id)
             .ok_or_else(|| format!("No process with id: {id}"))?;
         let buffer_len = proc.buffer.lock().unwrap().len();
+        let buffer_start = *proc.buffer_start.lock().unwrap();
         let read_cursor = *proc.read_cursor.lock().unwrap();
-        Ok((buffer_len, read_cursor))
+        Ok((buffer_start + buffer_len, read_cursor))
     }
 
     fn take_incremental_output(
         &self,
         id: &str,
         max_output_tokens: Option<usize>,
-    ) -> Result<(String, Option<usize>), String> {
-        let (buffer, truncated, read_cursor) = {
+    ) -> Result<(String, Option<usize>, Option<PathBuf>), String> {
+        let (buffer, buffer_start, truncated, read_cursor, spill) = {
             let procs = self.processes.lock().unwrap();
             let proc = procs
                 .get(id)
                 .ok_or_else(|| format!("Unknown session id {id}"))?;
             (
                 Arc::clone(&proc.buffer),
+                Arc::clone(&proc.buffer_start),
                 Arc::clone(&proc.truncated),
                 Arc::clone(&proc.read_cursor),
+                Arc::clone(&proc.spill),
             )
         };
 
         let buf = buffer.lock().unwrap();
+        let start_offset = *buffer_start.lock().unwrap();
+        let end_offset = start_offset + buf.len();
         let mut cursor = read_cursor.lock().unwrap();
-        let start = (*cursor).min(buf.len());
-        let mut rendered = String::from_utf8_lossy(&buf[start..]).to_string();
-        *cursor = buf.len();
-        if !rendered.is_empty() && truncated.load(Ordering::SeqCst) && *cursor == buf.len() {
+        let had_gap = *cursor < start_offset;
+        let start = (*cursor).max(start_offset);
+        let mut rendered =
+            String::from_utf8_lossy(&buf[start.saturating_sub(start_offset)..]).to_string();
+        *cursor = end_offset;
+        if !rendered.is_empty()
+            && (had_gap || truncated.load(Ordering::SeqCst) && *cursor == end_offset)
+        {
             if !rendered.ends_with('\n') {
                 rendered.push('\n');
             }
             rendered.push_str("[truncated]");
         }
-        Ok(truncate_exec_output(rendered, max_output_tokens))
+        let (rendered, original_token_count, token_truncated) =
+            truncate_exec_output(rendered, max_output_tokens);
+        let mut spill_guard = spill.lock().unwrap();
+        let mut full_output_path = spill_guard.as_ref().map(|spill| spill.path.clone());
+        if token_truncated && full_output_path.is_none() {
+            full_output_path = activate_spill(id, &buf, &mut spill_guard);
+        }
+        Ok((rendered, original_token_count, full_output_path))
     }
 
     async fn wait_until_exit_or_timeout(
@@ -291,9 +325,20 @@ impl ShellRuntime {
             if let Some(tx) = progress {
                 let new_chunk = {
                     let buf = state.buffer.lock().unwrap();
-                    if buf.len() > sent_len {
-                        let chunk = String::from_utf8_lossy(&buf[sent_len..]).to_string();
-                        sent_len = buf.len();
+                    let buffer_start = *state.buffer_start.lock().unwrap();
+                    let buffer_end = buffer_start + buf.len();
+                    if buffer_end > sent_len {
+                        let start = sent_len.max(buffer_start);
+                        let mut chunk =
+                            String::from_utf8_lossy(&buf[start.saturating_sub(buffer_start)..])
+                                .to_string();
+                        if sent_len < buffer_start && !chunk.is_empty() {
+                            if !chunk.ends_with('\n') {
+                                chunk.push('\n');
+                            }
+                            chunk.push_str("[truncated]");
+                        }
+                        sent_len = buffer_end;
                         Some(chunk)
                     } else {
                         None
@@ -312,13 +357,14 @@ impl ShellRuntime {
             let exited = state.exit_code.lock().unwrap().is_some();
             if exited {
                 wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
-                let (output, original_token_count) =
+                let (output, original_token_count, full_output_path) =
                     self.take_incremental_output(id, max_output_tokens)?;
                 let exit_code = state.exit_code.lock().unwrap().unwrap_or(-1);
                 return Ok(PollOutcome::Exited {
                     output,
                     original_token_count,
                     exit_code,
+                    full_output_path,
                 });
             }
 
@@ -329,19 +375,21 @@ impl ShellRuntime {
                 if let Some(exit_code) = exit_code {
                     wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS))
                         .await;
-                    let (output, original_token_count) =
+                    let (output, original_token_count, full_output_path) =
                         self.take_incremental_output(id, max_output_tokens)?;
                     return Ok(PollOutcome::Exited {
                         output,
                         original_token_count,
                         exit_code,
+                        full_output_path,
                     });
                 }
-                let (output, original_token_count) =
+                let (output, original_token_count, full_output_path) =
                     self.take_incremental_output(id, max_output_tokens)?;
                 return Ok(PollOutcome::Running {
                     output,
                     original_token_count,
+                    full_output_path,
                 });
             }
 
@@ -361,7 +409,11 @@ impl ShellRuntime {
     }
 
     fn remove_process(&self, id: &str) {
-        self.processes.lock().unwrap().remove(id);
+        if let Some(proc) = self.processes.lock().unwrap().remove(id) {
+            if let Some(mut spill) = proc.spill.lock().unwrap().take() {
+                let _ = spill.file.flush();
+            }
+        }
     }
 
     async fn write_stdin(&self, id: &str, input: &str) -> Result<(), String> {
@@ -427,11 +479,13 @@ enum PollOutcome {
     Running {
         output: String,
         original_token_count: Option<usize>,
+        full_output_path: Option<PathBuf>,
     },
     Exited {
         output: String,
         original_token_count: Option<usize>,
         exit_code: i32,
+        full_output_path: Option<PathBuf>,
     },
 }
 
@@ -522,18 +576,21 @@ impl StandardShell {
             Ok(PollOutcome::Running {
                 output,
                 original_token_count,
+                full_output_path,
                 ..
             }) => ToolResult::ok(standard_shell_io_record(
                 &handle_id,
                 output,
                 None,
                 original_token_count,
+                full_output_path.as_deref(),
                 started.elapsed().as_secs_f64(),
             )),
             Ok(PollOutcome::Exited {
                 output,
                 original_token_count,
                 exit_code,
+                full_output_path,
             }) => {
                 self.runtime.remove_process(&handle_id);
                 ToolResult::ok(standard_shell_io_record(
@@ -541,6 +598,7 @@ impl StandardShell {
                     output,
                     Some(exit_code),
                     original_token_count,
+                    full_output_path.as_deref(),
                     started.elapsed().as_secs_f64(),
                 ))
             }
@@ -603,18 +661,21 @@ impl StandardShell {
             Ok(PollOutcome::Running {
                 output,
                 original_token_count,
+                full_output_path,
                 ..
             }) => ToolResult::ok(standard_shell_io_record(
                 &id,
                 output,
                 None,
                 original_token_count,
+                full_output_path.as_deref(),
                 started.elapsed().as_secs_f64(),
             )),
             Ok(PollOutcome::Exited {
                 output,
                 original_token_count,
                 exit_code,
+                full_output_path,
             }) => {
                 self.runtime.remove_process(&id);
                 ToolResult::ok(standard_shell_io_record(
@@ -622,6 +683,7 @@ impl StandardShell {
                     output,
                     Some(exit_code),
                     original_token_count,
+                    full_output_path.as_deref(),
                     started.elapsed().as_secs_f64(),
                 ))
             }
@@ -642,7 +704,7 @@ impl ToolProvider for StandardShell {
         vec![
             ToolDefinition {
                 name: "exec_command".into(),
-                description: "Run a command in a PTY. Completed commands return `output` and `exit_code`; longer-running commands return `session_id` so you can continue the same process with `write_stdin`.".into(),
+                description: "Run a command in a PTY. Completed commands return `output` and `exit_code`; longer-running commands return `session_id` so you can continue the same process with `write_stdin`. Large or truncated output may also include `full_output_path` pointing at the saved full stream.".into(),
                 params: vec![
                     ToolParam {
                         name: "cmd".into(),
@@ -697,7 +759,7 @@ impl ToolProvider for StandardShell {
             },
             ToolDefinition {
                 name: "write_stdin".into(),
-                description: "Write bytes to a running command handle and wait briefly for the next settled output chunk. Use `close_stdin: true` to send EOF.".into(),
+                description: "Write bytes to a running command handle and wait briefly for the next settled output chunk. Use `close_stdin: true` to send EOF. Large or truncated output may also include `full_output_path` pointing at the saved full stream.".into(),
                 params: vec![
                     ToolParam {
                         name: "session_id".into(),
@@ -770,9 +832,12 @@ impl ToolProvider for StandardShell {
 }
 
 fn spawn_reader_thread(
+    id: String,
     mut reader: Box<dyn Read + Send>,
     buffer: Arc<StdMutex<Vec<u8>>>,
+    buffer_start: Arc<StdMutex<usize>>,
     truncated: Arc<AtomicBool>,
+    spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
     output_notify: Arc<Notify>,
 ) {
     thread::spawn(move || {
@@ -783,14 +848,25 @@ fn spawn_reader_thread(
                 Ok(n) => {
                     {
                         let mut buf = buffer.lock().unwrap();
-                        if buf.len() < MAX_OUTPUT {
-                            let remaining = MAX_OUTPUT - buf.len();
-                            let to_copy = remaining.min(n);
-                            buf.extend_from_slice(&chunk[..to_copy]);
-                            if to_copy < n {
-                                truncated.store(true, Ordering::SeqCst);
-                            }
-                        } else {
+                        let mut spill = spill.lock().unwrap();
+                        if buf.len() + n > SPILL_OUTPUT_THRESHOLD {
+                            let _ = activate_spill(&id, &buf, &mut spill);
+                        }
+                        let mut clear_spill = false;
+                        if let Some(spill_file) = spill.as_mut()
+                            && spill_file.file.write_all(&chunk[..n]).is_err()
+                        {
+                            clear_spill = true;
+                        }
+                        if clear_spill {
+                            *spill = None;
+                        }
+
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > MAX_OUTPUT {
+                            let to_drop = buf.len() - MAX_OUTPUT;
+                            buf.drain(..to_drop);
+                            *buffer_start.lock().unwrap() += to_drop;
                             truncated.store(true, Ordering::SeqCst);
                         }
                     }
@@ -829,21 +905,58 @@ fn shell_supports_login(shell_name: &str) -> bool {
     matches!(shell_name, "bash" | "zsh" | "ksh" | "mksh" | "fish")
 }
 
+fn shell_output_dir() -> std::io::Result<PathBuf> {
+    let dir = crate::lash_cache_dir().join("tool-output");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn shell_output_path(id: &str) -> std::io::Result<PathBuf> {
+    let dir = shell_output_dir()?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(dir.join(format!("exec_command-{id}-{nonce}.log")))
+}
+
+fn activate_spill(
+    id: &str,
+    existing_output: &[u8],
+    spill: &mut Option<ShellOutputSpill>,
+) -> Option<PathBuf> {
+    if let Some(spill) = spill.as_ref() {
+        return Some(spill.path.clone());
+    }
+
+    let path = shell_output_path(id).ok()?;
+    let mut file = File::create(&path).ok()?;
+    if file.write_all(existing_output).is_err() {
+        let _ = fs::remove_file(&path);
+        return None;
+    }
+    *spill = Some(ShellOutputSpill {
+        path: path.clone(),
+        file,
+    });
+    Some(path)
+}
+
 fn truncate_exec_output(
     output: String,
     max_output_tokens: Option<usize>,
-) -> (String, Option<usize>) {
+) -> (String, Option<usize>, bool) {
     let original_token_count = max_output_tokens.map(|_| estimate_token_count(&output));
     let Some(limit) = max_output_tokens else {
-        return (output, original_token_count);
+        return (output, original_token_count, false);
     };
     let max_chars = limit.saturating_mul(4);
     let char_count = output.chars().count();
     if char_count <= max_chars {
-        return (output, original_token_count);
+        return (output, original_token_count, false);
     }
     let truncated = output.chars().take(max_chars).collect::<String>() + "\n[truncated]";
-    (truncated, original_token_count)
+    (truncated, original_token_count, true)
 }
 
 fn estimate_token_count(text: &str) -> usize {
@@ -855,6 +968,7 @@ fn standard_shell_io_record(
     output: String,
     exit_code: Option<i32>,
     original_token_count: Option<usize>,
+    full_output_path: Option<&Path>,
     wall_time_seconds: f64,
 ) -> serde_json::Value {
     let session_id = exit_code
@@ -872,6 +986,12 @@ fn standard_shell_io_record(
     }
     if let Some(original_token_count) = original_token_count {
         record.insert("original_token_count".into(), json!(original_token_count));
+    }
+    if let Some(path) = full_output_path {
+        record.insert(
+            "full_output_path".into(),
+            json!(path.to_string_lossy().to_string()),
+        );
     }
     serde_json::Value::Object(record)
 }
@@ -896,6 +1016,7 @@ fn parse_standard_session_id(args: &serde_json::Value) -> Result<String, ToolRes
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
 
     #[tokio::test]
     async fn exec_command_returns_exit_code_when_command_finishes() {
@@ -1036,6 +1157,84 @@ mod tests {
             .await;
         assert!(result.success);
         assert_ne!(result.result["exit_code"], 0);
+    }
+
+    #[tokio::test]
+    async fn exec_command_reports_full_output_path_when_token_truncated() {
+        let shell = StandardShell::default();
+        let result = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": "python3 -c 'print(\"hello \" * 4000)'", "max_output_tokens": 16, "login": false}),
+            )
+            .await;
+        assert!(result.success, "{}", result.result);
+        let output = result.result["output"].as_str().unwrap();
+        let full_output_path = result.result["full_output_path"].as_str().unwrap();
+        let full_output = fs::read_to_string(full_output_path).expect("full output file");
+        assert!(output.contains("[truncated]"));
+        assert!(full_output.contains("hello hello"));
+    }
+
+    #[tokio::test]
+    async fn exec_command_spills_full_output_when_buffer_overflows() {
+        let shell = StandardShell::default();
+        let result = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": format!("python3 -c 'import sys; sys.stdout.write(\"x\" * {})'", MAX_OUTPUT + 8192), "login": false}),
+            )
+            .await;
+        assert!(result.success, "{}", result.result);
+        let output = result.result["output"].as_str().unwrap();
+        let full_output_path = result.result["full_output_path"].as_str().unwrap();
+        let full_output = fs::read_to_string(full_output_path).expect("full output file");
+        assert!(output.contains("[truncated]"));
+        assert!(full_output.len() >= MAX_OUTPUT + 8192);
+    }
+
+    #[tokio::test]
+    async fn exec_command_reports_full_output_path_for_large_output() {
+        let shell = StandardShell::default();
+        let result = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": format!("python3 -c 'import sys; sys.stdout.write(\"x\" * {})'", SPILL_OUTPUT_THRESHOLD + 4096), "login": false}),
+            )
+            .await;
+        assert!(result.success, "{}", result.result);
+        assert!(result.result["output"].as_str().is_some());
+        let full_output_path = result.result["full_output_path"].as_str().unwrap();
+        let full_output = fs::read_to_string(full_output_path).expect("full output file");
+        assert!(full_output.len() >= SPILL_OUTPUT_THRESHOLD + 4096);
+    }
+
+    #[tokio::test]
+    async fn write_stdin_reports_full_output_path_when_token_truncated() {
+        let shell = StandardShell::default();
+        let cmd = "python3 -u -c 'import sys; data = sys.stdin.read(); sys.stdout.write(data)'";
+        let open = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": cmd, "yield_time_ms": 10, "login": false}),
+            )
+            .await;
+        assert!(open.success, "{}", open.result);
+        let session_id = open.result["session_id"].as_i64().unwrap();
+        let payload = "segment ".repeat(5000);
+
+        let result = shell
+            .execute(
+                "write_stdin",
+                &json!({"session_id": session_id, "chars": payload, "close_stdin": true, "yield_time_ms": 1000, "max_output_tokens": 24}),
+            )
+            .await;
+        assert!(result.success, "{}", result.result);
+        let output = result.result["output"].as_str().unwrap();
+        let full_output_path = result.result["full_output_path"].as_str().unwrap();
+        let full_output = fs::read_to_string(full_output_path).expect("full output file");
+        assert!(output.contains("[truncated]"));
+        assert!(full_output.contains("segment segment"));
     }
 
     #[test]

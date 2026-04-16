@@ -185,3 +185,33 @@ fn pasted_text_ui_action_uses_large_paste_placeholder_path() {
     assert_eq!(app.editor.pending_large_pastes.len(), 1);
     assert!(app.input().contains("[Pasted Content"));
 }
+
+#[test]
+fn word_cursor_actions_move_across_word_boundaries() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.insert_text("alpha beta_gamma-delta  omega");
+
+    let outcome = apply_ui_action(
+        &mut app,
+        UiAction::MoveCursorWordLeft,
+        UiActionContext {
+            viewport_width: 80,
+            viewport_height: 24,
+            prompt_max_scroll: 0,
+        },
+    );
+    assert_eq!(outcome, UiActionOutcome::None);
+    assert_eq!(&app.input()[app.cursor_pos()..], "omega");
+
+    let outcome = apply_ui_action(
+        &mut app,
+        UiAction::MoveCursorWordRight,
+        UiActionContext {
+            viewport_width: 80,
+            viewport_height: 24,
+            prompt_max_scroll: 0,
+        },
+    );
+    assert_eq!(outcome, UiActionOutcome::None);
+    assert_eq!(app.cursor_pos(), app.input().len());
+}

@@ -134,7 +134,7 @@ fn project_model_value(
         };
     }
     if ctx.tool_name == "batch" {
-        return serde_json::Value::String(render_batch_model_summary(&ctx.result.result));
+        return project_batch_value(config, ctx);
     }
     let rendered = render_tool_result_payload(ctx.result.success, &ctx.result.result);
     if !needs_truncation(&rendered, config) {
@@ -172,7 +172,7 @@ fn project_stateful_value(
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
     if ctx.tool_name == "batch" {
-        return project_batch_history_value(&ctx.result.result, config, ctx);
+        return project_batch_value(config, ctx);
     }
     project_json_value(&ctx.result.result, config, ctx)
 }
@@ -401,7 +401,9 @@ fn tool_projection_direction(tool_name: &str) -> ProjectionDirection {
 }
 
 fn truncation_hint(ctx: Option<&ToolResultProjectionContext>, text: &str) -> String {
-    let output_path = ctx.and_then(|ctx| spill_tool_output(&ctx.tool_name, &ctx.args, text));
+    let output_path = ctx
+        .and_then(existing_tool_output_path)
+        .or_else(|| ctx.and_then(|ctx| spill_tool_output(&ctx.tool_name, &ctx.args, text)));
     match output_path {
         Some(path) => format!(
             "The tool output was truncated. Full output saved to: {}\nUse `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.",
@@ -425,6 +427,15 @@ fn observation_truncation_hint(text: &str, config: &ToolResultProjectionPluginCo
         "The observe output was capped at {} {} and {} lines max; original size was {} {} across {} lines. Use a narrower `observe` expression to inspect specific fields or slices instead of dumping the whole value at once.",
         config.limit, limit_unit, config.max_lines, total_units, limit_unit, total_lines
     )
+}
+
+fn existing_tool_output_path(ctx: &ToolResultProjectionContext) -> Option<PathBuf> {
+    ctx.result
+        .result
+        .get("full_output_path")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 fn spill_tool_output(
@@ -470,87 +481,124 @@ fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn render_batch_model_summary(value: &serde_json::Value) -> String {
-    let summary = value
-        .get("summary")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let successful = value
-                .get("successful")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            let total = value
-                .get("total")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(successful);
-            format!("Executed {successful}/{total} tools successfully.")
-        });
-
-    let mut lines = vec![summary];
-    if let Some(results) = value.get("results").and_then(|value| value.as_array()) {
-        let details = results
-            .iter()
-            .filter_map(|item| {
-                let tool = item.get("tool").and_then(|value| value.as_str())?;
-                let status = if item.get("success").and_then(|value| value.as_bool()) == Some(true)
-                {
-                    "ok"
-                } else {
-                    "failed"
-                };
-                Some(format!("- {tool}: {status}"))
-            })
-            .collect::<Vec<_>>();
-        if !details.is_empty() {
-            lines.push(String::new());
-            lines.extend(details);
-        }
-    }
-    lines.join("\n")
-}
-
-fn project_batch_history_value(
-    value: &serde_json::Value,
+fn project_batch_value(
     config: &ToolResultProjectionPluginConfig,
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
-    let Some(map) = value.as_object() else {
-        return project_json_value(value, config, ctx);
+    let Some(map) = ctx.result.result.as_object() else {
+        return project_json_value(&ctx.result.result, config, ctx);
     };
+
     let mut projected = serde_json::Map::new();
-    for key in ["summary", "total", "successful", "failed"] {
-        if let Some(value) = map.get(key) {
-            projected.insert(key.to_string(), value.clone());
-        }
-    }
-    let details = map
+
+    let results = map
         .get("results")
         .and_then(|value| value.as_array())
         .map(|items| {
             items
                 .iter()
-                .map(|item| {
-                    let mut detail = serde_json::Map::new();
-                    if let Some(tool) = item.get("tool") {
-                        detail.insert("tool".to_string(), tool.clone());
-                    }
-                    if let Some(success) = item.get("success") {
-                        detail.insert("success".to_string(), success.clone());
-                    }
-                    if let Some(duration_ms) = item.get("duration_ms") {
-                        detail.insert("duration_ms".to_string(), duration_ms.clone());
-                    }
-                    if let Some(error) = item.get("error") {
-                        detail.insert("error".to_string(), project_json_value(error, config, ctx));
-                    }
-                    serde_json::Value::Object(detail)
-                })
+                .enumerate()
+                .map(|(index, item)| project_batch_child_value(index, item, config, ctx))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    projected.insert("details".to_string(), serde_json::Value::Array(details));
+    projected.insert("results".to_string(), serde_json::Value::Array(results));
     serde_json::Value::Object(projected)
+}
+
+fn project_batch_child_value(
+    index: usize,
+    item: &serde_json::Value,
+    config: &ToolResultProjectionPluginConfig,
+    ctx: &ToolResultProjectionContext,
+) -> serde_json::Value {
+    let Some(map) = item.as_object() else {
+        return project_json_value(item, config, ctx);
+    };
+
+    let tool_name = map
+        .get("tool")
+        .and_then(|value| value.as_str())
+        .or_else(|| batch_child_tool_name(&ctx.args, index))
+        .unwrap_or("tool")
+        .to_string();
+    let success = map
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let duration_ms = map
+        .get("duration_ms")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let child_value = if success {
+        map.get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        map.get("error").cloned().unwrap_or(serde_json::Value::Null)
+    };
+    let child_args = batch_child_args(&ctx.args, index);
+
+    let projected_child = if tool_name == "batch" {
+        ToolResult {
+            success,
+            result: project_json_value(&child_value, config, ctx),
+            images: Vec::new(),
+        }
+    } else {
+        project_tool_result(
+            config,
+            ToolResultProjectionContext {
+                hook: ctx.hook,
+                session_id: ctx.session_id.clone(),
+                tool_name: tool_name.clone(),
+                args: child_args,
+                result: ToolResult {
+                    success,
+                    result: child_value,
+                    images: Vec::new(),
+                },
+                duration_ms,
+                host: Arc::clone(&ctx.host),
+            },
+        )
+    };
+
+    let mut projected = serde_json::Map::new();
+    if let Some(value) = map.get("index") {
+        projected.insert("index".to_string(), value.clone());
+    }
+    projected.insert("tool".to_string(), serde_json::json!(tool_name));
+    projected.insert("success".to_string(), serde_json::json!(success));
+    projected.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
+    projected.insert(
+        if success {
+            "result".to_string()
+        } else {
+            "error".to_string()
+        },
+        projected_child.result,
+    );
+    serde_json::Value::Object(projected)
+}
+
+fn batch_child_tool_name(batch_args: &serde_json::Value, index: usize) -> Option<&str> {
+    batch_args
+        .get("tool_calls")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.get(index))
+        .and_then(|value| value.get("tool"))
+        .and_then(|value| value.as_str())
+}
+
+fn batch_child_args(batch_args: &serde_json::Value, index: usize) -> serde_json::Value {
+    batch_args
+        .get("tool_calls")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.get(index))
+        .and_then(|value| value.get("parameters"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(Default::default()))
 }
 
 #[cfg(test)]
@@ -646,6 +694,35 @@ mod tests {
     }
 
     #[test]
+    fn truncation_hint_reuses_existing_full_output_path() {
+        let config = ToolResultProjectionPluginConfig {
+            limit: 512,
+            ..ToolResultProjectionPluginConfig::default()
+        };
+        let projected = project_tool_result(
+            &config,
+            ToolResultProjectionContext {
+                hook: ToolResultProjectionHook::BeforeState,
+                session_id: "root".to_string(),
+                tool_name: "exec_command".to_string(),
+                args: json!({}),
+                result: ToolResult::ok(json!({
+                    "output": "x".repeat(20_000),
+                    "full_output_path": "/tmp/existing-shell-output.log",
+                })),
+                duration_ms: 1,
+                host: Arc::new(NoopSessionManager),
+            },
+        );
+        let output = projected
+            .result
+            .get("output")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(output.contains("Full output saved to: /tmp/existing-shell-output.log"));
+    }
+
+    #[test]
     fn model_projection_can_collapse_large_structured_payload_to_string() {
         let config = ToolResultProjectionPluginConfig {
             mode: ToolResultProjectionMode::Bytes,
@@ -677,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_model_projection_drops_nested_child_payloads() {
+    fn batch_model_projection_preserves_projected_child_payloads() {
         let projected = project_tool_result(
             &ToolResultProjectionPluginConfig::default(),
             ToolResultProjectionContext {
@@ -686,10 +763,6 @@ mod tests {
                 tool_name: "batch".to_string(),
                 args: json!({}),
                 result: ToolResult::ok(json!({
-                    "summary": "Executed 1/2 tools successfully. 1 failed.",
-                    "total": 2,
-                    "successful": 1,
-                    "failed": 1,
                     "results": [
                         {"tool": "read_file", "success": true, "duration_ms": 1, "result": "very long child payload"},
                         {"tool": "grep", "success": false, "duration_ms": 1, "error": "boom"}
@@ -699,26 +772,32 @@ mod tests {
                 host: Arc::new(NoopSessionManager),
             },
         );
-        let text = projected.result.as_str().unwrap_or_default();
-        assert!(text.contains("Executed 1/2 tools successfully. 1 failed."));
-        assert!(text.contains("- read_file: ok"));
-        assert!(!text.contains("very long child payload"));
+        let results = projected
+            .result
+            .get("results")
+            .and_then(|value| value.as_array())
+            .expect("results");
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].get("result"),
+            Some(&json!("very long child payload"))
+        );
+        assert_eq!(results[1].get("error"), Some(&json!("boom")));
     }
 
     #[test]
-    fn batch_history_projection_keeps_only_metadata() {
+    fn batch_history_projection_recursively_projects_child_payloads() {
         let projected = project_tool_result(
-            &ToolResultProjectionPluginConfig::default(),
+            &ToolResultProjectionPluginConfig {
+                limit: 8,
+                ..ToolResultProjectionPluginConfig::default()
+            },
             ToolResultProjectionContext {
                 hook: ToolResultProjectionHook::BeforeHistory,
                 session_id: "root".to_string(),
                 tool_name: "batch".to_string(),
                 args: json!({}),
                 result: ToolResult::ok(json!({
-                    "summary": "Executed 1/2 tools successfully. 1 failed.",
-                    "total": 2,
-                    "successful": 1,
-                    "failed": 1,
                     "results": [
                         {"tool": "read_file", "success": true, "duration_ms": 1, "result": "child payload"},
                         {"tool": "grep", "success": false, "duration_ms": 1, "error": "boom"}
@@ -730,11 +809,15 @@ mod tests {
         );
         let details = projected
             .result
-            .get("details")
+            .get("results")
             .and_then(|value| value.as_array())
-            .expect("details");
+            .expect("results");
         assert_eq!(details.len(), 2);
-        assert!(details[0].get("result").is_none());
+        let child_result = details[0]
+            .get("result")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(child_result.contains("truncated"));
         assert_eq!(details[1].get("error"), Some(&json!("boom")));
     }
 

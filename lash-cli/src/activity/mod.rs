@@ -311,11 +311,7 @@ impl ActivityState {
     }
 
     fn blocks_for_batch_tool_call(&mut self, args: &Value, result: &Value) -> Vec<ActivityBlock> {
-        let Some(entries) = result
-            .get("results")
-            .or_else(|| result.get("details"))
-            .and_then(|value| value.as_array())
-        else {
+        let Some(entries) = result.get("results").and_then(|value| value.as_array()) else {
             return Vec::new();
         };
         let calls = args
@@ -387,7 +383,6 @@ mod tests {
                 ]
             }),
             json!({
-                "summary": "Executed 1/2 tools successfully. 1 failed.",
                 "results": [
                     {"tool": "read_file", "success": true, "result": "x"},
                     {"tool": "grep", "success": false, "error": "boom"}
@@ -466,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn projected_batch_details_expand_into_child_tool_blocks() {
+    fn projected_batch_results_expand_into_child_tool_blocks() {
         let mut state = ActivityState::default();
         let blocks = state.blocks_for_tool_call(
             "batch",
@@ -477,10 +472,9 @@ mod tests {
                 ]
             }),
             json!({
-                "summary": "All 2 tools executed successfully.",
-                "details": [
-                    {"tool": "read_file", "success": true, "duration_ms": 8},
-                    {"tool": "search_web", "success": true, "duration_ms": 1300}
+                "results": [
+                    {"tool": "read_file", "success": true, "duration_ms": 8, "result": "README body"},
+                    {"tool": "search_web", "success": true, "duration_ms": 1300, "result": {"results": []}}
                 ]
             }),
             true,

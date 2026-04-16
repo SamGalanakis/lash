@@ -8,6 +8,8 @@ pub(crate) enum UiAction {
     InputDelete,
     MoveCursorLeft,
     MoveCursorRight,
+    MoveCursorWordLeft,
+    MoveCursorWordRight,
     MoveCursorHome,
     MoveCursorEnd,
     HistoryUp,
@@ -91,6 +93,14 @@ pub(crate) fn apply_ui_action(
         }
         UiAction::MoveCursorRight => {
             app.move_cursor_right();
+            UiActionOutcome::None
+        }
+        UiAction::MoveCursorWordLeft => {
+            app.move_cursor_word_left();
+            UiActionOutcome::None
+        }
+        UiAction::MoveCursorWordRight => {
+            app.move_cursor_word_right();
             UiActionOutcome::None
         }
         UiAction::MoveCursorHome => {

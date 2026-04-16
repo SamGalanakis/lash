@@ -2117,6 +2117,26 @@ pub(crate) async fn run_app(
                         }
                         let _ = apply_terminal_action(&mut app, &terminal, UiAction::InputDelete);
                     }
+                    KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(recorder) = ui_trace.as_mut() {
+                            recorder.record_move_cursor_left();
+                        }
+                        let _ = apply_terminal_action(
+                            &mut app,
+                            &terminal,
+                            UiAction::MoveCursorWordLeft,
+                        );
+                    }
+                    KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(recorder) = ui_trace.as_mut() {
+                            recorder.record_move_cursor_right();
+                        }
+                        let _ = apply_terminal_action(
+                            &mut app,
+                            &terminal,
+                            UiAction::MoveCursorWordRight,
+                        );
+                    }
                     KeyCode::Left => {
                         if let Some(recorder) = ui_trace.as_mut() {
                             recorder.record_move_cursor_left();

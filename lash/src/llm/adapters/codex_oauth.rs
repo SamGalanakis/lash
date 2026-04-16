@@ -51,34 +51,124 @@ impl CodexStreamState {
         if let Some(item) = item {
             let text = CodexOAuthAdapter::message_text_from_item(item);
             if !text.is_empty() {
-                self.push_text_piece(&text);
+                self.reconcile_current_message_text(&text);
             }
         }
         self.current_text_part = None;
     }
 
-    fn push_text_piece(&mut self, piece: &str) {
-        CodexOAuthAdapter::apply_stream_piece(&mut self.full_text, &mut self.deltas, piece);
+    fn push_text_delta(&mut self, piece: &str) {
         if piece.is_empty() {
             return;
         }
 
-        let part_index = match self.current_text_part {
-            Some(index) => index,
-            None => match self.parts.last() {
-                Some(LlmOutputPart::Text { .. }) => self.parts.len() - 1,
-                _ => {
-                    let index = self.parts.len();
-                    self.parts.push(LlmOutputPart::Text {
-                        text: String::new(),
-                    });
-                    index
-                }
-            },
-        };
+        let part_index = self.ensure_text_part_index();
 
         if let Some(LlmOutputPart::Text { text }) = self.parts.get_mut(part_index) {
-            CodexOAuthAdapter::append_stream_piece(text, piece);
+            text.push_str(piece);
+        }
+        self.deltas.push(piece.to_string());
+        self.recompute_full_text();
+    }
+
+    fn reconcile_current_message_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let part_index = self.ensure_text_part_index();
+        let existing = self
+            .parts
+            .get(part_index)
+            .and_then(|part| match part {
+                LlmOutputPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        if text == existing {
+            return;
+        }
+        if let Some(suffix) = text.strip_prefix(existing.as_str()) {
+            self.push_text_delta(suffix);
+            return;
+        }
+        self.set_text_part(part_index, text.to_string());
+    }
+
+    fn reconcile_final_response_text(&mut self, text: &str) {
+        if text.is_empty() || self.full_text == text {
+            return;
+        }
+        if let Some(suffix) = text.strip_prefix(self.full_text.as_str()) {
+            self.push_text_delta(suffix);
+            return;
+        }
+        if self.full_text.is_empty() {
+            let part_index = self.ensure_text_part_index();
+            self.set_text_part(part_index, text.to_string());
+            self.deltas.push(text.to_string());
+            return;
+        }
+        self.replace_text_output(text);
+    }
+
+    fn ensure_text_part_index(&mut self) -> usize {
+        if let Some(index) = self.current_text_part {
+            return index;
+        }
+        if let Some(index) = self
+            .parts
+            .iter()
+            .rposition(|part| matches!(part, LlmOutputPart::Text { .. }))
+        {
+            return index;
+        }
+
+        let index = self.parts.len();
+        self.parts.push(LlmOutputPart::Text {
+            text: String::new(),
+        });
+        index
+    }
+
+    fn set_text_part(&mut self, part_index: usize, text: String) {
+        if let Some(LlmOutputPart::Text { text: existing }) = self.parts.get_mut(part_index) {
+            *existing = text;
+        }
+        self.recompute_full_text();
+    }
+
+    fn replace_text_output(&mut self, text: &str) {
+        let mut replaced = false;
+        let mut parts = Vec::with_capacity(self.parts.len().max(1));
+        for part in self.parts.drain(..) {
+            match part {
+                LlmOutputPart::Text { .. } if !replaced => {
+                    parts.push(LlmOutputPart::Text {
+                        text: text.to_string(),
+                    });
+                    replaced = true;
+                }
+                LlmOutputPart::Text { .. } => {}
+                other => parts.push(other),
+            }
+        }
+        if !replaced {
+            parts.push(LlmOutputPart::Text {
+                text: text.to_string(),
+            });
+        }
+        self.parts = parts;
+        self.current_text_part = None;
+        self.recompute_full_text();
+    }
+
+    fn recompute_full_text(&mut self) {
+        self.full_text.clear();
+        for part in &self.parts {
+            if let LlmOutputPart::Text { text } = part {
+                self.full_text.push_str(text);
+            }
         }
     }
 
@@ -442,33 +532,6 @@ impl CodexOAuthAdapter {
         }
     }
 
-    fn apply_stream_piece(full: &mut String, deltas: &mut Vec<String>, piece: &str) {
-        let delta = Self::stream_piece_delta(full, piece);
-        if !delta.is_empty() {
-            deltas.push(delta);
-        }
-    }
-
-    fn append_stream_piece(full: &mut String, piece: &str) {
-        let _ = Self::stream_piece_delta(full, piece);
-    }
-
-    fn stream_piece_delta(full: &mut String, piece: &str) -> String {
-        if piece.is_empty() {
-            return String::new();
-        }
-        if piece.starts_with(full.as_str()) {
-            let delta = &piece[full.len()..];
-            if !delta.is_empty() {
-                full.push_str(delta);
-                return delta.to_string();
-            }
-            return String::new();
-        }
-        full.push_str(piece);
-        piece.to_string()
-    }
-
     fn log_sse_event(
         event_type: &str,
         raw: &str,
@@ -583,14 +646,10 @@ impl CodexOAuthAdapter {
             }
             "response.output_text.delta" => {
                 if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    state.push_text_piece(delta);
+                    state.push_text_delta(delta);
                 }
             }
-            "response.output_text.done" => {
-                if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
-                    state.push_text_piece(text);
-                }
-            }
+            "response.output_text.done" => {}
             "response.function_call_arguments.delta" => {
                 if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
                     && let Some(delta) = event.get("delta").and_then(|v| v.as_str())
@@ -625,7 +684,7 @@ impl CodexOAuthAdapter {
             "response.completed" => {
                 if let Some(resp_value) = event.get("response") {
                     let final_text = Self::extract_text(resp_value);
-                    state.push_text_piece(&final_text);
+                    state.reconcile_final_response_text(&final_text);
                 }
             }
             "response.failed" => {
@@ -1114,6 +1173,87 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         );
         assert_eq!(state.usage.input_tokens, 12);
         assert_eq!(state.usage.output_tokens, 3);
+    }
+
+    #[test]
+    fn output_text_done_does_not_duplicate_a_repeated_tail() {
+        let mut state = CodexStreamState::default();
+
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.output_text.delta","delta":"I’ve got the wiring. "}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.output_text.delta","delta":"I’m doing one direct read pass."}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.output_text.done","text":"I’m doing one direct read pass."}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","text":"I’ve got the wiring. I’m doing one direct read pass."}]}}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.completed","response":{"output_text":"I’ve got the wiring. I’m doing one direct read pass.","usage":{"input_tokens":12,"output_tokens":9}}}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.deltas,
+            vec![
+                "I’ve got the wiring. ".to_string(),
+                "I’m doing one direct read pass.".to_string(),
+            ]
+        );
+        assert_eq!(
+            state.full_text,
+            "I’ve got the wiring. I’m doing one direct read pass."
+        );
+    }
+
+    #[test]
+    fn completed_response_appends_only_missing_suffix_once() {
+        let mut state = CodexStreamState::default();
+
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.output_text.delta","delta":"Hi "}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.completed","response":{"output_text":"Hi there","usage":{"input_tokens":30,"output_tokens":8}}}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(state.deltas, vec!["Hi ".to_string(), "there".to_string()]);
+        assert_eq!(state.full_text, "Hi there");
     }
 
     #[test]
