@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
 
-use crate::llm::adapters::streaming::{drive_sse_response, emit_progress};
+use crate::llm::adapters::streaming::{drive_sse_response, emit_delta_progress};
 use crate::llm::timeouts::{
     LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
 };
@@ -568,20 +568,20 @@ impl OpenAiGenericAdapter {
         out
     }
 
-    fn apply_stream_piece(full: &mut String, deltas: &mut Vec<String>, piece: &str) {
+    fn append_stream_piece(full: &mut String, piece: &str) -> Option<String> {
         if piece.is_empty() {
-            return;
+            return None;
         }
         if piece.starts_with(full.as_str()) {
             let delta = &piece[full.len()..];
             if !delta.is_empty() {
                 full.push_str(delta);
-                deltas.push(delta.to_string());
+                return Some(delta.to_string());
             }
-            return;
+            return None;
         }
         full.push_str(piece);
-        deltas.push(piece.to_string());
+        Some(piece.to_string())
     }
 
     #[cfg(test)]
@@ -591,20 +591,21 @@ impl OpenAiGenericAdapter {
         deltas: &mut Vec<String>,
         usage: &mut LlmUsage,
     ) -> Result<(), LlmTransportError> {
-        Self::process_sse_event_with_tools(raw, full, deltas, usage, None, None)
+        let _ = Self::process_sse_event_with_tools(raw, full, Some(deltas), usage, None, None)?;
+        Ok(())
     }
 
     fn process_sse_event_with_tools(
         raw: &str,
         full: &mut String,
-        deltas: &mut Vec<String>,
+        mut retained_deltas: Option<&mut Vec<String>>,
         usage: &mut LlmUsage,
         tool_calls: Option<&mut Vec<StreamingToolCall>>,
         provider_usage: Option<&mut Option<Value>>,
-    ) -> Result<(), LlmTransportError> {
+    ) -> Result<Vec<String>, LlmTransportError> {
         let raw = raw.trim();
         if raw.is_empty() || raw == "[DONE]" {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let event: Value = serde_json::from_str(raw).map_err(|e| {
             LlmTransportError::new(format!("Invalid SSE payload: {e}")).with_raw(raw)
@@ -618,6 +619,7 @@ impl OpenAiGenericAdapter {
             }
             return Err(transport_error);
         }
+        let mut added_deltas = Vec::new();
         if let Some(new_usage) = Self::usage_from_value(&event)
             && (new_usage.input_tokens > 0
                 || new_usage.output_tokens > 0
@@ -632,7 +634,12 @@ impl OpenAiGenericAdapter {
             *dst = Some(raw_usage);
         }
         for piece in Self::extract_text_parts(&event) {
-            Self::apply_stream_piece(full, deltas, &piece);
+            if let Some(delta) = Self::append_stream_piece(full, &piece) {
+                if let Some(dst) = retained_deltas.as_mut() {
+                    (**dst).push(delta.clone());
+                }
+                added_deltas.push(delta);
+            }
         }
         // Accumulate streaming tool call deltas.
         if let Some(tool_calls) = tool_calls
@@ -665,7 +672,7 @@ impl OpenAiGenericAdapter {
                 }
             }
         }
-        Ok(())
+        Ok(added_deltas)
     }
 
     fn stream_error_code(err: &Value) -> Option<String> {
@@ -704,7 +711,7 @@ impl OpenAiGenericAdapter {
         })?;
         let mut full = String::new();
         for piece in Self::extract_text_parts(&value) {
-            Self::apply_stream_piece(&mut full, &mut Vec::new(), &piece);
+            let _ = Self::append_stream_piece(&mut full, &piece);
         }
         let usage = Self::usage_from_value(&value).unwrap_or_default();
         Ok((full, usage))
@@ -931,7 +938,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         }
 
         let mut full = String::new();
-        let mut deltas = Vec::new();
+        let mut retained_deltas = stream_events.is_none().then(Vec::new);
         let mut usage = LlmUsage::default();
         let mut provider_usage = None;
         let mut streaming_tool_calls: Vec<StreamingToolCall> = Vec::new();
@@ -940,23 +947,16 @@ impl LlmTransport for OpenAiGenericAdapter {
             self.chunk_timeout,
             "OpenAI-compatible stream chunk timed out",
             |raw| {
-                let prev_len = deltas.len();
                 let prev_usage = usage.clone();
-                Self::process_sse_event_with_tools(
+                let added_deltas = Self::process_sse_event_with_tools(
                     &raw,
                     &mut full,
-                    &mut deltas,
+                    retained_deltas.as_mut(),
                     &mut usage,
                     Some(&mut streaming_tool_calls),
                     Some(&mut provider_usage),
                 )?;
-                emit_progress(
-                    stream_events.as_ref(),
-                    &deltas,
-                    prev_len,
-                    &usage,
-                    &prev_usage,
-                );
+                emit_delta_progress(stream_events.as_ref(), &added_deltas, &usage, &prev_usage);
                 Ok(())
             },
         )
@@ -977,7 +977,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         }
 
         Ok(LlmResponse {
-            deltas,
+            deltas: retained_deltas.unwrap_or_default(),
             full_text: full,
             parts,
             usage,
@@ -1044,7 +1044,7 @@ mod tests {
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2},"cost":0.95,"cost_details":{"upstream_inference_cost":19}}}"#,
             &mut full,
-            &mut deltas,
+            Some(&mut deltas),
             &mut usage,
             None,
             Some(&mut provider_usage),
@@ -1069,7 +1069,7 @@ mod tests {
         let err = OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"error":{"code":502,"message":"JSON error injected into SSE stream","metadata":{"error_type":"provider_unavailable"}}}"#,
             &mut full,
-            &mut deltas,
+            Some(&mut deltas),
             &mut usage,
             None,
             None,
@@ -1091,7 +1091,7 @@ mod tests {
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
             &mut full,
-            &mut deltas,
+            Some(&mut deltas),
             &mut usage,
             Some(&mut tool_calls),
             None,
@@ -1105,7 +1105,7 @@ mod tests {
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}"#,
             &mut full,
-            &mut deltas,
+            Some(&mut deltas),
             &mut usage,
             Some(&mut tool_calls),
             None,
@@ -1116,7 +1116,7 @@ mod tests {
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.rs\"}"}}]}}]}"#,
             &mut full,
-            &mut deltas,
+            Some(&mut deltas),
             &mut usage,
             Some(&mut tool_calls),
             None,
@@ -1126,6 +1126,25 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].arguments, r#"{"path":"a.rs"}"#);
         assert!(full.is_empty());
+    }
+
+    #[test]
+    fn process_sse_event_returns_new_deltas_without_retain_buffer() {
+        let mut full = String::new();
+        let mut usage = LlmUsage::default();
+
+        let added = OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"content":"Hello"}}]}"#,
+            &mut full,
+            None,
+            &mut usage,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(full, "Hello");
+        assert_eq!(added, vec!["Hello".to_string()]);
     }
 
     #[test]

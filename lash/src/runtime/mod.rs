@@ -660,13 +660,15 @@ impl LlmStreamSummary {
 }
 
 impl StandardStreamFallback {
-    fn push_text(&mut self, piece: String) {
+    fn push_text(&mut self, piece: &str) {
         if piece.is_empty() {
             return;
         }
         match self.parts.last_mut() {
-            Some(LlmOutputPart::Text { text }) => append_stream_piece(text, &piece),
-            _ => self.parts.push(LlmOutputPart::Text { text: piece }),
+            Some(LlmOutputPart::Text { text }) => append_stream_piece(text, piece),
+            _ => self.parts.push(LlmOutputPart::Text {
+                text: piece.to_string(),
+            }),
         }
     }
 

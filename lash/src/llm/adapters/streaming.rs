@@ -112,13 +112,22 @@ pub fn emit_progress(
     usage: &LlmUsage,
     prev_usage: &LlmUsage,
 ) {
+    emit_delta_progress(tx, &deltas[prev_len..], usage, prev_usage);
+}
+
+pub fn emit_delta_progress(
+    tx: Option<&LlmEventSender>,
+    added_deltas: &[String],
+    usage: &LlmUsage,
+    prev_usage: &LlmUsage,
+) {
     let Some(tx) = tx else {
         return;
     };
     if usage != prev_usage && usage != &LlmUsage::default() {
         tx.send(LlmStreamEvent::Usage(usage.clone()));
     }
-    for piece in deltas.iter().skip(prev_len) {
+    for piece in added_deltas {
         tx.send(LlmStreamEvent::Delta(piece.clone()));
     }
 }
