@@ -118,8 +118,6 @@ pub(crate) enum TracePromptRequest {
     Freeform {
         question: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        wait_seconds: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<TracePromptPanel>,
     },
     Single {
@@ -128,8 +126,6 @@ pub(crate) enum TracePromptRequest {
         #[serde(default)]
         allow_note: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        wait_seconds: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<TracePromptPanel>,
     },
     Multi {
@@ -137,8 +133,6 @@ pub(crate) enum TracePromptRequest {
         options: Vec<String>,
         #[serde(default)]
         allow_note: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        wait_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<TracePromptPanel>,
     },
@@ -149,7 +143,6 @@ impl TracePromptRequest {
         if request.is_freeform() {
             Self::Freeform {
                 question: request.question.clone(),
-                wait_seconds: request.wait.as_ref().map(|wait| wait.seconds),
                 panel: request.panel.as_ref().map(|panel| TracePromptPanel {
                     title: panel.title.clone(),
                     markdown: panel.markdown.clone(),
@@ -161,7 +154,6 @@ impl TracePromptRequest {
                     question: request.question.clone(),
                     options: request.options.clone(),
                     allow_note: request.allows_note(),
-                    wait_seconds: request.wait.as_ref().map(|wait| wait.seconds),
                     panel: request.panel.as_ref().map(|panel| TracePromptPanel {
                         title: panel.title.clone(),
                         markdown: panel.markdown.clone(),
@@ -171,7 +163,6 @@ impl TracePromptRequest {
                     question: request.question.clone(),
                     options: request.options.clone(),
                     allow_note: request.allows_note(),
-                    wait_seconds: request.wait.as_ref().map(|wait| wait.seconds),
                     panel: request.panel.as_ref().map(|panel| TracePromptPanel {
                         title: panel.title.clone(),
                         markdown: panel.markdown.clone(),

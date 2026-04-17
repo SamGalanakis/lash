@@ -31,8 +31,8 @@ pub use session_model::{
     CORE_GUIDANCE_SECTION, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, MessageSequence,
     Part, PartKind, PromptBuiltin, PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode,
     PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState,
-    RenderedPrompt, SessionEvent, TokenUsage, WAIT_PROMPT_RESUME_EARLY_TOKEN,
-    WAIT_PROMPT_TIMEOUT_TOKEN, default_prompt_template, messages_are_live_resume_safe,
+    RenderedPrompt, SessionEvent, TokenUsage, default_prompt_template,
+    messages_are_live_resume_safe,
 };
 pub use tool_surface::{
     ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceOverride,

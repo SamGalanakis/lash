@@ -816,7 +816,7 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<LashRunt
     let runtime = LashRuntime::builder()
         .with_policy(policy.clone())
         .with_store(Arc::clone(&store))
-        .with_background_executor(Arc::new(TokioBackgroundExecutor::default()))
+        .with_session_task_executor(Arc::new(TokioSessionTaskExecutor::default()))
         .with_llm_factory(move |_| Box::new(BenchmarkTransport::new(scenario)))
         .with_default_tool_bundles(DefaultToolPluginOptions {
             execution_mode,

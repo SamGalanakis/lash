@@ -43,8 +43,8 @@ pub use lash_sansio::PromptUsage;
 
 pub use builder::EmbeddedRuntimeBuilder;
 pub use host::{
-    BackgroundExecutor, BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost,
-    RuntimeCoreConfig, TokioBackgroundExecutor,
+    BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost, RuntimeCoreConfig,
+    SessionTaskExecutor, TokioSessionTaskExecutor,
 };
 
 #[doc(hidden)]
@@ -1569,9 +1569,9 @@ impl LashRuntime {
             .runtime_session_manager()
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         manager
-            .await_background_jobs(&self.state.session_id)
+            .await_hidden_tasks(&self.state.session_id)
             .await
-            .map_err(|err| SessionError::Protocol(format!("background job failed: {err}")))?;
+            .map_err(|err| SessionError::Protocol(format!("session task failed: {err}")))?;
         if self.background_sync_needed.swap(false, Ordering::AcqRel) {
             self.refresh_session_graph_from_store().await;
         }

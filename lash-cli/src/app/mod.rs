@@ -15,7 +15,7 @@ use lash_ui::UiExtensions;
 
 use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityState, ActivityStatus,
-    merge_edit_activity, merge_exploration_activity,
+    is_batch_tool_name, merge_edit_activity, merge_exploration_activity,
 };
 use crate::assistant_text::{
     normalize_assistant_text, push_assistant_text_block, render_live_assistant_text_block,
@@ -43,7 +43,7 @@ pub struct PluginPanelBlock {
 }
 
 pub use crate::editor::{LargePaste, PendingImage, SuggestionKind};
-pub use crate::overlay::{PromptState, WaitState};
+pub use crate::overlay::PromptState;
 
 pub struct LiveTurnState {
     pub status_text: String,
@@ -305,6 +305,8 @@ pub struct UiResumeState {
     pub streaming_output_hidden: usize,
     #[serde(default)]
     pub streaming_output_partial: String,
+    #[serde(default)]
+    pub interrupted_assistant_text: Option<String>,
 }
 
 impl UiResumeState {
@@ -323,6 +325,7 @@ impl UiResumeState {
             streaming_output: app.streaming_output.clone(),
             streaming_output_hidden: app.streaming_output_hidden,
             streaming_output_partial: app.streaming_output_partial.clone(),
+            interrupted_assistant_text: None,
         }
     }
 }
@@ -410,6 +413,11 @@ pub struct App {
     pub pending_steers: VecDeque<PreparedTurn>,
     /// FIFO drafts explicitly queued for later turns.
     pub queued_turns: VecDeque<PreparedTurn>,
+    /// Hidden monitor-origin wake requests awaiting injection or dispatch.
+    pending_monitor_wakes: VecDeque<String>,
+    /// Hidden monitor wake requests already handed to the runtime bridge and
+    /// awaiting checkpoint acceptance.
+    in_flight_monitor_wakes: VecDeque<String>,
     /// Most recent selection-style prompt response, held briefly so the next
     /// tool result can render it inline if it exposes a question-panel artifact.
     pending_option_prompt_response: Option<String>,
@@ -553,7 +561,7 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
-        if self.running || self.has_wait() {
+        if self.running {
             self.tick += 1;
             self.dirty = true;
         }
@@ -657,6 +665,8 @@ impl App {
             plugin_commands: Vec::new(),
             pending_steers: VecDeque::new(),
             queued_turns: VecDeque::new(),
+            pending_monitor_wakes: VecDeque::new(),
+            in_flight_monitor_wakes: VecDeque::new(),
             pending_option_prompt_response: None,
             overlay: None,
             focused: true,
@@ -1111,7 +1121,7 @@ impl App {
                 if let Some(activity) = activities.last() {
                     let detail = activity.result.detail_lines.first().cloned();
                     self.set_status(activity.call.summary.clone(), detail, true);
-                } else {
+                } else if !is_batch_tool_name(&name) {
                     self.set_status(name.clone(), None, true);
                 }
                 for activity in activities {
@@ -1266,6 +1276,46 @@ impl App {
             return;
         }
         self.queued_turns.push_back(turn);
+    }
+
+    pub fn queue_monitor_wake(&mut self, input: String) {
+        if input.trim().is_empty() {
+            return;
+        }
+        self.pending_monitor_wakes.push_back(input);
+    }
+
+    pub fn has_pending_monitor_wakes(&self) -> bool {
+        !self.pending_monitor_wakes.is_empty()
+    }
+
+    pub fn take_pending_monitor_wakes(&mut self) -> Vec<String> {
+        self.pending_monitor_wakes.drain(..).collect::<Vec<_>>()
+    }
+
+    pub fn mark_monitor_wakes_in_flight(&mut self, wakes: &[String]) {
+        self.in_flight_monitor_wakes.extend(wakes.iter().cloned());
+    }
+
+    pub fn acknowledge_monitor_wakes(&mut self, messages: &[PluginMessage]) {
+        for message in messages {
+            if !matches!(message.role, MessageRole::System) {
+                continue;
+            }
+            if let Some(idx) = self
+                .in_flight_monitor_wakes
+                .iter()
+                .position(|candidate| candidate == &message.content)
+            {
+                let _ = self.in_flight_monitor_wakes.remove(idx);
+            }
+        }
+    }
+
+    pub fn recycle_unaccepted_monitor_wakes(&mut self) {
+        while let Some(wake) = self.in_flight_monitor_wakes.pop_back() {
+            self.pending_monitor_wakes.push_front(wake);
+        }
     }
 
     pub fn requeue_front(&mut self, turn: PreparedTurn, pending: bool) {

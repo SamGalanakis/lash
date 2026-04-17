@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use crate::llm::types::LlmResponse;
+use crate::monitor::{MonitorSnapshot, MonitorSpec, MonitorUpdateBatch};
 use crate::runtime::{AssembledTurn, PersistedSessionState};
 use crate::{
     ContextApproachKind, ExecutionMode, MessageRole, SessionPolicy, SessionStateEnvelope,
@@ -19,7 +20,7 @@ pub use lash_sansio::{
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
 pub type PluginRuntimeEventHook = Arc<dyn Fn(PluginRuntimeEvent) -> PluginFuture<()> + Send + Sync>;
-pub type PluginBackgroundJob = PluginFuture<()>;
+pub type PluginSessionTask = PluginFuture<()>;
 pub type SessionConfigMutator = Arc<
     dyn Fn(SessionConfigChangedContext, SessionPolicy) -> PluginFuture<SessionPolicy> + Send + Sync,
 >;
@@ -775,18 +776,69 @@ pub trait SessionManager: Send + Sync {
     ) -> Result<SessionTurnHandle, PluginError>;
     async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
-    async fn spawn_background_job(
+    async fn spawn_hidden_task(
         &self,
         _session_id: &str,
         _label: &str,
-        _job: PluginBackgroundJob,
+        _task: PluginSessionTask,
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
-            "background jobs are unavailable in this session".to_string(),
+            "session tasks are unavailable in this session".to_string(),
         ))
     }
-    async fn await_background_jobs(&self, _session_id: &str) -> Result<(), PluginError> {
+    async fn await_hidden_tasks(&self, _session_id: &str) -> Result<(), PluginError> {
         Ok(())
+    }
+    async fn spawn_managed_task(
+        &self,
+        _session_id: &str,
+        _task_id: &str,
+        _label: &str,
+        _task: PluginSessionTask,
+    ) -> Result<(), PluginError> {
+        Err(PluginError::Session(
+            "managed session tasks are unavailable in this session".to_string(),
+        ))
+    }
+    async fn cancel_managed_task(
+        &self,
+        _session_id: &str,
+        _task_id: &str,
+    ) -> Result<(), PluginError> {
+        Err(PluginError::Session(
+            "managed session tasks are unavailable in this session".to_string(),
+        ))
+    }
+    async fn monitor_snapshot(&self, _session_id: &str) -> Result<MonitorSnapshot, PluginError> {
+        Err(PluginError::Session(
+            "monitors are unavailable in this session".to_string(),
+        ))
+    }
+    async fn take_monitor_updates(
+        &self,
+        _session_id: &str,
+    ) -> Result<MonitorUpdateBatch, PluginError> {
+        Err(PluginError::Session(
+            "monitors are unavailable in this session".to_string(),
+        ))
+    }
+    async fn start_monitor(
+        &self,
+        _session_id: &str,
+        _spec: MonitorSpec,
+    ) -> Result<MonitorSnapshot, PluginError> {
+        Err(PluginError::Session(
+            "monitors are unavailable in this session".to_string(),
+        ))
+    }
+    async fn stop_monitor(
+        &self,
+        _session_id: &str,
+        _monitor_id: &str,
+    ) -> Result<MonitorSnapshot, PluginError> {
+        Err(PluginError::Session(
+            "monitors are unavailable in this session".to_string(),
+        ))
     }
     async fn append_session_nodes(
         &self,
@@ -1476,6 +1528,8 @@ impl SessionPlugin for SpecPlugin {
 mod runtime_impl;
 mod tool_result_projection_builtin;
 
+#[path = "plugin_builtin/monitor.rs"]
+mod monitor;
 #[path = "plugin_builtin/observational_memory.rs"]
 mod observational_memory;
 #[path = "plugin_builtin/rlm_mode.rs"]
@@ -1485,15 +1539,17 @@ mod rolling_history;
 #[path = "plugin_builtin/standard_mode.rs"]
 mod standard_mode;
 
+pub use monitor::MonitorPluginFactory as BuiltinMonitorPluginFactory;
 pub use observational_memory::ObservationalMemoryPluginFactory;
 pub use rlm_mode::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
 pub use rolling_history::RollingHistoryPluginFactory;
 
 pub use runtime_impl::{
     CommandRegistrations, ExternalInvokeError, ExternalRegistrations, HistoryRegistrations,
-    OutputRegistrations, PersistentRuntimeServices, PluginHost, PluginRegistrar, PluginSession,
-    PromptRegistrations, RuntimeServices, SessionRegistrations, SurfaceRegistrations,
-    ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations, TurnRegistrations,
+    MonitorRegistrations, OutputRegistrations, PersistentRuntimeServices, PluginHost,
+    PluginRegistrar, PluginSession, PromptRegistrations, RuntimeServices, SessionRegistrations,
+    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
+    TurnRegistrations,
 };
 pub use tool_result_projection_builtin::{
     BuiltinToolResultProjectionPluginFactory, ToolResultProjectionMode,
@@ -1504,8 +1560,9 @@ pub(crate) use tool_result_projection_builtin::{
     truncate_observation_text,
 };
 
-pub(crate) fn builtin_mode_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
+pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     vec![
+        Arc::new(monitor::MonitorPluginFactory),
         Arc::new(standard_mode::StandardModePluginFactory),
         Arc::new(rlm_mode::BuiltinRlmModePluginFactory::default()),
     ]

@@ -262,7 +262,7 @@ impl HostPromptBridge {
             .map_err(|_| crate::PluginError::Session("prompt channel closed".to_string()))?;
         tokio::task::spawn_blocking(move || response_rx.recv())
             .await
-            .map_err(|err| crate::PluginError::Session(format!("prompt wait task failed: {err}")))?
+            .map_err(|err| crate::PluginError::Session(format!("prompt task failed: {err}")))?
             .map_err(|_| crate::PluginError::Session("prompt response channel closed".to_string()))
     }
 }
@@ -465,6 +465,56 @@ impl RuntimeSessionManager {
             crate::PluginError::Session("dynamic tools are unavailable in this session".to_string())
         })
     }
+
+    async fn invoke_monitor_external(
+        &self,
+        session_id: &str,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<crate::ToolResult, crate::PluginError> {
+        self.current_plugins
+            .host()
+            .invoke_external_for_session(session_id, name, args, Arc::new(self.clone()))
+            .await
+            .map_err(|err| crate::PluginError::Session(err.to_string()))
+    }
+
+    async fn ensure_registered_monitor_specs(
+        &self,
+        session_id: &str,
+    ) -> Result<(), crate::PluginError> {
+        let specs = self
+            .current_plugins
+            .host()
+            .monitor_specs_for_session(session_id)
+            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        if specs.is_empty() {
+            return Ok(());
+        }
+        let specs = specs
+            .into_iter()
+            .map(|owned| {
+                serde_json::json!({
+                    "plugin_id": owned.plugin_id,
+                    "spec": owned.value,
+                })
+            })
+            .collect::<Vec<_>>();
+        let result = self
+            .invoke_monitor_external(
+                session_id,
+                "monitor.register_specs",
+                serde_json::json!({
+                    "specs": specs,
+                }),
+            )
+            .await?;
+        if result.success {
+            Ok(())
+        } else {
+            Err(crate::PluginError::Session(result.result.to_string()))
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -616,7 +666,7 @@ impl SessionManager for RuntimeSessionManager {
             ),
             None => None,
         };
-        let mut runtime = match (&self.current_host.background_executor, &session_store) {
+        let mut runtime = match (&self.current_host.session_task_executor, &session_store) {
             (Some(executor), Some(store)) => {
                 let host = BackgroundRuntimeHost::new(
                     EmbeddedRuntimeHost {
@@ -871,11 +921,11 @@ impl SessionManager for RuntimeSessionManager {
         Ok(())
     }
 
-    async fn spawn_background_job(
+    async fn spawn_hidden_task(
         &self,
         session_id: &str,
         label: &str,
-        job: crate::plugin::PluginBackgroundJob,
+        task: crate::plugin::PluginSessionTask,
     ) -> Result<(), crate::PluginError> {
         if session_id != self.current_session_id {
             let known = self.registry.lock().await.contains_key(session_id);
@@ -885,26 +935,137 @@ impl SessionManager for RuntimeSessionManager {
                 )));
             }
         }
-        let Some(executor) = &self.current_host.background_executor else {
+        let Some(executor) = &self.current_host.session_task_executor else {
             return Err(crate::PluginError::Session(
-                "background jobs are unavailable in this runtime".to_string(),
+                "session tasks are unavailable in this runtime".to_string(),
             ));
         };
         if session_id == self.current_session_id {
             self.background_sync_needed.store(true, Ordering::Release);
         }
         executor
-            .spawn(&self.background_scope_key(session_id), label, job)
+            .spawn_hidden(&self.background_scope_key(session_id), label, task)
             .await
     }
 
-    async fn await_background_jobs(&self, session_id: &str) -> Result<(), crate::PluginError> {
-        let Some(executor) = &self.current_host.background_executor else {
+    async fn await_hidden_tasks(&self, session_id: &str) -> Result<(), crate::PluginError> {
+        let Some(executor) = &self.current_host.session_task_executor else {
             return Ok(());
         };
         executor
-            .await_all(&self.background_scope_key(session_id))
+            .await_hidden(&self.background_scope_key(session_id))
             .await
+    }
+
+    async fn spawn_managed_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        label: &str,
+        task: crate::plugin::PluginSessionTask,
+    ) -> Result<(), crate::PluginError> {
+        if session_id != self.current_session_id {
+            let known = self.registry.lock().await.contains_key(session_id);
+            if !known {
+                return Err(crate::PluginError::Session(format!(
+                    "unknown session `{session_id}`"
+                )));
+            }
+        }
+        let Some(executor) = &self.current_host.session_task_executor else {
+            return Err(crate::PluginError::Session(
+                "managed session tasks are unavailable in this runtime".to_string(),
+            ));
+        };
+        if session_id == self.current_session_id {
+            self.background_sync_needed.store(true, Ordering::Release);
+        }
+        executor
+            .spawn_managed(&self.background_scope_key(session_id), task_id, label, task)
+            .await
+    }
+
+    async fn cancel_managed_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<(), crate::PluginError> {
+        let Some(executor) = &self.current_host.session_task_executor else {
+            return Ok(());
+        };
+        executor
+            .cancel_managed(&self.background_scope_key(session_id), task_id)
+            .await
+    }
+
+    async fn monitor_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
+        self.ensure_registered_monitor_specs(session_id).await?;
+        let result = self
+            .invoke_monitor_external(session_id, "monitor.status", serde_json::json!({}))
+            .await?;
+        if !result.success {
+            return Err(crate::PluginError::Session(result.result.to_string()));
+        }
+        serde_json::from_value(result.result)
+            .map_err(|err| crate::PluginError::Session(format!("invalid monitor status: {err}")))
+    }
+
+    async fn take_monitor_updates(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::MonitorUpdateBatch, crate::PluginError> {
+        self.ensure_registered_monitor_specs(session_id).await?;
+        let result = self
+            .invoke_monitor_external(session_id, "monitor.take_updates", serde_json::json!({}))
+            .await?;
+        if !result.success {
+            return Err(crate::PluginError::Session(result.result.to_string()));
+        }
+        serde_json::from_value(result.result)
+            .map_err(|err| crate::PluginError::Session(format!("invalid monitor updates: {err}")))
+    }
+
+    async fn start_monitor(
+        &self,
+        session_id: &str,
+        spec: crate::MonitorSpec,
+    ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
+        self.ensure_registered_monitor_specs(session_id).await?;
+        let result = self
+            .invoke_monitor_external(
+                session_id,
+                "monitor.start",
+                serde_json::json!({ "spec": spec }),
+            )
+            .await?;
+        if !result.success {
+            return Err(crate::PluginError::Session(result.result.to_string()));
+        }
+        serde_json::from_value(result.result)
+            .map_err(|err| crate::PluginError::Session(format!("invalid monitor status: {err}")))
+    }
+
+    async fn stop_monitor(
+        &self,
+        session_id: &str,
+        monitor_id: &str,
+    ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
+        self.ensure_registered_monitor_specs(session_id).await?;
+        let result = self
+            .invoke_monitor_external(
+                session_id,
+                "monitor.stop",
+                serde_json::json!({ "id": monitor_id }),
+            )
+            .await?;
+        if !result.success {
+            return Err(crate::PluginError::Session(result.result.to_string()));
+        }
+        serde_json::from_value(result.result)
+            .map_err(|err| crate::PluginError::Session(format!("invalid monitor status: {err}")))
     }
 
     async fn prompt_user(

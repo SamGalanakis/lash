@@ -10,6 +10,7 @@ pub(crate) fn projected_blocks_from_state(
     ui_state: &UiResumeState,
 ) -> Vec<DisplayBlock> {
     let mut blocks = blocks_from_transcript(messages, tool_calls);
+    append_interrupted_assistant_block(&mut blocks, ui_state);
     blocks.extend(
         ui_state
             .plugin_panels
@@ -29,6 +30,28 @@ pub(crate) fn project_interrupted_blocks(
     let mut blocks = projected_blocks_from_state(messages, tool_calls, ui_state);
     push_system_message_block_if_new(&mut blocks, status_message.into());
     blocks
+}
+
+fn append_interrupted_assistant_block(blocks: &mut Vec<DisplayBlock>, ui_state: &UiResumeState) {
+    let Some(text) = ui_state.interrupted_assistant_text.as_deref() else {
+        return;
+    };
+    let cleaned = normalize_assistant_text(text);
+    if cleaned.is_empty() {
+        return;
+    }
+    if let Some(DisplayBlock::AssistantText(existing)) = blocks.last_mut() {
+        if cleaned.starts_with(existing.as_str()) {
+            if *existing != cleaned {
+                *existing = cleaned;
+            }
+            return;
+        }
+        if existing.starts_with(cleaned.as_str()) {
+            return;
+        }
+    }
+    let _ = push_assistant_text_block(blocks, &cleaned);
 }
 
 pub(crate) fn push_system_message_block_if_new(blocks: &mut Vec<DisplayBlock>, message: String) {

@@ -3,6 +3,7 @@ use crate::app::App;
 use crate::clipboard::{ClipboardEnv, osc52_allowed_by_env, osc52_sequence_for};
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
+use lash::{InjectedTurnInput, MessageRole, TurnInputInjectionBridge};
 
 #[test]
 fn pending_text_delta_buffer_coalesces_adjacent_chunks() {
@@ -65,6 +66,48 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
         app.blocks.last(),
         Some(DisplayBlock::UserInput(text)) if text == "(I want future migrations to work though!)"
     ));
+}
+
+#[test]
+fn pending_monitor_wakes_inject_as_hidden_system_messages() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let bridge = TurnInputInjectionBridge::new();
+    app.queue_monitor_wake("Monitor event \"build\": done".into());
+
+    let injected = enqueue_pending_monitor_wakes(&mut app, &bridge).expect("inject wakes");
+    assert_eq!(injected, 1);
+    assert!(!app.has_pending_monitor_wakes());
+
+    let drained = bridge.drain().expect("drain bridge");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].message.role, MessageRole::System);
+    assert_eq!(drained[0].message.content, "Monitor event \"build\": done");
+
+    app.recycle_unaccepted_monitor_wakes();
+    assert_eq!(
+        app.take_pending_monitor_wakes(),
+        vec!["Monitor event \"build\": done".to_string()]
+    );
+}
+
+#[test]
+fn accepted_monitor_wake_is_not_requeued_after_bridge_delivery() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let bridge = TurnInputInjectionBridge::new();
+    app.queue_monitor_wake("Monitor event \"build\": done".into());
+
+    let injected = enqueue_pending_monitor_wakes(&mut app, &bridge).expect("inject wakes");
+    assert_eq!(injected, 1);
+    let drained = bridge.drain().expect("drain bridge");
+    let messages = drained
+        .into_iter()
+        .map(|InjectedTurnInput { message }| message)
+        .collect::<Vec<_>>();
+
+    app.acknowledge_monitor_wakes(&messages);
+    app.recycle_unaccepted_monitor_wakes();
+
+    assert!(app.take_pending_monitor_wakes().is_empty());
 }
 
 #[test]

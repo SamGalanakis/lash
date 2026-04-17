@@ -13,6 +13,8 @@ impl App {
         self.clear_streaming_output();
         self.pending_steers.clear();
         self.queued_turns.clear();
+        self.pending_monitor_wakes.clear();
+        self.in_flight_monitor_wakes.clear();
         self.overlay = None;
         self.activity_state.reset();
         self.token_usage = TokenUsage::default();

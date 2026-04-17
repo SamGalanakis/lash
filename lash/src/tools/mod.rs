@@ -14,7 +14,6 @@ mod read_file;
 #[cfg(feature = "tool-impls")]
 mod shell;
 mod show_snippet_to_user;
-mod wait;
 mod web_search;
 
 pub use apply_patch::ApplyPatchTool;
@@ -36,7 +35,6 @@ pub use shell::StandardShell;
 #[cfg(feature = "tool-impls")]
 pub use shell::shell_prompt_contributions;
 pub use show_snippet_to_user::ShowSnippetToUser;
-pub use wait::WaitTool;
 pub use web_search::WebSearch;
 
 use crate::ToolResult;

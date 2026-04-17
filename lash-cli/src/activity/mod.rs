@@ -13,6 +13,10 @@ pub(crate) use self::projectors::edit::{patch_file_subject, patch_status_title};
 pub use self::projectors::exploration::merge_exploration_activity;
 use self::shared::activity_tool_name;
 
+pub(crate) fn is_batch_tool_name(name: &str) -> bool {
+    activity_tool_name(name) == "batch"
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivityKind {
     Exploration,
@@ -282,10 +286,7 @@ impl ActivityState {
     ) -> Vec<ActivityBlock> {
         let name = activity_tool_name(name);
         if name == "batch" {
-            let blocks = self.blocks_for_batch_tool_call(&args, &result);
-            if !blocks.is_empty() {
-                return blocks;
-            }
+            return self.blocks_for_batch_tool_call(&args, &result);
         }
         let status = if success {
             ActivityStatus::Completed
@@ -311,14 +312,10 @@ impl ActivityState {
     }
 
     fn blocks_for_batch_tool_call(&mut self, args: &Value, result: &Value) -> Vec<ActivityBlock> {
-        let Some(entries) = result.get("results").and_then(|value| value.as_array()) else {
+        let Some(entries) = batch_result_entries(result) else {
             return Vec::new();
         };
-        let calls = args
-            .get("tool_calls")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let calls = batch_call_specs(args);
 
         entries
             .iter()
@@ -327,31 +324,27 @@ impl ActivityState {
                 let child_name = item
                     .get("tool")
                     .and_then(|value| value.as_str())
-                    .or_else(|| {
-                        calls
-                            .get(index)
-                            .and_then(|value| value.get("tool"))
-                            .and_then(|value| value.as_str())
-                    })
+                    .or_else(|| calls.get(index).and_then(|call| call.tool_name.as_deref()))
                     .unwrap_or("tool")
                     .to_string();
                 let child_args = calls
                     .get(index)
-                    .and_then(|value| value.get("parameters"))
-                    .cloned()
+                    .map(|call| call.args.clone())
                     .unwrap_or_else(|| Value::Object(Default::default()));
                 let child_success = item
                     .get("success")
                     .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
+                    .unwrap_or_else(|| item.get("error").is_none());
                 let child_duration = item
                     .get("duration_ms")
                     .and_then(|value| value.as_u64())
                     .unwrap_or(0);
-                let child_result = if child_success {
-                    item.get("result").cloned().unwrap_or(Value::Null)
+                let child_result = if let Some(result) = item.get("result") {
+                    result.clone()
+                } else if let Some(error) = item.get("error") {
+                    error.clone()
                 } else {
-                    item.get("error").cloned().unwrap_or(Value::Null)
+                    item.clone()
                 };
 
                 self.blocks_for_tool_call(
@@ -364,6 +357,53 @@ impl ActivityState {
             })
             .collect()
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct BatchChildCallSpec {
+    tool_name: Option<String>,
+    args: Value,
+}
+
+fn batch_call_specs(args: &Value) -> Vec<BatchChildCallSpec> {
+    if let Some(calls) = args.get("tool_calls").and_then(|value| value.as_array()) {
+        return calls
+            .iter()
+            .map(|item| BatchChildCallSpec {
+                tool_name: item
+                    .get("tool")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                args: item
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
+            })
+            .collect();
+    }
+    if let Some(calls) = args.get("tool_uses").and_then(|value| value.as_array()) {
+        return calls
+            .iter()
+            .map(|item| BatchChildCallSpec {
+                tool_name: item
+                    .get("recipient_name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                args: item
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+fn batch_result_entries(result: &Value) -> Option<&Vec<Value>> {
+    result
+        .get("results")
+        .and_then(|value| value.as_array())
+        .or_else(|| result.as_array())
 }
 
 #[cfg(test)]
@@ -487,6 +527,36 @@ mod tests {
         assert!(blocks[0].result.detail_lines.is_empty());
         assert_eq!(blocks[1].call.tool_name, "search_web");
         assert_eq!(blocks[1].call.summary, "searched web for \"OpenAI\"");
+    }
+
+    #[test]
+    fn tool_use_batch_results_expand_into_child_tool_blocks() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "batch",
+            json!({
+                "tool_uses": [
+                    {
+                        "recipient_name": "functions.read_file",
+                        "parameters": {"path": "README.md"}
+                    },
+                    {
+                        "recipient_name": "functions.grep",
+                        "parameters": {"query": "OpenAI", "path": "README.md"}
+                    }
+                ]
+            }),
+            json!([
+                {"success": true, "result": "README body", "duration_ms": 8},
+                {"success": true, "result": "match", "duration_ms": 13}
+            ]),
+            true,
+            21,
+        );
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].call.tool_name, "read_file");
+        assert_eq!(blocks[1].call.tool_name, "grep");
     }
 
     #[test]

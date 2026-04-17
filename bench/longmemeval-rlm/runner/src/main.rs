@@ -22,7 +22,7 @@ use lash::{
     PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate, PromptTemplateEntry,
     PromptTemplateSection, Provider, ProviderOptions, RlmGlobalsPatchPluginBody, RuntimeCoreConfig,
     RuntimeStore, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
-    TokioBackgroundExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentToolConfig, SubagentsPluginFactory};
@@ -605,7 +605,7 @@ async fn run_question(
                 .with_llm_log_path(Some(llm_log_path.clone()))
                 .with_prompt_template(prompt_template(args.prompt_profile, args.session_tools)),
         ),
-        Arc::new(TokioBackgroundExecutor::default()),
+        Arc::new(TokioSessionTaskExecutor::default()),
     );
     let mut runtime = LashRuntime::from_persistent_background_state(
         policy.clone(),

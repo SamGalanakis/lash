@@ -1809,6 +1809,7 @@ dependencies = [
  "ignore",
  "lash-sansio",
  "lashlang",
+ "libc",
  "pdf-extract",
  "portable-pty",
  "regex",

@@ -7,7 +7,7 @@ use lash_tui::ScreenSnapshot;
 use lash_ui::UiExtensions;
 use tokio::sync::Mutex;
 
-use crate::app::{App, PreparedTurn, PromptState, WaitState};
+use crate::app::{App, PreparedTurn, PromptState};
 use crate::overlay::PromptFocus;
 use crate::ui_trace::{TraceRepoStatus, render_screen_snapshot};
 use crate::{apply_ui_host_effects, render};
@@ -129,26 +129,21 @@ impl UiHarness {
                         response_tx: response_tx.clone(),
                     });
                 apply_ui_host_effects(&mut self.app, effects);
-                if request.is_wait() {
-                    self.app
-                        .show_wait(WaitState::from_request(request, response_tx));
+                let focus = if request.is_freeform() {
+                    PromptFocus::Text
                 } else {
-                    let focus = if request.is_freeform() {
-                        PromptFocus::Text
-                    } else {
-                        PromptFocus::Options
-                    };
-                    self.app.show_prompt(PromptState {
-                        request,
-                        focus,
-                        cursor: 0,
-                        scroll_offset: 0,
-                        selected: Default::default(),
-                        reply_text: String::new(),
-                        reply_cursor: 0,
-                        response_tx,
-                    });
-                }
+                    PromptFocus::Options
+                };
+                self.app.show_prompt(PromptState {
+                    request,
+                    focus,
+                    cursor: 0,
+                    scroll_offset: 0,
+                    selected: Default::default(),
+                    reply_text: String::new(),
+                    reply_cursor: 0,
+                    response_tx,
+                });
             }
             other => {
                 let effects = self.ui_extensions.effects_for_session_event(&other);

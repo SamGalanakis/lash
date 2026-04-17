@@ -754,6 +754,28 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
 }
 
 #[test]
+fn interrupted_projection_preserves_partial_assistant_text() {
+    let blocks = project_interrupted_blocks(
+        &[],
+        &[],
+        &UiResumeState {
+            interrupted_assistant_text: Some("Partial streamed answer".to_string()),
+            ..UiResumeState::default()
+        },
+        "Cancelled.",
+    );
+
+    assert!(matches!(
+        blocks.first(),
+        Some(DisplayBlock::AssistantText(text)) if text == "Partial streamed answer"
+    ));
+    assert!(matches!(
+        blocks.last(),
+        Some(DisplayBlock::SystemMessage(msg)) if msg == "Cancelled."
+    ));
+}
+
+#[test]
 fn non_manual_error_sets_transient_status() {
     let mut app = App::new("test-model".into(), "test".into());
     app.handle_session_event(SessionEvent::LlmRequest {
@@ -852,6 +874,40 @@ fn take_last_queued_turn_restores_explicit_queue_only() {
 
     assert!(app.take_last_queued_turn().is_none());
     assert_eq!(app.pending_steers.len(), 1);
+}
+
+#[test]
+fn wake_session_effect_uses_hidden_monitor_queue() {
+    let mut app = App::new("test-model".into(), "test".into());
+
+    crate::apply_ui_host_effects(
+        &mut app,
+        vec![UiHostEffect::WakeSession {
+            input: "Monitor event \"build\": done".into(),
+        }],
+    );
+
+    assert!(!app.has_queued_messages());
+    assert_eq!(
+        app.take_pending_monitor_wakes(),
+        vec!["Monitor event \"build\": done".to_string()]
+    );
+}
+
+#[test]
+fn acknowledged_monitor_wakes_do_not_requeue() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.queue_monitor_wake("Monitor event \"build\": done".into());
+    let wakes = app.take_pending_monitor_wakes();
+    app.mark_monitor_wakes_in_flight(&wakes);
+
+    app.acknowledge_monitor_wakes(&[PluginMessage::text(
+        MessageRole::System,
+        "Monitor event \"build\": done",
+    )]);
+    app.recycle_unaccepted_monitor_wakes();
+
+    assert!(app.take_pending_monitor_wakes().is_empty());
 }
 
 #[test]
@@ -1746,64 +1802,6 @@ fn prompt_insert_text_inserts_literal_payload_at_cursor() {
 }
 
 #[test]
-fn wait_overlay_resume_returns_resume_early_token_without_chat_echo() {
-    let mut app = App::new("test-model".into(), "test".into());
-    let (response_tx, response_rx) = std::sync::mpsc::channel();
-    app.show_wait(WaitState::from_request(
-        lash::PromptRequest::freeform("Pausing briefly before continuing.").with_wait(5),
-        response_tx,
-    ));
-
-    app.resume_wait();
-
-    assert!(!app.has_wait());
-    assert!(!app.blocks.iter().any(
-        |block| matches!(block, DisplayBlock::UserInput(text) if text.contains("Pausing briefly"))
-    ));
-    assert_eq!(
-        response_rx.recv().expect("response"),
-        lash::PromptResponse::Text {
-            text: lash::WAIT_PROMPT_RESUME_EARLY_TOKEN.to_string()
-        }
-    );
-}
-
-#[test]
-fn wait_overlay_reports_countdown_and_timeout_response() {
-    let mut app = App::new("test-model".into(), "test".into());
-    let (response_tx, response_rx) = std::sync::mpsc::channel();
-    app.show_wait(WaitState::from_request(
-        lash::PromptRequest::freeform("Pausing briefly before continuing.").with_wait(0),
-        response_tx,
-    ));
-
-    assert_eq!(app.wait_remaining_seconds(), Some(0));
-    assert!(app.wait_timed_out());
-
-    app.timeout_wait();
-
-    assert!(!app.has_wait());
-    assert_eq!(
-        response_rx.recv().expect("response"),
-        lash::PromptResponse::Text {
-            text: lash::WAIT_PROMPT_TIMEOUT_TOKEN.to_string()
-        }
-    );
-}
-
-#[test]
-fn wait_overlay_starts_with_requested_remaining_seconds() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.show_wait(WaitState::from_request(
-        lash::PromptRequest::freeform("Pausing briefly before continuing.").with_wait(5),
-        std::sync::mpsc::channel().0,
-    ));
-
-    assert_eq!(app.wait_remaining_seconds(), Some(5));
-    assert!(!app.wait_timed_out());
-}
-
-#[test]
 fn prompt_toggle_current_option_ignores_freeform_prompts() {
     let mut app = App::new("test-model".into(), "test".into());
     app.show_prompt(PromptState {
@@ -1975,4 +1973,50 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
                         && panel.note.as_deref() == Some("ship the blue path")
             )
     ));
+}
+
+#[test]
+fn live_batch_tool_call_expands_children_without_parent_batch_block() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.blocks.clear();
+
+    app.handle_session_event(SessionEvent::ToolCall {
+        call_id: None,
+        name: "batch".into(),
+        args: serde_json::json!({
+            "tool_uses": [
+                {
+                    "recipient_name": "functions.read_file",
+                    "parameters": {"path": "README.md"}
+                },
+                {
+                    "recipient_name": "functions.grep",
+                    "parameters": {"query": "OpenAI", "path": "README.md"}
+                }
+            ]
+        }),
+        result: serde_json::json!([
+            {"success": true, "result": "README body", "duration_ms": 8},
+            {"success": true, "result": "match", "duration_ms": 13}
+        ]),
+        success: true,
+        duration_ms: 21,
+    });
+
+    let activities = app
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            DisplayBlock::Activity(activity) => Some(activity),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(activities.len(), 1);
+    assert_eq!(activities[0].call.kind, ActivityKind::Exploration);
+    assert_eq!(activities[0].call.summary, "Explored");
+    assert!(
+        activities
+            .iter()
+            .all(|activity| activity.call.tool_name != "batch" && activity.call.summary != "batch")
+    );
 }

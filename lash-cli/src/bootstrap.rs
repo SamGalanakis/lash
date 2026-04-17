@@ -75,7 +75,7 @@ fn plugin_factories_for_surface(
 }
 
 fn autonomous_tool_allowed(name: &str) -> bool {
-    !matches!(name, "ask" | "wait" | "show_snippet_to_user" | "showcase")
+    !matches!(name, "ask" | "show_snippet_to_user" | "showcase")
         && !name.starts_with("plan_")
         && name != "request_user_input"
 }
@@ -522,7 +522,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         .with_session_store_factory(Arc::new(DbSessionStoreFactory::new(sessions_dir.clone())));
     let mut runtime = LashRuntime::from_persistent_background_state(
         session_policy.clone(),
-        BackgroundRuntimeHost::new(embedded_host, Arc::new(TokioBackgroundExecutor::default())),
+        BackgroundRuntimeHost::new(embedded_host, Arc::new(TokioSessionTaskExecutor::default())),
         services,
         state,
     )

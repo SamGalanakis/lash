@@ -417,10 +417,6 @@ fn default_tool_session(
             crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::AskTool::new())),
         )));
         factories.push(Arc::new(StaticPluginFactory::new(
-            "wait",
-            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::WaitTool::new())),
-        )));
-        factories.push(Arc::new(StaticPluginFactory::new(
             "show_snippet_to_user",
             crate::PluginSpec::new()
                 .with_tool_provider(Arc::new(crate::tools::ShowSnippetToUser::new())),
@@ -489,7 +485,7 @@ async fn standard_runtime_with_transport_and_background(transport: MockTransport
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(
         test_host_config(),
-        Arc::new(TokioBackgroundExecutor::default()),
+        Arc::new(TokioSessionTaskExecutor::default()),
     );
     let mut runtime = LashRuntime::from_background_state(
         standard_test_policy(),
@@ -509,7 +505,7 @@ async fn standard_runtime_with_transport_and_background(transport: MockTransport
 
 async fn standard_runtime_with_shared_background_executor(
     transport: MockTransport,
-    executor: Arc<dyn BackgroundExecutor>,
+    executor: Arc<dyn SessionTaskExecutor>,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(test_host_config(), executor);
@@ -537,7 +533,7 @@ async fn om_runtime_with_transport_and_background(
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(
         test_host_config(),
-        Arc::new(TokioBackgroundExecutor::default()),
+        Arc::new(TokioSessionTaskExecutor::default()),
     );
     let plugin_host = crate::PluginHost::new(vec![
         Arc::new(crate::BuiltinObservationalMemoryPluginFactory),
@@ -3534,7 +3530,7 @@ async fn await_background_work_waits_for_registered_jobs() {
     let observed_task = Arc::clone(&observed);
 
     manager
-        .spawn_background_job(
+        .spawn_hidden_task(
             "root",
             "test",
             Box::pin(async move {
@@ -3556,7 +3552,7 @@ async fn await_background_work_waits_for_registered_jobs() {
 
 #[tokio::test]
 async fn await_background_work_does_not_cross_runtime_sessions_with_same_logical_id() {
-    let executor: Arc<dyn BackgroundExecutor> = Arc::new(TokioBackgroundExecutor::default());
+    let executor: Arc<dyn SessionTaskExecutor> = Arc::new(TokioSessionTaskExecutor::default());
     let runtime_one = standard_runtime_with_shared_background_executor(
         MockTransport::new(Vec::new()),
         Arc::clone(&executor),
@@ -3571,7 +3567,7 @@ async fn await_background_work_does_not_cross_runtime_sessions_with_same_logical
     let observed = Arc::new(AtomicBool::new(false));
     let observed_task = Arc::clone(&observed);
     manager_one
-        .spawn_background_job(
+        .spawn_hidden_task(
             "root",
             "test",
             Box::pin(async move {
