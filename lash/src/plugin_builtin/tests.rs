@@ -175,25 +175,6 @@ async fn ui_activity_plugin_emits_done_notification_surface_event() {
 }
 
 #[tokio::test]
-async fn ui_activity_plugin_skips_wait_prompt_notifications() {
-    let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
-    let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
-
-    let events = session
-        .on_prompt_request(PromptRequestHookContext {
-            session_id: "root".to_string(),
-            request: crate::PromptRequest::freeform("Pausing briefly before continuing.")
-                .with_wait(5),
-            host: manager,
-        })
-        .await
-        .expect("prompt hooks");
-
-    assert!(events.is_empty());
-}
-
-#[tokio::test]
 async fn ui_activity_plugin_emits_prompt_notification_surface_event() {
     let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
     let session = host.build_standard_session("root", None).expect("session");

@@ -1,8 +1,7 @@
-//! Ask / wait projectors.
+//! Ask projector.
 //!
 //! `ask` produces an `Ask` block with a `QuestionPanel` artifact
-//! describing the question and its options. `wait` produces an `Ask`
-//! block with a text summary of the pause duration.
+//! describing the question and its options.
 
 use serde_json::Value;
 
@@ -16,92 +15,36 @@ pub(crate) struct AskProjector;
 
 impl ToolProjector for AskProjector {
     fn tool_names(&self) -> &'static [&'static str] {
-        &["ask", "wait"]
+        &["ask"]
     }
 
     fn project(&self, ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
+        if ctx.name != "ask" {
+            return Vec::new();
+        }
         let status = if ctx.success {
             ActivityStatus::Completed
         } else {
             ActivityStatus::Failed
         };
-        match ctx.name {
-            "ask" => {
-                let detail_lines = ask_detail_lines(&ctx.args, &ctx.result);
-                let artifact = inline_question_panel_artifact(&ctx.args, &ctx.result);
-                let args = std::mem::replace(&mut ctx.args, Value::Null);
-                let result = std::mem::replace(&mut ctx.result, Value::Null);
-                vec![
-                    ActivityBlock::new(
-                        ActivityKind::Ask,
-                        ctx.name,
-                        args,
-                        "Question",
-                        status,
-                        result,
-                        ctx.duration_ms,
-                    )
-                    .with_detail_lines(detail_lines)
-                    .with_artifact(artifact),
-                ]
-            }
-            "wait" => {
-                let summary = wait_summary(&ctx.args, &ctx.result);
-                let detail_lines = wait_detail_lines(&ctx.args, &ctx.result);
-                let args = std::mem::replace(&mut ctx.args, Value::Null);
-                let result = std::mem::replace(&mut ctx.result, Value::Null);
-                vec![
-                    ActivityBlock::new(
-                        ActivityKind::Ask,
-                        ctx.name,
-                        args,
-                        summary,
-                        status,
-                        result,
-                        ctx.duration_ms,
-                    )
-                    .with_detail_lines(detail_lines),
-                ]
-            }
-            _ => Vec::new(),
-        }
+        let detail_lines = ask_detail_lines(&ctx.args, &ctx.result);
+        let artifact = inline_question_panel_artifact(&ctx.args, &ctx.result);
+        let args = std::mem::replace(&mut ctx.args, Value::Null);
+        let result = std::mem::replace(&mut ctx.result, Value::Null);
+        vec![
+            ActivityBlock::new(
+                ActivityKind::Ask,
+                ctx.name,
+                args,
+                "Question",
+                status,
+                result,
+                ctx.duration_ms,
+            )
+            .with_detail_lines(detail_lines)
+            .with_artifact(artifact),
+        ]
     }
-}
-
-fn wait_summary(args: &Value, result: &Value) -> String {
-    let seconds = result
-        .get("seconds")
-        .and_then(|value| value.as_u64())
-        .or_else(|| args.get("seconds").and_then(|value| value.as_u64()))
-        .unwrap_or(0);
-    if result
-        .get("resumed_early")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        format!("waited {seconds}s window · resumed early")
-    } else {
-        format!("waited {seconds}s")
-    }
-}
-
-fn wait_detail_lines(args: &Value, result: &Value) -> Vec<String> {
-    let seconds = result
-        .get("seconds")
-        .and_then(|value| value.as_u64())
-        .or_else(|| args.get("seconds").and_then(|value| value.as_u64()));
-    let mut lines = Vec::new();
-    if let Some(seconds) = seconds {
-        lines.push(format!("Paused for {seconds}s before continuing."));
-    }
-    if result
-        .get("resumed_early")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        lines.push("Resumed early from the terminal.".to_string());
-    }
-    lines
 }
 
 fn ask_detail_lines(args: &Value, _result: &Value) -> Vec<String> {

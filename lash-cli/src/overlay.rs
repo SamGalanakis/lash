@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
 
 use lash::{
     Message, MessageRole, PartKind, PromptRequest, PromptResponse, PromptSelectionMode,
@@ -215,54 +214,6 @@ impl PromptState {
                 };
                 Self::format_note_display(base, note.as_deref())
             }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct WaitState {
-    deadline: Instant,
-    pub response_tx: std::sync::mpsc::Sender<PromptResponse>,
-}
-
-impl WaitState {
-    pub fn from_request(
-        request: PromptRequest,
-        response_tx: std::sync::mpsc::Sender<PromptResponse>,
-    ) -> Self {
-        let seconds = request
-            .wait
-            .as_ref()
-            .map(|wait| wait.seconds)
-            .expect("wait state requires PromptRequest::wait");
-        let now = Instant::now();
-        Self {
-            deadline: now + Duration::from_secs(seconds),
-            response_tx,
-        }
-    }
-
-    pub fn remaining_seconds(&self) -> u64 {
-        let now = Instant::now();
-        if self.deadline <= now {
-            return 0;
-        }
-        self.deadline.duration_since(now).as_millis().div_ceil(1000) as u64
-    }
-
-    pub fn timed_out(&self) -> bool {
-        self.deadline <= Instant::now()
-    }
-
-    pub fn resume_response(&self) -> PromptResponse {
-        PromptResponse::Text {
-            text: lash::WAIT_PROMPT_RESUME_EARLY_TOKEN.to_string(),
-        }
-    }
-
-    pub fn timeout_response(&self) -> PromptResponse {
-        PromptResponse::Text {
-            text: lash::WAIT_PROMPT_TIMEOUT_TOKEN.to_string(),
         }
     }
 }
@@ -606,5 +557,4 @@ pub enum OverlayState {
     Tree(TreeState),
     SkillPicker(PickerState<(String, String)>),
     Prompt(PromptState),
-    Wait(WaitState),
 }

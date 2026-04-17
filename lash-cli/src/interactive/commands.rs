@@ -814,11 +814,8 @@ async fn handle_slash_command(
             }
         }
         command::Command::Tree => {
-            if app.has_prompt() || app.has_wait() {
-                push_system_message(
-                    app,
-                    "Close the active prompt or wait state before opening /tree.",
-                );
+            if app.has_prompt() {
+                push_system_message(app, "Close the active prompt before opening /tree.");
                 return Ok(false);
             }
             let Some(rt) = runtime.as_ref() else {

@@ -590,8 +590,6 @@ fn draw_turn_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.fill(area, ' ', bg(theme::surface_raised()));
     let label = if turn.status_text == "error" {
         "Error"
-    } else if app.has_wait() {
-        "Waiting"
     } else if app.has_prompt() {
         "Paused"
     } else if turn.status_text == "thinking" {
@@ -601,17 +599,10 @@ fn draw_turn_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         "Working"
     };
-    let elapsed = if app.has_wait() {
-        match app.wait_remaining_seconds() {
-            Some(0) => "resuming".to_string(),
-            Some(1) => "1s left".to_string(),
-            Some(seconds) => format!("{seconds}s left"),
-            None => String::new(),
-        }
-    } else {
-        crate::util::format_duration_ms_if_visible(turn.turn_started_at.elapsed().as_millis() as u64)
-            .unwrap_or_default()
-    };
+    let elapsed = crate::util::format_duration_ms_if_visible(
+        turn.turn_started_at.elapsed().as_millis() as u64,
+    )
+    .unwrap_or_default();
     let mut spans = animated_lash_word(turn.turn_started_at.elapsed());
     spans.push(Span::raw("  "));
     spans.push(Span::styled(label.to_string(), theme::turn_status_state()));
@@ -1161,7 +1152,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::mpsc;
 
-    use crate::overlay::{PromptFocus, PromptState, WaitState};
+    use crate::overlay::{PromptFocus, PromptState};
 
     #[test]
     fn animated_lash_word_cycles_slash_through_wordmark() {
@@ -1270,23 +1261,6 @@ mod tests {
         assert!(visible.contains("line 6") || visible.contains("line 7"));
         assert!(visible.contains("Choices"));
         assert!(visible.contains("Exit"));
-    }
-
-    #[test]
-    fn wait_status_strip_shows_waiting_and_remaining_time() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
-        app.start_turn();
-        let (response_tx, _response_rx) = mpsc::channel();
-        app.show_wait(WaitState::from_request(
-            PromptRequest::freeform("Pausing briefly before continuing.").with_wait(5),
-            response_tx,
-        ));
-
-        let snapshot = lash_tui::render_snapshot(72, 10, |frame| draw(frame, &mut app));
-        let visible = snapshot.visible_lines_trimmed().join("\n");
-
-        assert!(visible.contains("/LASH  Waiting"));
-        assert!(visible.contains("5s left"));
     }
 
     #[test]

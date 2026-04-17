@@ -259,6 +259,7 @@ pub struct PluginRegistrar {
     session_config_mutators: Vec<SessionConfigMutator>,
     external_ops: BTreeMap<String, RegisteredExternalOp>,
     commands: BTreeMap<String, RegisteredCommand>,
+    monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
     turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
     mode_session: Option<RegisteredExclusiveHook<Arc<dyn ModeSessionPlugin>>>,
@@ -374,6 +375,16 @@ impl SessionRegistrations<'_> {
     }
 }
 
+pub struct MonitorRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl MonitorRegistrations<'_> {
+    pub fn register(self, spec: crate::MonitorSpec) {
+        self.reg.add_monitor_spec(spec);
+    }
+}
+
 pub struct ExternalRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
@@ -447,6 +458,7 @@ impl PluginRegistrar {
             session_config_mutators: Vec::new(),
             external_ops: BTreeMap::new(),
             commands: BTreeMap::new(),
+            monitor_specs: Vec::new(),
             turn_context_transforms: Vec::new(),
             history_rewriters: Vec::new(),
             mode_session: None,
@@ -493,6 +505,10 @@ impl PluginRegistrar {
 
     pub fn commands(&mut self) -> CommandRegistrations<'_> {
         CommandRegistrations { reg: self }
+    }
+
+    pub fn monitors(&mut self) -> MonitorRegistrations<'_> {
+        MonitorRegistrations { reg: self }
     }
 
     pub fn history(&mut self) -> HistoryRegistrations<'_> {
@@ -649,6 +665,13 @@ impl PluginRegistrar {
         Ok(())
     }
 
+    fn add_monitor_spec(&mut self, spec: crate::MonitorSpec) {
+        self.monitor_specs.push(PluginOwned {
+            plugin_id: current_plugin_id(&self.registering_plugin_id),
+            value: spec,
+        });
+    }
+
     fn add_mode_session(
         &mut self,
         provider: Arc<dyn ModeSessionPlugin>,
@@ -691,7 +714,7 @@ impl PluginHost {
     pub fn new(factories: Vec<Arc<dyn PluginFactory>>) -> Self {
         let override_ids: BTreeSet<&'static str> =
             factories.iter().map(|factory| factory.id()).collect();
-        let mut all_factories = super::builtin_mode_plugin_factories();
+        let mut all_factories = super::builtin_plugin_factories();
         if !override_ids.is_empty() {
             all_factories.retain(|factory| !override_ids.contains(factory.id()));
         }
@@ -878,6 +901,7 @@ impl PluginHost {
             session_config_mutators: reg.session_config_mutators,
             external_ops: reg.external_ops,
             commands: reg.commands,
+            monitor_specs: reg.monitor_specs,
             turn_context_transforms: {
                 let mut list = reg.turn_context_transforms;
                 list.sort_by(|a, b| b.0.cmp(&a.0));
@@ -979,6 +1003,13 @@ impl PluginHost {
             .invoke_external(name, args, Some(session_id.to_string()), false, host)
             .await
     }
+
+    pub fn monitor_specs_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::PluginOwned<crate::MonitorSpec>>, ExternalInvokeError> {
+        Ok(self.session(session_id)?.monitor_specs().to_vec())
+    }
 }
 
 pub struct PluginSession {
@@ -1005,6 +1036,7 @@ pub struct PluginSession {
     session_config_mutators: Vec<SessionConfigMutator>,
     external_ops: BTreeMap<String, RegisteredExternalOp>,
     commands: BTreeMap<String, RegisteredCommand>,
+    monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
     turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
     history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
     mode_session: Arc<dyn ModeSessionPlugin>,
@@ -1090,6 +1122,10 @@ impl PluginSession {
             .values()
             .map(|op| op.def.clone())
             .collect()
+    }
+
+    pub fn monitor_specs(&self) -> &[PluginOwned<crate::MonitorSpec>] {
+        self.monitor_specs.as_slice()
     }
 
     /// Catalog of slash commands contributed by plugins registered on this session.

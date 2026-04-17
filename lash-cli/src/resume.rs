@@ -753,7 +753,10 @@ mod tests {
         crate::resume_snapshot::save_live_resume_snapshot(
             &store,
             &live_state,
-            &crate::app::UiResumeState::default(),
+            &crate::app::UiResumeState {
+                interrupted_assistant_text: Some("Interrupted partial assistant reply".to_string()),
+                ..crate::app::UiResumeState::default()
+            },
             &DynamicStateSnapshot {
                 base_generation: 0,
                 tools: std::collections::BTreeMap::new(),
@@ -803,6 +806,13 @@ mod tests {
             restored_runtime.projected_messages()[0].parts[0].content,
             "live snapshot message"
         );
+        assert!(app.blocks.iter().any(|block| {
+            matches!(
+                block,
+                DisplayBlock::AssistantText(text)
+                    if text == "Interrupted partial assistant reply"
+            )
+        }));
     }
 
     #[tokio::test]

@@ -373,7 +373,7 @@ impl SessionPlugin for ObservationalMemoryPlugin {
                     }
                     let session_id = ctx.session_id.clone();
                     let host = Arc::clone(&ctx.host);
-                    host.spawn_background_job(
+                    host.spawn_hidden_task(
                         &session_id,
                         OBSERVATIONAL_MEMORY_PLUGIN_ID,
                         Box::pin(async move {
@@ -432,7 +432,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         if pending_message_tokens >= self.config.observation_message_tokens
             || active_observation_tokens >= self.config.reflection_observation_tokens
         {
-            ctx.host.await_background_jobs(&ctx.session_id).await?;
+            ctx.host.await_hidden_tasks(&ctx.session_id).await?;
             graph = ctx.host.snapshot_current().await?.session_graph;
         }
 

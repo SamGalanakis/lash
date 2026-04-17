@@ -4,8 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash::{PluginHost, SessionEvent, SessionManager, ToolResult};
-use lash_tui::{Frame, InputEvent, TermCapabilities};
+use lash::{
+    MonitorSnapshot, MonitorUpdateBatch, PluginHost, SessionEvent, SessionManager, ToolResult,
+};
+use lash_tui::{Frame, InputEvent, KeyCode as InputKeyCode, Line, Style, TermCapabilities};
 
 pub use surface::{
     UiMountedSurface, UiSurfaceScene, UiSurfaceSize, UiSurfaceSlot, UiSurfaceSpec, UiSurfaceUpdate,
@@ -129,6 +131,9 @@ pub enum UiHostEffect {
         key: String,
     },
     QueueTurn {
+        input: String,
+    },
+    WakeSession {
         input: String,
     },
     SwitchToNewSession {
@@ -259,7 +264,10 @@ pub struct UiExtensions {
 
 impl UiExtensions {
     pub fn with_builtins(mut extra: Vec<Arc<dyn UiExtension>>) -> Result<Self, String> {
-        let mut extensions: Vec<Arc<dyn UiExtension>> = vec![Arc::new(PlanModeUiExtension)];
+        let mut extensions: Vec<Arc<dyn UiExtension>> = vec![
+            Arc::new(PlanModeUiExtension),
+            Arc::new(MonitorUiExtension::default()),
+        ];
         extensions.append(&mut extra);
         Self::new(extensions)
     }
@@ -665,6 +673,437 @@ fn plan_mode_effects(status: &PlanModeStatus) -> Vec<UiHostEffect> {
     effects
 }
 
+const MONITOR_OVERLAY_KEY: &str = "monitor_overlay";
+const MONITOR_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
+    name: "/monitor",
+    aliases: &[],
+    usage: "/monitor [toggle|show|hide|list|start <id>|stop <id>]",
+    description: "Inspect or control background monitors",
+    argument_hint: Some("[toggle|show|hide|list|start <id>|stop <id>]"),
+    argument_options: &["toggle", "show", "hide", "list"],
+    takes_argument: true,
+    allow_while_running: true,
+    action: "command",
+}];
+
+#[derive(Clone, Default)]
+struct MonitorUiExtension {
+    state: Arc<Mutex<MonitorUiState>>,
+}
+
+#[derive(Clone, Default)]
+struct MonitorUiState {
+    snapshot: MonitorSnapshot,
+    overlay_open: bool,
+    outstanding_wakes: std::collections::BTreeSet<String>,
+}
+
+impl MonitorUiExtension {
+    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, MonitorUiState>, String> {
+        self.state
+            .lock()
+            .map_err(|_| "monitor UI state poisoned".to_string())
+    }
+}
+
+#[async_trait]
+impl UiExtension for MonitorUiExtension {
+    fn id(&self) -> &'static str {
+        "monitor_ui"
+    }
+
+    fn commands(&self) -> &'static [SlashCommandSpec] {
+        MONITOR_COMMANDS
+    }
+
+    async fn sync(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
+        let updates = monitor_updates(
+            ctx.plugin_host,
+            ctx.session_id,
+            Arc::clone(&ctx.session_manager),
+        )
+        .await?;
+        let snapshot = monitor_status(
+            ctx.plugin_host,
+            ctx.session_id,
+            Arc::clone(&ctx.session_manager),
+        )
+        .await?;
+        let (effects, ack_ids) = {
+            let mut state = self.lock_state()?;
+            state.snapshot = snapshot.clone();
+            let mut effects = monitor_effects(&state);
+            let mut ack_ids = Vec::new();
+            for event in updates.events {
+                if let Some(input) = event.queue_turn_input.as_ref() {
+                    if state.outstanding_wakes.insert(event.monitor_id.clone()) {
+                        effects.push(UiHostEffect::PushSystemMessage(format!(
+                            "Monitor event: \"{}\"",
+                            event.message
+                        )));
+                        effects.push(UiHostEffect::WakeSession {
+                            input: input.clone(),
+                        });
+                        ack_ids.push(event.monitor_id.clone());
+                    }
+                } else if event.message.contains("failed") || event.message.contains("exited") {
+                    effects.push(UiHostEffect::PushSystemMessage(format!(
+                        "Monitor {}: {}",
+                        event.monitor_label, event.message
+                    )));
+                }
+            }
+            (effects, ack_ids)
+        };
+        if !ack_ids.is_empty() {
+            monitor_ack_wakes(
+                ctx.plugin_host,
+                ctx.session_id,
+                ctx.session_manager,
+                ack_ids,
+            )
+            .await?;
+        }
+        Ok(effects)
+    }
+
+    async fn invoke_action(
+        &self,
+        action: &str,
+        arg: Option<&str>,
+        ctx: UiContext<'_>,
+    ) -> Result<Vec<UiHostEffect>, String> {
+        if action != "command" {
+            return Err(format!("unknown monitor UI action `{action}`"));
+        }
+        let command = arg.unwrap_or("").trim();
+        match command {
+            "" | "toggle" => {
+                let mut state = self.lock_state()?;
+                state.overlay_open = !state.overlay_open;
+                Ok(monitor_effects(&state))
+            }
+            "show" => {
+                let mut state = self.lock_state()?;
+                state.overlay_open = true;
+                Ok(monitor_effects(&state))
+            }
+            "hide" => {
+                let mut state = self.lock_state()?;
+                state.overlay_open = false;
+                Ok(monitor_effects(&state))
+            }
+            "list" => {
+                let snapshot = monitor_status(
+                    ctx.plugin_host,
+                    ctx.session_id,
+                    Arc::clone(&ctx.session_manager),
+                )
+                .await?;
+                Ok(vec![UiHostEffect::PushSystemMessage(
+                    format_monitor_summary(&snapshot),
+                )])
+            }
+            _ if command.starts_with("stop ") => {
+                let id = command["stop ".len()..].trim();
+                monitor_stop(
+                    ctx.plugin_host,
+                    ctx.session_id,
+                    Arc::clone(&ctx.session_manager),
+                    id,
+                )
+                .await?;
+                let snapshot =
+                    monitor_status(ctx.plugin_host, ctx.session_id, ctx.session_manager).await?;
+                let mut state = self.lock_state()?;
+                state.snapshot = snapshot;
+                Ok(monitor_effects(&state))
+            }
+            _ if command.starts_with("start ") => {
+                let id = command["start ".len()..].trim();
+                let spec = {
+                    let state = self.lock_state()?;
+                    state
+                        .snapshot
+                        .monitors
+                        .iter()
+                        .find(|status| status.spec.id == id)
+                        .map(|status| status.spec.clone())
+                }
+                .ok_or_else(|| format!("unknown monitor `{id}`"))?;
+                monitor_start(
+                    ctx.plugin_host,
+                    ctx.session_id,
+                    Arc::clone(&ctx.session_manager),
+                    spec,
+                )
+                .await?;
+                let snapshot =
+                    monitor_status(ctx.plugin_host, ctx.session_id, ctx.session_manager).await?;
+                let mut state = self.lock_state()?;
+                state.snapshot = snapshot;
+                Ok(monitor_effects(&state))
+            }
+            other => Err(format!("unknown /monitor command `{other}`")),
+        }
+    }
+
+    fn render_surface(&self, surface_key: &str, _ctx: UiRenderContext<'_>, frame: &mut Frame<'_>) {
+        if surface_key != MONITOR_OVERLAY_KEY {
+            return;
+        }
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        let mut viewport = frame.viewport(frame.area());
+        viewport.clear(Style::default());
+        let width = viewport.area().width.saturating_sub(2);
+        let mut y = 0u16;
+        viewport.write_line(0, y, &Line::from("MONITORS"), width);
+        y = y.saturating_add(2);
+        if state.snapshot.monitors.is_empty() {
+            viewport.write_line(
+                0,
+                y,
+                &Line::from("No active or registered monitors."),
+                width,
+            );
+            return;
+        }
+        for status in &state.snapshot.monitors {
+            if y >= viewport.area().height {
+                break;
+            }
+            let line = format!(
+                "{} [{}] {}",
+                status.spec.id,
+                monitor_state_label(status),
+                status.spec.label
+            );
+            viewport.write_text(0, y, &line, Style::default(), width);
+            y = y.saturating_add(1);
+            if y >= viewport.area().height {
+                break;
+            }
+            let detail = status
+                .last_event
+                .as_deref()
+                .or(status.last_error.as_deref())
+                .unwrap_or(status.spec.command.as_str());
+            viewport.write_text(2, y, detail, Style::default(), width.saturating_sub(2));
+            y = y.saturating_add(2);
+        }
+    }
+
+    fn handle_surface_input(
+        &self,
+        surface_key: &str,
+        event: &InputEvent,
+        _ctx: UiContext<'_>,
+    ) -> UiInputOutcome {
+        if surface_key != MONITOR_OVERLAY_KEY {
+            return UiInputOutcome::Ignored;
+        }
+        let InputEvent::Key(key) = event else {
+            return UiInputOutcome::Ignored;
+        };
+        if key.kind != lash_tui::KeyEventKind::Press {
+            return UiInputOutcome::Ignored;
+        }
+        if key.code != InputKeyCode::Esc {
+            return UiInputOutcome::Ignored;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return UiInputOutcome::Ignored;
+        };
+        state.overlay_open = false;
+        UiInputOutcome::Handled(monitor_effects(&state))
+    }
+
+    fn handle_session_event(&self, event: &SessionEvent) -> Vec<UiHostEffect> {
+        if matches!(event, SessionEvent::Done | SessionEvent::Error { .. }) {
+            if let Ok(mut state) = self.state.lock() {
+                state.outstanding_wakes.clear();
+            }
+        }
+        Vec::new()
+    }
+}
+
+fn monitor_effects(state: &MonitorUiState) -> Vec<UiHostEffect> {
+    let mut effects = Vec::new();
+    let key = "monitor".to_string();
+    if state.snapshot.active_count > 0 {
+        let label = if state.snapshot.active_count == 1 {
+            "1 monitor".to_string()
+        } else {
+            format!("{} monitors", state.snapshot.active_count)
+        };
+        effects.push(UiHostEffect::UpsertModeIndicator { key, label });
+    } else {
+        effects.push(UiHostEffect::ClearModeIndicator { key });
+    }
+    if state.overlay_open {
+        effects.push(UiHostEffect::MountSurface {
+            spec: UiSurfaceSpec {
+                key: MONITOR_OVERLAY_KEY.to_string(),
+                slot: UiSurfaceSlot::Overlay,
+                size: UiSurfaceSize::Fixed {
+                    width: 88,
+                    height: 18,
+                },
+                order: 10,
+                focusable: true,
+                visible: true,
+                modal: true,
+            },
+        });
+        effects.push(UiHostEffect::FocusSurface {
+            key: MONITOR_OVERLAY_KEY.to_string(),
+        });
+    } else {
+        effects.push(UiHostEffect::BlurSurface {
+            key: MONITOR_OVERLAY_KEY.to_string(),
+        });
+        effects.push(UiHostEffect::UnmountSurface {
+            key: MONITOR_OVERLAY_KEY.to_string(),
+        });
+    }
+    effects
+}
+
+fn monitor_state_label(status: &lash::MonitorStatus) -> &'static str {
+    match status.run_state {
+        lash::MonitorRunState::Idle => "idle",
+        lash::MonitorRunState::Running => "running",
+        lash::MonitorRunState::Stopped => "stopped",
+        lash::MonitorRunState::Exited => "exited",
+        lash::MonitorRunState::Failed => "failed",
+    }
+}
+
+fn format_monitor_summary(snapshot: &MonitorSnapshot) -> String {
+    if snapshot.monitors.is_empty() {
+        return "No monitors registered.".to_string();
+    }
+    let mut lines = vec![format!("{} monitor(s)", snapshot.monitors.len())];
+    for status in &snapshot.monitors {
+        lines.push(format!(
+            "- {} [{}] {}",
+            status.spec.id,
+            monitor_state_label(status),
+            status.spec.label
+        ));
+    }
+    lines.join("\n")
+}
+
+async fn monitor_status(
+    plugin_host: &PluginHost,
+    session_id: &str,
+    session_manager: Arc<dyn SessionManager>,
+) -> Result<MonitorSnapshot, String> {
+    let result = plugin_host
+        .invoke_external_for_session(
+            session_id,
+            "monitor.status",
+            serde_json::json!({}),
+            session_manager,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    if !result.success {
+        return Err(result.result.to_string());
+    }
+    serde_json::from_value(result.result).map_err(|err| format!("invalid monitor status: {err}"))
+}
+
+async fn monitor_updates(
+    plugin_host: &PluginHost,
+    session_id: &str,
+    session_manager: Arc<dyn SessionManager>,
+) -> Result<MonitorUpdateBatch, String> {
+    let result = plugin_host
+        .invoke_external_for_session(
+            session_id,
+            "monitor.take_updates",
+            serde_json::json!({}),
+            session_manager,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    if !result.success {
+        return Err(result.result.to_string());
+    }
+    serde_json::from_value(result.result).map_err(|err| format!("invalid monitor updates: {err}"))
+}
+
+async fn monitor_ack_wakes(
+    plugin_host: &PluginHost,
+    session_id: &str,
+    session_manager: Arc<dyn SessionManager>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let result = plugin_host
+        .invoke_external_for_session(
+            session_id,
+            "monitor.ack_wake",
+            serde_json::json!({ "ids": ids }),
+            session_manager,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    if result.success {
+        Ok(())
+    } else {
+        Err(result.result.to_string())
+    }
+}
+
+async fn monitor_stop(
+    plugin_host: &PluginHost,
+    session_id: &str,
+    session_manager: Arc<dyn SessionManager>,
+    id: &str,
+) -> Result<(), String> {
+    let result = plugin_host
+        .invoke_external_for_session(
+            session_id,
+            "monitor.stop",
+            serde_json::json!({ "id": id }),
+            session_manager,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    if result.success {
+        Ok(())
+    } else {
+        Err(result.result.to_string())
+    }
+}
+
+async fn monitor_start(
+    plugin_host: &PluginHost,
+    session_id: &str,
+    session_manager: Arc<dyn SessionManager>,
+    spec: lash::MonitorSpec,
+) -> Result<(), String> {
+    let result = plugin_host
+        .invoke_external_for_session(
+            session_id,
+            "monitor.start",
+            serde_json::json!({ "spec": spec }),
+            session_manager,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    if result.success {
+        Ok(())
+    } else {
+        Err(result.result.to_string())
+    }
+}
+
 struct PlanModeUiExtension;
 
 const PLAN_MODE_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
@@ -955,19 +1394,21 @@ mod tests {
     #[test]
     fn command_tokens_and_shortcuts_are_unique() {
         let extensions = UiExtensions::builtin().expect("builtin extensions");
-        let command_names = extensions
-            .command_specs()
+        let command_specs = extensions.command_specs();
+        let command_names = command_specs
+            .iter()
             .into_iter()
             .map(|spec| spec.name.to_string())
             .collect::<BTreeSet<_>>();
-        let shortcuts = extensions
-            .shortcut_specs()
+        let shortcut_specs = extensions.shortcut_specs();
+        let shortcuts = shortcut_specs
+            .iter()
             .into_iter()
             .map(|spec| spec.chord)
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(command_names.len(), 1);
-        assert_eq!(shortcuts.len(), 1);
+        assert_eq!(command_names.len(), command_specs.len());
+        assert_eq!(shortcuts.len(), shortcut_specs.len());
     }
 
     #[derive(Default)]

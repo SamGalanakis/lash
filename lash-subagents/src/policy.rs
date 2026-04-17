@@ -176,7 +176,7 @@ fn followup_task_definition(examples: Vec<String>) -> ToolDefinition {
 fn wait_agent_definition(examples: Vec<String>) -> ToolDefinition {
     ToolDefinition {
         name: "wait_agent".into(),
-        description: "Wait for subagent events: task starts, completions, messages, or closes. With no `targets`, waits on the current agent's mailbox and descendant agents.".into(),
+        description: "Wait for **subagent** lifecycle events: task starts, completions, messages, or closes. With no `targets`, waits on the current agent's mailbox and descendant agents. This tool only receives subagent events — it does **not** collect `monitor` tool output, shell process events, or any other background stream. Monitor events are delivered automatically as new turn input, so never call `wait_agent` hoping to drain a monitor.".into(),
         params: vec![
             ToolParam::optional("targets", "list"),
             ToolParam::optional("timeout_ms", "int"),

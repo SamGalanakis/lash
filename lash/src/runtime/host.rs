@@ -56,38 +56,50 @@ impl PathResolver for DefaultPathResolver {
     }
 }
 
-/// Host-owned background execution policy.
+/// Host-owned session task execution policy.
 #[async_trait::async_trait]
-pub trait BackgroundExecutor: Send + Sync {
-    async fn spawn(
+pub trait SessionTaskExecutor: Send + Sync {
+    async fn spawn_hidden(
         &self,
         session_id: &str,
         label: &str,
-        job: crate::plugin::PluginBackgroundJob,
+        task: crate::plugin::PluginSessionTask,
     ) -> Result<(), PluginError>;
 
-    async fn await_all(&self, session_id: &str) -> Result<(), PluginError>;
+    async fn await_hidden(&self, session_id: &str) -> Result<(), PluginError>;
+
+    async fn spawn_managed(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        label: &str,
+        task: crate::plugin::PluginSessionTask,
+    ) -> Result<(), PluginError>;
+
+    async fn cancel_managed(&self, session_id: &str, task_id: &str) -> Result<(), PluginError>;
 }
 
-/// Tokio-backed background executor shared across runtime sessions.
+/// Tokio-backed session task executor shared across runtime sessions.
 #[derive(Default)]
-pub struct TokioBackgroundExecutor {
-    jobs: Mutex<BackgroundJobMap>,
+pub struct TokioSessionTaskExecutor {
+    hidden: Mutex<HiddenTaskMap>,
+    managed: Mutex<ManagedTaskMap>,
 }
 
-type BackgroundJobHandle = tokio::task::JoinHandle<Result<(), PluginError>>;
-type BackgroundJobMap = HashMap<String, Vec<BackgroundJobHandle>>;
+type SessionTaskHandle = tokio::task::JoinHandle<Result<(), PluginError>>;
+type HiddenTaskMap = HashMap<String, Vec<SessionTaskHandle>>;
+type ManagedTaskMap = HashMap<String, HashMap<String, SessionTaskHandle>>;
 
 #[async_trait::async_trait]
-impl BackgroundExecutor for TokioBackgroundExecutor {
-    async fn spawn(
+impl SessionTaskExecutor for TokioSessionTaskExecutor {
+    async fn spawn_hidden(
         &self,
         session_id: &str,
         _label: &str,
-        job: crate::plugin::PluginBackgroundJob,
+        task: crate::plugin::PluginSessionTask,
     ) -> Result<(), PluginError> {
-        let handle = tokio::spawn(job);
-        self.jobs
+        let handle = tokio::spawn(task);
+        self.hidden
             .lock()
             .await
             .entry(session_id.to_string())
@@ -96,26 +108,105 @@ impl BackgroundExecutor for TokioBackgroundExecutor {
         Ok(())
     }
 
-    async fn await_all(&self, session_id: &str) -> Result<(), PluginError> {
+    async fn await_hidden(&self, session_id: &str) -> Result<(), PluginError> {
         loop {
-            let jobs = self
-                .jobs
+            let tasks = self
+                .hidden
                 .lock()
                 .await
                 .remove(session_id)
                 .unwrap_or_default();
-            if jobs.is_empty() {
+            if tasks.is_empty() {
                 return Ok(());
             }
-            for job in jobs {
-                match job.await {
+            for task in tasks {
+                match task.await {
                     Ok(Ok(())) => {}
                     Ok(Err(err)) => return Err(err),
                     Err(err) => {
                         return Err(PluginError::Session(format!(
-                            "background job task failed: {err}"
+                            "hidden session task failed: {err}"
                         )));
                     }
+                }
+            }
+        }
+    }
+
+    async fn spawn_managed(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        _label: &str,
+        task: crate::plugin::PluginSessionTask,
+    ) -> Result<(), PluginError> {
+        self.prune_finished_managed(session_id).await;
+        let mut managed = self.managed.lock().await;
+        let tasks = managed.entry(session_id.to_string()).or_default();
+        if tasks.contains_key(task_id) {
+            return Err(PluginError::Session(format!(
+                "managed session task `{task_id}` is already running"
+            )));
+        }
+        tasks.insert(task_id.to_string(), tokio::spawn(task));
+        Ok(())
+    }
+
+    async fn cancel_managed(&self, session_id: &str, task_id: &str) -> Result<(), PluginError> {
+        self.prune_finished_managed(session_id).await;
+        let mut managed = self.managed.lock().await;
+        let Some(handle) = managed
+            .get_mut(session_id)
+            .and_then(|tasks| tasks.remove(task_id))
+        else {
+            return Ok(());
+        };
+        handle.abort();
+        Ok(())
+    }
+}
+
+impl TokioSessionTaskExecutor {
+    async fn prune_finished_managed(&self, session_id: &str) {
+        let finished = {
+            let managed = self.managed.lock().await;
+            managed
+                .get(session_id)
+                .map(|tasks| {
+                    tasks
+                        .iter()
+                        .filter_map(|(task_id, handle)| {
+                            handle.is_finished().then_some(task_id.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        if finished.is_empty() {
+            return;
+        }
+        let mut removed = Vec::new();
+        {
+            let mut managed = self.managed.lock().await;
+            if let Some(tasks) = managed.get_mut(session_id) {
+                for task_id in &finished {
+                    if let Some(handle) = tasks.remove(task_id) {
+                        removed.push(handle);
+                    }
+                }
+                if tasks.is_empty() {
+                    managed.remove(session_id);
+                }
+            }
+        }
+        for handle in removed {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!("managed session task finished with error: {err}");
+                }
+                Err(err) => {
+                    tracing::warn!("managed session task join failed: {err}");
                 }
             }
         }
@@ -218,17 +309,17 @@ impl EmbeddedRuntimeHost {
 #[derive(Clone)]
 pub struct BackgroundRuntimeHost {
     pub embedded: EmbeddedRuntimeHost,
-    pub background_executor: Arc<dyn BackgroundExecutor>,
+    pub session_task_executor: Arc<dyn SessionTaskExecutor>,
 }
 
 impl BackgroundRuntimeHost {
     pub fn new(
         embedded: EmbeddedRuntimeHost,
-        background_executor: Arc<dyn BackgroundExecutor>,
+        session_task_executor: Arc<dyn SessionTaskExecutor>,
     ) -> Self {
         Self {
             embedded,
-            background_executor,
+            session_task_executor,
         }
     }
 }
@@ -237,7 +328,7 @@ impl BackgroundRuntimeHost {
 pub(crate) struct RuntimeHost {
     pub core: RuntimeCoreConfig,
     pub session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
-    pub background_executor: Option<Arc<dyn BackgroundExecutor>>,
+    pub session_task_executor: Option<Arc<dyn SessionTaskExecutor>>,
 }
 
 impl From<EmbeddedRuntimeHost> for RuntimeHost {
@@ -245,7 +336,7 @@ impl From<EmbeddedRuntimeHost> for RuntimeHost {
         Self {
             core: value.core,
             session_store_factory: value.session_store_factory,
-            background_executor: None,
+            session_task_executor: None,
         }
     }
 }
@@ -255,7 +346,7 @@ impl From<BackgroundRuntimeHost> for RuntimeHost {
         Self {
             core: value.embedded.core,
             session_store_factory: value.embedded.session_store_factory,
-            background_executor: Some(value.background_executor),
+            session_task_executor: Some(value.session_task_executor),
         }
     }
 }

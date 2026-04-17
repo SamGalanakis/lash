@@ -43,9 +43,6 @@ impl PluginFactory for UiActivityPluginFactory {
                     }))
                     .with_prompt_request(Arc::new(|ctx| {
                         Box::pin(async move {
-                            if ctx.request.is_wait() {
-                                return Ok(Vec::new());
-                            }
                             Ok(vec![crate::PluginSurfaceEvent::Custom {
                                 name: "desktop_notification".to_string(),
                                 payload: serde_json::json!({

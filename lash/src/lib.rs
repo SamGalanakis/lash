@@ -7,6 +7,7 @@ pub mod llm;
 pub mod mcp;
 pub mod model_info;
 pub mod model_variant;
+pub mod monitor;
 pub mod oauth;
 pub mod plugin;
 pub mod provider;
@@ -100,9 +101,8 @@ pub use lash_sansio::{
     PromptTemplateSection, PruneState, RenderedPrompt, Response, RlmDriver, SansIoTurnInput,
     SessionEvent, StandardDriver, TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam,
     ToolResult, ToolSurface, ToolSurfaceBuildInput, TurnMachine, TurnMachineConfig,
-    UserInputProvenance, UserInputTransform, WAIT_PROMPT_RESUME_EARLY_TOKEN,
-    WAIT_PROMPT_TIMEOUT_TOKEN, build_mode_preamble, build_prompt, build_tool_surface, build_turn,
-    default_execution_mode, default_prompt_template, execution_mode_supported,
+    UserInputProvenance, UserInputTransform, build_mode_preamble, build_prompt, build_tool_surface,
+    build_turn, default_execution_mode, default_prompt_template, execution_mode_supported,
     messages_are_live_resume_safe,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
@@ -111,23 +111,28 @@ pub use model_info::{
     ModelCatalogSource, ModelCatalogStore, ModelInfo, ModelsDevHttpSource, ResolvedModelSpec,
 };
 pub use model_variant::VariantRequestConfig;
+pub use monitor::{
+    MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorEvent, MonitorRunState, MonitorSnapshot,
+    MonitorSpec, MonitorStatus, MonitorUpdateBatch, MonitorWakePolicy,
+};
 pub use plugin::ObservationalMemoryPluginFactory as BuiltinObservationalMemoryPluginFactory;
 pub use plugin::RollingHistoryPluginFactory as BuiltinRollingHistoryPluginFactory;
 pub use plugin::{
     AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
-    BuiltinRlmModePluginFactory, BuiltinToolResultProjectionPluginFactory, CheckpointHookContext,
-    CommandDef, CommandHandler, CommandInvocation, CommandOutcome, CommandRegistrations,
-    DirectCompletion, ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind,
-    HistoryError, HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
-    ModeExtras, PersistentRuntimeServices, PluginDirective, PluginError, PluginFactory, PluginHost,
-    PluginOwned, PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession,
-    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
-    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext, PromptRequestHookContext,
-    RewriteContext, RewriteTrigger, RlmCreateExtras, RlmModePluginConfig, RlmTermination,
-    RuntimeServices, SessionAppendNode, SessionConfigChangedContext, SessionContextSurface,
-    SessionCreateRequest, SessionHandle, SessionManager, SessionParam, SessionPlugin,
-    SessionPluginMode, SessionReadView, SessionSnapshot, SessionStartPoint,
+    BuiltinMonitorPluginFactory, BuiltinRlmModePluginFactory,
+    BuiltinToolResultProjectionPluginFactory, CheckpointHookContext, CommandDef, CommandHandler,
+    CommandInvocation, CommandOutcome, CommandRegistrations, DirectCompletion,
+    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, HistoryError,
+    HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState, ModeExtras,
+    MonitorRegistrations, PersistentRuntimeServices, PluginDirective, PluginError, PluginFactory,
+    PluginHost, PluginOwned, PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook,
+    PluginSession, PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact,
+    PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
+    PromptRequestHookContext, RewriteContext, RewriteTrigger, RlmCreateExtras, RlmModePluginConfig,
+    RlmTermination, RuntimeServices, SessionAppendNode, SessionConfigChangedContext,
+    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionManager, SessionParam,
+    SessionPlugin, SessionPluginMode, SessionReadView, SessionSnapshot, SessionStartPoint,
     SessionStateChangedContext, SessionTurnHandle, SnapshotReader, SnapshotWriter,
     StandardCreateExtras, ToolResultProjectionContext, ToolResultProjectionHook,
     ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
@@ -141,13 +146,13 @@ pub use plugin::{
 };
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
-    AssembledTurn, AssistantOutput, BackgroundExecutor, BackgroundRuntimeHost, CodeOutputRecord,
-    DefaultPathResolver, DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink,
-    ExecutionSummary, InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver,
-    PersistedSessionState, PromptUsage, RunMode, RuntimeCoreConfig, RuntimeError, SanitizerPolicy,
-    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
-    TerminationPolicy, TokenLedgerEntry, TokioBackgroundExecutor, TurnInput, TurnIssue, TurnStatus,
-    UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
+    AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
+    DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
+    InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver, PersistedSessionState,
+    PromptUsage, RunMode, RuntimeCoreConfig, RuntimeError, SanitizerPolicy, SessionStateEnvelope,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, SessionUsageReport,
+    TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
+    TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use session::{
     InjectedTurnInput, Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,

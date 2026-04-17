@@ -247,6 +247,79 @@ async fn apply_ui_host_effect(
     }
 }
 
+fn monitor_wake_message(input: &str) -> PluginMessage {
+    PluginMessage::text(MessageRole::System, input)
+}
+
+fn enqueue_pending_monitor_wakes(
+    app: &mut App,
+    turn_input_injection_bridge: &TurnInputInjectionBridge,
+) -> Result<usize, String> {
+    let wakes = app.take_pending_monitor_wakes();
+    if wakes.is_empty() {
+        return Ok(0);
+    }
+    let messages = wakes
+        .iter()
+        .map(|input| InjectedTurnInput {
+            message: monitor_wake_message(input),
+        })
+        .collect::<Vec<_>>();
+    turn_input_injection_bridge.enqueue(messages)?;
+    app.mark_monitor_wakes_in_flight(&wakes);
+    Ok(wakes.len())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_pending_monitor_wakes(
+    app: &mut App,
+    ui_trace: &mut Option<UiTraceRecorder>,
+    logger: &mut SessionLogger,
+    runtime: &mut Option<LashRuntime>,
+    history: &mut Vec<Message>,
+    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
+    cancel_token: &mut Option<CancellationToken>,
+    active_stream_id: &mut u64,
+    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    turn_input_injection_bridge: &TurnInputInjectionBridge,
+    desired_dynamic: &DynamicStateSnapshot,
+) -> Result<bool, String> {
+    if !app.running && runtime_return_rx.is_none() && runtime.is_none() {
+        return Ok(false);
+    }
+    let injected = enqueue_pending_monitor_wakes(app, turn_input_injection_bridge)?;
+    if injected == 0 {
+        return Ok(false);
+    }
+    if app.running || runtime_return_rx.is_some() || app.has_queued_messages() {
+        return Ok(false);
+    }
+
+    let prepared_turn = PreparedTurn::prepare(String::new(), Vec::new(), &app.skills);
+    let turn_input = TurnInput {
+        items: Vec::new(),
+        image_blobs: Default::default(),
+        user_input: None,
+        mode: Some(RunMode::Normal),
+    };
+    send_user_message(
+        prepared_turn,
+        turn_input,
+        app,
+        ui_trace.as_mut(),
+        logger,
+        runtime,
+        history,
+        runtime_return_rx,
+        cancel_token,
+        active_stream_id,
+        app_tx,
+        desired_dynamic,
+    )
+    .await;
+    Ok(true)
+}
+
 #[async_trait::async_trait]
 impl EventSink for AppEventSink {
     async fn emit(&self, event: SessionEvent) {
@@ -468,6 +541,7 @@ pub(crate) async fn run_app(
     let mut active_stream_id: u64 = 0;
     let mut pending_clear_after_return = false;
     let mut pending_text_deltas = PendingTextDeltaBuffer::default();
+    let mut last_ui_sync = tokio::time::Instant::now();
 
     sync_ui_extensions(
         &mut app,
@@ -593,6 +667,30 @@ pub(crate) async fn run_app(
             active_stream_id,
         );
 
+        if app.has_pending_monitor_wakes() {
+            match process_pending_monitor_wakes(
+                &mut app,
+                &mut ui_trace,
+                logger,
+                &mut runtime,
+                &mut history,
+                &mut runtime_return_rx,
+                &mut cancel_token,
+                &mut active_stream_id,
+                &app_tx,
+                &turn_input_injection_bridge,
+                &desired_dynamic,
+            )
+            .await
+            {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(err) => {
+                    push_system_message(&mut app, format!("Failed to inject monitor wake: {err}"))
+                }
+            }
+        }
+
         if !app.running
             && runtime.is_some()
             && runtime_return_rx.is_none()
@@ -655,6 +753,7 @@ pub(crate) async fn run_app(
                         );
                     }
                     if done.stream_id != active_stream_id || pending_clear_after_return {
+                        app.recycle_unaccepted_monitor_wakes();
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.export_state().policy;
                             let _ = rt.reset_session().await;
@@ -738,7 +837,10 @@ pub(crate) async fn run_app(
                             Some(DisplayBlock::SystemMessage(message))
                                 if message == crate::util::manual_interrupt_message()
                         );
-                        let ui_resume_state = app.ui_resume_state();
+                        let mut ui_resume_state = app.ui_resume_state();
+                        ui_resume_state.interrupted_assistant_text =
+                            (!done.result.assistant_output.safe_text.trim().is_empty())
+                                .then(|| done.result.assistant_output.safe_text.clone());
                         if let Some(rt) = runtime.as_mut() {
                             persist_runtime_turn_state(
                                 rt,
@@ -770,6 +872,7 @@ pub(crate) async fn run_app(
                             app.invalidate_height_cache();
                             app.scroll_to_bottom();
                         }
+                        app.recycle_unaccepted_monitor_wakes();
                         runtime_return_rx = None;
                         cancel_token = None;
                         dispatch_next_queued_turn(
@@ -818,6 +921,7 @@ pub(crate) async fn run_app(
                         persist_runtime_turn_state(rt, &mut state, false, &store, &ui_resume_state)
                             .await;
                     }
+                    app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;
                     log_runtime_handoff(
@@ -871,6 +975,7 @@ pub(crate) async fn run_app(
                         ui_trace.as_mut(),
                     );
                     app.stop_turn();
+                    app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;
                     log_runtime_handoff(
@@ -946,10 +1051,6 @@ pub(crate) async fn run_app(
         match event {
             AppEvent::Terminal(TermEvent::Paste(text)) => {
                 app.dirty = true;
-
-                if app.has_wait() {
-                    continue;
-                }
 
                 if app.has_prompt() && app.is_prompt_text_entry() {
                     if let Some(recorder) = ui_trace.as_mut() {
@@ -1052,10 +1153,6 @@ pub(crate) async fn run_app(
                         has_prompt = app.has_prompt(),
                         "handling Ctrl+C as dismiss/quit"
                     );
-                    if app.has_wait() {
-                        app.skip_wait();
-                        continue;
-                    }
                     if app.has_prompt() {
                         if let Some(recorder) = ui_trace.as_mut() {
                             recorder.record_prompt_dismiss();
@@ -1067,15 +1164,14 @@ pub(crate) async fn run_app(
                 }
 
                 // ALT+O: reliable full expand toggle across most terminals.
-                if !app.has_wait()
-                    && key.modifiers.contains(KeyModifiers::ALT)
+                if key.modifiers.contains(KeyModifiers::ALT)
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
                 {
                     app.toggle_full_expand();
                     continue;
                 }
 
-                if !app.has_wait() && queued_turn_edit_binding().matches(key) {
+                if queued_turn_edit_binding().matches(key) {
                     if let Some((turn, _was_pending)) = app.take_last_queued_turn() {
                         app.restore_prepared_turn(turn);
                         app.update_suggestions();
@@ -1084,8 +1180,7 @@ pub(crate) async fn run_app(
                 }
 
                 // CTRL+O: cycle expand (0↔1)
-                if !app.has_wait()
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
                 {
                     app.cycle_expand();
@@ -1095,8 +1190,7 @@ pub(crate) async fn run_app(
                 // CTRL+SHIFT+Z: redo the most recently undone edit.
                 // Matched before plain CTRL+Z so modern terminals that
                 // deliver both modifiers route redo, not undo.
-                if !app.has_wait()
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
                     && key.modifiers.contains(KeyModifiers::SHIFT)
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'z'))
                 {
@@ -1107,8 +1201,7 @@ pub(crate) async fn run_app(
                 }
 
                 // CTRL+Z: undo the most recent edit to the input draft.
-                if !app.has_wait()
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::SHIFT)
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'z'))
                 {
@@ -1120,8 +1213,7 @@ pub(crate) async fn run_app(
 
                 // ALT+Z: redo fallback for terminals that swallow
                 // CTRL+SHIFT+Z (legacy xterm, some tmux configs).
-                if !app.has_wait()
-                    && key.modifiers.contains(KeyModifiers::ALT)
+                if key.modifiers.contains(KeyModifiers::ALT)
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'z'))
                 {
                     if app.editor_redo() {
@@ -1139,8 +1231,7 @@ pub(crate) async fn run_app(
                 }
 
                 // CTRL+SHIFT+V: always paste text from clipboard
-                if !app.has_wait()
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
                     && key.modifiers.contains(KeyModifiers::SHIFT)
                     && key.code == KeyCode::Char('V')
                 {
@@ -1154,10 +1245,7 @@ pub(crate) async fn run_app(
                 }
 
                 // CTRL+V: paste image from clipboard (no text fallback)
-                if !app.has_wait()
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('v')
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
                     if let Ok(mut clipboard) = arboard::Clipboard::new()
                         && let Ok(img_data) = clipboard.get_image()
                     {
@@ -1196,9 +1284,7 @@ pub(crate) async fn run_app(
 
                 // Escape key behavior depends on state
                 if key.code == KeyCode::Esc {
-                    if app.has_wait() {
-                        app.skip_wait();
-                    } else if app.has_prompt() {
+                    if app.has_prompt() {
                         if let Some(recorder) = ui_trace.as_mut() {
                             recorder.record_prompt_dismiss();
                         }
@@ -1354,34 +1440,6 @@ pub(crate) async fn run_app(
                                 &mut app,
                                 &terminal,
                                 UiAction::PromptScrollDown(1),
-                            );
-                            app.dirty = true;
-                            continue;
-                        }
-                    }
-
-                    if app.has_wait() {
-                        if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
-                            if let Some(recorder) = ui_trace.as_mut() {
-                                recorder.record_scroll_up(1);
-                            }
-                            let _ =
-                                apply_terminal_action(&mut app, &terminal, UiAction::ScrollUp(1));
-                            app.dirty = true;
-                            continue;
-                        }
-                        if matches!(key.code, KeyCode::Down | KeyCode::Char('j')) {
-                            if let Some(recorder) = ui_trace.as_mut() {
-                                recorder.record_scroll_down(1);
-                            }
-                            let _ = apply_ui_action(
-                                &mut app,
-                                UiAction::ScrollDown(1),
-                                UiActionContext {
-                                    viewport_width: vw,
-                                    viewport_height: vh,
-                                    prompt_max_scroll: 0,
-                                },
                             );
                             app.dirty = true;
                             continue;
@@ -1646,15 +1704,6 @@ pub(crate) async fn run_app(
                             );
                         }
                         _ => {}
-                    }
-                    continue;
-                }
-
-                if app.has_wait() {
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.code == KeyCode::Char('j')
-                    {
-                        app.resume_wait();
                     }
                     continue;
                 }
@@ -2457,8 +2506,15 @@ pub(crate) async fn run_app(
                     &session_manager,
                     &mut app,
                 );
-                if app.wait_timed_out() {
-                    app.timeout_wait();
+                if last_ui_sync.elapsed() >= std::time::Duration::from_millis(250) {
+                    sync_ui_extensions(
+                        &mut app,
+                        ui_extensions.as_ref(),
+                        &plugin_host,
+                        Arc::clone(&session_manager),
+                    )
+                    .await;
+                    last_ui_sync = tokio::time::Instant::now();
                 }
             }
             AppEvent::Session { stream_id, event } => {
@@ -2485,25 +2541,21 @@ pub(crate) async fn run_app(
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_emit_prompt(&request);
                     }
-                    if request.is_wait() {
-                        app.show_wait(app::WaitState::from_request(request, response_tx));
+                    let focus = if request.is_freeform() {
+                        crate::overlay::PromptFocus::Text
                     } else {
-                        let focus = if request.is_freeform() {
-                            crate::overlay::PromptFocus::Text
-                        } else {
-                            crate::overlay::PromptFocus::Options
-                        };
-                        app.show_prompt(app::PromptState {
-                            request,
-                            focus,
-                            cursor: 0,
-                            scroll_offset: 0,
-                            selected: Default::default(),
-                            reply_text: String::new(),
-                            reply_cursor: 0,
-                            response_tx,
-                        });
-                    }
+                        crate::overlay::PromptFocus::Options
+                    };
+                    app.show_prompt(app::PromptState {
+                        request,
+                        focus,
+                        cursor: 0,
+                        scroll_offset: 0,
+                        selected: Default::default(),
+                        reply_text: String::new(),
+                        reply_cursor: 0,
+                        response_tx,
+                    });
                 } else {
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_session_event(&event);
@@ -2515,6 +2567,9 @@ pub(crate) async fn run_app(
                         } else {
                             None
                         };
+                    if let SessionEvent::InjectedTurnInputAccepted { messages, .. } = &event {
+                        app.acknowledge_monitor_wakes(messages);
+                    }
                     app.handle_session_event(event);
                     for effect in ui_effects {
                         apply_ui_host_effect(

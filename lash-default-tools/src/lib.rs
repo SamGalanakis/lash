@@ -4,7 +4,7 @@ use lash::instructions::InstructionSource;
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::tools::{
     ApplyPatchTool, AskTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory, ShowSnippetToUser,
-    StandardShell, WaitTool, WebSearch, shell_prompt_contributions,
+    StandardShell, WebSearch, shell_prompt_contributions,
 };
 use lash::{
     BuiltinObservationalMemoryPluginFactory, BuiltinRollingHistoryPluginFactory,
@@ -143,11 +143,6 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
                     "ask",
                     PluginSpec::new()
                         .with_tool_provider(Arc::new(AskTool::new()) as Arc<dyn ToolProvider>),
-                )));
-                factories.push(Arc::new(StaticPluginFactory::new(
-                    "wait",
-                    PluginSpec::new()
-                        .with_tool_provider(Arc::new(WaitTool::new()) as Arc<dyn ToolProvider>),
                 )));
                 factories.push(Arc::new(StaticPluginFactory::new(
                     "show_snippet_to_user",

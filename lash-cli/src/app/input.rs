@@ -278,10 +278,6 @@ impl App {
         matches!(self.overlay, Some(OverlayState::Prompt(_)))
     }
 
-    pub fn has_wait(&self) -> bool {
-        matches!(self.overlay, Some(OverlayState::Wait(_)))
-    }
-
     /// Whether the prompt is currently in text-entry mode.
     pub fn is_prompt_text_entry(&self) -> bool {
         match &self.overlay {
@@ -442,54 +438,10 @@ impl App {
         self.overlay = Some(OverlayState::Prompt(prompt));
     }
 
-    pub fn show_wait(&mut self, wait: WaitState) {
-        self.overlay = Some(OverlayState::Wait(wait));
-        self.dirty = true;
-    }
-
     pub fn prompt_state(&self) -> Option<&PromptState> {
         match &self.overlay {
             Some(OverlayState::Prompt(prompt)) => Some(prompt),
             _ => None,
-        }
-    }
-
-    pub fn wait_state(&self) -> Option<&WaitState> {
-        match &self.overlay {
-            Some(OverlayState::Wait(wait)) => Some(wait),
-            _ => None,
-        }
-    }
-
-    pub fn wait_remaining_seconds(&self) -> Option<u64> {
-        self.wait_state().map(WaitState::remaining_seconds)
-    }
-
-    pub fn wait_timed_out(&self) -> bool {
-        self.wait_state().is_some_and(WaitState::timed_out)
-    }
-
-    pub fn resume_wait(&mut self) {
-        match self.overlay.take() {
-            Some(OverlayState::Wait(wait)) => {
-                let _ = wait.response_tx.send(wait.resume_response());
-                self.dirty = true;
-            }
-            other => self.overlay = other,
-        }
-    }
-
-    pub fn skip_wait(&mut self) {
-        self.resume_wait();
-    }
-
-    pub fn timeout_wait(&mut self) {
-        match self.overlay.take() {
-            Some(OverlayState::Wait(wait)) => {
-                let _ = wait.response_tx.send(wait.timeout_response());
-                self.dirty = true;
-            }
-            other => self.overlay = other,
         }
     }
 
