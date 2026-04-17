@@ -1,15 +1,16 @@
 use async_trait::async_trait;
 use base64::Engine;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::llm::adapters::streaming::{drive_sse_response, emit_delta_progress};
+use crate::llm::adapters::streaming::drive_sse_response;
 use crate::llm::timeouts::{
     LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
 };
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmMessage, LlmOutputPart, LlmOutputSpec, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmEventSender, LlmMessage, LlmOutputPart, LlmOutputSpec, LlmReplayChunk, LlmRequest,
+    LlmResponse, LlmRole, LlmStreamEvent, LlmUsage, ModelSelection, coalesce_replay_messages,
 };
 use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
@@ -138,6 +139,63 @@ struct StreamingToolCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatStreamEvent {
+    #[serde(default)]
+    choices: Vec<OpenAiCompatChoice>,
+    #[serde(default)]
+    usage: Option<Value>,
+    #[serde(default)]
+    error: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatChoice {
+    #[serde(default)]
+    delta: Option<OpenAiCompatMessage>,
+    #[serde(default)]
+    message: Option<OpenAiCompatMessage>,
+}
+
+#[derive(Deserialize, Default)]
+struct OpenAiCompatMessage {
+    #[serde(default)]
+    content: Option<OpenAiCompatContent>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAiCompatToolCall>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OpenAiCompatContent {
+    Text(String),
+    Parts(Vec<OpenAiCompatContentPart>),
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatContentPart {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatToolCall {
+    #[serde(default)]
+    index: Option<u64>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiCompatToolFunction>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatToolFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 impl Default for OpenAiGenericAdapter {
@@ -488,8 +546,11 @@ impl OpenAiGenericAdapter {
     }
 
     fn usage_from_value(value: &Value) -> Option<LlmUsage> {
-        let usage = value.get("usage")?;
-        Some(LlmUsage {
+        Some(Self::usage_from_usage_value(value.get("usage")?))
+    }
+
+    fn usage_from_usage_value(usage: &Value) -> LlmUsage {
+        LlmUsage {
             input_tokens: Self::parse_i64(usage.get("prompt_tokens")),
             output_tokens: Self::parse_i64(usage.get("completion_tokens")),
             cached_input_tokens: Self::parse_i64(
@@ -504,7 +565,7 @@ impl OpenAiGenericAdapter {
                     .get("completion_tokens_details")
                     .and_then(|d| d.get("reasoning_tokens"))
             })),
-        })
+        }
     }
 
     fn provider_usage_from_value(value: &Value) -> Option<Value> {
@@ -568,6 +629,50 @@ impl OpenAiGenericAdapter {
         out
     }
 
+    fn append_added_delta(
+        full: &mut String,
+        retained_deltas: &mut Option<&mut Vec<String>>,
+        stream_events: Option<&LlmEventSender>,
+        piece: &str,
+    ) {
+        if let Some(delta) = Self::append_stream_piece(full, piece) {
+            match (retained_deltas.as_mut(), stream_events) {
+                (Some(dst), Some(tx)) => {
+                    (**dst).push(delta.clone());
+                    tx.send(LlmStreamEvent::Delta(delta));
+                }
+                (Some(dst), None) => (**dst).push(delta),
+                (None, Some(tx)) => tx.send(LlmStreamEvent::Delta(delta)),
+                (None, None) => {}
+            }
+        }
+    }
+
+    fn process_stream_content(
+        full: &mut String,
+        retained_deltas: &mut Option<&mut Vec<String>>,
+        stream_events: Option<&LlmEventSender>,
+        content: &OpenAiCompatContent,
+    ) {
+        match content {
+            OpenAiCompatContent::Text(text) => {
+                Self::append_added_delta(full, retained_deltas, stream_events, text.as_ref());
+            }
+            OpenAiCompatContent::Parts(parts) => {
+                for part in parts {
+                    if let Some(text) = part.text.as_ref() {
+                        Self::append_added_delta(
+                            full,
+                            retained_deltas,
+                            stream_events,
+                            text.as_ref(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn append_stream_piece(full: &mut String, piece: &str) -> Option<String> {
         if piece.is_empty() {
             return None;
@@ -591,7 +696,16 @@ impl OpenAiGenericAdapter {
         deltas: &mut Vec<String>,
         usage: &mut LlmUsage,
     ) -> Result<(), LlmTransportError> {
-        let _ = Self::process_sse_event_with_tools(raw, full, Some(deltas), usage, None, None)?;
+        Self::process_sse_event_with_tools(
+            raw,
+            full,
+            Some(deltas),
+            usage,
+            &LlmUsage::default(),
+            None,
+            None,
+            None,
+        )?;
         Ok(())
     }
 
@@ -600,17 +714,19 @@ impl OpenAiGenericAdapter {
         full: &mut String,
         mut retained_deltas: Option<&mut Vec<String>>,
         usage: &mut LlmUsage,
+        prev_usage: &LlmUsage,
+        stream_events: Option<&LlmEventSender>,
         tool_calls: Option<&mut Vec<StreamingToolCall>>,
         provider_usage: Option<&mut Option<Value>>,
-    ) -> Result<Vec<String>, LlmTransportError> {
+    ) -> Result<(), LlmTransportError> {
         let raw = raw.trim();
         if raw.is_empty() || raw == "[DONE]" {
-            return Ok(Vec::new());
+            return Ok(());
         }
-        let event: Value = serde_json::from_str(raw).map_err(|e| {
+        let event: OpenAiCompatStreamEvent = serde_json::from_str(raw).map_err(|e| {
             LlmTransportError::new(format!("Invalid SSE payload: {e}")).with_raw(raw)
         })?;
-        if let Some(err) = event.get("error") {
+        if let Some(err) = event.error.as_ref() {
             let mut transport_error = LlmTransportError::new("OpenAI-compatible stream error")
                 .with_raw(err.to_string())
                 .retryable(Self::stream_error_is_retryable(err));
@@ -619,8 +735,7 @@ impl OpenAiGenericAdapter {
             }
             return Err(transport_error);
         }
-        let mut added_deltas = Vec::new();
-        if let Some(new_usage) = Self::usage_from_value(&event)
+        if let Some(new_usage) = event.usage.as_ref().map(Self::usage_from_usage_value)
             && (new_usage.input_tokens > 0
                 || new_usage.output_tokens > 0
                 || new_usage.cached_input_tokens > 0
@@ -629,50 +744,56 @@ impl OpenAiGenericAdapter {
             *usage = new_usage;
         }
         if let Some(dst) = provider_usage
-            && let Some(raw_usage) = Self::provider_usage_from_value(&event)
+            && let Some(raw_usage) = event.usage.clone()
         {
             *dst = Some(raw_usage);
         }
-        for piece in Self::extract_text_parts(&event) {
-            if let Some(delta) = Self::append_stream_piece(full, &piece) {
-                if let Some(dst) = retained_deltas.as_mut() {
-                    (**dst).push(delta.clone());
-                }
-                added_deltas.push(delta);
+        if let Some(tx) = stream_events
+            && usage != prev_usage
+            && usage != &LlmUsage::default()
+        {
+            tx.send(LlmStreamEvent::Usage(usage.clone()));
+        }
+        for choice in &event.choices {
+            if let Some(delta) = &choice.delta
+                && let Some(content) = delta.content.as_ref()
+            {
+                Self::process_stream_content(full, &mut retained_deltas, stream_events, content);
+            }
+            if let Some(message) = &choice.message
+                && let Some(content) = message.content.as_ref()
+            {
+                Self::process_stream_content(full, &mut retained_deltas, stream_events, content);
             }
         }
         // Accumulate streaming tool call deltas.
-        if let Some(tool_calls) = tool_calls
-            && let Some(choices) = event.get("choices").and_then(|v| v.as_array())
-        {
-            for choice in choices {
-                let Some(tcs) = choice
-                    .get("delta")
-                    .and_then(|d| d.get("tool_calls"))
-                    .and_then(|t| t.as_array())
-                else {
-                    continue;
-                };
-                for tc in tcs {
-                    let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+        if let Some(tool_calls) = tool_calls {
+            for choice in &event.choices {
+                for tc in choice
+                    .delta
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|delta| delta.tool_calls.iter())
+                {
+                    let index = tc.index.unwrap_or(0) as usize;
                     while tool_calls.len() <= index {
                         tool_calls.push(StreamingToolCall::default());
                     }
-                    if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                        tool_calls[index].id = id.to_string();
+                    if let Some(id) = tc.id.as_ref() {
+                        tool_calls[index].id.clone_from(id);
                     }
-                    if let Some(f) = tc.get("function") {
-                        if let Some(name) = f.get("name").and_then(|n| n.as_str()) {
-                            tool_calls[index].name = name.to_string();
+                    if let Some(function) = tc.function.as_ref() {
+                        if let Some(name) = function.name.as_ref() {
+                            tool_calls[index].name.clone_from(name);
                         }
-                        if let Some(args) = f.get("arguments").and_then(|a| a.as_str()) {
+                        if let Some(args) = function.arguments.as_ref() {
                             tool_calls[index].arguments.push_str(args);
                         }
                     }
                 }
             }
         }
-        Ok(added_deltas)
+        Ok(())
     }
 
     fn stream_error_code(err: &Value) -> Option<String> {
@@ -948,15 +1069,16 @@ impl LlmTransport for OpenAiGenericAdapter {
             "OpenAI-compatible stream chunk timed out",
             |raw| {
                 let prev_usage = usage.clone();
-                let added_deltas = Self::process_sse_event_with_tools(
+                Self::process_sse_event_with_tools(
                     &raw,
                     &mut full,
                     retained_deltas.as_mut(),
                     &mut usage,
+                    &prev_usage,
+                    stream_events.as_ref(),
                     Some(&mut streaming_tool_calls),
                     Some(&mut provider_usage),
                 )?;
-                emit_delta_progress(stream_events.as_ref(), &added_deltas, &usage, &prev_usage);
                 Ok(())
             },
         )
@@ -1046,6 +1168,8 @@ mod tests {
             &mut full,
             Some(&mut deltas),
             &mut usage,
+            &LlmUsage::default(),
+            None,
             None,
             Some(&mut provider_usage),
         )
@@ -1071,6 +1195,8 @@ mod tests {
             &mut full,
             Some(&mut deltas),
             &mut usage,
+            &LlmUsage::default(),
+            None,
             None,
             None,
         )
@@ -1093,6 +1219,8 @@ mod tests {
             &mut full,
             Some(&mut deltas),
             &mut usage,
+            &LlmUsage::default(),
+            None,
             Some(&mut tool_calls),
             None,
         )
@@ -1107,6 +1235,8 @@ mod tests {
             &mut full,
             Some(&mut deltas),
             &mut usage,
+            &LlmUsage::default(),
+            None,
             Some(&mut tool_calls),
             None,
         )
@@ -1118,6 +1248,8 @@ mod tests {
             &mut full,
             Some(&mut deltas),
             &mut usage,
+            &LlmUsage::default(),
+            None,
             Some(&mut tool_calls),
             None,
         )
@@ -1130,21 +1262,35 @@ mod tests {
 
     #[test]
     fn process_sse_event_returns_new_deltas_without_retain_buffer() {
+        use std::sync::{Arc, Mutex};
+
         let mut full = String::new();
         let mut usage = LlmUsage::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let tx_events = events.clone();
+        let tx = crate::llm::types::LlmEventSender::new(move |event| {
+            tx_events.lock().unwrap().push(event);
+        });
 
-        let added = OpenAiGenericAdapter::process_sse_event_with_tools(
+        OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"content":"Hello"}}]}"#,
             &mut full,
             None,
             &mut usage,
+            &LlmUsage::default(),
+            Some(&tx),
             None,
             None,
         )
         .unwrap();
 
         assert_eq!(full, "Hello");
-        assert_eq!(added, vec!["Hello".to_string()]);
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            crate::llm::types::LlmStreamEvent::Delta(text) => assert_eq!(text, "Hello"),
+            other => panic!("unexpected stream event: {other:?}"),
+        }
     }
 
     #[test]
