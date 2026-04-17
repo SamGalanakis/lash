@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
+use std::io;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -6,6 +8,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use chrono::Utc;
+use lash::llm::adapters::openrouter::OpenAiGenericAdapter;
 use lash::llm::transport::{LlmTransport, LlmTransportError};
 use lash::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
@@ -15,12 +18,15 @@ use lash_default_tools::{
 };
 use serde::Serialize;
 use stats_alloc::Stats;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 const OM_ACTIVE_STATE_PLUGIN_TYPE: &str = "lash.context.observational_memory.state";
 const DEFAULT_PROMPT: &str =
     "Inspect the current state and reply with exactly: runtime perf benchmark ok";
 const HISTORY_EXCHANGES: usize = 18;
+const OPENAI_COMPAT_STREAM_CHUNK_COUNT: usize = 256;
+const OPENAI_COMPAT_STREAM_CHUNK_BYTES: usize = 96;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimePerfScenario {
@@ -28,14 +34,22 @@ pub(crate) enum RuntimePerfScenario {
     Rlm,
     RlmGlobals,
     ObservationalMemory,
+    OpenAiCompatStream,
 }
 
 impl RuntimePerfScenario {
-    const ALL: [Self; 4] = [
+    const DEFAULTS: [Self; 4] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmGlobals,
         Self::ObservationalMemory,
+    ];
+    const KNOWN: [Self; 5] = [
+        Self::Standard,
+        Self::Rlm,
+        Self::RlmGlobals,
+        Self::ObservationalMemory,
+        Self::OpenAiCompatStream,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -44,6 +58,7 @@ impl RuntimePerfScenario {
             "rlm" => Some(Self::Rlm),
             "rlm_globals" => Some(Self::RlmGlobals),
             "observational_memory" => Some(Self::ObservationalMemory),
+            "openai_compat_stream" => Some(Self::OpenAiCompatStream),
             _ => None,
         }
     }
@@ -54,12 +69,15 @@ impl RuntimePerfScenario {
             Self::Rlm => "rlm",
             Self::RlmGlobals => "rlm_globals",
             Self::ObservationalMemory => "observational_memory",
+            Self::OpenAiCompatStream => "openai_compat_stream",
         }
     }
 
     fn execution_mode(self) -> ExecutionMode {
         match self {
-            Self::Standard | Self::ObservationalMemory => ExecutionMode::Standard,
+            Self::Standard | Self::ObservationalMemory | Self::OpenAiCompatStream => {
+                ExecutionMode::Standard
+            }
             Self::Rlm | Self::RlmGlobals => ExecutionMode::Rlm,
         }
     }
@@ -70,15 +88,6 @@ impl RuntimePerfScenario {
                 ContextApproach::ObservationalMemory(ObservationalMemoryConfig::default())
             }
             _ => ContextApproach::RollingHistory(RollingHistoryConfig),
-        }
-    }
-
-    fn response_text(self) -> &'static str {
-        match self {
-            Self::Standard => "runtime perf benchmark ok",
-            Self::Rlm => "runtime perf benchmark ok",
-            Self::RlmGlobals => "runtime perf benchmark ok",
-            Self::ObservationalMemory => "runtime perf benchmark ok",
         }
     }
 }
@@ -255,6 +264,37 @@ struct BenchmarkTransport {
     scenario: RuntimePerfScenario,
 }
 
+struct BenchmarkRuntime {
+    runtime: LashRuntime,
+    _openai_compat_server: Option<OpenAiCompatBenchServer>,
+}
+
+impl Deref for BenchmarkRuntime {
+    type Target = LashRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl DerefMut for BenchmarkRuntime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
+}
+
+struct OpenAiCompatBenchServer {
+    base_url: String,
+    shutdown: CancellationToken,
+    accept_task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct BenchmarkStreamProfile {
+    full_text: String,
+    deltas: Vec<String>,
+}
+
 #[derive(Default)]
 struct RuntimePerfStore {
     next_blob_id: AtomicU64,
@@ -365,6 +405,46 @@ impl BenchmarkTransport {
     }
 }
 
+impl OpenAiCompatBenchServer {
+    async fn start(profile: BenchmarkStreamProfile) -> anyhow::Result<Self> {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .context("bind local OpenAI-compatible perf server")?;
+        let address = listener
+            .local_addr()
+            .context("resolve local OpenAI-compatible perf server address")?;
+        let response_body = Arc::new(openai_compat_sse_body(&profile));
+        let shutdown = CancellationToken::new();
+        let accept_shutdown = shutdown.clone();
+        let accept_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = accept_shutdown.cancelled() => break,
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break; };
+                        let body = Arc::clone(&response_body);
+                        tokio::spawn(async move {
+                            let _ = serve_openai_compat_connection(stream, body).await;
+                        });
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            base_url: format!("http://{address}/v1"),
+            shutdown,
+            accept_task,
+        })
+    }
+}
+
+impl Drop for OpenAiCompatBenchServer {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        self.accept_task.abort();
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PhaseStart {
     started_at: Instant,
@@ -452,7 +532,7 @@ impl LlmTransport for BenchmarkTransport {
         _provider: &mut Provider,
         req: LlmRequest,
     ) -> Result<LlmResponse, LlmTransportError> {
-        let text = self.scenario.response_text().to_string();
+        let profile = benchmark_stream_profile(self.scenario);
         let usage = LlmUsage {
             input_tokens: 1_024,
             output_tokens: 64,
@@ -460,13 +540,17 @@ impl LlmTransport for BenchmarkTransport {
             reasoning_tokens: 48,
         };
         if let Some(tx) = req.stream_events.as_ref() {
-            tx.send(LlmStreamEvent::Delta(text.clone()));
+            for delta in &profile.deltas {
+                tx.send(LlmStreamEvent::Delta(delta.clone()));
+            }
             tx.send(LlmStreamEvent::Usage(usage.clone()));
         }
         Ok(LlmResponse {
-            full_text: text.clone(),
-            deltas: vec![text.clone()],
-            parts: vec![LlmOutputPart::Text { text }],
+            full_text: profile.full_text.clone(),
+            deltas: profile.deltas.clone(),
+            parts: vec![LlmOutputPart::Text {
+                text: profile.full_text,
+            }],
             usage,
             provider_usage: None,
             request_body: None,
@@ -619,7 +703,7 @@ fn finish_dhat_profiler(_profiler: Option<()>) {}
 
 fn resolve_scenarios(filters: &[String]) -> anyhow::Result<Vec<RuntimePerfScenario>> {
     if filters.is_empty() {
-        return Ok(RuntimePerfScenario::ALL.to_vec());
+        return Ok(RuntimePerfScenario::DEFAULTS.to_vec());
     }
 
     let mut scenarios = Vec::with_capacity(filters.len());
@@ -627,7 +711,7 @@ fn resolve_scenarios(filters: &[String]) -> anyhow::Result<Vec<RuntimePerfScenar
         let scenario = RuntimePerfScenario::parse(filter).ok_or_else(|| {
             anyhow::anyhow!(
                 "unknown runtime perf scenario `{filter}`; expected one of: {}",
-                RuntimePerfScenario::ALL
+                RuntimePerfScenario::KNOWN
                     .iter()
                     .map(|scenario| scenario.name())
                     .collect::<Vec<_>>()
@@ -795,14 +879,22 @@ async fn run_once(
     })
 }
 
-async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<LashRuntime> {
+async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<BenchmarkRuntime> {
     let execution_mode = scenario.execution_mode();
     let context_approach = scenario.context_approach();
+    let openai_compat_server = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
+        Some(OpenAiCompatBenchServer::start(benchmark_stream_profile(scenario)).await?)
+    } else {
+        None
+    };
     let policy = SessionPolicy {
         model: "mock-model".to_string(),
         provider: Provider::OpenAiGeneric {
             api_key: "test-key".to_string(),
-            base_url: "https://example.invalid/v1".to_string(),
+            base_url: openai_compat_server
+                .as_ref()
+                .map(|server| server.base_url.clone())
+                .unwrap_or_else(|| "https://example.invalid/v1".to_string()),
             options: ProviderOptions::default(),
         },
         max_context_tokens: Some(200_000),
@@ -813,21 +905,28 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<LashRunt
 
     let profile = DefaultToolSurfaceProfile::for_runtime(&context_approach, false, false);
     let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimeStore>;
-    let runtime = LashRuntime::builder()
+    let builder = LashRuntime::builder()
         .with_policy(policy.clone())
         .with_store(Arc::clone(&store))
         .with_session_task_executor(Arc::new(TokioSessionTaskExecutor::default()))
-        .with_llm_factory(move |_| Box::new(BenchmarkTransport::new(scenario)))
         .with_default_tool_bundles(DefaultToolPluginOptions {
             execution_mode,
             context_approach,
             bundles: profile.bundles,
             tavily_api_key: None,
             instruction_source: None,
-        })
-        .build()
-        .await?;
-    Ok(runtime)
+        });
+    let builder = match scenario {
+        RuntimePerfScenario::OpenAiCompatStream => builder.with_llm_factory(|provider| {
+            Box::new(OpenAiGenericAdapter::new(provider.llm_timeouts()))
+        }),
+        _ => builder.with_llm_factory(move |_| Box::new(BenchmarkTransport::new(scenario))),
+    };
+    let runtime = builder.build().await?;
+    Ok(BenchmarkRuntime {
+        runtime,
+        _openai_compat_server: openai_compat_server,
+    })
 }
 
 async fn seed_runtime_state(
@@ -997,7 +1096,138 @@ fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize) -> String 
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
+        RuntimePerfScenario::OpenAiCompatStream => format!(
+            "Turn {} in OpenAI-compatible streaming benchmark mode. Continue the benchmark chat and reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
     }
+}
+
+fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> BenchmarkStreamProfile {
+    match scenario {
+        RuntimePerfScenario::OpenAiCompatStream => {
+            let alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+            let mut deltas = Vec::with_capacity(OPENAI_COMPAT_STREAM_CHUNK_COUNT + 1);
+            for index in 0..OPENAI_COMPAT_STREAM_CHUNK_COUNT {
+                let prefix = format!("chunk-{index:03}: ");
+                let fill_len = OPENAI_COMPAT_STREAM_CHUNK_BYTES.saturating_sub(prefix.len() + 1);
+                let body: String = alphabet
+                    .chars()
+                    .cycle()
+                    .skip(index % alphabet.len())
+                    .take(fill_len)
+                    .collect();
+                deltas.push(format!("{prefix}{body}\n"));
+            }
+            deltas.push("runtime perf benchmark ok".to_string());
+            BenchmarkStreamProfile {
+                full_text: deltas.concat(),
+                deltas,
+            }
+        }
+        _ => {
+            let text = "runtime perf benchmark ok".to_string();
+            BenchmarkStreamProfile {
+                full_text: text.clone(),
+                deltas: vec![text],
+            }
+        }
+    }
+}
+
+fn openai_compat_sse_body(profile: &BenchmarkStreamProfile) -> Vec<u8> {
+    let mut body = String::new();
+    for delta in &profile.deltas {
+        body.push_str("data: ");
+        body.push_str(
+            &serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "content": delta,
+                    }
+                }]
+            })
+            .to_string(),
+        );
+        body.push_str("\n\n");
+    }
+    body.push_str("data: ");
+    body.push_str(
+        &serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1024,
+                "completion_tokens": 64,
+                "prompt_tokens_details": {
+                    "cached_tokens": 512,
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 48,
+                }
+            }
+        })
+        .to_string(),
+    );
+    body.push_str("\n\n");
+    body.push_str("data: [DONE]\n\n");
+    body.into_bytes()
+}
+
+async fn serve_openai_compat_connection(
+    mut stream: tokio::net::TcpStream,
+    response_body: Arc<Vec<u8>>,
+) -> io::Result<()> {
+    drain_http_request(&mut stream).await?;
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        response_body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(response_body.as_slice()).await?;
+    stream.shutdown().await
+}
+
+async fn drain_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<()> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut content_length = None;
+    let mut header_len = None;
+    loop {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if header_len.is_none()
+            && let Some(index) = find_bytes(&buffer, b"\r\n\r\n")
+        {
+            let end = index + 4;
+            header_len = Some(end);
+            let headers = String::from_utf8_lossy(&buffer[..end]);
+            content_length = Some(parse_content_length(&headers).unwrap_or(0));
+        }
+        if let (Some(header_len), Some(content_length)) = (header_len, content_length)
+            && buffer.len() >= header_len + content_length
+        {
+            return Ok(());
+        }
+    }
+}
+
+fn parse_content_length(headers: &str) -> Option<usize> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn summarize(

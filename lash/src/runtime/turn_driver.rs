@@ -991,7 +991,7 @@ impl RuntimeTurnDriver {
             LlmStreamEvent::Delta(delta) => {
                 if !delta.is_empty() {
                     *state.text_streamed = true;
-                    let raw_delta = delta.clone();
+                    let raw_delta = self.host.core.llm_log_path.as_ref().map(|_| delta.clone());
                     let delta = self
                         .transform_assistant_stream_chunk(event_tx, delta)
                         .await?;
@@ -1002,7 +1002,7 @@ impl RuntimeTurnDriver {
                             iteration: state.iteration,
                             event_type: "delta",
                             text: LlmDebugText {
-                                raw: Some(&raw_delta),
+                                raw: raw_delta.as_deref(),
                                 visible: Some(&delta),
                             },
                             usage: None,
@@ -1010,7 +1010,7 @@ impl RuntimeTurnDriver {
                         },
                     );
                     if !delta.is_empty() {
-                        state.streamed_output.push_text(delta.clone());
+                        state.streamed_output.push_text(&delta);
                         send_session_event(event_tx, SessionEvent::TextDelta { content: delta })
                             .await;
                     }
@@ -1019,7 +1019,7 @@ impl RuntimeTurnDriver {
             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
                 if !text.is_empty() {
                     *state.text_streamed = true;
-                    let raw_text = text.clone();
+                    let raw_text = self.host.core.llm_log_path.as_ref().map(|_| text.clone());
                     let text = self
                         .transform_assistant_stream_chunk(event_tx, text)
                         .await?;
@@ -1030,7 +1030,7 @@ impl RuntimeTurnDriver {
                             iteration: state.iteration,
                             event_type: "text_part",
                             text: LlmDebugText {
-                                raw: Some(&raw_text),
+                                raw: raw_text.as_deref(),
                                 visible: Some(&text),
                             },
                             usage: None,
@@ -1038,7 +1038,7 @@ impl RuntimeTurnDriver {
                         },
                     );
                     if !text.is_empty() {
-                        state.streamed_output.push_text(text.clone());
+                        state.streamed_output.push_text(&text);
                         send_session_event(event_tx, SessionEvent::TextDelta { content: text })
                             .await;
                     }
