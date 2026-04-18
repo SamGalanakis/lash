@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "bench-longmemeval-rlm"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "lash"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "async-trait",
  "base64",
@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "lash-autoresearch"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "async-trait",
  "lash",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "lash-cli"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1893,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "lash-default-tools"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "lash",
  "serde_json",
@@ -1911,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "lash-sansio"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "base64",
  "serde",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "lash-subagents"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "async-trait",
  "lash",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "lash-tui"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "lash-ui"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "async-trait",
  "lash",
@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "lashlang"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "compact_str",
  "criterion",
