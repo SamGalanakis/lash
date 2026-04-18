@@ -148,7 +148,8 @@ pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
     DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
-    InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver, PersistedSessionState,
+    InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
+    ManagedTaskStatus, NoopEventSink, OutputState, PathResolver, PersistedSessionState,
     PromptUsage, RunMode, RuntimeCoreConfig, RuntimeError, SanitizerPolicy, SessionStateEnvelope,
     SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, SessionUsageReport,
     TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,

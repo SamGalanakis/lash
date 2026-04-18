@@ -960,8 +960,7 @@ impl SessionManager for RuntimeSessionManager {
     async fn spawn_managed_task(
         &self,
         session_id: &str,
-        task_id: &str,
-        label: &str,
+        spec: crate::ManagedTaskSpec,
         task: crate::plugin::PluginSessionTask,
     ) -> Result<(), crate::PluginError> {
         if session_id != self.current_session_id {
@@ -981,7 +980,7 @@ impl SessionManager for RuntimeSessionManager {
             self.background_sync_needed.store(true, Ordering::Release);
         }
         executor
-            .spawn_managed(&self.background_scope_key(session_id), task_id, label, task)
+            .spawn_managed(&self.background_scope_key(session_id), spec, task)
             .await
     }
 
@@ -996,6 +995,101 @@ impl SessionManager for RuntimeSessionManager {
         executor
             .cancel_managed(&self.background_scope_key(session_id), task_id)
             .await
+    }
+
+    async fn register_background_task(
+        &self,
+        session_id: &str,
+        spec: crate::ManagedTaskSpec,
+        cancel: Option<crate::ManagedTaskCancel>,
+    ) -> Result<(), crate::PluginError> {
+        let Some(executor) = &self.current_host.session_task_executor else {
+            return Err(crate::PluginError::Session(
+                "background task registry is unavailable in this runtime".to_string(),
+            ));
+        };
+        executor
+            .register_external(&self.background_scope_key(session_id), spec, cancel)
+            .await
+    }
+
+    async fn complete_background_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        run_state: crate::ManagedRunState,
+    ) {
+        let Some(executor) = &self.current_host.session_task_executor else {
+            return;
+        };
+        executor
+            .mark_terminal(&self.background_scope_key(session_id), task_id, run_state)
+            .await;
+    }
+
+    async fn list_background_tasks(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+        let Some(executor) = &self.current_host.session_task_executor else {
+            return Err(crate::PluginError::Session(
+                "background task registry is unavailable in this runtime".to_string(),
+            ));
+        };
+        Ok(executor
+            .list_managed(&self.background_scope_key(session_id))
+            .await)
+    }
+
+    async fn cancel_background_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<crate::ManagedTaskStatus, crate::PluginError> {
+        let Some(executor) = &self.current_host.session_task_executor else {
+            return Err(crate::PluginError::Session(
+                "background task registry is unavailable in this runtime".to_string(),
+            ));
+        };
+        let scope_key = self.background_scope_key(session_id);
+        let Some(status) = executor.get_managed(&scope_key, task_id).await else {
+            return Err(crate::PluginError::Session(format!(
+                "unknown background task `{task_id}`"
+            )));
+        };
+        match status.kind {
+            crate::ManagedTaskKind::Monitor => {
+                let monitor_id = task_id
+                    .strip_prefix("monitor:")
+                    .unwrap_or(task_id)
+                    .to_string();
+                self.stop_monitor(session_id, &monitor_id).await?;
+                executor
+                    .mark_terminal(&scope_key, task_id, crate::ManagedRunState::Cancelled)
+                    .await;
+            }
+            crate::ManagedTaskKind::Subagent => {
+                // Producer-owned cancel: ask the task owner to terminate via
+                // its registered cancellation channel. For now we just mark
+                // the record; subagent host wires up a close path in its
+                // register_background_task adapter.
+                executor.cancel_managed(&scope_key, task_id).await?;
+                executor
+                    .mark_terminal(&scope_key, task_id, crate::ManagedRunState::Cancelled)
+                    .await;
+            }
+            _ => {
+                executor.cancel_managed(&scope_key, task_id).await?;
+                executor
+                    .mark_terminal(&scope_key, task_id, crate::ManagedRunState::Cancelled)
+                    .await;
+            }
+        }
+        let updated = executor
+            .get_managed(&scope_key, task_id)
+            .await
+            .unwrap_or(status);
+        Ok(updated)
     }
 
     async fn monitor_snapshot(

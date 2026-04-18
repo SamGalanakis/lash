@@ -9,8 +9,8 @@ use crate::tool_dispatch::{
 };
 use crate::tools::batch::batch_tool_definition;
 use crate::{
-    ExecutionMode, MAX_MONITOR_TIMEOUT_MS, MonitorRunState, MonitorSpec, ProgressSender,
-    SessionError, ToolDefinition, ToolParam, ToolResult,
+    ExecutionMode, MAX_MONITOR_TIMEOUT_MS, ManagedRunState, ManagedTaskKind, MonitorRunState,
+    MonitorSpec, ProgressSender, SessionError, ToolDefinition, ToolParam, ToolResult,
 };
 
 pub(crate) struct StandardModePluginFactory;
@@ -64,7 +64,12 @@ struct StandardModeNativeTools;
 #[async_trait::async_trait]
 impl ModeNativeToolsPlugin for StandardModeNativeTools {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![batch_tool_definition(), monitor_tool_definition()]
+        vec![
+            batch_tool_definition(),
+            monitor_tool_definition(),
+            tasks_list_tool_definition(),
+            tasks_stop_tool_definition(),
+        ]
     }
 
     async fn execute(
@@ -77,6 +82,8 @@ impl ModeNativeToolsPlugin for StandardModeNativeTools {
         match name {
             "batch" => Some(execute_batch_tool_call(context, args, progress).await),
             "monitor" => Some(execute_monitor_tool_call(context, args).await),
+            "tasks_list" => Some(execute_tasks_list_tool_call(context).await),
+            "tasks_stop" => Some(execute_tasks_stop_tool_call(context, args).await),
             _ => None,
         }
     }
@@ -353,6 +360,110 @@ async fn execute_monitor_tool_call(
                 None => ToolResult::err_fmt("monitor started but status was unavailable"),
             }
         }
+        Err(err) => ToolResult::err_fmt(err.to_string()),
+    }
+}
+
+fn tasks_list_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "tasks_list".into(),
+        description: "List every background task registered for this session — monitors and subagents — with their id, kind, label, and run_state. Use this to see what's still running before deciding whether to keep waiting, poll again, or stop something.".into(),
+        params: vec![],
+        returns: "json".into(),
+        examples: vec!["tasks_list()".into()],
+        enabled: true,
+        injected: true,
+        input_schema_override: None,
+        output_schema_override: None,
+    }
+}
+
+fn tasks_stop_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "tasks_stop".into(),
+        description: "Cancel a background task by id. Ids come from `tasks_list` — monitors look like `monitor:<name>` and subagent subtrees look like `subagent:/root/<name>`. For monitors this terminates the process tree; for subagents it closes the subtree (running turns are cancelled, idle sessions closed).".into(),
+        params: vec![ToolParam {
+            name: "id".into(),
+            r#type: "string".into(),
+            description: "Task id as returned by `tasks_list`.".into(),
+            default_value: None,
+            required: true,
+        }],
+        returns: "json".into(),
+        examples: vec![
+            "tasks_stop(id=\"monitor:app-errors\")".into(),
+            "tasks_stop(id=\"subagent:/root/inspect_auth\")".into(),
+        ],
+        enabled: true,
+        injected: true,
+        input_schema_override: None,
+        output_schema_override: None,
+    }
+}
+
+fn run_state_label(state: ManagedRunState) -> &'static str {
+    match state {
+        ManagedRunState::Running => "running",
+        ManagedRunState::Completed => "completed",
+        ManagedRunState::Failed => "failed",
+        ManagedRunState::Cancelled => "cancelled",
+    }
+}
+
+fn kind_label(kind: ManagedTaskKind) -> &'static str {
+    kind.as_str()
+}
+
+async fn execute_tasks_list_tool_call(context: &ToolDispatchContext) -> ToolResult {
+    match context
+        .host
+        .list_background_tasks(&context.session_id)
+        .await
+    {
+        Ok(tasks) => {
+            let entries: Vec<serde_json::Value> = tasks
+                .into_iter()
+                .map(|task| {
+                    let started_at_iso = chrono::DateTime::<chrono::Utc>::from(task.started_at)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                    serde_json::json!({
+                        "id": task.id,
+                        "label": task.label,
+                        "kind": kind_label(task.kind),
+                        "producer": task.producer,
+                        "run_state": run_state_label(task.run_state),
+                        "started_at": started_at_iso,
+                    })
+                })
+                .collect();
+            ToolResult::ok(serde_json::json!({ "tasks": entries }))
+        }
+        Err(err) => ToolResult::err_fmt(err.to_string()),
+    }
+}
+
+async fn execute_tasks_stop_tool_call(
+    context: &ToolDispatchContext,
+    args: &serde_json::Value,
+) -> ToolResult {
+    let Some(id) = args
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return ToolResult::err_fmt("tasks_stop requires `id`");
+    };
+    match context
+        .host
+        .cancel_background_task(&context.session_id, id)
+        .await
+    {
+        Ok(status) => ToolResult::ok(serde_json::json!({
+            "id": status.id,
+            "kind": kind_label(status.kind),
+            "run_state": run_state_label(status.run_state),
+        })),
         Err(err) => ToolResult::err_fmt(err.to_string()),
     }
 }

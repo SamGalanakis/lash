@@ -462,11 +462,18 @@ impl OpenAiGenericAdapter {
             "stream": stream,
         });
 
-        // Use the correct max-tokens field name per provider.
+        // Use the correct max-tokens field name per provider. The cap is 32k by
+        // default; benchmarks that need longer outputs (e.g. long-horizon CoT)
+        // can raise it via `LASH_MAX_OUTPUT_TOKENS`.
+        let max_output_tokens: u64 = std::env::var("LASH_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|v: &u64| *v > 0)
+            .unwrap_or(32768);
         if compat.use_max_tokens_field {
-            body["max_tokens"] = json!(32768);
+            body["max_tokens"] = json!(max_output_tokens);
         } else {
-            body["max_completion_tokens"] = json!(32768);
+            body["max_completion_tokens"] = json!(max_output_tokens);
         }
 
         if let Some(variant) = req.model_variant.as_deref()

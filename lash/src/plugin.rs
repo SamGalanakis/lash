@@ -792,8 +792,7 @@ pub trait SessionManager: Send + Sync {
     async fn spawn_managed_task(
         &self,
         _session_id: &str,
-        _task_id: &str,
-        _label: &str,
+        _spec: crate::ManagedTaskSpec,
         _task: PluginSessionTask,
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
@@ -807,6 +806,43 @@ pub trait SessionManager: Send + Sync {
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
             "managed session tasks are unavailable in this session".to_string(),
+        ))
+    }
+    async fn register_background_task(
+        &self,
+        _session_id: &str,
+        _spec: crate::ManagedTaskSpec,
+        _cancel: Option<crate::ManagedTaskCancel>,
+    ) -> Result<(), PluginError> {
+        Err(PluginError::Session(
+            "background task registry is unavailable in this session".to_string(),
+        ))
+    }
+    async fn complete_background_task(
+        &self,
+        _session_id: &str,
+        _task_id: &str,
+        _run_state: crate::ManagedRunState,
+    ) {
+    }
+    async fn list_background_tasks(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<crate::ManagedTaskStatus>, PluginError> {
+        Err(PluginError::Session(
+            "background task registry is unavailable in this session".to_string(),
+        ))
+    }
+    /// Dispatch a kind-aware cancel for any registered background task.
+    /// Monitor tasks terminate their process trees; subagent tasks close
+    /// the agent subtree; other managed tasks are aborted.
+    async fn cancel_background_task(
+        &self,
+        _session_id: &str,
+        _task_id: &str,
+    ) -> Result<crate::ManagedTaskStatus, PluginError> {
+        Err(PluginError::Session(
+            "background task registry is unavailable in this session".to_string(),
         ))
     }
     async fn monitor_snapshot(&self, _session_id: &str) -> Result<MonitorSnapshot, PluginError> {

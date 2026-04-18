@@ -219,6 +219,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bench-longcot"
+version = "0.2.59"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dotenvy",
+ "lash",
+ "lash-export",
+ "lash-subagents",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "bench-longmemeval-rlm"
 version = "0.2.59"
 dependencies = [
@@ -1851,6 +1870,7 @@ dependencies = [
  "lash",
  "lash-autoresearch",
  "lash-default-tools",
+ "lash-export",
  "lash-subagents",
  "lash-tui",
  "lash-ui",
@@ -1880,6 +1900,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-export"
+version = "0.2.59"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lash",
+ "serde_json",
+]
+
+[[package]]
 name = "lash-sansio"
 version = "0.2.59"
 dependencies = [
@@ -1898,6 +1928,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

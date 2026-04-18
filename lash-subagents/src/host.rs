@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use lash::{AssembledTurn, InputItem, SessionCreateRequest, SessionManager, TurnInput, TurnStatus};
+use lash::{
+    AssembledTurn, InputItem, ManagedRunState, ManagedTaskKind, ManagedTaskSpec,
+    SessionCreateRequest, SessionManager, TurnInput, TurnStatus,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -88,6 +91,10 @@ pub struct SpawnAgentResponse {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
+    /// Populated when the requested `task_name` was normalized (e.g.
+    /// hyphens/spaces converted to underscores, uppercase lowered).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_name_note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -282,6 +289,9 @@ struct AgentRecord {
     inbox: VecDeque<InboxMessage>,
     closing: bool,
     last_status: String,
+    /// Session that spawned this agent; used to complete the agent's entry
+    /// in that session's background task registry when the agent exits.
+    owner_session_id: String,
 }
 
 struct ActiveTask {
@@ -356,6 +366,7 @@ impl LocalSubagentHost {
                 inbox: VecDeque::new(),
                 closing: false,
                 last_status: "idle".to_string(),
+                owner_session_id: session_id.to_string(),
             });
         let locator = AgentLocator {
             root_session_id,
@@ -396,6 +407,84 @@ impl LocalSubagentHost {
                 state.trees.remove(root_session_id);
             }
         }
+    }
+
+    fn owner_session_id_for_path(
+        state: &HostState,
+        root_session_id: &str,
+        path: &str,
+    ) -> Option<String> {
+        state
+            .trees
+            .get(root_session_id)
+            .and_then(|tree| tree.agents.get(path))
+            .map(|agent| agent.owner_session_id.clone())
+    }
+
+    /// Close an agent subtree by absolute path without needing a
+    /// ToolExecutionContext. Used by the background task registry when
+    /// `tasks_stop` targets a subagent.
+    pub async fn force_close_subtree(
+        &self,
+        host: Arc<dyn SessionManager>,
+        root_session_id: &str,
+        target: &str,
+    ) -> Result<Vec<String>, String> {
+        let (paths, turn_ids, immediate_closes) = {
+            let mut state = self.state_lock()?;
+            let tree = state
+                .trees
+                .get_mut(root_session_id)
+                .ok_or_else(|| "subagent tree missing".to_string())?;
+            let paths = tree
+                .agents
+                .keys()
+                .filter(|path| is_same_or_descendant(path, target))
+                .cloned()
+                .collect::<Vec<_>>();
+            if paths.is_empty() {
+                return Err(format!("unknown agent `{target}`"));
+            }
+            let mut turn_ids = Vec::new();
+            let mut immediate_closes = Vec::new();
+            for path in &paths {
+                if let Some(agent) = tree.agents.get_mut(path) {
+                    agent.closing = true;
+                    agent.queued_tasks.clear();
+                    agent.inbox.clear();
+                    if let Some(active) = &agent.active_task {
+                        turn_ids.push(active.turn_id.clone());
+                    } else {
+                        immediate_closes.push((
+                            path.clone(),
+                            agent.session_id.clone(),
+                            agent.owner_session_id.clone(),
+                        ));
+                    }
+                }
+            }
+            (paths, turn_ids, immediate_closes)
+        };
+        for turn_id in turn_ids {
+            let _ = host.cancel_turn(&turn_id).await;
+        }
+        for (path, session_id, owner_session_id) in &immediate_closes {
+            let _ = host.close_session(session_id).await;
+            {
+                let mut state = self.state_lock()?;
+                if let Some(tree) = state.trees.get_mut(root_session_id) {
+                    Self::queue_event(tree, WaitAgentEvent::AgentClosed { path: path.clone() });
+                }
+                Self::remove_agent_locked(&mut state, root_session_id, path);
+            }
+            host.complete_background_task(
+                owner_session_id,
+                &format!("subagent:{path}"),
+                ManagedRunState::Cancelled,
+            )
+            .await;
+        }
+        Ok(paths)
     }
 
     async fn start_next_task(
@@ -536,11 +625,30 @@ impl LocalSubagentHost {
 
         if let Some(session_id) = close_session_id {
             let _ = manager.close_session(&session_id).await;
-            if let Ok(mut state) = self.state_lock()
-                && let Some(tree) = state.trees.get_mut(&root_session_id)
-            {
-                Self::queue_event(tree, WaitAgentEvent::AgentClosed { path: path.clone() });
-                Self::remove_agent_locked(&mut state, &root_session_id, &path);
+            let owner_session_id = {
+                if let Ok(mut state) = self.state_lock() {
+                    let owner =
+                        Self::owner_session_id_for_path(&state, &root_session_id, &path);
+                    if let Some(tree) = state.trees.get_mut(&root_session_id) {
+                        Self::queue_event(
+                            tree,
+                            WaitAgentEvent::AgentClosed { path: path.clone() },
+                        );
+                    }
+                    Self::remove_agent_locked(&mut state, &root_session_id, &path);
+                    owner
+                } else {
+                    None
+                }
+            };
+            if let Some(owner) = owner_session_id {
+                manager
+                    .complete_background_task(
+                        &owner,
+                        &format!("subagent:{path}"),
+                        ManagedRunState::Completed,
+                    )
+                    .await;
             }
             return;
         }
@@ -597,10 +705,18 @@ impl SubagentHost for LocalSubagentHost {
             .clone()
             .ok_or_else(|| "child session id is required".to_string())?;
 
+        let normalized_task_name = normalize_relative_path(&request.task_name)?;
+        let task_name_note = (normalized_task_name != request.task_name).then(|| {
+            format!(
+                "task_name `{original}` was normalized to `{normalized}` (lowercase letters, digits, and underscores only)",
+                original = request.task_name,
+                normalized = normalized_task_name,
+            )
+        });
         let (root_session_id, path) = {
             let mut state = self.state_lock()?;
             let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let path = join_path(&locator.path, &normalize_relative_path(&request.task_name)?);
+            let path = join_path(&locator.path, &normalized_task_name);
             let tree = state
                 .trees
                 .get_mut(&locator.root_session_id)
@@ -631,6 +747,7 @@ impl SubagentHost for LocalSubagentHost {
                     inbox: VecDeque::new(),
                     closing: false,
                     last_status: "spawning".to_string(),
+                    owner_session_id: context.session_id.clone(),
                 },
             );
             (locator.root_session_id.clone(), path.clone())
@@ -686,14 +803,57 @@ impl SubagentHost for LocalSubagentHost {
             return Err(err);
         }
 
+        // Register with the parent session's background task registry so it
+        // shows up in `tasks_list` and can be cancelled via `tasks_stop`.
+        let cancel_host = Arc::clone(&context.host);
+        let cancel_self = self.clone();
+        let cancel_root = root_session_id.clone();
+        let cancel_path = path.clone();
+        let cancel: lash::ManagedTaskCancel = Arc::new(move || {
+            let host = Arc::clone(&cancel_host);
+            let this = cancel_self.clone();
+            let root = cancel_root.clone();
+            let target = cancel_path.clone();
+            Box::pin(async move {
+                if let Err(err) = this.force_close_subtree(host, &root, &target).await {
+                    tracing::warn!(
+                        error = %err,
+                        agent_path = %target,
+                        "failed to close subagent subtree from tasks_stop"
+                    );
+                }
+            })
+        });
+        if let Err(err) = context
+            .host
+            .register_background_task(
+                &context.session_id,
+                ManagedTaskSpec {
+                    id: format!("subagent:{path}"),
+                    label: request.task_name.clone(),
+                    kind: ManagedTaskKind::Subagent,
+                    producer: "subagent",
+                },
+                Some(cancel),
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %err,
+                agent_path = %path,
+                "failed to register subagent with background task registry"
+            );
+        }
+
         Ok(SpawnAgentResponse {
-            task_name: request.task_name,
+            task_name: normalized_task_name,
             path,
             session_id: session.session_id,
             status: "running".to_string(),
             capability: request.capability.as_str().to_string(),
             model: session.policy.model,
             model_variant: session.policy.model_variant,
+            task_name_note,
         })
     }
 
@@ -876,56 +1036,18 @@ impl SubagentHost for LocalSubagentHost {
         context: &lash::ToolExecutionContext,
         request: CloseAgentRequest,
     ) -> Result<CloseAgentResponse, String> {
-        let (root_session_id, paths, turn_ids, immediate_closes) = {
+        let (root_session_id, target) = {
             let mut state = self.state_lock()?;
             let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
             let target = Self::resolve_target(&locator.path, &request.target)?;
             if target == "/root" {
                 return Err("cannot close /root".to_string());
             }
-            let tree = state
-                .trees
-                .get_mut(&locator.root_session_id)
-                .ok_or_else(|| "subagent tree missing".to_string())?;
-            let paths = tree
-                .agents
-                .keys()
-                .filter(|path| is_same_or_descendant(path, &target))
-                .cloned()
-                .collect::<Vec<_>>();
-            if paths.is_empty() {
-                return Err(format!("unknown agent `{target}`"));
-            }
-
-            let mut turn_ids = Vec::new();
-            let mut immediate_closes = Vec::new();
-            for path in &paths {
-                if let Some(agent) = tree.agents.get_mut(path) {
-                    agent.closing = true;
-                    agent.queued_tasks.clear();
-                    agent.inbox.clear();
-                    if let Some(active) = &agent.active_task {
-                        turn_ids.push(active.turn_id.clone());
-                    } else {
-                        immediate_closes.push((path.clone(), agent.session_id.clone()));
-                    }
-                }
-            }
-            (locator.root_session_id, paths, turn_ids, immediate_closes)
+            (locator.root_session_id, target)
         };
-
-        for turn_id in turn_ids {
-            let _ = context.host.cancel_turn(&turn_id).await;
-        }
-        for (path, session_id) in &immediate_closes {
-            let _ = context.host.close_session(session_id).await;
-            let mut state = self.state_lock()?;
-            if let Some(tree) = state.trees.get_mut(&root_session_id) {
-                Self::queue_event(tree, WaitAgentEvent::AgentClosed { path: path.clone() });
-            }
-            Self::remove_agent_locked(&mut state, &root_session_id, path);
-        }
-
+        let paths = self
+            .force_close_subtree(Arc::clone(&context.host), &root_session_id, &target)
+            .await?;
         Ok(CloseAgentResponse { closed: paths })
     }
 
@@ -1090,15 +1212,26 @@ fn normalize_absolute_path(value: &str) -> Result<String, String> {
 }
 
 fn validate_segment(segment: &str) -> Result<String, String> {
-    if segment
-        .chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
-    {
-        Ok(segment.to_string())
-    } else {
+    let mut out = String::with_capacity(segment.len());
+    let mut prev_was_sep = false;
+    for ch in segment.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_was_sep = false;
+        } else if !out.is_empty() && !prev_was_sep {
+            out.push('_');
+            prev_was_sep = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
         Err(format!(
-            "invalid task name segment `{segment}`: use lowercase letters, digits, and underscores"
+            "task name segment `{segment}` has no usable characters — use letters or digits"
         ))
+    } else {
+        Ok(out)
     }
 }
 
@@ -1107,6 +1240,38 @@ fn join_path(parent: &str, relative: &str) -> String {
         format!("/root/{relative}")
     } else {
         format!("{parent}/{relative}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_relative_path, validate_segment};
+
+    #[test]
+    fn slugifies_mixed_case_and_hyphens() {
+        assert_eq!(validate_segment("Task-Lifecycle Test").unwrap(), "task_lifecycle_test");
+        assert_eq!(validate_segment("InspectAuth").unwrap(), "inspectauth");
+        assert_eq!(validate_segment("foo__bar").unwrap(), "foo_bar");
+        assert_eq!(validate_segment("foo-").unwrap(), "foo");
+    }
+
+    #[test]
+    fn rejects_segment_with_no_alphanumerics() {
+        assert!(validate_segment("---").is_err());
+        assert!(validate_segment("").is_err());
+    }
+
+    #[test]
+    fn passes_through_already_valid_segment() {
+        assert_eq!(validate_segment("foo_bar").unwrap(), "foo_bar");
+    }
+
+    #[test]
+    fn normalize_relative_path_handles_multiple_segments() {
+        assert_eq!(
+            normalize_relative_path("Auth Flow/Stage 1").unwrap(),
+            "auth_flow/stage_1"
+        );
     }
 }
 
