@@ -1,0 +1,15 @@
+[package]
+name = "lash-export"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash", features = ["sqlite-store"] }
+anyhow = "1"
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "lash-export"
+path = "src/bin/lash_export.rs"

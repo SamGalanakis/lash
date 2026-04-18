@@ -20,6 +20,7 @@ lash-subagents = { path = "../lash-subagents" }
 lash-ui = { path = "../lash-ui" }
 lash-tui = { path = "../lash-tui" }
 lash-autoresearch = { path = "../lash-autoresearch" }
+lash-export = { path = "../lash-export" }
 crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }

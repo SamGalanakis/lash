@@ -62,7 +62,7 @@ pub(super) fn subagent_prompt_contributions() -> Vec<PromptContribution> {
         ),
         PromptContribution::guidance(
             "Agent Lifecycle",
-            "Use `send_message` for concise out-of-band notes, `followup_task` to give an existing subagent more work, `wait_agent` to consume subagent updates or completions, `close_agent` to stop a subagent subtree, and `list_agents` to inspect the live tree. `send_message` may target `/root`; `followup_task` may not. `fork_turns` controls how much of the current session context a new subagent receives: `none`, `all`, or a positive integer string for only the most recent turns.",
+            "Use `send_message` for concise out-of-band notes, `followup_task` to give an existing subagent more work, `wait_agent` to consume subagent updates or completions, and `list_agents` to inspect the live tree. Stop a subagent subtree with the shared `tasks_stop` tool (target id is `subagent:{path}`). `send_message` may target `/root`; `followup_task` may not. `fork_turns` controls how much of the current session context a new subagent receives: `none`, `all`, or a positive integer string for only the most recent turns.",
         ),
     ]
 }
@@ -93,7 +93,6 @@ fn standard_subagent_tool_definitions() -> Vec<ToolDefinition> {
             r#"update = wait_agent(timeout_ms=30000)"#.into(),
             r#"update = wait_agent(targets=["/root/inspect_auth"], timeout_ms=30000)"#.into(),
         ]),
-        close_agent_definition(vec![r#"close_agent(target="/root/inspect_auth")"#.into()]),
         list_agents_definition(vec![r#"agents = list_agents(path_prefix="/root")"#.into()]),
     ]
 }
@@ -116,7 +115,6 @@ fn rlm_subagent_tool_definitions() -> Vec<ToolDefinition> {
             r#"call wait_agent { timeout_ms: 30000 }"#.into(),
             r#"call wait_agent { targets: ["/root/inspect_auth"], timeout_ms: 30000 }"#.into(),
         ]),
-        close_agent_definition(vec![r#"call close_agent { target: "/root/inspect_auth" }"#.into()]),
         list_agents_definition(vec![r#"call list_agents { path_prefix: "/root" }"#.into()]),
     ]
 }
@@ -124,7 +122,7 @@ fn rlm_subagent_tool_definitions() -> Vec<ToolDefinition> {
 fn spawn_agent_definition(examples: Vec<String>) -> ToolDefinition {
     ToolDefinition {
         name: "spawn_agent".into(),
-        description: "Spawn a subagent under the current agent path and start it in the background. Pick `capability` from `low`, `medium`, or `high`. Set `fork_turns` to `none`, `all`, or a positive integer string to control inherited context. If `output` is present, the subagent must return a value matching that shape.".into(),
+        description: "Spawn a subagent under the current agent path and start it in the background. Pick `capability` from `low`, `medium`, or `high`. Set `fork_turns` to `none`, `all`, or a positive integer string to control inherited context. If `output` is present, the subagent must return a value matching that shape. `task_name` is auto-normalized (lowercased; spaces, hyphens, and other non-alphanumeric characters collapse to `_`); the response includes a `task_name_note` when normalization changed what you sent.".into(),
         params: vec![
             ToolParam::typed("task_name", "str"),
             ToolParam::typed("task", "str"),
@@ -186,20 +184,6 @@ fn wait_agent_definition(examples: Vec<String>) -> ToolDefinition {
         enabled: true,
         injected: true,
         input_schema_override: Some(wait_agent_input_schema()),
-        output_schema_override: None,
-    }
-}
-
-fn close_agent_definition(examples: Vec<String>) -> ToolDefinition {
-    ToolDefinition {
-        name: "close_agent".into(),
-        description: "Close an agent subtree. Running turns are cancelled first; idle sessions close immediately. `/root` cannot be closed.".into(),
-        params: vec![ToolParam::typed("target", "str")],
-        returns: "dict".into(),
-        examples,
-        enabled: true,
-        injected: true,
-        input_schema_override: None,
         output_schema_override: None,
     }
 }

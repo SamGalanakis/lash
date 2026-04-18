@@ -333,6 +333,33 @@ struct Args {
     /// Number of committed turns to run inside each measured runtime session
     #[arg(long, hide = true, default_value_t = 12)]
     runtime_perf_turns: usize,
+
+    /// Export a persisted session by id or `.db` path and exit
+    #[arg(long, value_name = "SESSION")]
+    export: Option<String>,
+
+    /// Export format: `html` (default) or `json`. Only meaningful with --export.
+    #[arg(long = "export-format", value_name = "FORMAT", default_value = "html")]
+    export_format: String,
+
+    /// Destination file for --export. If omitted, the rendered document is written to stdout.
+    #[arg(long = "export-out", value_name = "PATH")]
+    export_out: Option<std::path::PathBuf>,
+}
+
+fn run_export(session: &str, format: &str, out: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let format = lash_export::ExportFormat::parse(format)?;
+    let selector_path = std::path::PathBuf::from(session);
+    let selector = if selector_path.is_file() {
+        lash_export::SessionSelector::Path(selector_path.as_path())
+    } else {
+        lash_export::SessionSelector::Id(session)
+    };
+    let rendered = lash_export::export(selector, format, out)?;
+    if out.is_none() {
+        print!("{rendered}");
+    }
+    Ok(())
 }
 
 fn cleanup_terminal() {
@@ -376,6 +403,9 @@ async fn main() -> anyhow::Result<()> {
             APP_VERSION,
         )
         .await;
+    }
+    if let Some(session) = args.export.as_deref() {
+        return run_export(session, &args.export_format, args.export_out.as_deref());
     }
     // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {

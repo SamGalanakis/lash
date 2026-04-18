@@ -67,6 +67,21 @@ observe result
 - `observe` output and tool results are fed back into the next iteration (your context), so inspect first and refine on the next step if needed.
 - You must explicitly use `observe` to inspect values and make progress based on them. Do not rely on implicit inspection through tool results or execution errors.
 
+### Builtins
+
+Call these as functions — e.g. `len(x)`, `slice(s, 0, 200)`. For `slice`, `null` bounds mean "from start" / "to end"; negative bounds count from the end.
+
+- `len(x)` — length of a string/list/record (0 for null)
+- `empty(x)` — true if length is 0
+- `slice(s, start, end)` — substring or sublist
+- `split(s, sep)` / `join(list, sep)` — string split/join
+- `trim(s)` — strip whitespace
+- `starts_with(s, prefix)` / `ends_with(s, suffix)` / `contains(haystack, needle)`
+- `keys(record)` / `values(record)`
+- `to_string(x)` / `to_int(x)` / `to_float(x)`
+- `json_parse(s)` — parse a JSON string into a value
+- `format(template, record)` — string interpolation
+
 ### Decomposition
 
 - Break large tasks into smaller, self-contained steps.
@@ -769,7 +784,10 @@ fn extract_first_lashlang_fence(text: &str) -> Option<FenceExtraction> {
             let rest = &text[after_open..];
             let lang_end = rest.find('\n').unwrap_or(rest.len());
             let lang = rest[..lang_end].trim();
-            if !matches!(lang, "lashlang" | "rlm") {
+            // `lashlang` is the canonical tag; `rlm` is the legacy alias and
+            // `lash` is accepted as a common abbreviation models frequently
+            // emit. Anything else is prose inside another code fence.
+            if !matches!(lang, "lashlang" | "rlm" | "lash") {
                 search_from = after_open;
                 continue;
             }

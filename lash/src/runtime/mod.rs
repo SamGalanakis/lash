@@ -43,7 +43,8 @@ pub use lash_sansio::PromptUsage;
 
 pub use builder::EmbeddedRuntimeBuilder;
 pub use host::{
-    BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost, RuntimeCoreConfig,
+    BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost, ManagedRunState,
+    ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, RuntimeCoreConfig,
     SessionTaskExecutor, TokioSessionTaskExecutor,
 };
 

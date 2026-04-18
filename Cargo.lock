@@ -1859,6 +1859,7 @@ dependencies = [
  "lash",
  "lash-autoresearch",
  "lash-default-tools",
+ "lash-export",
  "lash-subagents",
  "lash-tui",
  "lash-ui",
@@ -1888,6 +1889,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-export"
+version = "0.2.60"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lash",
+ "serde_json",
+]
+
+[[package]]
 name = "lash-sansio"
 version = "0.2.60"
 dependencies = [
@@ -1906,6 +1917,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

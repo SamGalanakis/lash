@@ -241,11 +241,16 @@ impl MonitorPlugin {
         let session_id_owned = session_id.to_string();
         let spec_clone = spec.clone();
         let task_host = Arc::clone(&host);
+        let managed_spec = crate::ManagedTaskSpec {
+            id: task_id.clone(),
+            label: spec.label.clone(),
+            kind: crate::ManagedTaskKind::Monitor,
+            producer: "monitor",
+        };
         match host
             .spawn_managed_task(
                 session_id,
-                &task_id,
-                &spec.label,
+                managed_spec,
                 Box::pin(async move {
                     run_monitor_task(state, session_id_owned, spec_clone, task_host).await
                 }),

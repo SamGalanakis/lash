@@ -40,6 +40,33 @@ struct CodexStreamState {
 
 impl CodexStreamState {
     fn begin_message(&mut self) {
+        // When a new message item follows a previous one with existing text,
+        // emit a paragraph break so the UI renders separate items as separate
+        // paragraphs instead of concatenating their sentences (e.g. progress
+        // summaries that land as "blocks it.Next I'm fetching...").
+        let prev_has_text = self
+            .parts
+            .iter()
+            .rev()
+            .find_map(|part| match part {
+                LlmOutputPart::Text { text } if !text.is_empty() => Some(true),
+                LlmOutputPart::Text { .. } => None,
+                _ => None,
+            })
+            .unwrap_or(false);
+        if prev_has_text {
+            if let Some(idx) = self
+                .parts
+                .iter()
+                .rposition(|part| matches!(part, LlmOutputPart::Text { text } if !text.is_empty()))
+                && let Some(LlmOutputPart::Text { text }) = self.parts.get_mut(idx)
+                && !text.ends_with("\n\n")
+            {
+                text.push_str("\n\n");
+            }
+            self.deltas.push("\n\n".to_string());
+            self.recompute_full_text();
+        }
         let index = self.parts.len();
         self.parts.push(LlmOutputPart::Text {
             text: String::new(),
@@ -474,17 +501,25 @@ impl CodexOAuthAdapter {
             return s.to_string();
         }
         if let Some(arr) = value.get("output").and_then(|v| v.as_array()) {
-            let mut out = String::new();
+            // Concatenate items with a paragraph break so this stays in sync
+            // with `begin_message`, which injects "\n\n" between streamed
+            // message items. Mismatched separators would otherwise trigger
+            // `reconcile_final_response_text` to replace the live buffer.
+            let mut items_text: Vec<String> = Vec::new();
             for item in arr {
                 if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                    let mut item_text = String::new();
                     for part in content {
                         if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                            out.push_str(text);
+                            item_text.push_str(text);
                         }
+                    }
+                    if !item_text.is_empty() {
+                        items_text.push(item_text);
                     }
                 }
             }
-            return out;
+            return items_text.join("\n\n");
         }
         String::new()
     }
@@ -1226,6 +1261,36 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         assert_eq!(
             state.full_text,
             "I’ve got the wiring. I’m doing one direct read pass."
+        );
+    }
+
+    #[test]
+    fn consecutive_message_items_are_separated_with_paragraph_break() {
+        let mut state = CodexStreamState::default();
+
+        for event in [
+            r#"{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}}"#,
+            r#"{"type":"response.output_text.delta","delta":"I'm checking the repo."}"#,
+            r#"{"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","text":"I'm checking the repo."}]}}"#,
+            r#"{"type":"response.output_item.added","item":{"id":"msg_2","type":"message","status":"in_progress","content":[]}}"#,
+            r#"{"type":"response.output_text.delta","delta":"Next I'm fetching remote state."}"#,
+            r#"{"type":"response.output_item.done","item":{"id":"msg_2","type":"message","status":"completed","content":[{"type":"output_text","text":"Next I'm fetching remote state."}]}}"#,
+            r#"{"type":"response.completed","response":{"output":[{"content":[{"type":"output_text","text":"I'm checking the repo."}]},{"content":[{"type":"output_text","text":"Next I'm fetching remote state."}]}],"usage":{"input_tokens":10,"output_tokens":12}}}"#,
+        ] {
+            CodexOAuthAdapter::process_sse_event(event, &mut state, None).unwrap();
+        }
+
+        assert_eq!(
+            state.deltas,
+            vec![
+                "I'm checking the repo.".to_string(),
+                "\n\n".to_string(),
+                "Next I'm fetching remote state.".to_string(),
+            ]
+        );
+        assert_eq!(
+            state.full_text,
+            "I'm checking the repo.\n\nNext I'm fetching remote state."
         );
     }
 

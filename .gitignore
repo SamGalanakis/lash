@@ -10,9 +10,14 @@ target-bullseye/
 .env
 .env.*
 jobs/
-.benchmarks/
-bench/longbench-v2/.venv/
-bench/longbench-v2/vendor/
+# benchmark harness state: vendored upstream repos, venvs, runs, responses.
+# All harnesses under bench/ are expected to write generated state here.
+/.benchmarks/
+bench/**/.venv/
+bench/**/vendor/
+bench/**/runs/
+bench/**/responses/
+bench/**/results/
 __pycache__/
 *.pyc
 .DS_Store
