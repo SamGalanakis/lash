@@ -928,6 +928,7 @@ impl crate::ToolProvider for SlowTool {
             examples: vec![],
             enabled: true,
             injected: true,
+            execution_mode: crate::ToolExecutionMode::Parallel,
             input_schema_override: None,
             output_schema_override: None,
         }]

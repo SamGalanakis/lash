@@ -9,13 +9,14 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::json;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ProgressSender, PromptContribution, SandboxMessage, ToolDefinition, ToolExecutionMode,
-    ToolParam, ToolProvider, ToolResult,
+    ProgressSender, PromptContribution, SandboxMessage, ToolDefinition, ToolExecutionContext,
+    ToolExecutionMode, ToolParam, ToolProvider, ToolResult,
 };
 
 use super::require_str;
@@ -31,6 +32,7 @@ struct ShellProcess {
     exit_notify: Arc<Notify>,
     output_notify: Arc<Notify>,
     spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
+    killer: Arc<StdMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
 }
 
 pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
@@ -53,6 +55,7 @@ struct ProcessState {
     exit_code: Arc<StdMutex<Option<i32>>>,
     exit_notify: Arc<Notify>,
     output_notify: Arc<Notify>,
+    killer: Arc<StdMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
 }
 
 struct ShellOutputSpill {
@@ -181,6 +184,7 @@ impl ShellRuntime {
             .slave
             .spawn_command(cmd)
             .map_err(|err| format!("Failed to spawn PTY command: {err}"))?;
+        let killer = child.clone_killer();
         let reader = pair
             .master
             .try_clone_reader()
@@ -199,6 +203,7 @@ impl ShellRuntime {
         let exit_notify = Arc::new(Notify::new());
         let output_notify = Arc::new(Notify::new());
         let spill = Arc::new(StdMutex::new(None));
+        let killer = Arc::new(StdMutex::new(Some(killer)));
 
         spawn_reader_thread(
             id.clone(),
@@ -227,6 +232,7 @@ impl ShellRuntime {
             exit_notify,
             output_notify,
             spill,
+            killer,
         };
         self.processes.lock().unwrap().insert(id, process);
         Ok(())
@@ -249,6 +255,7 @@ impl ShellRuntime {
             exit_code: Arc::clone(&proc.exit_code),
             exit_notify: Arc::clone(&proc.exit_notify),
             output_notify: Arc::clone(&proc.output_notify),
+            killer: Arc::clone(&proc.killer),
         })
     }
 
@@ -316,12 +323,21 @@ impl ShellRuntime {
         progress: Option<&ProgressSender>,
         max_output_tokens: Option<usize>,
         behavior: WaitBehavior,
+        cancel: Option<CancellationToken>,
     ) -> Result<PollOutcome, String> {
         let state = self.process_state(id)?;
         let deadline = timeout.map(|value| tokio::time::Instant::now() + value);
         let mut sent_len = behavior.baseline_len;
 
         loop {
+            if let Some(token) = cancel.as_ref()
+                && token.is_cancelled()
+            {
+                kill_child(&state);
+                wait_for_child_exit(&state, Duration::from_millis(500)).await;
+                return Ok(PollOutcome::Cancelled);
+            }
+
             if let Some(tx) = progress {
                 let new_chunk = {
                     let buf = state.buffer.lock().unwrap();
@@ -393,16 +409,25 @@ impl ShellRuntime {
                 });
             }
 
+            let cancel_future = async {
+                match cancel.as_ref() {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
             if let Some(wake_at) = deadline {
                 tokio::select! {
                     _ = state.exit_notify.notified() => {}
                     _ = state.output_notify.notified() => {}
                     _ = tokio::time::sleep_until(wake_at) => {}
+                    _ = cancel_future => {}
                 }
             } else {
                 tokio::select! {
                     _ = state.exit_notify.notified() => {}
                     _ = state.output_notify.notified() => {}
+                    _ = cancel_future => {}
                 }
             }
         }
@@ -457,6 +482,32 @@ impl ShellRuntime {
     }
 }
 
+fn kill_child(state: &ProcessState) {
+    if let Some(mut killer) = state.killer.lock().unwrap().take() {
+        let _ = killer.kill();
+    }
+}
+
+async fn wait_for_child_exit(state: &ProcessState, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if state.exit_code.lock().unwrap().is_some() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::select! {
+            _ = state.exit_notify.notified() => {
+                if state.exit_code.lock().unwrap().is_some() {
+                    return;
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => return,
+        }
+    }
+}
+
 async fn wait_for_buffer_settle(state: &ProcessState, quiet_period: Duration) {
     let mut last_len = state.buffer.lock().unwrap().len();
     let mut quiet_until = tokio::time::Instant::now() + quiet_period;
@@ -487,6 +538,7 @@ enum PollOutcome {
         exit_code: i32,
         full_output_path: Option<PathBuf>,
     },
+    Cancelled,
 }
 
 pub struct StandardShell {
@@ -548,6 +600,7 @@ impl StandardShell {
         &self,
         params: &ExecCommandParams,
         progress: Option<&ProgressSender>,
+        cancel: Option<CancellationToken>,
     ) -> ToolResult {
         let started = Instant::now();
         let handle_id = self.runtime.allocate_handle_id();
@@ -570,6 +623,7 @@ impl StandardShell {
                 progress,
                 params.max_output_tokens,
                 WaitBehavior { baseline_len: 0 },
+                cancel,
             )
             .await
         {
@@ -602,6 +656,10 @@ impl StandardShell {
                     started.elapsed().as_secs_f64(),
                 ))
             }
+            Ok(PollOutcome::Cancelled) => {
+                self.runtime.remove_process(&handle_id);
+                ToolResult::err_fmt("tool call cancelled")
+            }
             Err(err) => {
                 self.runtime.remove_process(&handle_id);
                 ToolResult::err(json!(err))
@@ -613,6 +671,7 @@ impl StandardShell {
         &self,
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
+        cancel: Option<CancellationToken>,
     ) -> ToolResult {
         let id = match parse_standard_session_id(args) {
             Ok(value) => value,
@@ -655,6 +714,7 @@ impl StandardShell {
                 progress,
                 max_output_tokens,
                 WaitBehavior { baseline_len },
+                cancel,
             )
             .await
         {
@@ -686,6 +746,10 @@ impl StandardShell {
                     full_output_path.as_deref(),
                     started.elapsed().as_secs_f64(),
                 ))
+            }
+            Ok(PollOutcome::Cancelled) => {
+                self.runtime.remove_process(&id);
+                ToolResult::err_fmt("tool call cancelled")
             }
             Err(err) => ToolResult::err(json!(err)),
         }
@@ -824,24 +888,38 @@ impl ToolProvider for StandardShell {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        // TODO(cancel): When a turn is cancelled the dispatcher aborts the
-        // JoinSet task that called us, so this future stops being polled. The
-        // spawned PTY child process still runs until it exits naturally. To
-        // propagate cancellation to the child, capture a
-        // `portable_pty::ChildKiller` from `spawn_wait_thread` and kill it when
-        // the cancellation token fires (read from
-        // `ToolExecutionContext::cancellation_token` via
-        // `execute_streaming_with_context`). Deferred: non-trivial ownership
-        // rework in `ShellRuntime`/`ShellProcess`.
+        self.dispatch(name, args, progress, None).await
+    }
+
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.dispatch(name, args, progress, context.cancellation_token.clone())
+            .await
+    }
+}
+
+impl StandardShell {
+    async fn dispatch(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        progress: Option<&ProgressSender>,
+        cancel: Option<CancellationToken>,
+    ) -> ToolResult {
         match name {
             "exec_command" => {
                 let params = match self.parse_exec_command_params(args) {
                     Ok(params) => params,
                     Err(err) => return err,
                 };
-                self.exec_command(&params, progress).await
+                self.exec_command(&params, progress, cancel).await
             }
-            "write_stdin" => self.write_stdin_call(args, progress).await,
+            "write_stdin" => self.write_stdin_call(args, progress, cancel).await,
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         }
     }
@@ -1259,5 +1337,135 @@ mod tests {
         let defs = shell.definitions();
         assert_eq!(defs.len(), 2);
         assert!(defs.iter().all(|def| !def.description.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn exec_command_cancel_token_kills_running_child() {
+        use crate::test_support::MockSessionManager;
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        let shell = StandardShell::default();
+        let token = CancellationToken::new();
+        let ctx = ToolExecutionContext {
+            session_id: "test".to_string(),
+            host: Arc::new(MockSessionManager::default()),
+            cancellation_token: Some(token.clone()),
+            async_task_id: None,
+        };
+
+        // A long-running sleep that would otherwise hold the tool call for
+        // 5s. The dispatcher must return promptly once the token fires, and
+        // the PTY child must be killed rather than left to run.
+        let args = json!({
+            "cmd": "sleep 5",
+            "yield_time_ms": 30_000,
+            "login": false,
+        });
+
+        let cancel_handle = {
+            let token = token.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                token.cancel();
+            })
+        };
+
+        let started = Instant::now();
+        let result = shell
+            .execute_streaming_with_context("exec_command", &args, &ctx, None)
+            .await;
+        let elapsed = started.elapsed();
+        let _ = cancel_handle.await;
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancelled dispatch should return in under 1s (took {elapsed:?})"
+        );
+        assert!(!result.success, "cancelled result should be an error");
+        assert_eq!(result.result.as_str(), Some("tool call cancelled"));
+    }
+
+    #[tokio::test]
+    async fn cancel_during_write_stdin_wait_kills_child_by_pid() {
+        use crate::test_support::MockSessionManager;
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        fn pid_alive(pid: i32) -> bool {
+            // On Linux, /proc/<pid> disappears once the kernel reaps the
+            // task. Use that as a portable stand-in for kill(pid, 0) without
+            // pulling in a new dep.
+            std::path::Path::new(&format!("/proc/{pid}")).exists()
+        }
+
+        let shell = StandardShell::default();
+        let token = CancellationToken::new();
+        let ctx = ToolExecutionContext {
+            session_id: "test".to_string(),
+            host: Arc::new(MockSessionManager::default()),
+            cancellation_token: Some(token.clone()),
+            async_task_id: None,
+        };
+
+        // Open a long-lived child. `echo $$` reports the shell's pid, then
+        // `exec sleep 5` replaces the shell with sleep so the printed pid is
+        // exactly the process the ChildKiller targets.
+        let args = json!({
+            "cmd": "echo $$; exec sleep 5",
+            "yield_time_ms": 500,
+            "login": false,
+        });
+        let open = shell.execute("exec_command", &args).await;
+        assert!(open.success, "{}", open.result);
+        let session_id = open.result["session_id"]
+            .as_i64()
+            .expect("expected a running session_id");
+        let captured = open.result["output"].as_str().unwrap_or("");
+        let pid: Option<i32> = captured
+            .lines()
+            .find_map(|line| line.trim().parse::<i32>().ok());
+
+        let cancel_handle = {
+            let token = token.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                token.cancel();
+            })
+        };
+
+        let started = Instant::now();
+        let result = shell
+            .execute_streaming_with_context(
+                "write_stdin",
+                &json!({"session_id": session_id, "chars": "", "yield_time_ms": 30_000}),
+                &ctx,
+                None,
+            )
+            .await;
+        let elapsed = started.elapsed();
+        let _ = cancel_handle.await;
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancelled dispatch should return in under 1s (took {elapsed:?})"
+        );
+        assert!(!result.success, "cancelled result should be an error");
+        assert_eq!(result.result.as_str(), Some("tool call cancelled"));
+
+        if let Some(pid) = pid
+            && cfg!(target_os = "linux")
+        {
+            // Give the kernel a moment to reap.
+            let mut gone = false;
+            for _ in 0..50 {
+                if !pid_alive(pid) {
+                    gone = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(gone, "child pid {pid} was still alive after cancel");
+        }
     }
 }
