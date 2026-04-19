@@ -134,6 +134,22 @@ pub fn assistant_text() -> Style {
     Style::default().fg(text_primary())
 }
 
+// Model reasoning / "thinking" trace. Pi renders this as italic + muted
+// gray so it sits visibly below the assistant's actual answer without
+// competing with prose; we follow the same contract using lash's
+// existing faint text token (ASH_TEXT) plus italic. Reusing `text_faint`
+// keeps the palette tight — no new pigment — and keeps reasoning in the
+// same hierarchy tier as other "system chatter" surfaces.
+pub fn assistant_reasoning() -> Style {
+    Style::default()
+        .fg(text_faint())
+        .add_modifier(Modifier::Italic)
+}
+
+pub fn assistant_reasoning_bar() -> Style {
+    Style::default().fg(text_faint())
+}
+
 pub fn nested_list_item() -> Style {
     Style::default().fg(text_subtle())
 }

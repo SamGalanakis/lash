@@ -137,6 +137,10 @@ impl AutonomousRenderer {
                 | PluginSurfaceEvent::ModeIndicatorClear { .. }
                 | PluginSurfaceEvent::Custom { .. } => {}
             },
+            // Reasoning summaries are a TUI-only affordance; in
+            // autonomous mode we deliberately discard them to keep stdout
+            // aligned with the model's final answer.
+            SessionEvent::ReasoningDelta { .. } => {}
             SessionEvent::Done
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::ChildTokenUsage { .. }

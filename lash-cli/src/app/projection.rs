@@ -1,4 +1,5 @@
 use super::*;
+use crate::assistant_text;
 
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
@@ -324,6 +325,19 @@ fn append_transcript_blocks(
         MessageRole::Assistant => {
             let mut prose = Vec::new();
             for part in &message.parts {
+                // Reasoning gets its own block kind and is always emitted
+                // before any prose from the same message, preserving the
+                // "thinking → reply" order the model produced. Flush any
+                // pending prose first so a reasoning part doesn't reorder
+                // in front of prose from earlier parts.
+                if matches!(part.kind, PartKind::Reasoning) {
+                    flush_assistant_prose(blocks, &mut prose);
+                    let trimmed = part.content.trim();
+                    if !trimmed.is_empty() {
+                        let _ = assistant_text::push_assistant_reasoning_block(blocks, trimmed);
+                    }
+                    continue;
+                }
                 let Some(text) = rendered_part_text(&part.kind, &part.content) else {
                     continue;
                 };
@@ -338,6 +352,7 @@ fn append_transcript_blocks(
                         blocks.push(DisplayBlock::Error(text));
                     }
                     PartKind::ToolResult => {}
+                    PartKind::Reasoning => {}
                 }
             }
             flush_assistant_prose(blocks, &mut prose);

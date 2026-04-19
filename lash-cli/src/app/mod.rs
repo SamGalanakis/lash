@@ -296,6 +296,11 @@ pub enum DisplayBlock {
     /// the renderer that checked "is the next block a UserInput?").
     TurnStart(Turn),
     UserInput(String),
+    /// Model reasoning summary ("thinking"). Rendered above the
+    /// assistant's final text in a muted/italic style so the user can see
+    /// the model's scratch thoughts without confusing them with the
+    /// actual reply. Display-only; never persisted back into prompts.
+    AssistantReasoning(String),
     AssistantText(String),
     Activity(Box<ActivityBlock>),
     ShellOutput {
@@ -858,7 +863,10 @@ impl App {
 
         match self.blocks.last() {
             Some(
-                DisplayBlock::AssistantText(_) | DisplayBlock::Splash | DisplayBlock::TurnStart(_),
+                DisplayBlock::AssistantText(_)
+                | DisplayBlock::AssistantReasoning(_)
+                | DisplayBlock::Splash
+                | DisplayBlock::TurnStart(_),
             )
             | None => 0,
             _ => 1,
@@ -969,6 +977,24 @@ impl App {
             self.mark_visible_output();
         }
         self.live_assistant = None;
+    }
+
+    fn append_to_trailing_reasoning_block(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        match self.blocks.last_mut() {
+            Some(DisplayBlock::AssistantReasoning(existing)) => {
+                existing.push_str(delta);
+                let idx = self.blocks.len() - 1;
+                self.invalidate_height_cache_from(idx);
+            }
+            _ => {
+                self.blocks
+                    .push(DisplayBlock::AssistantReasoning(delta.to_string()));
+                self.invalidate_height_cache_from(self.blocks.len() - 1);
+            }
+        }
     }
 
     fn finalize_live_assistant(&mut self) {
@@ -1100,6 +1126,20 @@ impl App {
     /// Process a session event, updating display blocks.
     pub fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
+            SessionEvent::ReasoningDelta { content } => {
+                if content.is_empty() {
+                    return;
+                }
+                self.mark_first_token_arrived();
+                // Render reasoning live in scrollback by extending the
+                // trailing `AssistantReasoning` block. We stream directly
+                // to a display block instead of buffering so the user
+                // sees the thinking trace appear immediately, matching
+                // pi's experience.
+                self.append_to_trailing_reasoning_block(&content);
+                self.mark_visible_output();
+                self.scroll_to_bottom();
+            }
             SessionEvent::TextDelta { content } => {
                 if !self.running && self.live_turn.is_none() && self.live_assistant.is_none() {
                     if self.assistant_text_finalized {

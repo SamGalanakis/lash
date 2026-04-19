@@ -1496,6 +1496,10 @@ fn format_message_for_observer(node: &impl ObservedMessageNode) -> String {
             PartKind::ToolCall => format!("[tool call] {}", part.content),
             PartKind::ToolResult => format!("[tool result] {}", part.content),
             PartKind::Image => "[image]".to_string(),
+            // Reasoning summaries are display-only and excluded from
+            // observational memory snapshots — they exist for the user's
+            // benefit, not as durable context the agent replays.
+            PartKind::Reasoning => String::new(),
         })
         .collect::<Vec<_>>()
         .join("\n");
