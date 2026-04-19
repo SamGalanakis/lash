@@ -218,6 +218,9 @@ impl CodexStreamState {
         let index = self.parts.len();
         self.parts.push(LlmOutputPart::Reasoning {
             text: String::new(),
+            id: String::new(),
+            summary: Vec::new(),
+            encrypted_content: None,
         });
         self.current_reasoning_part = Some(index);
     }
@@ -236,7 +239,7 @@ impl CodexStreamState {
                     .expect("reasoning part just pushed")
             }
         };
-        if let Some(LlmOutputPart::Reasoning { text }) = self.parts.get_mut(index) {
+        if let Some(LlmOutputPart::Reasoning { text, .. }) = self.parts.get_mut(index) {
             text.push_str(delta);
         }
         self.reasoning_deltas.push(delta.to_string());
@@ -247,7 +250,7 @@ impl CodexStreamState {
         // Trim trailing whitespace off the completed part so concatenated
         // paragraphs don't carry stray blanks.
         if let Some(index) = self.current_reasoning_part.take()
-            && let Some(LlmOutputPart::Reasoning { text }) = self.parts.get_mut(index)
+            && let Some(LlmOutputPart::Reasoning { text, .. }) = self.parts.get_mut(index)
         {
             let trimmed = text.trim_end();
             if trimmed.len() != text.len() {
@@ -335,7 +338,7 @@ impl CodexStreamState {
             .iter()
             .filter_map(|part| match part {
                 LlmOutputPart::Text { text } if text.is_empty() => None,
-                LlmOutputPart::Reasoning { text } if text.trim().is_empty() => None,
+                LlmOutputPart::Reasoning { text, .. } if text.trim().is_empty() => None,
                 _ => Some(part.clone()),
             })
             .collect::<Vec<_>>();
@@ -925,7 +928,7 @@ impl CodexOAuthAdapter {
                 // suffix (mirrors the logic for `output_text.done`).
                 if let Some(text) = event.get("text").and_then(|v| v.as_str())
                     && let Some(index) = state.current_reasoning_part
-                    && let Some(LlmOutputPart::Reasoning { text: existing }) =
+                    && let Some(LlmOutputPart::Reasoning { text: existing, .. }) =
                         state.parts.get(index)
                 {
                     let existing = existing.clone();
@@ -1353,7 +1356,7 @@ impl LlmTransport for CodexOAuthAdapter {
                             LlmOutputPart::ToolCall { .. } => {
                                 tx.send(LlmStreamEvent::Part(part.clone()));
                             }
-                            LlmOutputPart::Reasoning { text } if !text.is_empty() => {
+                            LlmOutputPart::Reasoning { text, .. } if !text.is_empty() => {
                                 tx.send(LlmStreamEvent::ReasoningDelta(text.clone()));
                             }
                             _ => {}

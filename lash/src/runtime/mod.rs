@@ -674,18 +674,6 @@ impl StandardStreamFallback {
         }
     }
 
-    fn push_reasoning(&mut self, piece: &str) {
-        if piece.is_empty() {
-            return;
-        }
-        match self.parts.last_mut() {
-            Some(LlmOutputPart::Reasoning { text }) => text.push_str(piece),
-            _ => self.parts.push(LlmOutputPart::Reasoning {
-                text: piece.to_string(),
-            }),
-        }
-    }
-
     fn push_tool_call(
         &mut self,
         call_id: String,
@@ -701,11 +689,28 @@ impl StandardStreamFallback {
         });
     }
 
+    fn push_reasoning(
+        &mut self,
+        text: String,
+        id: String,
+        summary: Vec<String>,
+        encrypted_content: Option<String>,
+    ) {
+        self.parts.push(LlmOutputPart::Reasoning {
+            text,
+            id,
+            summary,
+            encrypted_content,
+        });
+    }
+
     fn is_empty(&self) -> bool {
         !self.parts.iter().any(|part| match part {
             LlmOutputPart::Text { text } => !text.is_empty(),
+            // A reasoning-only stream still represents a real response —
+            // the adapter should keep it so the next turn can re-feed.
+            LlmOutputPart::Reasoning { .. } => true,
             LlmOutputPart::ToolCall { .. } => true,
-            LlmOutputPart::Reasoning { .. } => false,
         })
     }
 
@@ -2102,6 +2107,7 @@ impl LashRuntime {
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -2125,6 +2131,7 @@ impl LashRuntime {
                         tool_name: None,
                         tool_item_id: None,
                         prune_state: PruneState::Intact,
+            reasoning_meta: None,
                     });
                 }
                 NormalizedItem::Image(bytes) => {
@@ -2144,6 +2151,7 @@ impl LashRuntime {
                         tool_name: None,
                         tool_item_id: None,
                         prune_state: PruneState::Intact,
+            reasoning_meta: None,
                     });
                 }
             }
@@ -2158,6 +2166,7 @@ impl LashRuntime {
                 tool_name: None,
                 tool_item_id: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             });
         }
         reassign_part_ids(&user_id, &mut user_parts);

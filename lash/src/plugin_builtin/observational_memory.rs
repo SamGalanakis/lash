@@ -1109,6 +1109,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
             tool_name: None,
             tool_item_id: None,
             prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
@@ -1496,9 +1497,8 @@ fn format_message_for_observer(node: &impl ObservedMessageNode) -> String {
             PartKind::ToolCall => format!("[tool call] {}", part.content),
             PartKind::ToolResult => format!("[tool result] {}", part.content),
             PartKind::Image => "[image]".to_string(),
-            // Reasoning summaries are display-only and excluded from
-            // observational memory snapshots — they exist for the user's
-            // benefit, not as durable context the agent replays.
+            // Reasoning parts are excluded from observational memory —
+            // chain-of-thought is display-only and not durable context.
             PartKind::Reasoning => String::new(),
         })
         .collect::<Vec<_>>()
@@ -1531,6 +1531,7 @@ mod tests {
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,

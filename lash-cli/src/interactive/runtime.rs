@@ -30,6 +30,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
             InputItem::FileRef { path } => {
@@ -42,6 +43,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
             InputItem::DirRef { path } => {
@@ -54,6 +56,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
             InputItem::ImageRef { id } => {
@@ -77,6 +80,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
         }

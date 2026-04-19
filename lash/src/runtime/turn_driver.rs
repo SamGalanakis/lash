@@ -1166,34 +1166,18 @@ impl RuntimeTurnDriver {
                             tool_call: None,
                         },
                     );
-                    state.streamed_output.push_reasoning(&delta);
+                    // Delta-only streaming path (fix 1.3a display). No
+                    // encrypted content yet — that arrives with the full
+                    // item on `output_item.done` (fix 1.3b).
+                    state.streamed_output.push_reasoning(
+                        delta.clone(),
+                        String::new(),
+                        Vec::new(),
+                        None,
+                    );
                     send_session_event(
                         event_tx,
                         SessionEvent::ReasoningDelta { content: delta },
-                    )
-                    .await;
-                }
-            }
-            LlmStreamEvent::Part(LlmOutputPart::Reasoning { text }) => {
-                if !text.is_empty() {
-                    self.log_llm_stream_event(
-                        state.debug,
-                        LlmStreamEventLog {
-                            session_id: &self.session_id,
-                            iteration: state.iteration,
-                            event_type: "reasoning_part",
-                            text: LlmDebugText {
-                                raw: None,
-                                visible: Some(&text),
-                            },
-                            usage: None,
-                            tool_call: None,
-                        },
-                    );
-                    state.streamed_output.push_reasoning(&text);
-                    send_session_event(
-                        event_tx,
-                        SessionEvent::ReasoningDelta { content: text },
                     )
                     .await;
                 }
@@ -1254,6 +1238,39 @@ impl RuntimeTurnDriver {
                     .streamed_output
                     .push_tool_call(call_id, tool_name, input_json, id);
             }
+            LlmStreamEvent::Part(LlmOutputPart::Reasoning {
+                text,
+                id,
+                summary,
+                encrypted_content,
+            }) => {
+                if !text.is_empty() {
+                    self.log_llm_stream_event(
+                        state.debug,
+                        LlmStreamEventLog {
+                            session_id: &self.session_id,
+                            iteration: state.iteration,
+                            event_type: "reasoning_part",
+                            text: LlmDebugText {
+                                raw: None,
+                                visible: Some(&text),
+                            },
+                            usage: None,
+                            tool_call: None,
+                        },
+                    );
+                    send_session_event(
+                        event_tx,
+                        SessionEvent::ReasoningDelta {
+                            content: text.clone(),
+                        },
+                    )
+                    .await;
+                }
+                state
+                    .streamed_output
+                    .push_reasoning(text, id, summary, encrypted_content);
+            }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(
                     state.debug,
@@ -1302,6 +1319,9 @@ pub(super) fn llm_response_has_content(response: &LlmResponse) -> bool {
     }
     response.parts.iter().any(|part| match part {
         LlmOutputPart::Text { text } => !text.is_empty(),
+        // Reasoning-only responses still count as "has content" so the
+        // adapter's stream-fallback buffer is preserved for replay.
+        LlmOutputPart::Reasoning { .. } => true,
         LlmOutputPart::ToolCall { .. } => true,
         // Reasoning alone is not "content" for the purposes of deciding
         // whether the response is empty — the model must also produce

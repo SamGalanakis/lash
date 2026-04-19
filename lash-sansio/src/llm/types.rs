@@ -19,13 +19,21 @@ pub enum LlmOutputPart {
     Text {
         text: String,
     },
-    /// Human-readable summary of the model's reasoning ("thinking"), as
-    /// returned by providers that support reasoning summaries (e.g. Codex's
-    /// `response.reasoning_summary_text.*` events). Display-only — the
-    /// session replay layer must NOT resend this content to the model as
-    /// assistant input; encrypted reasoning re-feeding is a separate path.
+    /// Model "thinking" / reasoning summary item from providers that expose a
+    /// chain-of-thought channel (currently the Codex Responses API).
+    ///
+    /// `text` is the human-readable summary (joined from `summary[*].text`) —
+    /// display path (fix 1.3a) renders this field. `id` / `summary` /
+    /// `encrypted_content` carry the raw Codex reasoning item so we can
+    /// re-emit it on the next turn (fix 1.3b) to avoid the model redoing its
+    /// internal reasoning work. `encrypted_content` is `None` when the
+    /// provider didn't return it (e.g. display-only reasoning from streaming
+    /// summaries before the final item arrives, or non-Codex providers).
     Reasoning {
         text: String,
+        id: String,
+        summary: Vec<String>,
+        encrypted_content: Option<String>,
     },
     ToolCall {
         call_id: String,

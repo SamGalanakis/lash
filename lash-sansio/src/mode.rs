@@ -5,7 +5,7 @@ use crate::sansio::{
     CheckpointResumeAction, CompletedToolCall, DriverAction, DriverContextView, PendingToolCall,
     ProtocolDriverHandle, RlmTermination, WaitingExecState, WaitingLlmState, driver_state,
 };
-use crate::session_model::message::{PartAttachment, data_url_for_bytes};
+use crate::session_model::message::{PartAttachment, ReasoningMeta, data_url_for_bytes};
 use crate::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, SessionEvent, format_tool_result_content,
     fresh_message_id, make_error_event, reassign_part_ids,
@@ -209,8 +209,15 @@ impl ProtocolDriverHandle for StandardDriver {
     ) -> Vec<DriverAction> {
         let response_parts = normalized_response_parts(&llm_response);
         let mut assistant_text = String::new();
-        let mut reasoning_paragraphs: Vec<String> = Vec::new();
         let mut tool_calls: Vec<(String, String, String, Option<String>)> = Vec::new();
+        // Reasoning items captured with their position in the original
+        // response. The `usize` is the index in `tool_calls` that this
+        // reasoning item originally preceded, so we can interleave
+        // reasoning → tool_call in the emission order Codex produced.
+        // `Option<ReasoningMeta>` carries the encrypted roundtrip payload
+        // when present (fix 1.3b); when None, the item is display-only
+        // (fix 1.3a) — still rendered in the UI but never re-fed.
+        let mut reasoning_items: Vec<(usize, Option<ReasoningMeta>, String)> = Vec::new();
         let mut actions = Vec::new();
 
         for part in response_parts {
@@ -226,11 +233,28 @@ impl ProtocolDriverHandle for StandardDriver {
                         }
                     }
                 }
-                LlmOutputPart::Reasoning { text } => {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        reasoning_paragraphs.push(trimmed.to_string());
+                LlmOutputPart::Reasoning {
+                    text,
+                    id,
+                    summary,
+                    encrypted_content,
+                } => {
+                    let trimmed = text.trim().to_string();
+                    // Skip fully-empty reasoning items (no display text and
+                    // no roundtrip payload).
+                    if trimmed.is_empty() && encrypted_content.is_none() {
+                        continue;
                     }
+                    let meta = if encrypted_content.is_some() {
+                        Some(ReasoningMeta {
+                            id,
+                            summary,
+                            encrypted_content,
+                        })
+                    } else {
+                        None
+                    };
+                    reasoning_items.push((tool_calls.len(), meta, trimmed));
                 }
                 LlmOutputPart::ToolCall {
                     call_id,
@@ -250,7 +274,7 @@ impl ProtocolDriverHandle for StandardDriver {
         }));
 
         if tool_calls.is_empty() {
-            if assistant_text.trim().is_empty() {
+            if assistant_text.trim().is_empty() && reasoning_items.is_empty() {
                 actions.push(DriverAction::Emit(make_error_event(
                     "llm_provider",
                     Some("empty_response"),
@@ -261,10 +285,43 @@ impl ProtocolDriverHandle for StandardDriver {
                 return actions;
             }
 
-            actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
-                assistant_text,
-                &reasoning_paragraphs,
-            )]));
+            // Build assistant message: reasoning parts FIRST (so the UI
+            // can draw the "thinking" block above the prose), then prose.
+            let asst_id = fresh_message_id();
+            let mut parts_out = Vec::new();
+            for (_, meta, text) in reasoning_items {
+                parts_out.push(reasoning_part(&asst_id, parts_out.len(), text, meta));
+            }
+            if !assistant_text.trim().is_empty() {
+                parts_out.push(Part {
+                    id: format!("{}.p{}", asst_id, parts_out.len()),
+                    kind: PartKind::Prose,
+                    content: assistant_text,
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_item_id: None,
+                    prune_state: PruneState::Intact,
+                    reasoning_meta: None,
+                });
+            }
+            if parts_out.is_empty() {
+                actions.push(DriverAction::Emit(make_error_event(
+                    "llm_provider",
+                    Some("empty_response"),
+                    "Model returned no assistant text or tool calls.",
+                    None,
+                )));
+                actions.push(DriverAction::Finish);
+                return actions;
+            }
+            actions.push(DriverAction::AppendMessages(vec![Message {
+                id: asst_id,
+                role: MessageRole::Assistant,
+                parts: parts_out,
+                user_input: None,
+                origin: None,
+            }]));
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish,
@@ -275,21 +332,6 @@ impl ProtocolDriverHandle for StandardDriver {
         let asst_id = fresh_message_id();
         let mut assistant_parts = Vec::new();
         // Reasoning parts come FIRST so the renderer can draw the
-        // "thinking" block directly above the assistant's text /
-        // tool-call. They are marked `PartKind::Reasoning` which the
-        // prompt builder strips before the next request is sent.
-        for paragraph in &reasoning_paragraphs {
-            assistant_parts.push(Part {
-                id: format!("{}.p{}", asst_id, assistant_parts.len()),
-                kind: PartKind::Reasoning,
-                content: paragraph.clone(),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-                prune_state: PruneState::Intact,
-            });
-        }
         if !assistant_text.trim().is_empty() {
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
@@ -300,11 +342,31 @@ impl ProtocolDriverHandle for StandardDriver {
                 tool_name: None,
                 tool_item_id: None,
                 prune_state: PruneState::Intact,
+                reasoning_meta: None,
             });
         }
 
         let mut calls = Vec::new();
-        for (call_id, tool_name, input_json, item_id) in tool_calls {
+        // Interleave reasoning items with tool calls to preserve the
+        // original emission order. Codex re-feeds expect the sequence
+        // `reasoning → function_call` from the turn in which both were
+        // produced — swapping them drops the chain-of-thought pairing.
+        let mut reasoning_iter = reasoning_items.into_iter().peekable();
+        for (tool_index, (call_id, tool_name, input_json, item_id)) in
+            tool_calls.into_iter().enumerate()
+        {
+            while let Some((insert_index, _, _)) = reasoning_iter.peek() {
+                if *insert_index > tool_index {
+                    break;
+                }
+                let (_, meta, text) = reasoning_iter.next().expect("peek ok");
+                assistant_parts.push(reasoning_part(
+                    &asst_id,
+                    assistant_parts.len(),
+                    text,
+                    meta,
+                ));
+            }
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
                 kind: PartKind::ToolCall,
@@ -314,6 +376,7 @@ impl ProtocolDriverHandle for StandardDriver {
                 tool_name: Some(tool_name.clone()),
                 tool_item_id: item_id.clone(),
                 prune_state: PruneState::Intact,
+                reasoning_meta: None,
             });
 
             let args = serde_json::from_str::<Value>(&input_json)
@@ -324,6 +387,15 @@ impl ProtocolDriverHandle for StandardDriver {
                 args,
                 item_id,
             });
+        }
+        // Drain any reasoning that lives after the last tool call.
+        for (_, meta, text) in reasoning_iter {
+            assistant_parts.push(reasoning_part(
+                &asst_id,
+                assistant_parts.len(),
+                text,
+                meta,
+            ));
         }
 
         if !assistant_parts.is_empty() {
@@ -361,6 +433,7 @@ impl ProtocolDriverHandle for StandardDriver {
                 tool_name: Some(outcome.tool_name.clone()),
                 tool_item_id: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             });
 
             for (image_offset, image) in outcome.model_result.images.into_iter().enumerate() {
@@ -373,6 +446,7 @@ impl ProtocolDriverHandle for StandardDriver {
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
                 result_parts.push(Part {
                     id: String::new(),
@@ -387,6 +461,7 @@ impl ProtocolDriverHandle for StandardDriver {
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
         }
@@ -460,12 +535,9 @@ impl ProtocolDriverHandle for RlmDriver {
                 LlmOutputPart::Text { text } => {
                     append_assistant_text_part(&mut assistant_text, &text);
                 }
-                LlmOutputPart::Reasoning { text } => {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        reasoning_paragraphs.push(trimmed.to_string());
-                    }
-                }
+                // RLM mode never re-feeds reasoning items to the model and
+                // doesn't surface them to the user — drop them silently.
+                LlmOutputPart::Reasoning { .. } => {}
                 LlmOutputPart::ToolCall { .. } => {}
             }
         }
@@ -487,7 +559,6 @@ impl ProtocolDriverHandle for RlmDriver {
                 RlmTermination::ProseWithoutFence => {
                     actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
                         assistant_text,
-                        &reasoning_paragraphs,
                     )]));
                     actions.push(DriverAction::StartCheckpoint {
                         checkpoint: CheckpointKind::BeforeCompletion,
@@ -496,7 +567,7 @@ impl ProtocolDriverHandle for RlmDriver {
                 }
                 RlmTermination::Finish { .. } => {
                     actions.push(DriverAction::AppendMessages(vec![
-                        assistant_prose_message(assistant_text, &reasoning_paragraphs),
+                        assistant_prose_message(assistant_text),
                         typed_rlm_finish_reminder_message(),
                     ]));
                     actions.push(DriverAction::AdvanceIteration);
@@ -518,7 +589,6 @@ impl ProtocolDriverHandle for RlmDriver {
 
         actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
             assistant_text,
-            &reasoning_paragraphs,
         )]));
         actions.push(DriverAction::StartExec {
             code: fence.code,
@@ -611,7 +681,6 @@ impl ProtocolDriverHandle for RlmDriver {
             };
             actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
                 rendered,
-                &[],
             )]));
             actions.push(DriverAction::Emit(SessionEvent::TypedFinish {
                 value: finish_value.clone(),
@@ -688,35 +757,44 @@ fn normalized_response_parts(llm_response: &LlmResponse) -> Vec<LlmOutputPart> {
     }
 }
 
-fn assistant_prose_message(content: String, reasoning_paragraphs: &[String]) -> Message {
-    let id = fresh_message_id();
-    let mut parts: Vec<Part> = Vec::with_capacity(reasoning_paragraphs.len() + 1);
-    for paragraph in reasoning_paragraphs {
-        parts.push(Part {
-            id: format!("{id}.p{}", parts.len()),
-            kind: PartKind::Reasoning,
-            content: paragraph.clone(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-            prune_state: PruneState::Intact,
-        });
-    }
-    parts.push(Part {
-        id: format!("{id}.p{}", parts.len()),
-        kind: PartKind::Prose,
-        content,
+/// Build a Reasoning `Part` from a reasoning item. `meta` is Some when the
+/// item carries encrypted content for Codex re-feeding (fix 1.3b); None for
+/// display-only summaries (fix 1.3a).
+fn reasoning_part(
+    asst_id: &str,
+    index: usize,
+    text: String,
+    meta: Option<ReasoningMeta>,
+) -> Part {
+    Part {
+        id: format!("{asst_id}.p{index}"),
+        kind: PartKind::Reasoning,
+        content: text,
         attachment: None,
         tool_call_id: None,
         tool_name: None,
         tool_item_id: None,
         prune_state: PruneState::Intact,
-    });
+        reasoning_meta: meta,
+    }
+}
+
+fn assistant_prose_message(content: String) -> Message {
+    let id = fresh_message_id();
     Message {
-        id,
+        id: id.clone(),
         role: MessageRole::Assistant,
-        parts,
+        parts: vec![Part {
+            id: format!("{id}.p0"),
+            kind: PartKind::Prose,
+            content,
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_item_id: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+        }],
         user_input: None,
         origin: None,
     }
@@ -736,6 +814,7 @@ fn typed_rlm_finish_reminder_message() -> Message {
             tool_name: None,
             tool_item_id: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,
@@ -758,6 +837,7 @@ fn typed_rlm_schema_error_message(error_text: &str) -> Message {
             tool_name: None,
             tool_item_id: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,
@@ -778,6 +858,7 @@ fn turn_limit_exhausted_message(max_turns: usize) -> Message {
             tool_name: None,
             tool_item_id: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,
@@ -795,6 +876,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
         tool_name: None,
         tool_item_id: None,
         prune_state: PruneState::Intact,
+            reasoning_meta: None,
     }];
     for (image_offset, image) in images.iter().enumerate() {
         parts.push(Part {
@@ -806,6 +888,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
             tool_name: None,
             tool_item_id: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         });
         parts.push(Part {
             id: format!("{id}.p{}", parts.len()),
@@ -820,6 +903,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
             tool_name: None,
             tool_item_id: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         });
     }
     Message {

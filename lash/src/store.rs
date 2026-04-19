@@ -2210,6 +2210,7 @@ mod tests {
                 tool_name: None,
                 tool_item_id: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,

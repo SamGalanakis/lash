@@ -546,8 +546,8 @@ pub fn tree_message_preview(message: &Message) -> String {
                 }
                 preview.push_str("[error]");
             }
-            // Reasoning summaries aren't useful as a message preview —
-            // the user wants to see the actual reply, not the thinking.
+            // Reasoning summaries don't appear in message previews — the
+            // user wants the reply, not the thinking.
             PartKind::Reasoning => {}
         }
     }

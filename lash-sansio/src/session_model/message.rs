@@ -54,6 +54,32 @@ pub struct Part {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_item_id: Option<String>,
     pub prune_state: PruneState,
+    /// Populated only for `PartKind::Reasoning` parts. Carries the raw Codex
+    /// reasoning-item fields (`id`, `summary[]`, `encrypted_content`) so the
+    /// adapter can re-emit the exact same item on subsequent turns, letting
+    /// the model reuse its encrypted chain-of-thought instead of redoing it.
+    /// `#[serde(default, skip_serializing_if)]` so older snapshots that
+    /// predate this field round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_meta: Option<ReasoningMeta>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReasoningMeta {
+    /// Provider-native item id (e.g. Codex `rs_...`). Empty when the item
+    /// was only observed as streaming summary text without a final
+    /// `response.output_item.done` event.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// Individual `summary[*].text` entries as returned by the provider.
+    /// Preserved verbatim so re-emission on the next turn matches the
+    /// original shape the provider minted (Codex is sensitive to this).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summary: Vec<String>,
+    /// Encrypted chain-of-thought blob. Required for Codex re-feeding —
+    /// parts without it are display-only and must NOT be re-emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -66,10 +92,14 @@ pub enum PartKind {
     Prose,
     ToolCall,
     ToolResult,
-    /// Model "thinking" / reasoning summary. Stored on the session for
-    /// display and snapshot fidelity, but deliberately excluded from the
-    /// rendered prompt so it is never re-sent to the model as assistant
-    /// input. Re-feeding uses the separate encrypted-reasoning path.
+    /// Chain-of-thought / reasoning item captured from providers that expose
+    /// a reasoning channel. `content` holds the human-readable summary for
+    /// display (fix 1.3a). The encrypted blob and raw `summary`/`id` needed
+    /// to re-feed the model on the next turn (fix 1.3b) live in
+    /// `reasoning_meta`. Reasoning parts are preserved across snapshots so
+    /// next-turn re-feeding survives session resume; they are never rendered
+    /// into the flat chat prompt — Codex re-emission goes through its own
+    /// channel, other providers drop reasoning parts entirely.
     Reasoning,
 }
 
@@ -97,6 +127,14 @@ pub enum PruneState {
 
 impl Part {
     pub fn prompt_char_count(&self) -> usize {
+        // Reasoning parts are not user-visible text and aren't sent to the
+        // model as flat prompt content (the Codex adapter re-emits them
+        // via a structured channel instead). Excluding them from the
+        // accounting keeps the rolling-history plugin's prune decisions
+        // driven by real conversation content.
+        if matches!(self.kind, PartKind::Reasoning) {
+            return 0;
+        }
         if matches!(self.kind, PartKind::Image) {
             return self
                 .attachment
@@ -228,8 +266,10 @@ fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachm
     }
     let mut out = Vec::new();
     for part in &msg.parts {
-        // Reasoning summaries are not part of the replayable transcript —
-        // they are local display annotations only.
+        // Reasoning items are display-only from the transcript's point of
+        // view — they are never replayed as flat text. The Codex adapter has
+        // its own wire channel that re-emits the raw reasoning item on the
+        // next turn (fix 1.3b); other providers drop reasoning entirely.
         if matches!(part.kind, PartKind::Reasoning) {
             continue;
         }
@@ -462,6 +502,11 @@ pub fn messages_are_live_resume_safe(messages: &[Message]) -> bool {
 
     for message in messages {
         for part in &message.parts {
+            // Reasoning parts don't participate in tool pairing and are
+            // always safe to resume through.
+            if matches!(part.kind, PartKind::Reasoning) {
+                continue;
+            }
             match part.kind {
                 PartKind::ToolCall => {
                     if !matches!(message.role, MessageRole::Assistant) {
@@ -614,12 +659,36 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
     for msg in msgs {
         for part in &msg.parts {
             match part.kind {
-                // Reasoning summaries are display-only. Never feed them
-                // back to the model as assistant input — the only legal
-                // re-feeding path is the separate encrypted-reasoning
-                // channel, which does not flow through this prompt
-                // builder.
-                PartKind::Reasoning => continue,
+                PartKind::Reasoning => {
+                    // Only forward reasoning items that carry a payload the
+                    // adapter can actually re-emit. Parts without
+                    // `encrypted_content` are display-only (e.g. partial
+                    // streaming summaries that arrived before the item's
+                    // `output_item.done` event) and must not be sent back.
+                    //
+                    // Adapters that don't understand this kind (non-Codex)
+                    // drop the message silently — see
+                    // `google_cloudcode.rs` / `openrouter.rs` skip logic.
+                    let Some(meta) = part.reasoning_meta.as_ref() else {
+                        continue;
+                    };
+                    if meta.encrypted_content.is_none() {
+                        continue;
+                    }
+                    let payload = serde_json::to_string(meta).unwrap_or_default();
+                    if payload.is_empty() {
+                        continue;
+                    }
+                    rendered.messages.push(LlmMessage {
+                        role: LlmRole::Assistant,
+                        content: payload,
+                        kind: "reasoning".to_string(),
+                        image_idx: -1,
+                        tool_call_id: None,
+                        tool_name: None,
+                        tool_item_id: None,
+                    });
+                }
                 PartKind::ToolCall => {
                     rendered.messages.push(LlmMessage {
                         role: LlmRole::Assistant,
@@ -707,6 +776,7 @@ mod tests {
             tool_name: None,
             tool_item_id: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }
     }
 
@@ -724,6 +794,7 @@ mod tests {
             tool_name: None,
             tool_item_id: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }
     }
 
@@ -858,6 +929,7 @@ mod tests {
                     tool_name: Some("read_file".to_string()),
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -874,6 +946,7 @@ mod tests {
                     tool_name: Some("read_file".to_string()),
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -907,6 +980,7 @@ mod tests {
                     tool_name: Some("ask".to_string()),
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -923,6 +997,7 @@ mod tests {
                     tool_name: Some("ask".to_string()),
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -1008,6 +1083,7 @@ mod tests {
                     tool_name: Some("exec_command".to_string()),
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -1050,6 +1126,7 @@ mod tests {
                     tool_name: Some("read_file".to_string()),
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -1066,6 +1143,7 @@ mod tests {
                     tool_name: Some("read_file".to_string()),
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -1154,11 +1232,121 @@ mod tests {
                 tool_name: Some("read_file".to_string()),
                 tool_item_id: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
         }];
 
         assert!(!messages_are_live_resume_safe(&msgs));
+    }
+
+    // ─── Reasoning-part roundtrip (fix 1.3b) ──────────────────────────
+    //
+    // Codex reasoning items carry an encrypted chain-of-thought blob
+    // that the adapter re-emits on the next turn. The session-model
+    // layer stores these parts so they survive resume/snapshot and
+    // flows them through as `kind == "reasoning"` LlmMessages.
+
+    fn reasoning_part_fixture(encrypted: Option<&str>) -> Part {
+        Part {
+            id: "m0.p0".to_string(),
+            kind: PartKind::Reasoning,
+            content: "Thinking.".to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: Some(ReasoningMeta {
+                id: "rs_xyz".to_string(),
+                summary: vec!["Thinking.".to_string()],
+                encrypted_content: encrypted.map(str::to_string),
+            }),
+        }
+    }
+
+    #[test]
+    fn reasoning_part_roundtrips_through_snapshot_serde() {
+        let msgs = vec![Message {
+            id: "m0".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![reasoning_part_fixture(Some("CIPHER=="))],
+            user_input: None,
+            origin: None,
+        }];
+        let serialized = serde_json::to_string(&msgs).expect("serialize");
+        let deserialized: Vec<Message> =
+            serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(deserialized[0].parts.len(), 1);
+        let part = &deserialized[0].parts[0];
+        assert!(matches!(part.kind, PartKind::Reasoning));
+        let meta = part.reasoning_meta.as_ref().expect("meta survives");
+        assert_eq!(meta.id, "rs_xyz");
+        assert_eq!(meta.summary, vec!["Thinking.".to_string()]);
+        assert_eq!(meta.encrypted_content.as_deref(), Some("CIPHER=="));
+    }
+
+    #[test]
+    fn reasoning_part_roundtrips_when_snapshot_predates_field() {
+        // Older snapshots written before fix 1.3b have no
+        // `reasoning_meta` column. The field must default to `None`
+        // and the deserializer must accept the legacy shape.
+        let legacy = r#"[{
+            "id":"m0","role":"Assistant",
+            "parts":[{
+                "id":"m0.p0","kind":"Prose","content":"Hi",
+                "prune_state":"Intact"
+            }]
+        }]"#;
+        let msgs: Vec<Message> = serde_json::from_str(legacy).expect("legacy snapshot");
+        assert!(msgs[0].parts[0].reasoning_meta.is_none());
+    }
+
+    #[test]
+    fn reasoning_parts_never_flow_to_rendered_prompt_as_text() {
+        // Whether or not the reasoning item carries an encrypted blob,
+        // it must NEVER be flattened into assistant text content.
+        // Without an encrypted blob the adapter also drops it entirely
+        // (no point re-feeding a display-only summary).
+        let display_only = vec![Message {
+            id: "m0".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![reasoning_part_fixture(None)],
+            user_input: None,
+            origin: None,
+        }];
+        let rendered = render_structured_prompt(&display_only);
+        assert!(
+            rendered.messages.is_empty(),
+            "display-only reasoning must not reach the prompt"
+        );
+
+        // With encrypted content, a single `kind=="reasoning"` message
+        // is emitted so the Codex adapter can re-emit it. The content
+        // is a JSON ReasoningMeta payload, not human-readable text.
+        let replayable = vec![Message {
+            id: "m0".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![reasoning_part_fixture(Some("CIPHER=="))],
+            user_input: None,
+            origin: None,
+        }];
+        let rendered = render_structured_prompt(&replayable);
+        assert_eq!(rendered.messages.len(), 1);
+        assert_eq!(rendered.messages[0].kind, "reasoning");
+        assert!(rendered.messages[0].content.contains("CIPHER=="));
+        // Sanity: transcript rendering never includes reasoning text.
+        let transcript = render_transcript_prompt(&replayable);
+        assert!(!transcript.messages[0].content.contains("Thinking."));
+        assert!(!transcript.messages[0].content.contains("CIPHER=="));
+    }
+
+    #[test]
+    fn reasoning_parts_are_zero_for_prune_accounting() {
+        // The rolling-history plugin's prune logic is driven by
+        // `prompt_char_count`. Reasoning parts are not user-visible,
+        // so they must not count against the prompt budget.
+        let part = reasoning_part_fixture(Some("X=="));
+        assert_eq!(part.prompt_char_count(), 0);
     }
 }

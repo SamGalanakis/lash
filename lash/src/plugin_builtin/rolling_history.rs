@@ -623,6 +623,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
             tool_name: None,
             tool_item_id: None,
             prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
@@ -988,6 +989,7 @@ mod tests {
                 tool_name: None,
                 tool_item_id: None,
                 prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -1011,6 +1013,7 @@ mod tests {
                 tool_name: None,
                 tool_item_id: None,
                 prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -1126,6 +1129,7 @@ mod tests {
                     tool_name: Some(record.tool.clone()),
                     tool_item_id: None,
                     prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
                 })
                 .collect(),
             user_input: None,
