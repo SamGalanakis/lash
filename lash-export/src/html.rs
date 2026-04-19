@@ -147,6 +147,10 @@ fn render_part(
                 render_pre_block(out, "tool-result-inline", &part.content);
             }
         }
+        // Reasoning items don't have an HTML export rendering yet — the
+        // sibling display task (fix 1.3a) owns that. The blob re-feed
+        // path (this task) only needs the data to survive serialization.
+        PartKind::Reasoning => {}
     }
 }
 

@@ -673,6 +673,7 @@ impl TurnMachine {
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: PruneState::Intact,
+            reasoning_meta: None,
                     }]
                 } else {
                     message.parts.clone()
@@ -693,6 +694,7 @@ impl TurnMachine {
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: PruneState::Intact,
+            reasoning_meta: None,
                     }));
                 }
                 reassign_part_ids(&message_id, &mut parts);
@@ -870,6 +872,18 @@ impl TurnMachine {
                     "text": text,
                 })),
                 LlmOutputPart::Text { .. } => None,
+                LlmOutputPart::Reasoning {
+                    text,
+                    id,
+                    summary,
+                    encrypted_content,
+                } => Some(serde_json::json!({
+                    "type": "reasoning",
+                    "id": id,
+                    "summary": summary,
+                    "text": text,
+                    "has_encrypted": encrypted_content.is_some(),
+                })),
                 LlmOutputPart::ToolCall {
                     call_id,
                     tool_name,

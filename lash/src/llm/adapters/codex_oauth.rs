@@ -38,6 +38,83 @@ struct CodexStreamState {
     tool_calls: HashMap<String, CodexStreamingToolCall>,
 }
 
+/// Decode a session-model-rendered reasoning message back into the raw
+/// Codex Responses input item shape. The session-render path serializes
+/// `ReasoningMeta` as JSON into `LlmMessage::content` with `kind =
+/// "reasoning"`; here we pull id/summary/encrypted_content out of that
+/// JSON and rebuild the `{type:"reasoning", ...}` item Codex expects.
+///
+/// Returns `None` when the payload lacks `encrypted_content` — without
+/// the blob the re-emit is pointless (Codex ignores summary-only items
+/// on input) and could even error on some model variants.
+fn reasoning_input_item_from_message_content(content: &str) -> Option<Value> {
+    #[derive(serde::Deserialize)]
+    struct Meta {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        summary: Vec<String>,
+        #[serde(default)]
+        encrypted_content: Option<String>,
+    }
+    let meta: Meta = serde_json::from_str(content).ok()?;
+    let encrypted = meta.encrypted_content?;
+    let summary = meta
+        .summary
+        .into_iter()
+        .map(|text| {
+            json!({
+                "type": "summary_text",
+                "text": text,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut item = json!({
+        "type": "reasoning",
+        "summary": summary,
+        "encrypted_content": encrypted,
+    });
+    if !meta.id.is_empty() {
+        item["id"] = json!(meta.id);
+    }
+    Some(item)
+}
+
+fn reasoning_part_from_item(item: &Value) -> Option<LlmOutputPart> {
+    if item.get("type").and_then(|v| v.as_str()) != Some("reasoning") {
+        return None;
+    }
+    let id = item
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let summary = item
+        .get("summary")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| entry.get("text").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let encrypted_content = item
+        .get("encrypted_content")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    // We keep parts without encrypted_content too so the display-layer
+    // can still render them, but only parts WITH encrypted_content will
+    // be re-emitted on subsequent turns (enforced at encode time).
+    let text = summary.join("\n\n");
+    Some(LlmOutputPart::Reasoning {
+        text,
+        id,
+        summary,
+        encrypted_content,
+    })
+}
+
 impl CodexStreamState {
     fn begin_message(&mut self) {
         // When a new message item follows a previous one with existing text,
@@ -301,7 +378,8 @@ impl CodexStreamState {
             .iter()
             .filter_map(|part| match part {
                 LlmOutputPart::Text { text } => Some(text.as_str()),
-                LlmOutputPart::ToolCall { .. } => None,
+                // Reasoning items are not user-visible assistant text.
+                LlmOutputPart::Reasoning { .. } | LlmOutputPart::ToolCall { .. } => None,
             })
             .collect::<String>()
     }
@@ -371,6 +449,20 @@ impl CodexOAuthAdapter {
                     if matches!(msg.role, LlmRole::System) && msg.kind != "tool_result" {
                         if !msg.content.is_empty() {
                             instructions.push(msg.content);
+                        }
+                    } else if msg.kind == "reasoning" {
+                        // Re-feed reasoning items (fix 1.3b). The session
+                        // model serializes the raw Codex item
+                        // (id/summary/encrypted_content) into
+                        // `msg.content` as JSON; we decode and re-emit it
+                        // in the same wire slot so Codex can reconstruct
+                        // chain-of-thought state without redoing the
+                        // work. Missing/garbled payloads are skipped
+                        // silently — at worst the model redoes the
+                        // reasoning on this turn.
+                        if let Some(item) = reasoning_input_item_from_message_content(&msg.content)
+                        {
+                            input.push(item);
                         }
                     } else if msg.kind == "tool_result" {
                         input.push(json!({
@@ -472,10 +564,18 @@ impl CodexOAuthAdapter {
             "parallel_tool_calls": !req.tools.is_empty(),
             "stream": stream,
             "store": false,
-            "include": [],
+            // Ask Codex to include the encrypted chain-of-thought blob
+            // with every `reasoning` output item so subsequent turns can
+            // re-feed it instead of making the model redo its internal
+            // reasoning work (fix 1.3b).
+            "include": ["reasoning.encrypted_content"],
         });
         if let Some(effort) = req.model_variant.as_deref() {
-            body["reasoning"] = json!({"effort": effort});
+            // `summary: "auto"` comes from fix 1.4 — it lets the server
+            // surface human-readable reasoning summaries on a separate
+            // channel (handled by fix 1.3a's display code) independent
+            // of the encrypted blob we re-feed here.
+            body["reasoning"] = json!({"effort": effort, "summary": "auto"});
         }
         if let Some(session_id) = req.session_id.as_deref() {
             body["prompt_cache_key"] = json!(session_id);
@@ -712,6 +812,19 @@ impl CodexOAuthAdapter {
                                 let _ = state.finish_tool_call(item);
                             }
                         }
+                        Some("reasoning") => {
+                            // The final reasoning item carries both the
+                            // human-readable summary list and the
+                            // encrypted chain-of-thought blob we need for
+                            // next-turn re-feeding. Append it in wire
+                            // order so it stays paired with any
+                            // surrounding function_call items — Codex
+                            // expects `reasoning` → `function_call`
+                            // sequencing on replay.
+                            if let Some(part) = reasoning_part_from_item(item) {
+                                state.parts.push(part);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -824,6 +937,16 @@ impl CodexOAuthAdapter {
                             tool_name: name.to_string(),
                             input_json,
                         });
+                    }
+                    "reasoning" => {
+                        // Reasoning items arriving in a non-streaming
+                        // response body (or in `response.completed`'s
+                        // `output` array) carry the same
+                        // id/summary/encrypted_content the streaming
+                        // path captures via `output_item.done`.
+                        if let Some(part) = reasoning_part_from_item(item) {
+                            parts.push(part);
+                        }
                     }
                     _ => {}
                 }
@@ -1429,7 +1552,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         assert_eq!(body["prompt_cache_key"], "sess-123");
         assert_eq!(body["store"], false);
         assert_eq!(body["instructions"], "sys");
-        assert_eq!(body["include"], json!([]));
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     }
 
     #[test]
@@ -1621,5 +1744,195 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         assert_eq!(part["image_url"], "data:image/png;base64,AAECAw==");
         assert!(part.get("image_base64").is_none());
         assert!(part.get("mime_type").is_none());
+    }
+
+    // ─── Reasoning item roundtrip (fix 1.3b) ────────────────────────────
+    //
+    // Codex exposes an encrypted chain-of-thought blob on each
+    // `reasoning` output item. Lash captures id/summary/encrypted_content
+    // from the stream and re-emits the same shape on the next turn so
+    // the model doesn't redo its internal work across tool-calling
+    // loops.
+
+    #[test]
+    fn stream_parse_captures_reasoning_item_from_output_item_done() {
+        // A minimal response containing a reasoning item before the
+        // terminal message. The encrypted blob is what the next turn
+        // must feed back; the summary[] is preserved verbatim so Codex
+        // recognises it on replay.
+        let payload = r#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"rs_123","type":"reasoning","summary":[{"type":"summary_text","text":"Checked the repo."},{"type":"summary_text","text":"Planning next step."}],"encrypted_content":"BLOB=="}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","text":"Done."}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"input_tokens":12,"output_tokens":3}}}
+"#;
+        let mut state = CodexStreamState::default();
+        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
+        let parts = state.response_parts();
+        let reasoning = parts
+            .iter()
+            .find_map(|part| match part {
+                LlmOutputPart::Reasoning {
+                    id,
+                    summary,
+                    encrypted_content,
+                    text,
+                } => Some((
+                    id.clone(),
+                    summary.clone(),
+                    encrypted_content.clone(),
+                    text.clone(),
+                )),
+                _ => None,
+            })
+            .expect("reasoning part captured");
+        assert_eq!(reasoning.0, "rs_123");
+        assert_eq!(
+            reasoning.1,
+            vec![
+                "Checked the repo.".to_string(),
+                "Planning next step.".to_string()
+            ]
+        );
+        assert_eq!(reasoning.2.as_deref(), Some("BLOB=="));
+        // `text` joins the summary paragraphs for display convenience
+        // (fix 1.3a's renderer reads this field).
+        assert_eq!(reasoning.3, "Checked the repo.\n\nPlanning next step.");
+    }
+
+    #[test]
+    fn build_input_re_emits_reasoning_item_before_adjacent_function_call() {
+        // Simulate a replayed turn where the assistant produced a
+        // reasoning item followed by a tool call, then got a tool
+        // result. The next request should carry the reasoning item in
+        // its original wire slot so Codex can chain its CoT state.
+        let meta = serde_json::json!({
+            "id": "rs_abc",
+            "summary": ["Step 1"],
+            "encrypted_content": "CIPHER==",
+        })
+        .to_string();
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "ask".to_string(),
+                    kind: "text".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: meta,
+                    kind: "reasoning".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "{\"path\":\"README.md\"}".to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "ok".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+
+        // Expect user → reasoning → function_call → function_call_output
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_abc");
+        assert_eq!(input[1]["encrypted_content"], "CIPHER==");
+        assert_eq!(input[1]["summary"][0]["type"], "summary_text");
+        assert_eq!(input[1]["summary"][0]["text"], "Step 1");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[3]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn build_input_skips_reasoning_without_encrypted_content() {
+        // Display-only reasoning (no encrypted blob) must not be
+        // re-emitted — Codex treats such items as malformed.
+        let meta = serde_json::json!({
+            "id": "rs_abc",
+            "summary": ["Thinking"],
+        })
+        .to_string();
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "ask".to_string(),
+                    kind: "text".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: meta,
+                    kind: "reasoning".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn build_request_body_includes_encrypted_reasoning() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![message(LlmRole::User, "text", "hello")],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: Some("medium".to_string()),
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+        let body = CodexOAuthAdapter::build_request_body(&req, false);
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        // Fix 1.4: reasoning.summary = "auto" rides alongside the effort.
+        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert_eq!(body["reasoning"]["summary"], "auto");
     }
 }

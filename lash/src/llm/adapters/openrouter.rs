@@ -267,6 +267,15 @@ impl OpenAiGenericAdapter {
         for chunk in coalesce_replay_messages(&req.messages) {
             match chunk {
                 LlmReplayChunk::Message(msg) => {
+                    // Codex-specific encrypted reasoning items are
+                    // carried on `LlmMessage` as `kind == "reasoning"`.
+                    // OpenRouter / OpenAI-compatible backends don't
+                    // understand this payload, so drop it silently
+                    // rather than shipping the raw JSON blob as assistant
+                    // text (fix 1.3b).
+                    if msg.kind == "reasoning" {
+                        continue;
+                    }
                     let role = if msg.kind == "tool_result" {
                         "tool"
                     } else if matches!(msg.role, LlmRole::System) {
@@ -1563,5 +1572,54 @@ mod tests {
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert_eq!(body["response_format"]["json_schema"]["name"], "answer");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+    }
+
+    #[test]
+    fn build_messages_drops_codex_reasoning_items_silently() {
+        // `kind == "reasoning"` is the session-model hand-off for
+        // Codex's encrypted chain-of-thought re-feeding (fix 1.3b).
+        // Non-Codex adapters must ignore it rather than leaking the
+        // opaque JSON blob into the user-visible message history.
+        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
+        let req = req(vec![
+            LlmMessage {
+                role: LlmRole::System,
+                content: "sys".to_string(),
+                kind: "text".to_string(),
+                image_idx: -1,
+                tool_call_id: None,
+                tool_name: None,
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: "hi".to_string(),
+                kind: "text".to_string(),
+                image_idx: -1,
+                tool_call_id: None,
+                tool_name: None,
+            },
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: r#"{"id":"rs_1","summary":["stuff"],"encrypted_content":"X"}"#
+                    .to_string(),
+                kind: "reasoning".to_string(),
+                image_idx: -1,
+                tool_call_id: None,
+                tool_name: None,
+            },
+        ]);
+
+        let messages = adapter.build_messages(&req);
+        // Only the system + user messages survive; the reasoning item
+        // is silently dropped so its JSON payload never reaches the
+        // non-Codex provider.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        for msg in &messages {
+            let content = msg["content"].as_str().unwrap_or("");
+            assert!(!content.contains("encrypted_content"));
+            assert!(!content.contains("rs_1"));
+        }
     }
 }

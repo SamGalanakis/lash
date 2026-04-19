@@ -313,6 +313,7 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
             tool_call_id: None,
             tool_name: None,
             prune_state: lash::PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: Some(lash::UserInputProvenance {
             display_text: "Use /wholehog".into(),

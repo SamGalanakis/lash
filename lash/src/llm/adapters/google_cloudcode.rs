@@ -104,6 +104,13 @@ impl GoogleCloudCodeAdapter {
                     if matches!(msg.role, LlmRole::System) {
                         continue;
                     }
+                    // Codex-specific reasoning items (fix 1.3b) ride on
+                    // `LlmMessage` with `kind == "reasoning"`. Gemini
+                    // doesn't consume them, so drop them here instead of
+                    // shipping the raw JSON blob as assistant text.
+                    if msg.kind == "reasoning" {
+                        continue;
+                    }
                     let role = match msg.role {
                         LlmRole::Assistant => "model",
                         LlmRole::User => "user",
@@ -1478,5 +1485,43 @@ mod tests {
             "medium"
         );
         assert!(request["request"].get("thinkingConfig").is_none());
+    }
+
+    #[test]
+    fn build_contents_drops_codex_reasoning_items_silently() {
+        // The Gemini adapter must not forward Codex reasoning re-feeds
+        // (fix 1.3b). `kind == "reasoning"` items should disappear
+        // rather than leak their encrypted payload as model-facing text.
+        let req = LlmRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![
+                message(LlmRole::User, "text", "hi"),
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: r#"{"id":"rs_1","summary":["x"],"encrypted_content":"Y"}"#
+                        .to_string(),
+                    kind: "reasoning".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+        let contents = GoogleCloudCodeAdapter::build_contents(&req);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
+        // No message carries the encrypted blob.
+        for content in &contents {
+            let serialized = content.to_string();
+            assert!(!serialized.contains("encrypted_content"));
+            assert!(!serialized.contains("rs_1"));
+        }
     }
 }

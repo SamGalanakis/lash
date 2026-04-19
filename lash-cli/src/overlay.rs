@@ -546,6 +546,10 @@ pub fn tree_message_preview(message: &Message) -> String {
                 }
                 preview.push_str("[error]");
             }
+            // Reasoning parts are not user-visible and not included in
+            // the overlay preview — the sibling display task (fix 1.3a)
+            // owns reasoning rendering in its own distinct style.
+            PartKind::Reasoning => {}
         }
     }
     preview.replace('\n', " ").trim().to_string()

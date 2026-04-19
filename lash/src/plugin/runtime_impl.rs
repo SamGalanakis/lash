@@ -175,6 +175,7 @@ mod tests {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 },
                 Part {
                     id: String::new(),
@@ -191,6 +192,7 @@ mod tests {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 },
                 Part {
                     id: String::new(),
@@ -200,6 +202,7 @@ mod tests {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 },
             ],
             images: Vec::new(),
@@ -230,6 +233,7 @@ fn normalize_message_ids(messages: &mut [Message]) {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             });
         }
         if !matches!(message.role, MessageRole::User) {

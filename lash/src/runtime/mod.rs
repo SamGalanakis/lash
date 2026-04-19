@@ -681,9 +681,27 @@ impl StandardStreamFallback {
         });
     }
 
+    fn push_reasoning(
+        &mut self,
+        text: String,
+        id: String,
+        summary: Vec<String>,
+        encrypted_content: Option<String>,
+    ) {
+        self.parts.push(LlmOutputPart::Reasoning {
+            text,
+            id,
+            summary,
+            encrypted_content,
+        });
+    }
+
     fn is_empty(&self) -> bool {
         !self.parts.iter().any(|part| match part {
             LlmOutputPart::Text { text } => !text.is_empty(),
+            // A reasoning-only stream still represents a real response —
+            // the adapter should keep it so the next turn can re-feed.
+            LlmOutputPart::Reasoning { .. } => true,
             LlmOutputPart::ToolCall { .. } => true,
         })
     }
@@ -2074,6 +2092,7 @@ impl LashRuntime {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -2096,6 +2115,7 @@ impl LashRuntime {
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: PruneState::Intact,
+            reasoning_meta: None,
                     });
                 }
                 NormalizedItem::Image(bytes) => {
@@ -2114,6 +2134,7 @@ impl LashRuntime {
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: PruneState::Intact,
+            reasoning_meta: None,
                     });
                 }
             }
@@ -2127,6 +2148,7 @@ impl LashRuntime {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             });
         }
         reassign_part_ids(&user_id, &mut user_parts);

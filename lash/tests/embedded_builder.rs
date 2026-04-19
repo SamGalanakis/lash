@@ -19,6 +19,7 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,

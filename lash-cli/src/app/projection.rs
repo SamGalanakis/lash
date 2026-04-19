@@ -292,6 +292,11 @@ fn append_transcript_blocks(
                         blocks.push(DisplayBlock::Error(text));
                     }
                     PartKind::ToolResult => {}
+                    // Display of reasoning summaries is owned by fix 1.3a
+                    // (sibling task #20). This task (1.3b) only needs
+                    // the parts to round-trip so the adapter can re-feed
+                    // the encrypted chain-of-thought on the next turn.
+                    PartKind::Reasoning => {}
                 }
             }
             flush_assistant_prose(blocks, &mut prose);

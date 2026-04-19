@@ -40,6 +40,7 @@ pub(crate) fn plugin_message_to_message(
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }]
     } else {
         plugin_message.parts.clone()
@@ -60,6 +61,7 @@ pub(crate) fn plugin_message_to_message(
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }));
     }
     reassign_part_ids(&message_id, &mut parts);

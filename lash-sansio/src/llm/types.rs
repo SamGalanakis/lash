@@ -19,6 +19,22 @@ pub enum LlmOutputPart {
     Text {
         text: String,
     },
+    /// Model "thinking" / reasoning summary item from providers that expose a
+    /// chain-of-thought channel (currently the Codex Responses API).
+    ///
+    /// `text` is the human-readable summary (joined from `summary[*].text`) —
+    /// kept here so the display-path sibling code (fix 1.3a) has one field to
+    /// render. `id` / `summary` / `encrypted_content` carry the raw Codex
+    /// reasoning item so we can re-emit it on the next turn to avoid the
+    /// model redoing its internal reasoning work. `encrypted_content` is
+    /// `None` when the provider didn't return it (e.g. display-only
+    /// reasoning from streaming summaries before the final item arrives).
+    Reasoning {
+        text: String,
+        id: String,
+        summary: Vec<String>,
+        encrypted_content: Option<String>,
+    },
     ToolCall {
         call_id: String,
         tool_name: String,

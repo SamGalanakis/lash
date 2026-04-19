@@ -1071,6 +1071,22 @@ impl RuntimeTurnDriver {
                     .streamed_output
                     .push_tool_call(call_id, tool_name, input_json);
             }
+            LlmStreamEvent::Part(LlmOutputPart::Reasoning {
+                text,
+                id,
+                summary,
+                encrypted_content,
+            }) => {
+                // Reasoning parts participate in the final LlmResponse via
+                // the stream-fallback buffer so `handle_llm_success` sees
+                // them even when only the streamed parts landed. We do
+                // not drive any user-visible delta from here — fix 1.3a
+                // (sibling task #20) owns reasoning-summary display via
+                // its own `ReasoningDelta` event type.
+                state
+                    .streamed_output
+                    .push_reasoning(text, id, summary, encrypted_content);
+            }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(
                     state.debug,
@@ -1119,6 +1135,9 @@ pub(super) fn llm_response_has_content(response: &LlmResponse) -> bool {
     }
     response.parts.iter().any(|part| match part {
         LlmOutputPart::Text { text } => !text.is_empty(),
+        // Reasoning-only responses still count as "has content" so the
+        // adapter's stream-fallback buffer is preserved for replay.
+        LlmOutputPart::Reasoning { .. } => true,
         LlmOutputPart::ToolCall { .. } => true,
     })
 }

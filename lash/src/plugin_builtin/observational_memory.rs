@@ -1108,6 +1108,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
             tool_call_id: None,
             tool_name: None,
             prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
@@ -1495,6 +1496,10 @@ fn format_message_for_observer(node: &impl ObservedMessageNode) -> String {
             PartKind::ToolCall => format!("[tool call] {}", part.content),
             PartKind::ToolResult => format!("[tool result] {}", part.content),
             PartKind::Image => "[image]".to_string(),
+            // Reasoning trace is not part of observational memory —
+            // it's internal chain-of-thought, not something the session
+            // needs to surface back to the observer.
+            PartKind::Reasoning => String::new(),
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1525,6 +1530,7 @@ mod tests {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,

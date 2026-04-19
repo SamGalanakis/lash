@@ -2,8 +2,9 @@ pub mod message;
 pub mod prompt;
 
 pub use message::{
-    Message, MessageRole, MessageSequence, Part, PartKind, PruneState, RenderedPrompt,
-    append_rendered_prompt, messages_are_live_resume_safe, render_prompt, render_transcript_prompt,
+    Message, MessageRole, MessageSequence, Part, PartKind, PruneState, ReasoningMeta,
+    RenderedPrompt, append_rendered_prompt, messages_are_live_resume_safe, render_prompt,
+    render_transcript_prompt,
 };
 pub use prompt::{
     CORE_GUIDANCE_SECTION, MAIN_AGENT_INTRO, PromptBuiltin, PromptSlot, PromptTemplate,
@@ -317,6 +318,7 @@ impl TurnTerminationPolicyState {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,

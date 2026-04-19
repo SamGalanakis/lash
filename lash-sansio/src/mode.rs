@@ -5,7 +5,7 @@ use crate::sansio::{
     CheckpointResumeAction, CompletedToolCall, DriverAction, DriverContextView, PendingToolCall,
     ProtocolDriverHandle, RlmTermination, WaitingExecState, WaitingLlmState, driver_state,
 };
-use crate::session_model::message::{PartAttachment, data_url_for_bytes};
+use crate::session_model::message::{PartAttachment, ReasoningMeta, data_url_for_bytes};
 use crate::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, SessionEvent, format_tool_result_content,
     fresh_message_id, make_error_event, reassign_part_ids,
@@ -213,6 +213,14 @@ impl ProtocolDriverHandle for StandardDriver {
         let response_parts = normalized_response_parts(&llm_response);
         let mut assistant_text = String::new();
         let mut tool_calls: Vec<(String, String, String)> = Vec::new();
+        // Reasoning items captured with their position in the original
+        // response. `insert_before_tool_index` points at the index in
+        // `tool_calls` that this reasoning item originally preceded, so
+        // the assistant message we assemble below can interleave
+        // reasoning → tool_call in the same order Codex emitted them —
+        // the adapter then re-emits them in that exact sequence on the
+        // next turn (fix 1.3b).
+        let mut reasoning_items: Vec<(usize, ReasoningMeta, String)> = Vec::new();
         let mut actions = Vec::new();
 
         for part in response_parts {
@@ -227,6 +235,30 @@ impl ProtocolDriverHandle for StandardDriver {
                             }));
                         }
                     }
+                }
+                LlmOutputPart::Reasoning {
+                    text,
+                    id,
+                    summary,
+                    encrypted_content,
+                } => {
+                    // Only persist reasoning items that carry the
+                    // encrypted blob — display-only summaries (e.g. the
+                    // partial streaming text with no `output_item.done`
+                    // event) aren't replayable and would just bloat the
+                    // session state.
+                    if encrypted_content.is_none() {
+                        continue;
+                    }
+                    reasoning_items.push((
+                        tool_calls.len(),
+                        ReasoningMeta {
+                            id,
+                            summary,
+                            encrypted_content,
+                        },
+                        text,
+                    ));
                 }
                 LlmOutputPart::ToolCall {
                     call_id,
@@ -245,7 +277,7 @@ impl ProtocolDriverHandle for StandardDriver {
         }));
 
         if tool_calls.is_empty() {
-            if assistant_text.trim().is_empty() {
+            if assistant_text.trim().is_empty() && reasoning_items.is_empty() {
                 actions.push(DriverAction::Emit(make_error_event(
                     "llm_provider",
                     Some("empty_response"),
@@ -256,9 +288,44 @@ impl ProtocolDriverHandle for StandardDriver {
                 return actions;
             }
 
-            actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
-                assistant_text,
-            )]));
+            // Build an assistant message with prose + any trailing
+            // reasoning parts (text-only response paths).
+            let asst_id = fresh_message_id();
+            let mut parts_out = Vec::new();
+            if !assistant_text.trim().is_empty() {
+                parts_out.push(Part {
+                    id: format!("{}.p{}", asst_id, parts_out.len()),
+                    kind: PartKind::Prose,
+                    content: assistant_text,
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                });
+            }
+            for (_, meta, text) in reasoning_items {
+                parts_out.push(reasoning_part(&asst_id, parts_out.len(), text, meta));
+            }
+            if parts_out.is_empty() {
+                // Only empty/display-only reasoning and no prose — treat
+                // like an empty response to keep behaviour unchanged.
+                actions.push(DriverAction::Emit(make_error_event(
+                    "llm_provider",
+                    Some("empty_response"),
+                    "Model returned no assistant text or tool calls.",
+                    None,
+                )));
+                actions.push(DriverAction::Finish);
+                return actions;
+            }
+            actions.push(DriverAction::AppendMessages(vec![Message {
+                id: asst_id,
+                role: MessageRole::Assistant,
+                parts: parts_out,
+                user_input: None,
+                origin: None,
+            }]));
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish,
@@ -277,11 +344,29 @@ impl ProtocolDriverHandle for StandardDriver {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+                reasoning_meta: None,
             });
         }
 
         let mut calls = Vec::new();
-        for (call_id, tool_name, input_json) in tool_calls {
+        // Interleave reasoning items with tool calls to preserve the
+        // original emission order. Codex re-feeds expect the sequence
+        // `reasoning → function_call` from the turn in which both were
+        // produced — swapping them drops the chain-of-thought pairing.
+        let mut reasoning_iter = reasoning_items.into_iter().peekable();
+        for (tool_index, (call_id, tool_name, input_json)) in tool_calls.into_iter().enumerate() {
+            while let Some((insert_index, _, _)) = reasoning_iter.peek() {
+                if *insert_index > tool_index {
+                    break;
+                }
+                let (_, meta, text) = reasoning_iter.next().expect("peek ok");
+                assistant_parts.push(reasoning_part(
+                    &asst_id,
+                    assistant_parts.len(),
+                    text,
+                    meta,
+                ));
+            }
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
                 kind: PartKind::ToolCall,
@@ -290,6 +375,7 @@ impl ProtocolDriverHandle for StandardDriver {
                 tool_call_id: Some(call_id.clone()),
                 tool_name: Some(tool_name.clone()),
                 prune_state: PruneState::Intact,
+                reasoning_meta: None,
             });
 
             let args = serde_json::from_str::<Value>(&input_json)
@@ -299,6 +385,15 @@ impl ProtocolDriverHandle for StandardDriver {
                 tool_name,
                 args,
             });
+        }
+        // Drain any reasoning that lives after the last tool call.
+        for (_, meta, text) in reasoning_iter {
+            assistant_parts.push(reasoning_part(
+                &asst_id,
+                assistant_parts.len(),
+                text,
+                meta,
+            ));
         }
 
         if !assistant_parts.is_empty() {
@@ -335,6 +430,7 @@ impl ProtocolDriverHandle for StandardDriver {
                 tool_call_id: Some(outcome.call_id.clone()),
                 tool_name: Some(outcome.tool_name.clone()),
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             });
 
             for (image_offset, image) in outcome.model_result.images.into_iter().enumerate() {
@@ -346,6 +442,7 @@ impl ProtocolDriverHandle for StandardDriver {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
                 result_parts.push(Part {
                     id: String::new(),
@@ -359,6 +456,7 @@ impl ProtocolDriverHandle for StandardDriver {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
         }
@@ -647,6 +745,19 @@ fn normalized_response_parts(llm_response: &LlmResponse) -> Vec<LlmOutputPart> {
     }
 }
 
+fn reasoning_part(asst_id: &str, index: usize, text: String, meta: ReasoningMeta) -> Part {
+    Part {
+        id: format!("{asst_id}.p{index}"),
+        kind: PartKind::Reasoning,
+        content: text,
+        attachment: None,
+        tool_call_id: None,
+        tool_name: None,
+        prune_state: PruneState::Intact,
+        reasoning_meta: Some(meta),
+    }
+}
+
 fn assistant_prose_message(content: String) -> Message {
     let id = fresh_message_id();
     Message {
@@ -660,6 +771,7 @@ fn assistant_prose_message(content: String) -> Message {
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,
@@ -679,6 +791,7 @@ fn typed_rlm_finish_reminder_message() -> Message {
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,
@@ -700,6 +813,7 @@ fn typed_rlm_schema_error_message(error_text: &str) -> Message {
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,
@@ -719,6 +833,7 @@ fn turn_limit_exhausted_message(max_turns: usize) -> Message {
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,
@@ -735,6 +850,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
         tool_call_id: None,
         tool_name: None,
         prune_state: PruneState::Intact,
+            reasoning_meta: None,
     }];
     for (image_offset, image) in images.iter().enumerate() {
         parts.push(Part {
@@ -745,6 +861,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         });
         parts.push(Part {
             id: format!("{id}.p{}", parts.len()),
@@ -758,6 +875,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         });
     }
     Message {

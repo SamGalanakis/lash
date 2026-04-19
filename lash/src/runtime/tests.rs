@@ -27,6 +27,7 @@ async fn drain_standard_stream_queue(
                 }
             }
             LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+            LlmStreamEvent::Part(LlmOutputPart::Reasoning { .. }) => {}
             LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
         }
     }
@@ -139,6 +140,7 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         }],
         user_input: None,
         origin: None,
@@ -1230,6 +1232,7 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
                 },
                 crate::Part {
                     id: String::new(),
@@ -1239,6 +1242,7 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
                 },
             ],
             images: Vec::new(),
@@ -1529,6 +1533,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -1657,6 +1662,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -2112,6 +2118,7 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -2149,6 +2156,7 @@ fn assembler_prefers_state_output_when_streamed_text_is_a_truncated_prefix() {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -2238,6 +2246,7 @@ fn assembler_detects_max_turn_message() {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,

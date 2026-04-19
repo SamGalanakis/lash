@@ -46,6 +46,7 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
             InputItem::FileRef { path } => {
@@ -57,6 +58,7 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
             InputItem::DirRef { path } => {
@@ -68,6 +70,7 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
             InputItem::ImageRef { id } => {
@@ -90,6 +93,7 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
+            reasoning_meta: None,
                 });
             }
         }
@@ -104,6 +108,7 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         });
     }
 
@@ -244,6 +249,7 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
+            reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
