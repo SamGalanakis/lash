@@ -49,7 +49,7 @@ finish split(content, "\n")[2]
 - Background start: `start call tool { arg: expr }` returns a handle. Resolve with `await handle` (or `await [h1, h2]` for a list in order). Cancel with `cancel handle` (best-effort).
 - Independent parallel tool calls: `parallel { ... }`. Returns branch results as a list, in order. Do not use it when one branch needs another branch's output.
 - `observe expr` inspects a value mid-turn. `observe` output and tool results feed into the next turn's context — so inspect first, refine on the next step.
-- `finish <expr>` ends the turn with the given value. Required when the session declares a typed output schema; otherwise optional — a prose-only reply also ends the turn.
+- `finish <expr>` terminates the lashlang program with a value. In typed-RLM sessions (the prompt will include a **Required output** section when a schema is declared), the value is the session's final answer and must match that schema. Otherwise the value is captured as an observation for the next turn. **The turn itself ends when you reply with prose only — no fenced block.** `finish` ends the *program*, not the turn.
 - Control flow: statement `if`/`for`; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
 - If the prompt includes a **Bound Variables** section, those names are already in scope — use them, don't rebuild them from prose.
