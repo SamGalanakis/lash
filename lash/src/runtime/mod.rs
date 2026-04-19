@@ -707,8 +707,6 @@ impl StandardStreamFallback {
     fn is_empty(&self) -> bool {
         !self.parts.iter().any(|part| match part {
             LlmOutputPart::Text { text } => !text.is_empty(),
-            // A reasoning-only stream still represents a real response —
-            // the adapter should keep it so the next turn can re-feed.
             LlmOutputPart::Reasoning { .. } => true,
             LlmOutputPart::ToolCall { .. } => true,
         })

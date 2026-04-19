@@ -141,6 +141,55 @@ struct StreamingToolCall {
     arguments: String,
 }
 
+/// Accumulator for reasoning summary text produced by providers that
+/// expose it on the Chat Completions stream. Reasoning parts sit BEFORE
+/// the assistant's visible text in the output list, matching the order
+/// in which providers emit the deltas. A new reasoning part begins each
+/// time reasoning resumes after a gap (e.g. after some text or a tool
+/// call), so multi-segment reasoning stays addressable as separate
+/// summary blocks.
+#[derive(Debug, Default)]
+struct ReasoningAccumulator {
+    /// Finalized reasoning parts, in emission order.
+    finished: Vec<String>,
+    /// The in-progress reasoning segment. `None` when the last delta
+    /// seen was not reasoning (so the next reasoning delta starts a
+    /// fresh segment).
+    current: Option<String>,
+}
+
+impl ReasoningAccumulator {
+    fn push_delta(&mut self, piece: &str) {
+        if piece.is_empty() {
+            return;
+        }
+        match &mut self.current {
+            Some(buf) => buf.push_str(piece),
+            None => self.current = Some(piece.to_string()),
+        }
+    }
+
+    /// Close the in-progress reasoning segment. Called whenever a
+    /// non-reasoning signal arrives (text, tool-call arguments) so the
+    /// next reasoning delta starts a new block rather than merging into
+    /// the previous one.
+    fn close_segment(&mut self) {
+        if let Some(text) = self.current.take() {
+            let trimmed = text.trim_end();
+            if !trimmed.is_empty() {
+                self.finished.push(trimmed.to_string());
+            }
+        }
+    }
+
+    /// Drain the accumulator into the finished list and return all
+    /// reasoning parts in order. Consumes the accumulator.
+    fn into_parts(mut self) -> Vec<String> {
+        self.close_segment();
+        self.finished
+    }
+}
+
 #[derive(Deserialize)]
 struct OpenAiCompatStreamEvent {
     #[serde(default)]
@@ -165,6 +214,40 @@ struct OpenAiCompatMessage {
     content: Option<OpenAiCompatContent>,
     #[serde(default)]
     tool_calls: Vec<OpenAiCompatToolCall>,
+    // Reasoning summary text. Providers disagree on the field name:
+    //  - `reasoning_content` (llama.cpp, DeepSeek, Chutes)
+    //  - `reasoning` (OpenRouter-normalized, some Anthropic/xAI bridges)
+    //  - `reasoning_text` (some OpenAI-compatible servers)
+    // We accept all three. At most one is set per delta in practice;
+    // the extraction helper picks the first non-empty one to avoid
+    // duplicating text when a provider mirrors both fields.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_text: Option<String>,
+}
+
+impl OpenAiCompatMessage {
+    /// Returns the first non-empty reasoning field present on this message.
+    /// Providers sometimes populate multiple fields with the same content
+    /// (e.g. chutes.ai sets both `reasoning_content` and `reasoning`); we
+    /// pick the first match so callers don't double-accumulate.
+    fn reasoning_text(&self) -> Option<&str> {
+        for field in [
+            self.reasoning_content.as_deref(),
+            self.reasoning.as_deref(),
+            self.reasoning_text.as_deref(),
+        ] {
+            if let Some(text) = field
+                && !text.is_empty()
+            {
+                return Some(text);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Deserialize)]
@@ -267,15 +350,6 @@ impl OpenAiGenericAdapter {
         for chunk in coalesce_replay_messages(&req.messages) {
             match chunk {
                 LlmReplayChunk::Message(msg) => {
-                    // Codex-specific encrypted reasoning items are
-                    // carried on `LlmMessage` as `kind == "reasoning"`.
-                    // OpenRouter / OpenAI-compatible backends don't
-                    // understand this payload, so drop it silently
-                    // rather than shipping the raw JSON blob as assistant
-                    // text (fix 1.3b).
-                    if msg.kind == "reasoning" {
-                        continue;
-                    }
                     let role = if msg.kind == "tool_result" {
                         "tool"
                     } else if matches!(msg.role, LlmRole::System) {
@@ -430,6 +504,39 @@ impl OpenAiGenericAdapter {
         }
     }
 
+    /// Clamp a requested reasoning-effort level to what the target model
+    /// actually supports on the Chat Completions API. Mirrors pi's
+    /// `clampReasoning` + `supportsXhigh` logic from
+    /// `packages/ai/src/providers/openai-completions.ts`:
+    ///
+    /// * `xhigh` is only valid on GPT-5.2/5.3/5.4 families and
+    ///   Opus 4.6/4.7. For everything else it collapses to `high`.
+    /// * All other values (`minimal`, `low`, `medium`, `high`) pass
+    ///   through untouched.
+    ///
+    /// The `model` string is matched case-insensitively against the raw
+    /// provider-qualified id (e.g. `"openai/gpt-5.4"`,
+    /// `"anthropic/claude-opus-4.7"`).
+    pub(crate) fn clamp_reasoning_effort_chat(model: &str, effort: &str) -> String {
+        let normalized = effort.trim().to_ascii_lowercase();
+        if normalized != "xhigh" {
+            return normalized;
+        }
+        let model_lc = model.to_ascii_lowercase();
+        let supports_xhigh = model_lc.contains("gpt-5.2")
+            || model_lc.contains("gpt-5.3")
+            || model_lc.contains("gpt-5.4")
+            || model_lc.contains("opus-4-6")
+            || model_lc.contains("opus-4.6")
+            || model_lc.contains("opus-4-7")
+            || model_lc.contains("opus-4.7");
+        if supports_xhigh {
+            "xhigh".to_string()
+        } else {
+            "high".to_string()
+        }
+    }
+
     fn is_openrouter(base_url: &str) -> bool {
         base_url
             .trim()
@@ -489,11 +596,12 @@ impl OpenAiGenericAdapter {
             && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
                 crate::model_variant::request_config(provider, &req.model, variant)
         {
+            let clamped = Self::clamp_reasoning_effort_chat(&req.model, &effort);
             if Self::is_openrouter(&base_url) {
                 // OpenRouter normalizes reasoning via a nested reasoning object.
-                body["reasoning"] = json!({ "effort": effort });
+                body["reasoning"] = json!({ "effort": clamped });
             } else {
-                body["reasoning_effort"] = json!(effort);
+                body["reasoning_effort"] = json!(clamped);
             }
         }
         if stream && compat.supports_usage_in_streaming {
@@ -721,6 +829,7 @@ impl OpenAiGenericAdapter {
             None,
             None,
             None,
+            None,
         )?;
         Ok(())
     }
@@ -734,6 +843,7 @@ impl OpenAiGenericAdapter {
         stream_events: Option<&LlmEventSender>,
         tool_calls: Option<&mut Vec<StreamingToolCall>>,
         provider_usage: Option<&mut Option<Value>>,
+        mut reasoning: Option<&mut ReasoningAccumulator>,
     ) -> Result<(), LlmTransportError> {
         let raw = raw.trim();
         if raw.is_empty() || raw == "[DONE]" {
@@ -771,14 +881,43 @@ impl OpenAiGenericAdapter {
             tx.send(LlmStreamEvent::Usage(usage.clone()));
         }
         for choice in &event.choices {
+            // Reasoning arrives before text on providers that emit it;
+            // apply it first so ordering in the final parts list matches.
+            if let Some(delta) = &choice.delta
+                && let Some(piece) = delta.reasoning_text()
+            {
+                Self::handle_reasoning_piece(
+                    reasoning.as_deref_mut(),
+                    stream_events,
+                    piece,
+                );
+            }
+            if let Some(message) = &choice.message
+                && let Some(piece) = message.reasoning_text()
+            {
+                Self::handle_reasoning_piece(
+                    reasoning.as_deref_mut(),
+                    stream_events,
+                    piece,
+                );
+            }
+
             if let Some(delta) = &choice.delta
                 && let Some(content) = delta.content.as_ref()
             {
+                // A content delta means we're no longer streaming reasoning;
+                // close the segment so later reasoning (if any) starts fresh.
+                if let Some(acc) = reasoning.as_deref_mut() {
+                    acc.close_segment();
+                }
                 Self::process_stream_content(full, &mut retained_deltas, stream_events, content);
             }
             if let Some(message) = &choice.message
                 && let Some(content) = message.content.as_ref()
             {
+                if let Some(acc) = reasoning.as_deref_mut() {
+                    acc.close_segment();
+                }
                 Self::process_stream_content(full, &mut retained_deltas, stream_events, content);
             }
         }
@@ -791,6 +930,12 @@ impl OpenAiGenericAdapter {
                     .into_iter()
                     .flat_map(|delta| delta.tool_calls.iter())
                 {
+                    // Tool-call activity also ends any in-progress
+                    // reasoning segment so the next reasoning burst is
+                    // its own part.
+                    if let Some(acc) = reasoning.as_deref_mut() {
+                        acc.close_segment();
+                    }
                     let index = tc.index.unwrap_or(0) as usize;
                     while tool_calls.len() <= index {
                         tool_calls.push(StreamingToolCall::default());
@@ -810,6 +955,22 @@ impl OpenAiGenericAdapter {
             }
         }
         Ok(())
+    }
+
+    fn handle_reasoning_piece(
+        reasoning: Option<&mut ReasoningAccumulator>,
+        stream_events: Option<&LlmEventSender>,
+        piece: &str,
+    ) {
+        if piece.is_empty() {
+            return;
+        }
+        if let Some(acc) = reasoning {
+            acc.push_delta(piece);
+        }
+        if let Some(tx) = stream_events {
+            tx.send(LlmStreamEvent::ReasoningDelta(piece.to_string()));
+        }
     }
 
     fn stream_error_code(err: &Value) -> Option<String> {
@@ -866,6 +1027,25 @@ impl OpenAiGenericAdapter {
         let Some(message) = choice.get("message") else {
             return parts;
         };
+
+        // Non-streaming path: some providers (e.g. llama.cpp, DeepSeek,
+        // OpenRouter-normalized) include reasoning alongside the final
+        // message. Check all three field names, matching pi's behavior.
+        // `reasoning` is placed before the visible text so replay order
+        // matches the streaming path.
+        for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+            if let Some(text) = message.get(field).and_then(|v| v.as_str())
+                && !text.is_empty()
+            {
+                parts.push(LlmOutputPart::Reasoning {
+                    text: text.to_string(),
+                    id: String::new(),
+                    summary: Vec::new(),
+                    encrypted_content: None,
+                });
+                break;
+            }
+        }
 
         if let Some(text) = message.get("content").and_then(|c| c.as_str())
             && !text.is_empty()
@@ -1060,6 +1240,17 @@ impl LlmTransport for OpenAiGenericAdapter {
                 if usage != LlmUsage::default() {
                     tx.send(LlmStreamEvent::Usage(usage.clone()));
                 }
+                // Replay any reasoning captured on the non-streaming
+                // response so the UI still gets to render it. Emit as a
+                // single delta per reasoning part (consumers accumulate
+                // by convention).
+                for part in &parts {
+                    if let LlmOutputPart::Reasoning { text, .. } = part
+                        && !text.is_empty()
+                    {
+                        tx.send(LlmStreamEvent::ReasoningDelta(text.clone()));
+                    }
+                }
                 if !content.is_empty() {
                     tx.send(LlmStreamEvent::Delta(content.clone()));
                 }
@@ -1080,6 +1271,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         let mut usage = LlmUsage::default();
         let mut provider_usage = None;
         let mut streaming_tool_calls: Vec<StreamingToolCall> = Vec::new();
+        let mut reasoning_acc = ReasoningAccumulator::default();
         drive_sse_response(
             resp,
             self.chunk_timeout,
@@ -1095,6 +1287,7 @@ impl LlmTransport for OpenAiGenericAdapter {
                     stream_events.as_ref(),
                     Some(&mut streaming_tool_calls),
                     Some(&mut provider_usage),
+                    Some(&mut reasoning_acc),
                 )?;
                 Ok(())
             },
@@ -1102,6 +1295,20 @@ impl LlmTransport for OpenAiGenericAdapter {
         .await?;
 
         let mut parts = Vec::new();
+        // Reasoning precedes the assistant text in the output list: it
+        // was emitted first over the wire, and consumers render it as
+        // pre-answer "thinking". Filter empties so spurious frames don't
+        // produce ghost reasoning parts.
+        for text in reasoning_acc.into_parts() {
+            if !text.is_empty() {
+                parts.push(LlmOutputPart::Reasoning {
+                    text,
+                    id: String::new(),
+                    summary: Vec::new(),
+                    encrypted_content: None,
+                });
+            }
+        }
         if !full.is_empty() {
             parts.push(LlmOutputPart::Text { text: full.clone() });
         }
@@ -1190,6 +1397,7 @@ mod tests {
             None,
             None,
             Some(&mut provider_usage),
+            None,
         )
         .unwrap();
 
@@ -1217,6 +1425,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect_err("stream error");
 
@@ -1241,6 +1450,7 @@ mod tests {
             None,
             Some(&mut tool_calls),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(tool_calls.len(), 1);
@@ -1257,6 +1467,7 @@ mod tests {
             None,
             Some(&mut tool_calls),
             None,
+            None,
         )
         .unwrap();
 
@@ -1269,6 +1480,7 @@ mod tests {
             &LlmUsage::default(),
             None,
             Some(&mut tool_calls),
+            None,
             None,
         )
         .unwrap();
@@ -1299,6 +1511,7 @@ mod tests {
             Some(&tx),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1322,7 +1535,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1331,7 +1543,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
         ]);
 
@@ -1353,7 +1564,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1362,7 +1572,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::Assistant,
@@ -1371,7 +1580,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: Some("call_1".to_string()),
                 tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1380,7 +1588,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: Some("call_1".to_string()),
                 tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
             },
         ]);
 
@@ -1411,7 +1618,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1420,7 +1626,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
         ]);
         req.model = "openai/gpt-5".to_string();
@@ -1449,7 +1654,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::Assistant,
@@ -1458,7 +1662,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: Some("call_1".to_string()),
                 tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1467,7 +1670,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: Some("call_1".to_string()),
                 tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
             },
         ]);
 
@@ -1494,7 +1696,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1503,7 +1704,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
         ]);
         req.model = "model".to_string();
@@ -1531,7 +1731,6 @@ mod tests {
             image_idx: -1,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
         }]);
         req.model = "anthropic/claude-sonnet-4.6".to_string();
 
@@ -1562,7 +1761,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1571,7 +1769,6 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
             },
         ]);
         req.model = "openai/gpt-5".to_string();
@@ -1592,52 +1789,366 @@ mod tests {
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
     }
 
-    #[test]
-    fn build_messages_drops_codex_reasoning_items_silently() {
-        // `kind == "reasoning"` is the session-model hand-off for
-        // Codex's encrypted chain-of-thought re-feeding (fix 1.3b).
-        // Non-Codex adapters must ignore it rather than leaking the
-        // opaque JSON blob into the user-visible message history.
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let req = req(vec![
-            LlmMessage {
-                role: LlmRole::System,
-                content: "sys".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: "hi".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-            },
-            LlmMessage {
-                role: LlmRole::Assistant,
-                content: r#"{"id":"rs_1","summary":["stuff"],"encrypted_content":"X"}"#
-                    .to_string(),
-                kind: "reasoning".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-            },
-        ]);
+    // ─── Reasoning / thinking stream tests ───
 
-        let messages = adapter.build_messages(&req);
-        // Only the system + user messages survive; the reasoning item
-        // is silently dropped so its JSON payload never reaches the
-        // non-Codex provider.
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["role"], "user");
-        for msg in &messages {
-            let content = msg["content"].as_str().unwrap_or("");
-            assert!(!content.contains("encrypted_content"));
-            assert!(!content.contains("rs_1"));
+    #[test]
+    fn reasoning_content_delta_produces_reasoning_part_and_stream_event() {
+        use std::sync::{Arc, Mutex};
+
+        let mut full = String::new();
+        let mut usage = LlmUsage::default();
+        let mut reasoning = ReasoningAccumulator::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let tx_events = events.clone();
+        let tx = crate::llm::types::LlmEventSender::new(move |event| {
+            tx_events.lock().unwrap().push(event);
+        });
+
+        // Reasoning delta, then content delta — simulating a provider
+        // that streams its chain-of-thought before the final answer.
+        OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"reasoning_content":"Thinking about "}}]}"#,
+            &mut full,
+            None,
+            &mut usage,
+            &LlmUsage::default(),
+            Some(&tx),
+            None,
+            None,
+            Some(&mut reasoning),
+        )
+        .unwrap();
+        OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"reasoning_content":"the answer."}}]}"#,
+            &mut full,
+            None,
+            &mut usage,
+            &LlmUsage::default(),
+            Some(&tx),
+            None,
+            None,
+            Some(&mut reasoning),
+        )
+        .unwrap();
+        OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"content":"Hi."}}]}"#,
+            &mut full,
+            None,
+            &mut usage,
+            &LlmUsage::default(),
+            Some(&tx),
+            None,
+            None,
+            Some(&mut reasoning),
+        )
+        .unwrap();
+
+        // Assistant text accumulates separately from reasoning.
+        assert_eq!(full, "Hi.");
+
+        // Reasoning accumulator holds the finalized segment in order.
+        let parts = reasoning.into_parts();
+        assert_eq!(parts, vec!["Thinking about the answer.".to_string()]);
+
+        // Stream events: two ReasoningDelta, then one Delta (order matches
+        // the order of arrival; this is load-bearing for the UI).
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.len(), 3);
+        match &events[0] {
+            LlmStreamEvent::ReasoningDelta(text) => {
+                assert_eq!(text, "Thinking about ");
+            }
+            other => panic!("expected ReasoningDelta, got {other:?}"),
         }
+        match &events[1] {
+            LlmStreamEvent::ReasoningDelta(text) => {
+                assert_eq!(text, "the answer.");
+            }
+            other => panic!("expected ReasoningDelta, got {other:?}"),
+        }
+        match &events[2] {
+            LlmStreamEvent::Delta(text) => {
+                assert_eq!(text, "Hi.");
+            }
+            other => panic!("expected Delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_field_variants_all_parsed() {
+        // Each variant — reasoning_content, reasoning, reasoning_text —
+        // must produce a ReasoningDelta so we accept all three provider
+        // dialects transparently.
+        for (payload, expected) in [
+            (
+                r#"{"choices":[{"delta":{"reasoning_content":"alpha"}}]}"#,
+                "alpha",
+            ),
+            (r#"{"choices":[{"delta":{"reasoning":"beta"}}]}"#, "beta"),
+            (
+                r#"{"choices":[{"delta":{"reasoning_text":"gamma"}}]}"#,
+                "gamma",
+            ),
+        ] {
+            use std::sync::{Arc, Mutex};
+
+            let mut full = String::new();
+            let mut usage = LlmUsage::default();
+            let mut reasoning = ReasoningAccumulator::default();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let tx_events = events.clone();
+            let tx = crate::llm::types::LlmEventSender::new(move |event| {
+                tx_events.lock().unwrap().push(event);
+            });
+
+            OpenAiGenericAdapter::process_sse_event_with_tools(
+                payload,
+                &mut full,
+                None,
+                &mut usage,
+                &LlmUsage::default(),
+                Some(&tx),
+                None,
+                None,
+                Some(&mut reasoning),
+            )
+            .unwrap();
+
+            let events = events.lock().unwrap().clone();
+            assert_eq!(events.len(), 1, "payload: {payload}");
+            match &events[0] {
+                LlmStreamEvent::ReasoningDelta(text) => {
+                    assert_eq!(text, expected, "payload: {payload}");
+                }
+                other => panic!("payload {payload}: expected ReasoningDelta, got {other:?}"),
+            }
+            assert_eq!(reasoning.into_parts(), vec![expected.to_string()]);
+        }
+    }
+
+    #[test]
+    fn delta_without_reasoning_field_produces_no_reasoning_part() {
+        use std::sync::{Arc, Mutex};
+
+        let mut full = String::new();
+        let mut usage = LlmUsage::default();
+        let mut reasoning = ReasoningAccumulator::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let tx_events = events.clone();
+        let tx = crate::llm::types::LlmEventSender::new(move |event| {
+            tx_events.lock().unwrap().push(event);
+        });
+
+        OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"content":"just text"}}]}"#,
+            &mut full,
+            None,
+            &mut usage,
+            &LlmUsage::default(),
+            Some(&tx),
+            None,
+            None,
+            Some(&mut reasoning),
+        )
+        .unwrap();
+
+        // No reasoning events should have fired.
+        let events = events.lock().unwrap().clone();
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, LlmStreamEvent::ReasoningDelta(_))),
+            "no reasoning deltas expected, got {events:?}"
+        );
+        // Accumulator should drain to an empty list — no spurious empty
+        // reasoning parts.
+        assert!(reasoning.into_parts().is_empty());
+    }
+
+    #[test]
+    fn empty_reasoning_field_is_ignored() {
+        // Some providers send `"reasoning":""` on nearly every delta to
+        // keep the schema stable. We must not treat those as a segment
+        // boundary or a delta.
+        let mut full = String::new();
+        let mut usage = LlmUsage::default();
+        let mut reasoning = ReasoningAccumulator::default();
+
+        OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"reasoning":""}}]}"#,
+            &mut full,
+            None,
+            &mut usage,
+            &LlmUsage::default(),
+            None,
+            None,
+            None,
+            Some(&mut reasoning),
+        )
+        .unwrap();
+
+        assert!(reasoning.into_parts().is_empty());
+    }
+
+    #[test]
+    fn reasoning_then_text_then_reasoning_produces_two_segments() {
+        // Pi's adapter starts a new thinking block whenever reasoning
+        // resumes after a non-reasoning event. We match that behaviour:
+        // text between two reasoning bursts breaks them into separate
+        // Reasoning parts (ordered before the text part? No — the
+        // second segment represents post-text "second thoughts" and
+        // stays in emission order).
+        let mut full = String::new();
+        let mut usage = LlmUsage::default();
+        let mut reasoning = ReasoningAccumulator::default();
+
+        for payload in [
+            r#"{"choices":[{"delta":{"reasoning":"first."}}]}"#,
+            r#"{"choices":[{"delta":{"content":"answer."}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning":"second."}}]}"#,
+        ] {
+            OpenAiGenericAdapter::process_sse_event_with_tools(
+                payload,
+                &mut full,
+                None,
+                &mut usage,
+                &LlmUsage::default(),
+                None,
+                None,
+                None,
+                Some(&mut reasoning),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(full, "answer.");
+        assert_eq!(
+            reasoning.into_parts(),
+            vec!["first.".to_string(), "second.".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_stream_response_captures_reasoning_from_message() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "pondering",
+                        "content": "answer"
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let parts = OpenAiGenericAdapter::response_parts_from_value(&value);
+        // Reasoning sits before text so replay order mirrors streaming.
+        assert_eq!(
+            parts,
+            vec![
+                LlmOutputPart::Reasoning {
+                    text: "pondering".to_string(),
+                    id: String::new(),
+                    summary: Vec::new(),
+                    encrypted_content: None,
+                },
+                LlmOutputPart::Text {
+                    text: "answer".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn non_stream_response_picks_first_non_empty_reasoning_field() {
+        // When a provider mirrors the same content across multiple fields
+        // (chutes.ai behaviour), we must only take it once.
+        let value: Value = serde_json::from_str(
+            r#"{
+                "choices": [{
+                    "message": {
+                        "reasoning_content": "think",
+                        "reasoning": "think",
+                        "content": "done"
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let parts = OpenAiGenericAdapter::response_parts_from_value(&value);
+        let reasoning_parts: Vec<&LlmOutputPart> = parts
+            .iter()
+            .filter(|p| matches!(p, LlmOutputPart::Reasoning { .. }))
+            .collect();
+        assert_eq!(reasoning_parts.len(), 1);
+    }
+
+    // ─── Reasoning-effort clamp ───
+    //
+    // Mirrors pi's `clampReasoning` + `supportsXhigh` from
+    // `packages/ai/src/providers/openai-completions.ts`: `xhigh` is only
+    // valid on GPT-5.2/5.3/5.4 and Opus 4.6/4.7. Everything else
+    // collapses `xhigh` to `high`.
+
+    #[test]
+    fn clamp_reasoning_effort_chat_passes_through_standard_levels() {
+        for effort in ["minimal", "low", "medium", "high"] {
+            assert_eq!(
+                OpenAiGenericAdapter::clamp_reasoning_effort_chat("anthropic/claude-sonnet-4.6", effort),
+                effort,
+            );
+        }
+    }
+
+    #[test]
+    fn clamp_reasoning_effort_chat_keeps_xhigh_for_supported_models() {
+        for model in [
+            "openai/gpt-5.2",
+            "openai/gpt-5.3",
+            "openai/gpt-5.4",
+            "anthropic/claude-opus-4-6",
+            "anthropic/claude-opus-4.6",
+            "anthropic/claude-opus-4-7",
+            "anthropic/claude-opus-4.7",
+        ] {
+            assert_eq!(
+                OpenAiGenericAdapter::clamp_reasoning_effort_chat(model, "xhigh"),
+                "xhigh",
+                "model {model} should support xhigh",
+            );
+        }
+    }
+
+    #[test]
+    fn clamp_reasoning_effort_chat_collapses_xhigh_for_unsupported_models() {
+        for model in [
+            "openai/gpt-5",
+            "openai/gpt-5.1",
+            "anthropic/claude-sonnet-4.6",
+            "anthropic/claude-opus-4.5",
+            "z-ai/glm-5",
+            "deepseek/deepseek-chat",
+        ] {
+            assert_eq!(
+                OpenAiGenericAdapter::clamp_reasoning_effort_chat(model, "xhigh"),
+                "high",
+                "model {model} should NOT support xhigh",
+            );
+        }
+    }
+
+    #[test]
+    fn clamp_reasoning_effort_chat_is_case_insensitive_and_trims() {
+        assert_eq!(
+            OpenAiGenericAdapter::clamp_reasoning_effort_chat("openai/gpt-5", "  XHIGH "),
+            "high",
+        );
+        assert_eq!(
+            OpenAiGenericAdapter::clamp_reasoning_effort_chat("openai/gpt-5", "HIGH"),
+            "high",
+        );
     }
 }
