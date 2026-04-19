@@ -696,12 +696,21 @@ impl CodexOAuthAdapter {
             "instructions": instructions,
             "input": input,
             "tools": tools,
-            "tool_choice": Self::tool_choice_value(&req.tool_choice),
             "parallel_tool_calls": !req.tools.is_empty(),
             "stream": stream,
             "store": false,
             "include": [],
         });
+        // `tool_choice` is only meaningful when the request advertises tools.
+        // In RLM mode we intentionally send `tools: []` because tools are
+        // documented in the prompt body and invoked via `lashlang`, not the
+        // native tool-call envelope. Sending `tool_choice: "none"` on top of
+        // an empty tool list adds a second "definitely don't call any
+        // function" signal that gpt-5.x reasoning models take literally,
+        // causing them to refuse to emit `call` expressions in lashlang.
+        if !req.tools.is_empty() {
+            body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));
+        }
         if let Some(effort) = req.model_variant.as_deref() {
             body["reasoning"] = json!({
                 "effort": Self::clamp_reasoning_effort(&req.model, effort),
