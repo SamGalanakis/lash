@@ -19,6 +19,14 @@ pub enum LlmOutputPart {
     Text {
         text: String,
     },
+    /// Human-readable summary of the model's reasoning ("thinking"), as
+    /// returned by providers that support reasoning summaries (e.g. Codex's
+    /// `response.reasoning_summary_text.*` events). Display-only — the
+    /// session replay layer must NOT resend this content to the model as
+    /// assistant input; encrypted reasoning re-feeding is a separate path.
+    Reasoning {
+        text: String,
+    },
     ToolCall {
         call_id: String,
         tool_name: String,
@@ -184,6 +192,10 @@ pub struct LlmUsage {
 #[derive(Clone, Debug)]
 pub enum LlmStreamEvent {
     Delta(String),
+    /// Incremental reasoning-summary text. Kept separate from `Delta` so
+    /// the UI can render it in a distinct muted/italic style rather than
+    /// mixing it into the assistant's final text.
+    ReasoningDelta(String),
     Part(LlmOutputPart),
     Usage(LlmUsage),
 }

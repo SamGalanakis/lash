@@ -60,6 +60,11 @@ pub enum PartKind {
     Prose,
     ToolCall,
     ToolResult,
+    /// Model "thinking" / reasoning summary. Stored on the session for
+    /// display and snapshot fidelity, but deliberately excluded from the
+    /// rendered prompt so it is never re-sent to the model as assistant
+    /// input. Re-feeding uses the separate encrypted-reasoning path.
+    Reasoning,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -166,12 +171,14 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
             | PartKind::Image
             | PartKind::Prose
             | PartKind::ToolCall
-            | PartKind::ToolResult => rendered,
+            | PartKind::ToolResult
+            | PartKind::Reasoning => rendered,
         },
         MessageRole::Assistant => match part.kind {
             PartKind::Code => rendered,
             PartKind::ToolCall => render_assistant_tool_call(part, &rendered),
             PartKind::Prose | PartKind::Text | PartKind::Image | PartKind::ToolResult => rendered,
+            PartKind::Reasoning => rendered,
             _ => rendered,
         },
         MessageRole::User => rendered,
@@ -215,6 +222,11 @@ fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachm
     }
     let mut out = Vec::new();
     for part in &msg.parts {
+        // Reasoning summaries are not part of the replayable transcript —
+        // they are local display annotations only.
+        if matches!(part.kind, PartKind::Reasoning) {
+            continue;
+        }
         if let Some(attachment) = attachment_from_part(part) {
             attachments.push(attachment);
             out.push("[Image attached]".to_string());
@@ -595,6 +607,12 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
     for msg in msgs {
         for part in &msg.parts {
             match part.kind {
+                // Reasoning summaries are display-only. Never feed them
+                // back to the model as assistant input — the only legal
+                // re-feeding path is the separate encrypted-reasoning
+                // channel, which does not flow through this prompt
+                // builder.
+                PartKind::Reasoning => continue,
                 PartKind::ToolCall => {
                     rendered.messages.push(LlmMessage {
                         role: LlmRole::Assistant,
@@ -1035,6 +1053,71 @@ mod tests {
         ];
 
         assert!(messages_are_live_resume_safe(&msgs));
+    }
+
+    #[test]
+    fn reasoning_parts_survive_snapshot_but_never_reach_the_model() {
+        let reasoning_part = Part {
+            id: "m1.p0".to_string(),
+            kind: PartKind::Reasoning,
+            content: "Thinking about how to answer.".to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: PruneState::Intact,
+        };
+
+        let msgs = vec![Message {
+            id: "m1".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                reasoning_part.clone(),
+                part(PartKind::Prose, "Here is the answer."),
+            ],
+            user_input: None,
+            origin: None,
+        }];
+
+        // JSON round-trip preserves the reasoning part — the snapshot
+        // layer must not silently drop it, otherwise replays would lose
+        // the trace.
+        let serialized = serde_json::to_string(&msgs).expect("serialize messages");
+        let deserialized: Vec<Message> =
+            serde_json::from_str(&serialized).expect("deserialize messages");
+        assert_eq!(deserialized[0].parts.len(), 2);
+        assert!(matches!(
+            deserialized[0].parts[0].kind,
+            PartKind::Reasoning
+        ));
+        assert_eq!(
+            deserialized[0].parts[0].content,
+            "Thinking about how to answer."
+        );
+
+        // But the rendered LLM prompt must NOT include the reasoning
+        // content in any assistant message — that's the safety property
+        // for the next-turn re-feed path.
+        let rendered = render_structured_prompt(&msgs);
+        assert_eq!(rendered.messages.len(), 1);
+        assert_eq!(rendered.messages[0].role, LlmRole::Assistant);
+        assert_eq!(rendered.messages[0].content, "Here is the answer.");
+        assert!(
+            !rendered.messages[0]
+                .content
+                .contains("Thinking about how to answer.")
+        );
+
+        // Even when the assistant message consists solely of reasoning,
+        // no assistant turn should be sent to the model.
+        let reasoning_only = vec![Message {
+            id: "m2".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![reasoning_part],
+            user_input: None,
+            origin: None,
+        }];
+        let rendered_only = render_structured_prompt(&reasoning_only);
+        assert!(rendered_only.messages.is_empty());
     }
 
     #[test]

@@ -1016,6 +1016,54 @@ impl RuntimeTurnDriver {
                     }
                 }
             }
+            LlmStreamEvent::ReasoningDelta(delta) => {
+                if !delta.is_empty() {
+                    self.log_llm_stream_event(
+                        state.debug,
+                        LlmStreamEventLog {
+                            session_id: &self.session_id,
+                            iteration: state.iteration,
+                            event_type: "reasoning_delta",
+                            text: LlmDebugText {
+                                raw: None,
+                                visible: Some(&delta),
+                            },
+                            usage: None,
+                            tool_call: None,
+                        },
+                    );
+                    state.streamed_output.push_reasoning(&delta);
+                    send_session_event(
+                        event_tx,
+                        SessionEvent::ReasoningDelta { content: delta },
+                    )
+                    .await;
+                }
+            }
+            LlmStreamEvent::Part(LlmOutputPart::Reasoning { text }) => {
+                if !text.is_empty() {
+                    self.log_llm_stream_event(
+                        state.debug,
+                        LlmStreamEventLog {
+                            session_id: &self.session_id,
+                            iteration: state.iteration,
+                            event_type: "reasoning_part",
+                            text: LlmDebugText {
+                                raw: None,
+                                visible: Some(&text),
+                            },
+                            usage: None,
+                            tool_call: None,
+                        },
+                    );
+                    state.streamed_output.push_reasoning(&text);
+                    send_session_event(
+                        event_tx,
+                        SessionEvent::ReasoningDelta { content: text },
+                    )
+                    .await;
+                }
+            }
             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
                 if !text.is_empty() {
                     *state.text_streamed = true;
@@ -1120,6 +1168,10 @@ pub(super) fn llm_response_has_content(response: &LlmResponse) -> bool {
     response.parts.iter().any(|part| match part {
         LlmOutputPart::Text { text } => !text.is_empty(),
         LlmOutputPart::ToolCall { .. } => true,
+        // Reasoning alone is not "content" for the purposes of deciding
+        // whether the response is empty — the model must also produce
+        // text or a tool call.
+        LlmOutputPart::Reasoning { .. } => false,
     })
 }
 

@@ -35,6 +35,16 @@ struct CodexStreamState {
     usage: LlmUsage,
     final_response: Option<Value>,
     current_text_part: Option<usize>,
+    /// Index of the reasoning-summary `LlmOutputPart` currently receiving
+    /// deltas. Each `response.reasoning_summary_part.added` starts a new
+    /// entry; the server groups reasoning output into multiple "parts"
+    /// (paragraphs) so we keep one slot per part instead of merging them
+    /// into a single blob.
+    current_reasoning_part: Option<usize>,
+    /// Streaming-time reasoning-summary deltas collected since the last
+    /// flush. Fed to `LlmStreamEvent::ReasoningDelta` by the caller so
+    /// the UI can render thinking incrementally.
+    reasoning_deltas: Vec<String>,
     tool_calls: HashMap<String, CodexStreamingToolCall>,
 }
 
@@ -199,6 +209,52 @@ impl CodexStreamState {
         }
     }
 
+    fn begin_reasoning_part(&mut self) {
+        let index = self.parts.len();
+        self.parts.push(LlmOutputPart::Reasoning {
+            text: String::new(),
+        });
+        self.current_reasoning_part = Some(index);
+    }
+
+    fn push_reasoning_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let index = match self.current_reasoning_part {
+            Some(index) => index,
+            None => {
+                // Some providers send a delta before the `part.added`
+                // event. Create an implicit part so we don't drop text.
+                self.begin_reasoning_part();
+                self.current_reasoning_part
+                    .expect("reasoning part just pushed")
+            }
+        };
+        if let Some(LlmOutputPart::Reasoning { text }) = self.parts.get_mut(index) {
+            text.push_str(delta);
+        }
+        self.reasoning_deltas.push(delta.to_string());
+    }
+
+    fn finish_reasoning_part(&mut self) {
+        // Drop the cursor; the next `part.added` will open a fresh slot.
+        // Trim trailing whitespace off the completed part so concatenated
+        // paragraphs don't carry stray blanks.
+        if let Some(index) = self.current_reasoning_part.take()
+            && let Some(LlmOutputPart::Reasoning { text }) = self.parts.get_mut(index)
+        {
+            let trimmed = text.trim_end();
+            if trimmed.len() != text.len() {
+                *text = trimmed.to_string();
+            }
+        }
+    }
+
+    fn take_reasoning_deltas(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.reasoning_deltas)
+    }
+
     fn update_tool_call_from_item(&mut self, item: &Value) -> Option<String> {
         let item_id = item.get("id").and_then(|v| v.as_str())?.to_string();
         let tool_call = self.tool_calls.entry(item_id.clone()).or_default();
@@ -266,6 +322,7 @@ impl CodexStreamState {
             .iter()
             .filter_map(|part| match part {
                 LlmOutputPart::Text { text } if text.is_empty() => None,
+                LlmOutputPart::Reasoning { text } if text.trim().is_empty() => None,
                 _ => Some(part.clone()),
             })
             .collect::<Vec<_>>();
@@ -301,7 +358,7 @@ impl CodexStreamState {
             .iter()
             .filter_map(|part| match part {
                 LlmOutputPart::Text { text } => Some(text.as_str()),
-                LlmOutputPart::ToolCall { .. } => None,
+                LlmOutputPart::ToolCall { .. } | LlmOutputPart::Reasoning { .. } => None,
             })
             .collect::<String>()
     }
@@ -675,9 +732,41 @@ impl CodexOAuthAdapter {
                         Some("function_call") => {
                             let _ = state.update_tool_call_from_item(item);
                         }
+                        // For reasoning items we wait for
+                        // `reasoning_summary_part.added` to open a slot —
+                        // the outer item carries no text on its own.
                         _ => {}
                     }
                 }
+            }
+            "response.reasoning_summary_part.added" => {
+                state.begin_reasoning_part();
+            }
+            "response.reasoning_summary_text.delta" => {
+                if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
+                    state.push_reasoning_delta(delta);
+                }
+            }
+            "response.reasoning_summary_text.done" => {
+                // The `text` field on this event is the full text for the
+                // current part; if our accumulator already matches we do
+                // nothing, otherwise reconcile by appending the missing
+                // suffix (mirrors the logic for `output_text.done`).
+                if let Some(text) = event.get("text").and_then(|v| v.as_str())
+                    && let Some(index) = state.current_reasoning_part
+                    && let Some(LlmOutputPart::Reasoning { text: existing }) =
+                        state.parts.get(index)
+                {
+                    let existing = existing.clone();
+                    if text != existing
+                        && let Some(suffix) = text.strip_prefix(existing.as_str())
+                    {
+                        state.push_reasoning_delta(suffix);
+                    }
+                }
+            }
+            "response.reasoning_summary_part.done" => {
+                state.finish_reasoning_part();
             }
             "response.output_text.delta" => {
                 if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
@@ -712,6 +801,7 @@ impl CodexOAuthAdapter {
                                 let _ = state.finish_tool_call(item);
                             }
                         }
+                        Some("reasoning") => state.finish_reasoning_part(),
                         _ => {}
                     }
                 }
@@ -1025,8 +1115,14 @@ impl LlmTransport for CodexOAuthAdapter {
                         tx.send(LlmStreamEvent::Delta(piece.clone()));
                     }
                     for part in &response.parts {
-                        if matches!(part, LlmOutputPart::ToolCall { .. }) {
-                            tx.send(LlmStreamEvent::Part(part.clone()));
+                        match part {
+                            LlmOutputPart::ToolCall { .. } => {
+                                tx.send(LlmStreamEvent::Part(part.clone()));
+                            }
+                            LlmOutputPart::Reasoning { text } if !text.is_empty() => {
+                                tx.send(LlmStreamEvent::ReasoningDelta(text.clone()));
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1081,6 +1177,9 @@ impl LlmTransport for CodexOAuthAdapter {
                     &prev_usage,
                 );
                 if let Some(tx) = &stream_events {
+                    for piece in state.take_reasoning_deltas() {
+                        tx.send(LlmStreamEvent::ReasoningDelta(piece));
+                    }
                     for part in emitted_parts {
                         tx.send(LlmStreamEvent::Part(part));
                     }
@@ -1621,5 +1720,144 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         assert_eq!(part["image_url"], "data:image/png;base64,AAECAw==");
         assert!(part.get("image_base64").is_none());
         assert!(part.get("mime_type").is_none());
+    }
+
+    #[test]
+    fn reasoning_summary_events_produce_reasoning_parts_and_deltas() {
+        let payload = r#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","summary":[]}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Checking the "}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"codebase."}
+
+event: response.reasoning_summary_text.done
+data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","text":"Checking the codebase."}
+
+event: response.reasoning_summary_part.done
+data: {"type":"response.reasoning_summary_part.done","item_id":"rs_1"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"Checking the codebase."}]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"Done."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","text":"Done."}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"input_tokens":12,"output_tokens":3}}}
+"#;
+
+        let mut state = CodexStreamState::default();
+        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
+
+        // Reasoning deltas should have been accumulated on the
+        // `reasoning_deltas` channel so the UI can render incrementally.
+        assert_eq!(
+            state.reasoning_deltas,
+            vec!["Checking the ".to_string(), "codebase.".to_string()]
+        );
+
+        // The finalized response parts should carry a `Reasoning` entry
+        // before the assistant text, exposing the trace to consumers that
+        // rehydrate the turn after the stream ends.
+        let parts = state.response_parts();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0],
+            LlmOutputPart::Reasoning {
+                text: "Checking the codebase.".to_string(),
+            }
+        );
+        assert_eq!(
+            parts[1],
+            LlmOutputPart::Text {
+                text: "Done.".to_string(),
+            }
+        );
+
+        // `full_text` must still report only the assistant's answer so
+        // downstream text-centric code paths (usage logging, etc.) stay
+        // unaffected by the new reasoning signal.
+        assert_eq!(state.full_text, "Done.");
+    }
+
+    #[test]
+    fn multiple_reasoning_summary_parts_become_separate_parts() {
+        let mut state = CodexStreamState::default();
+
+        for event in [
+            r#"{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}"#,
+            r#"{"type":"response.reasoning_summary_text.delta","delta":"First paragraph."}"#,
+            r#"{"type":"response.reasoning_summary_part.done"}"#,
+            r#"{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}"#,
+            r#"{"type":"response.reasoning_summary_text.delta","delta":"Second paragraph."}"#,
+            r#"{"type":"response.reasoning_summary_part.done"}"#,
+        ] {
+            CodexOAuthAdapter::process_sse_event(event, &mut state, None).unwrap();
+        }
+
+        let parts = state.response_parts();
+        assert_eq!(
+            parts,
+            vec![
+                LlmOutputPart::Reasoning {
+                    text: "First paragraph.".to_string(),
+                },
+                LlmOutputPart::Reasoning {
+                    text: "Second paragraph.".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn reasoning_summary_done_reconciles_missing_suffix() {
+        let mut state = CodexStreamState::default();
+
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.reasoning_summary_text.delta","delta":"Looking"}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+        // Server sends the `done` event with the full text; the
+        // accumulator must pick up the missing suffix without duplicating
+        // the prefix that already arrived.
+        CodexOAuthAdapter::process_sse_event(
+            r#"{"type":"response.reasoning_summary_text.done","text":"Looking at it."}"#,
+            &mut state,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.reasoning_deltas,
+            vec!["Looking".to_string(), " at it.".to_string()]
+        );
+        let parts = state.response_parts();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0],
+            LlmOutputPart::Reasoning {
+                text: "Looking at it.".to_string(),
+            }
+        );
     }
 }

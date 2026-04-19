@@ -212,6 +212,7 @@ impl ProtocolDriverHandle for StandardDriver {
     ) -> Vec<DriverAction> {
         let response_parts = normalized_response_parts(&llm_response);
         let mut assistant_text = String::new();
+        let mut reasoning_paragraphs: Vec<String> = Vec::new();
         let mut tool_calls: Vec<(String, String, String)> = Vec::new();
         let mut actions = Vec::new();
 
@@ -226,6 +227,12 @@ impl ProtocolDriverHandle for StandardDriver {
                                 content: assistant_text[previous_len..].to_string(),
                             }));
                         }
+                    }
+                }
+                LlmOutputPart::Reasoning { text } => {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        reasoning_paragraphs.push(trimmed.to_string());
                     }
                 }
                 LlmOutputPart::ToolCall {
@@ -258,6 +265,7 @@ impl ProtocolDriverHandle for StandardDriver {
 
             actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
                 assistant_text,
+                &reasoning_paragraphs,
             )]));
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
@@ -268,6 +276,21 @@ impl ProtocolDriverHandle for StandardDriver {
 
         let asst_id = fresh_message_id();
         let mut assistant_parts = Vec::new();
+        // Reasoning parts come FIRST so the renderer can draw the
+        // "thinking" block directly above the assistant's text /
+        // tool-call. They are marked `PartKind::Reasoning` which the
+        // prompt builder strips before the next request is sent.
+        for paragraph in &reasoning_paragraphs {
+            assistant_parts.push(Part {
+                id: format!("{}.p{}", asst_id, assistant_parts.len()),
+                kind: PartKind::Reasoning,
+                content: paragraph.clone(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            });
+        }
         if !assistant_text.trim().is_empty() {
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
@@ -426,9 +449,19 @@ impl ProtocolDriverHandle for RlmDriver {
         })];
 
         let mut assistant_text = String::new();
+        let mut reasoning_paragraphs: Vec<String> = Vec::new();
         for part in normalized_response_parts(&llm_response) {
-            if let LlmOutputPart::Text { text } = part {
-                append_assistant_text_part(&mut assistant_text, &text);
+            match part {
+                LlmOutputPart::Text { text } => {
+                    append_assistant_text_part(&mut assistant_text, &text);
+                }
+                LlmOutputPart::Reasoning { text } => {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        reasoning_paragraphs.push(trimmed.to_string());
+                    }
+                }
+                LlmOutputPart::ToolCall { .. } => {}
             }
         }
 
@@ -449,6 +482,7 @@ impl ProtocolDriverHandle for RlmDriver {
                 RlmTermination::ProseWithoutFence => {
                     actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
                         assistant_text,
+                        &reasoning_paragraphs,
                     )]));
                     actions.push(DriverAction::StartCheckpoint {
                         checkpoint: CheckpointKind::BeforeCompletion,
@@ -457,7 +491,7 @@ impl ProtocolDriverHandle for RlmDriver {
                 }
                 RlmTermination::Finish { .. } => {
                     actions.push(DriverAction::AppendMessages(vec![
-                        assistant_prose_message(assistant_text),
+                        assistant_prose_message(assistant_text, &reasoning_paragraphs),
                         typed_rlm_finish_reminder_message(),
                     ]));
                     actions.push(DriverAction::AdvanceIteration);
@@ -479,6 +513,7 @@ impl ProtocolDriverHandle for RlmDriver {
 
         actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
             assistant_text,
+            &reasoning_paragraphs,
         )]));
         actions.push(DriverAction::StartExec {
             code: fence.code,
@@ -571,6 +606,7 @@ impl ProtocolDriverHandle for RlmDriver {
             };
             actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
                 rendered,
+                &[],
             )]));
             actions.push(DriverAction::Emit(SessionEvent::TypedFinish {
                 value: finish_value.clone(),
@@ -647,20 +683,33 @@ fn normalized_response_parts(llm_response: &LlmResponse) -> Vec<LlmOutputPart> {
     }
 }
 
-fn assistant_prose_message(content: String) -> Message {
+fn assistant_prose_message(content: String, reasoning_paragraphs: &[String]) -> Message {
     let id = fresh_message_id();
-    Message {
-        id: id.clone(),
-        role: MessageRole::Assistant,
-        parts: vec![Part {
-            id: format!("{id}.p0"),
-            kind: PartKind::Prose,
-            content,
+    let mut parts: Vec<Part> = Vec::with_capacity(reasoning_paragraphs.len() + 1);
+    for paragraph in reasoning_paragraphs {
+        parts.push(Part {
+            id: format!("{id}.p{}", parts.len()),
+            kind: PartKind::Reasoning,
+            content: paragraph.clone(),
             attachment: None,
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
-        }],
+        });
+    }
+    parts.push(Part {
+        id: format!("{id}.p{}", parts.len()),
+        kind: PartKind::Prose,
+        content,
+        attachment: None,
+        tool_call_id: None,
+        tool_name: None,
+        prune_state: PruneState::Intact,
+    });
+    Message {
+        id,
+        role: MessageRole::Assistant,
+        parts,
         user_input: None,
         origin: None,
     }
