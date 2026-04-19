@@ -687,6 +687,17 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
                 app.queue_turn(PreparedTurn::prepare(input, Vec::new(), &app.skills));
                 app.dirty = true;
             }
+            UiHostEffect::QueuePreparedTurn {
+                display_text,
+                effective_text,
+            } => {
+                app.queue_turn(PreparedTurn::prepare_with_effective_text(
+                    display_text,
+                    effective_text,
+                    Vec::new(),
+                ));
+                app.dirty = true;
+            }
             UiHostEffect::WakeSession { input } => {
                 app.queue_monitor_wake(input);
             }

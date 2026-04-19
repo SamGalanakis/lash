@@ -1914,6 +1914,7 @@ version = "0.2.60"
 dependencies = [
  "async-trait",
  "lash",
+ "lashlang",
  "serde",
  "serde_json",
  "tokio",

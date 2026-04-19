@@ -27,7 +27,9 @@ use crate::session_model::{
     fresh_message_id, make_error_event, plugin_message_to_message, reassign_part_ids,
     transport_stream_events,
 };
-use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
+use crate::tool_dispatch::{
+    ToolDispatchContext, dispatch_tool_call_with_execution_context,
+};
 use crate::{
     CheckpointKind, ExecutionMode, ExternalInvokeError, PersistedTurnState,
     PersistentRuntimeServices, PromptHookContext, RuntimeServices, SandboxMessage, Session,
@@ -1298,6 +1300,12 @@ fn fallback_assistant_output_from_state(state: &SessionStateEnvelope) -> String 
             message
                 .parts
                 .iter()
+                .filter(|part| {
+                    matches!(
+                        part.kind,
+                        PartKind::Text | PartKind::Prose | PartKind::Image
+                    )
+                })
                 .map(|part| part.content.as_str())
                 .collect::<String>()
         })

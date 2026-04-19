@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full"] }
+lashlang = { path = "../lashlang" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

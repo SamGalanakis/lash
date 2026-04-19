@@ -434,6 +434,18 @@ fn parse_output_schema(value: Option<&Value>) -> Result<Option<Value>, String> {
     if output.is_empty() {
         return Err("at least one output field is required".to_string());
     }
+
+    // Fast path: lashlang `Type { ... }` literals are delivered wrapped with a
+    // single `$lash_type` key whose value is already a JSON Schema. Pass it
+    // through directly so richer types (enums, nested records, optional fields,
+    // `list[<composite>]`) are preserved end-to-end.
+    if output.len() == 1
+        && let Some(schema) = output.get(lashlang::LASH_TYPE_KEY)
+    {
+        validate_schema(schema)?;
+        return Ok(Some(schema.clone()));
+    }
+
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for (name, descriptor) in output {
@@ -449,6 +461,23 @@ fn parse_output_schema(value: Option<&Value>) -> Result<Option<Value>, String> {
         "required": required,
         "additionalProperties": false,
     })))
+}
+
+/// Lightweight sanity check for a JSON Schema handed to us by the runtime.
+/// We only reject shapes that would produce a useless prompt; the provider's
+/// structured-output path does the full enforcement.
+fn validate_schema(schema: &Value) -> Result<(), String> {
+    let object = schema
+        .as_object()
+        .ok_or_else(|| "Type schema must be a JSON object".to_string())?;
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Type schema missing `type` field".to_string())?;
+    match kind {
+        "object" | "array" | "string" | "integer" | "number" | "boolean" => Ok(()),
+        other => Err(format!("unsupported Type schema kind `{other}`")),
+    }
 }
 
 fn type_descriptor_to_json_schema(descriptor: &str) -> Result<Value, String> {
@@ -561,6 +590,46 @@ mod tests {
         assert_eq!(schema["properties"]["answer"]["type"], json!("string"));
         assert_eq!(schema["properties"]["count"]["type"], json!("integer"));
         assert_eq!(schema["properties"]["items"]["type"], json!("array"));
+    }
+
+    #[test]
+    fn output_schema_passes_through_lash_type_wrapper() {
+        let inner_schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "status": { "type": "string", "enum": ["ok", "err"] }
+            },
+            "required": ["name", "tags", "status"],
+            "additionalProperties": false
+        });
+        let wrapped = json!({ lashlang::LASH_TYPE_KEY: inner_schema.clone() });
+        let schema = parse_output_schema(Some(&wrapped))
+            .expect("schema")
+            .expect("present");
+        assert_eq!(schema, inner_schema);
+    }
+
+    #[test]
+    fn output_schema_rejects_lash_type_without_type_field() {
+        let wrapped = json!({ lashlang::LASH_TYPE_KEY: {"properties": {}} });
+        let err = parse_output_schema(Some(&wrapped)).expect_err("missing type");
+        assert!(err.contains("type"), "error: {err}");
+    }
+
+    #[test]
+    fn output_schema_accepts_array_top_level_type() {
+        let wrapped = json!({
+            lashlang::LASH_TYPE_KEY: {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        });
+        let schema = parse_output_schema(Some(&wrapped))
+            .expect("schema")
+            .expect("present");
+        assert_eq!(schema["type"], json!("array"));
     }
 
     #[test]

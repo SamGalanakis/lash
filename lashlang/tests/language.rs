@@ -1336,3 +1336,128 @@ fn expect_string<'a>(args: &'a Record, key: &str) -> Result<&'a str, ToolHostErr
         _ => Err(ToolHostError::new(format!("missing string arg: {key}"))),
     }
 }
+
+// ------------------------------------------------------------------
+//  End-to-end Type literal integration tests
+// ------------------------------------------------------------------
+
+#[test]
+fn end_to_end_type_value_is_json_schema_shaped() {
+    let program = parse(
+        r#"
+        Books = Type {
+          title: str,
+          genre: enum["fiction", "non-fiction"],
+          tags: list[str],
+          meta: Type {
+            pages: int,
+            published: int
+          },
+          isbn: str?
+        }
+        finish Books
+        "#,
+    )
+    .expect("should parse");
+    let host = TestHost::default();
+    let mut state = State::new();
+    let outcome =
+        lashlang::execute_program(&program, &mut state, &host).expect("should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    let schema = lashlang::unwrap_type_value(&value)
+        .and_then(Value::as_record)
+        .expect("wrapped type");
+    assert_eq!(schema["type"], Value::String("object".into()));
+    let required = match &schema["required"] {
+        Value::List(items) => items,
+        _ => panic!("required must be list"),
+    };
+    // isbn is optional → 4 required
+    assert_eq!(required.len(), 4);
+}
+
+#[test]
+fn type_is_usable_as_a_tool_call_argument() {
+    #[derive(Default)]
+    struct CaptureHost {
+        captured: std::sync::Mutex<Option<Value>>,
+    }
+    impl ToolHost for CaptureHost {
+        fn call(&self, _: &str, args: &Record) -> Result<Value, ToolHostError> {
+            *self.captured.lock().unwrap() = args.get("output").cloned();
+            Ok(Value::Null)
+        }
+    }
+    let host = CaptureHost::default();
+    let program = parse(
+        r#"
+        Shape = Type { name: str, labels: list[enum["a","b"]] }
+        call spawn_agent { task: "find X", output: Shape }
+        finish null
+        "#,
+    )
+    .expect("should parse");
+    let mut state = State::new();
+    lashlang::execute_program(&program, &mut state, &host).expect("should run");
+    let captured = host.captured.lock().unwrap().clone().expect("captured arg");
+    let inner = lashlang::unwrap_type_value(&captured).expect("wrapped type");
+    let schema = inner.as_record().expect("schema record");
+    assert_eq!(schema["type"], Value::String("object".into()));
+    let props = schema["properties"].as_record().unwrap();
+    let labels = props["labels"].as_record().unwrap();
+    assert_eq!(labels["type"], Value::String("array".into()));
+    let items = labels["items"].as_record().unwrap();
+    let enum_values = match &items["enum"] {
+        Value::List(items) => items,
+        _ => panic!("enum should be list"),
+    };
+    assert_eq!(enum_values.len(), 2);
+}
+
+#[test]
+fn undefined_ref_in_type_produces_runtime_error() {
+    let program = parse("finish Type { inner: Missing }").expect("should parse");
+    let host = TestHost::default();
+    let mut state = State::new();
+    let err = lashlang::execute_program(&program, &mut state, &host)
+        .expect_err("Missing is undefined");
+    assert!(matches!(err, RuntimeError::UndefinedVariable { .. }));
+}
+
+#[test]
+fn snapshot_round_trip_preserves_type_values() {
+    let program = parse(
+        r#"
+        Books = Type { title: str, count: int }
+        finish Books
+        "#,
+    )
+    .expect("should parse");
+    let host = TestHost::default();
+    let mut state = State::new();
+    let outcome =
+        lashlang::execute_program(&program, &mut state, &host).expect("should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    let snapshot = state.snapshot();
+    let serialized = serde_json::to_string(&snapshot).expect("serialize");
+    let restored: lashlang::Snapshot =
+        serde_json::from_str(&serialized).expect("deserialize");
+    let restored_state = State::from_snapshot(restored);
+    // Re-execute a program that references Books — the ref should still resolve.
+    let program2 = parse("finish Books").expect("parse");
+    let mut state2 = restored_state;
+    let outcome2 = lashlang::execute_program(&program2, &mut state2, &host).expect("run");
+    let ExecutionOutcome::Finished(v2) = outcome2 else {
+        panic!("expected finish");
+    };
+    assert_eq!(value, v2);
+}
+
+// Silence the warnings emitted when the module compiles but some helpers are
+// unused.
+#[allow(dead_code)]
+fn _use_unused(_: ExecuteError) {}

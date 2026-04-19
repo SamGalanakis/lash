@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, CallExpr, Expr, Program, Stmt, UnaryOp};
+use crate::ast::{BinaryOp, CallExpr, Expr, Program, Stmt, TypeExpr, TypeField, UnaryOp};
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
 
@@ -334,6 +334,10 @@ impl Parser {
             TokenKind::Ident(name) => {
                 let name = name.clone();
                 self.bump();
+                if name == "Type" && matches!(self.peek_kind(), TokenKind::LBrace) {
+                    let ty = self.parse_type_object()?;
+                    return Ok(Expr::TypeLiteral(Box::new(ty)));
+                }
                 if matches!(self.peek_kind(), TokenKind::LParen) {
                     self.bump();
                     let mut args = Vec::new();
@@ -424,6 +428,107 @@ impl Parser {
         let args = self.parse_record_entries()?;
         self.expect_exact(TokenKind::RBrace, "`}`")?;
         Ok(CallExpr { name, args })
+    }
+
+    fn parse_type_object(&mut self) -> Result<TypeExpr, ParseError> {
+        self.expect_exact(TokenKind::LBrace, "`{`")?;
+        let mut fields = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        if !matches!(self.peek_kind(), TokenKind::RBrace) {
+            loop {
+                let name_token_span = self.peek().span;
+                let name = self.expect_ident()?;
+                if !seen.insert(name.clone()) {
+                    return Err(ParseError::Expected {
+                        expected: "unique field name",
+                        found: format!("duplicate field `{name}`"),
+                        span: name_token_span,
+                    });
+                }
+                self.expect_exact(TokenKind::Colon, "`:`")?;
+                let ty = self.parse_type_expr()?;
+                let optional = if matches!(self.peek_kind(), TokenKind::Question) {
+                    self.bump();
+                    true
+                } else {
+                    false
+                };
+                fields.push(TypeField { name, ty, optional });
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        self.expect_exact(TokenKind::RBrace, "`}`")?;
+        Ok(TypeExpr::Object(fields))
+    }
+
+    fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
+        let token = self.peek().clone();
+        match token.kind {
+            TokenKind::Ident(name) => {
+                self.bump();
+                match name.as_str() {
+                    "str" | "string" => Ok(TypeExpr::Str),
+                    "int" | "integer" => Ok(TypeExpr::Int),
+                    "float" | "number" => Ok(TypeExpr::Float),
+                    "bool" | "boolean" => Ok(TypeExpr::Bool),
+                    "dict" | "object" => Ok(TypeExpr::Dict),
+                    "any" => Ok(TypeExpr::Any),
+                    "enum" => {
+                        self.expect_exact(TokenKind::LBracket, "`[`")?;
+                        let mut values = Vec::new();
+                        if !matches!(self.peek_kind(), TokenKind::RBracket) {
+                            loop {
+                                let value = self.expect_string_literal()?;
+                                values.push(value);
+                                if matches!(self.peek_kind(), TokenKind::Comma) {
+                                    self.bump();
+                                    continue;
+                                }
+                                break;
+                            }
+                        }
+                        if values.is_empty() {
+                            return Err(ParseError::Expected {
+                                expected: "at least one enum string literal",
+                                found: "empty enum".to_string(),
+                                span: token.span,
+                            });
+                        }
+                        self.expect_exact(TokenKind::RBracket, "`]`")?;
+                        Ok(TypeExpr::Enum(values))
+                    }
+                    "list" => {
+                        self.expect_exact(TokenKind::LBracket, "`[`")?;
+                        let inner = self.parse_type_expr()?;
+                        self.expect_exact(TokenKind::RBracket, "`]`")?;
+                        Ok(TypeExpr::List(Box::new(inner)))
+                    }
+                    "Type" => self.parse_type_object(),
+                    _ => Ok(TypeExpr::Ref(name)),
+                }
+            }
+            _ => Err(ParseError::Expected {
+                expected: "type expression",
+                found: render_kind(&token.kind),
+                span: token.span,
+            }),
+        }
+    }
+
+    fn expect_string_literal(&mut self) -> Result<String, ParseError> {
+        let token = self.bump().clone();
+        match token.kind {
+            TokenKind::String(value) => Ok(value),
+            other => Err(ParseError::Expected {
+                expected: "string literal",
+                found: render_kind(&other),
+                span: token.span,
+            }),
+        }
     }
 
     fn expect_ident(&mut self) -> Result<String, ParseError> {
@@ -813,6 +918,93 @@ mod tests {
         let tokens = lex("x").expect("lexing should succeed");
         let parser = Parser { tokens, index: 1 };
         assert_eq!(parser.prev_span(), Span { start: 0, end: 1 });
+    }
+
+    #[test]
+    fn parses_type_literal_with_all_kinds() {
+        let program = parse(
+            r#"
+            Books = Type {
+              title: str,
+              count: int,
+              rating: float,
+              active: bool,
+              meta: dict,
+              extra: any,
+              genre: enum["fiction", "non-fiction"],
+              tags: list[str],
+              chapters: list[Type { name: str, page: int }],
+              nested: Type { pages: int },
+              isbn: str?,
+              reference: Books
+            }
+            finish Books
+            "#,
+        )
+        .expect("program should parse");
+
+        let Stmt::Assign { expr, .. } = &program.statements[0] else {
+            panic!("expected assign");
+        };
+        let Expr::TypeLiteral(ty) = expr else {
+            panic!("expected TypeLiteral");
+        };
+        let TypeExpr::Object(fields) = ty.as_ref() else {
+            panic!("expected object");
+        };
+        assert_eq!(fields.len(), 12);
+        assert!(matches!(fields[0].ty, TypeExpr::Str));
+        assert!(matches!(fields[1].ty, TypeExpr::Int));
+        assert!(matches!(fields[5].ty, TypeExpr::Any));
+        assert!(matches!(fields[6].ty, TypeExpr::Enum(_)));
+        assert!(matches!(fields[7].ty, TypeExpr::List(_)));
+        assert!(matches!(fields[9].ty, TypeExpr::Object(_)));
+        assert!(fields[10].optional);
+        assert!(matches!(fields[11].ty, TypeExpr::Ref(ref name) if name == "Books"));
+    }
+
+    #[test]
+    fn type_is_not_a_global_keyword_outside_literal_position() {
+        // A bare `Type` identifier should still bind as a variable reference
+        // when not followed by `{` — avoids breaking pre-existing programs
+        // that may already use the name.
+        let program = parse("Type = 1\nx = Type\nfinish x").expect("should parse");
+        assert_eq!(program.statements.len(), 3);
+        let Stmt::Assign { expr, .. } = &program.statements[1] else {
+            panic!("expected assign");
+        };
+        assert!(matches!(expr, Expr::Variable(name) if name == "Type"));
+    }
+
+    #[test]
+    fn type_literal_rejects_empty_enum() {
+        let err = parse("x = Type { v: enum[] }").expect_err("empty enum should fail");
+        let message = format!("{err}");
+        assert!(
+            message.contains("empty enum") || message.contains("enum"),
+            "error should mention enum: {message}"
+        );
+    }
+
+    #[test]
+    fn type_literal_rejects_duplicate_fields() {
+        let err = parse("x = Type { a: str, a: int }").expect_err("duplicate field");
+        let message = format!("{err}");
+        assert!(message.contains("duplicate"), "error: {message}");
+    }
+
+    #[test]
+    fn type_literal_rejects_non_string_enum_value() {
+        let err = parse("x = Type { v: enum[1, 2] }").expect_err("numeric enum value");
+        assert!(matches!(err, ParseError::Expected { .. }));
+    }
+
+    #[test]
+    fn type_literal_parses_without_trailing_comma_or_with_one() {
+        parse("x = Type { a: str, b: int }").expect("should parse");
+        // trailing comma not supported (matches record literal behavior)
+        let err = parse("x = Type { a: str, }").expect_err("trailing comma rejected");
+        assert!(matches!(err, ParseError::Expected { .. }));
     }
 
     #[test]

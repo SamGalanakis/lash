@@ -86,6 +86,14 @@ fn plan_exit_fresh_context_input(display: &str) -> String {
     format!("Do a full, faithful implementation of the plan found at: {display}")
 }
 
+fn plan_exit_confirmation_display(selection: &str, note: Option<&str>) -> String {
+    if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
+        format!("{selection}\n\nNote: {note}")
+    } else {
+        selection.to_string()
+    }
+}
+
 fn fresh_context_session_id() -> String {
     format!("plan-{}", uuid::Uuid::new_v4().simple())
 }
@@ -538,6 +546,8 @@ impl PlanModeTools {
 
         ToolResult::ok(json!({
             "approved": true,
+            "answer": answer,
+            "confirmation_display": plan_exit_confirmation_display(selection, note.as_deref()),
             "plan_path": report.display_path,
             "execution_mode": "current_session",
             "next_turn_input": plan_exit_next_turn_input(&report.display_path, note.as_deref()),

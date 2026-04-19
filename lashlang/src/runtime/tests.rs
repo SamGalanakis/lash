@@ -782,3 +782,303 @@ fn await_list_preserves_per_item_errors() {
     assert_eq!(err["ok"], Value::Bool(false));
     assert_eq!(err["error"], Value::String("expected handle record".into()));
 }
+
+// ------------------------------------------------------------------
+//  Type literals: syntactic signatures with enum, list, nested, ref,
+//  optional fields. See the top-level README for the full grammar.
+// ------------------------------------------------------------------
+
+/// Extract the inner JSON Schema wrapped by a `$lash_type` value.
+fn unwrap_schema(value: &Value) -> &Record {
+    crate::runtime::unwrap_type_value(value)
+        .and_then(Value::as_record)
+        .expect("Type value must unwrap to a schema record")
+}
+
+#[test]
+fn type_scalar_schemas_const_fold_to_json_schema() {
+    for (src, expected) in [
+        ("finish Type { v: str }", "string"),
+        ("finish Type { v: int }", "integer"),
+        ("finish Type { v: float }", "number"),
+        ("finish Type { v: bool }", "boolean"),
+        ("finish Type { v: dict }", "object"),
+    ] {
+        let value = exec(src).expect("should succeed");
+        let schema = unwrap_schema(&value);
+        assert_eq!(schema["type"], Value::String("object".into()));
+        let props = schema["properties"]
+            .as_record()
+            .expect("properties must be record");
+        let v = props["v"].as_record().expect("field schema");
+        assert_eq!(v["type"], Value::String(expected.into()));
+        assert_eq!(
+            schema["additionalProperties"],
+            Value::Bool(false),
+            "additionalProperties must be false for {src}",
+        );
+    }
+}
+
+#[test]
+fn type_any_is_empty_schema() {
+    let value = exec("finish Type { v: any }").expect("should succeed");
+    let schema = unwrap_schema(&value);
+    let props = schema["properties"].as_record().expect("properties");
+    let v = props["v"].as_record().expect("field schema");
+    assert!(v.is_empty(), "any must be an empty JSON Schema");
+}
+
+#[test]
+fn type_enum_produces_string_with_enum_array() {
+    let value = exec(r#"finish Type { status: enum["ok", "err", "pending"] }"#)
+        .expect("should succeed");
+    let schema = unwrap_schema(&value);
+    let status = schema["properties"].as_record().unwrap()["status"]
+        .as_record()
+        .expect("enum field schema");
+    assert_eq!(status["type"], Value::String("string".into()));
+    let Value::List(values) = &status["enum"] else {
+        panic!("enum must be a list");
+    };
+    let strings: Vec<_> = values.iter().collect();
+    assert_eq!(strings.len(), 3);
+    assert_eq!(strings[0], &Value::String("ok".into()));
+    assert_eq!(strings[2], &Value::String("pending".into()));
+}
+
+#[test]
+fn type_list_schema_wraps_inner_type_as_items() {
+    let value = exec("finish Type { tags: list[str] }").expect("should succeed");
+    let schema = unwrap_schema(&value);
+    let tags = schema["properties"].as_record().unwrap()["tags"]
+        .as_record()
+        .expect("list field schema");
+    assert_eq!(tags["type"], Value::String("array".into()));
+    let items = tags["items"].as_record().expect("items schema");
+    assert_eq!(items["type"], Value::String("string".into()));
+}
+
+#[test]
+fn type_list_of_enum_preserves_nested_shape() {
+    let value = exec(r#"finish Type { labels: list[enum["a", "b"]] }"#).expect("should succeed");
+    let schema = unwrap_schema(&value);
+    let labels = schema["properties"].as_record().unwrap()["labels"]
+        .as_record()
+        .expect("list schema");
+    let items = labels["items"].as_record().expect("enum item schema");
+    assert_eq!(items["type"], Value::String("string".into()));
+    assert!(matches!(items["enum"], Value::List(_)));
+}
+
+#[test]
+fn type_nested_object_is_full_subschema() {
+    let value = exec(
+        r#"
+        finish Type {
+          title: str,
+          meta: Type {
+            pages: int,
+            published: int
+          }
+        }
+        "#,
+    )
+    .expect("should succeed");
+    let schema = unwrap_schema(&value);
+    let meta = schema["properties"].as_record().unwrap()["meta"]
+        .as_record()
+        .expect("nested object schema");
+    assert_eq!(meta["type"], Value::String("object".into()));
+    let sub_props = meta["properties"].as_record().unwrap();
+    assert_eq!(
+        sub_props["pages"].as_record().unwrap()["type"],
+        Value::String("integer".into())
+    );
+    let required = match &meta["required"] {
+        Value::List(items) => items,
+        _ => panic!("required must be list"),
+    };
+    assert_eq!(required.len(), 2);
+}
+
+#[test]
+fn type_optional_field_drops_from_required() {
+    let value = exec("finish Type { a: str, b: int? }").expect("should succeed");
+    let schema = unwrap_schema(&value);
+    let required = match &schema["required"] {
+        Value::List(items) => items,
+        _ => panic!("required must be list"),
+    };
+    assert_eq!(required.len(), 1);
+    assert_eq!(required[0], Value::String("a".into()));
+    // Optional field still appears in properties (just not required).
+    let props = schema["properties"].as_record().unwrap();
+    assert!(props.get("b").is_some());
+}
+
+#[test]
+fn type_ref_resolves_previously_defined_type() {
+    let src = r#"
+        Inner = Type { count: int }
+        Outer = Type { name: str, nested: Inner }
+        finish Outer
+    "#;
+    let value = exec(src).expect("should succeed");
+    let schema = unwrap_schema(&value);
+    let nested = schema["properties"].as_record().unwrap()["nested"]
+        .as_record()
+        .expect("nested resolved schema");
+    assert_eq!(nested["type"], Value::String("object".into()));
+    let nested_props = nested["properties"].as_record().unwrap();
+    assert_eq!(
+        nested_props["count"].as_record().unwrap()["type"],
+        Value::String("integer".into())
+    );
+}
+
+#[test]
+fn type_ref_to_non_type_value_is_type_error() {
+    let err = exec(
+        r#"
+        Inner = { count: 5 }
+        Outer = Type { nested: Inner }
+        finish Outer
+        "#,
+    )
+    .expect_err("should fail: Inner is not a Type value");
+    assert!(
+        matches!(err, RuntimeError::TypeError { .. }),
+        "expected TypeError, got {err:?}"
+    );
+}
+
+#[test]
+fn type_ref_with_undefined_name_is_undefined_variable() {
+    let err = exec("finish Type { nested: MissingType }")
+        .expect_err("unknown ref should fail");
+    assert_eq!(
+        err,
+        RuntimeError::UndefinedVariable {
+            name: "MissingType".to_string()
+        }
+    );
+}
+
+#[test]
+fn compile_stats_count_const_folded_and_dynamic_literals() {
+    let src = r#"
+        Inner = Type { n: int }
+        A = Type { x: str }
+        B = Type { nested: Inner }
+        finish B
+    "#;
+    let program = crate::parse(src).expect("should parse");
+    let compiled = crate::compile_program(&program);
+    let stats = compiled.compile_stats();
+    assert_eq!(stats.type_literals_total, 3);
+    assert_eq!(stats.type_literals_const_folded, 2, "Inner and A are constant");
+    assert_eq!(stats.type_literals_dynamic, 1, "B references Inner");
+    assert_eq!(stats.type_ref_sites, 1);
+}
+
+#[test]
+fn profile_report_surfaces_resolve_type_ref_counts() {
+    let src = r#"
+        Inner = Type { n: int }
+        Outer = Type { nested: Inner }
+        finish Outer
+    "#;
+    let program = crate::parse(src).expect("should parse");
+    let compiled = crate::compile_program(&program);
+    let mut state = State::new();
+    let (_outcome, report) = crate::profile_compiled(&compiled, &mut state, &Host)
+        .expect("profile should succeed");
+    let names: Vec<_> = report
+        .instruction_stats()
+        .iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(
+        names.contains(&"resolve_type_ref"),
+        "profile should track resolve_type_ref: {names:?}"
+    );
+    assert!(
+        names.contains(&"wrap_type_literal"),
+        "profile should track wrap_type_literal: {names:?}"
+    );
+    assert_eq!(report.compile_stats().type_literals_total, 2);
+}
+
+#[test]
+fn type_literal_inside_tool_call_args_passes_through_as_record() {
+    struct CaptureHost {
+        captured: std::sync::Mutex<Option<Value>>,
+    }
+    impl ToolHost for CaptureHost {
+        fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
+            if name == "spawn" {
+                let schema = args
+                    .get("output")
+                    .cloned()
+                    .expect("output arg must be present");
+                *self.captured.lock().unwrap() = Some(schema);
+                return Ok(Value::Null);
+            }
+            Err(ToolHostError::new(format!("unknown: {name}")))
+        }
+    }
+    let host = CaptureHost {
+        captured: std::sync::Mutex::new(None),
+    };
+    let program = crate::parse(
+        r#"
+        Shape = Type { name: str, tags: list[str] }
+        call spawn { output: Shape }
+        finish null
+        "#,
+    )
+    .expect("should parse");
+    let mut state = State::new();
+    crate::execute_program(&program, &mut state, &host).expect("should run");
+
+    let captured = host.captured.lock().unwrap().clone().expect("captured");
+    let inner = crate::runtime::unwrap_type_value(&captured).expect("has $lash_type");
+    let schema = inner.as_record().expect("schema record");
+    assert_eq!(schema["type"], Value::String("object".into()));
+}
+
+#[test]
+fn duplicate_field_name_is_parse_error() {
+    let err = crate::parse("x = Type { a: str, a: int }").expect_err("duplicate field");
+    let message = format!("{err}");
+    assert!(message.contains("duplicate field"), "{message}");
+}
+
+#[test]
+fn empty_enum_is_parse_error() {
+    let err = crate::parse("x = Type { status: enum[] }").expect_err("empty enum");
+    let message = format!("{err}");
+    assert!(message.contains("enum"), "{message}");
+}
+
+#[test]
+fn unknown_type_constructor_becomes_ref_not_error_at_parse() {
+    // Unknown identifiers in type position are treated as refs; runtime
+    // resolution is what errors out.
+    let program =
+        crate::parse("finish Type { x: Unknown }").expect("should parse as ref");
+    assert!(matches!(program.statements.last(), Some(Stmt::Finish(_))));
+}
+
+#[test]
+fn lash_type_wrapper_survives_round_trip_through_json() {
+    let value = exec("finish Type { n: int }").expect("should succeed");
+    // to_json + from_json must preserve the Type-ness.
+    let json = crate::runtime::to_json(&value);
+    let recovered = crate::runtime::from_json(json);
+    let schema = crate::runtime::unwrap_type_value(&recovered)
+        .and_then(Value::as_record)
+        .expect("round-trip must preserve wrapper");
+    assert_eq!(schema["type"], Value::String("object".into()));
+}

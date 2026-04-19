@@ -817,6 +817,15 @@ impl ToolProvider for StandardShell {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
+        // TODO(cancel): When a turn is cancelled the dispatcher aborts the
+        // JoinSet task that called us, so this future stops being polled. The
+        // spawned PTY child process still runs until it exits naturally. To
+        // propagate cancellation to the child, capture a
+        // `portable_pty::ChildKiller` from `spawn_wait_thread` and kill it when
+        // the cancellation token fires (read from
+        // `ToolExecutionContext::cancellation_token` via
+        // `execute_streaming_with_context`). Deferred: non-trivial ownership
+        // rework in `ShellRuntime`/`ShellProcess`.
         match name {
             "exec_command" => {
                 let params = match self.parse_exec_command_params(args) {

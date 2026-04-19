@@ -17,11 +17,8 @@ use serde_json::Value;
 
 const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution is needed.
 
-- Work in small, concrete steps and verify each meaningful step.
 - Use `batch` for two or more independent tool calls. Serialize calls when later arguments depend on earlier results.
-- Avoid filler prose between tool calls.
-- If you are unsure, resolve the uncertainty with the smallest relevant check.
-- Before concluding, verify the concrete end-state whenever possible.
+- After applying a change, verify the end-state. Do not re-verify before acting.
 - For direct conversational requests that need no tools, respond in prose only."#;
 
 const RLM_EXECUTION_SECTION: &str = r#"In this mode you write `lashlang` code inside your prose response and the runtime executes it. There is no native tool-call envelope — you embed code directly.

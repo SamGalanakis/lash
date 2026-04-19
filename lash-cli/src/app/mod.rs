@@ -168,6 +168,25 @@ impl PreparedTurn {
         Self::prepare_with_large_pastes(text, images, skills, Vec::new())
     }
 
+    pub fn prepare_with_effective_text(
+        display_text: String,
+        effective_text: String,
+        images: Vec<PendingImage>,
+    ) -> Self {
+        Self {
+            draft_id: uuid::Uuid::new_v4().to_string(),
+            display_text: display_text.clone(),
+            effective_text: effective_text.clone(),
+            images,
+            large_pastes: Vec::new(),
+            input_provenance: UserInputProvenance {
+                display_text,
+                effective_text,
+                transforms: Vec::new(),
+            },
+        }
+    }
+
     pub fn prepare_with_large_pastes(
         text: String,
         images: Vec<PendingImage>,
@@ -1052,7 +1071,24 @@ impl App {
         if history_text.is_empty() {
             return;
         }
-        if self.blocks.last().is_some_and(
+        // The original UserInput is pushed immediately when the user sends
+        // a steered/queued message. By the time the runtime fires the
+        // checkpoint commit (e.g. codex `InjectedMessagesCommitted` after
+        // post-tool checkpoint), the assistant may have already pushed
+        // AssistantText / Activity blocks on top, so checking only the
+        // last block lets a duplicate slip through. Scan everything since
+        // the most recent user TurnStart instead.
+        let scan_start = self
+            .blocks
+            .iter()
+            .rposition(|block| {
+                matches!(
+                    block,
+                    DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
+                )
+            })
+            .unwrap_or(0);
+        if self.blocks[scan_start..].iter().any(
             |block| matches!(block, DisplayBlock::UserInput(text) if text.trim() == history_text),
         ) {
             return;
@@ -1113,7 +1149,7 @@ impl App {
                 let renders_prompt_response_inline = activities
                     .iter()
                     .any(Self::activity_renders_prompt_response_inline);
-                if renders_prompt_response_inline {
+                if renders_prompt_response_inline || name == "plan_exit" {
                     self.pending_option_prompt_response = None;
                 } else if let Some(display) = self.pending_option_prompt_response.take() {
                     self.push_prompt_response_user_block(display);

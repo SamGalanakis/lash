@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, CallExpr, Expr, Program, Stmt, UnaryOp};
+use crate::ast::{BinaryOp, CallExpr, Expr, Program, Stmt, TypeExpr, UnaryOp};
 use compact_str::CompactString;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -13,6 +13,11 @@ use std::time::Instant;
 use thiserror::Error;
 
 const RECORD_INDEX_THRESHOLD: usize = 8;
+
+/// Marker key that wraps a Type literal at its outermost level so a host-side
+/// consumer can tell a Type value apart from a plain record. The inner value
+/// is the JSON-Schema representation of the type.
+pub const LASH_TYPE_KEY: &str = "$lash_type";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Symbol(u32);
@@ -405,11 +410,20 @@ pub fn execute_program<H: ToolHost>(
 #[derive(Clone)]
 pub struct CompiledProgram {
     chunk: Chunk,
+    compile_stats: CompileStats,
+}
+
+impl CompiledProgram {
+    pub fn compile_stats(&self) -> &CompileStats {
+        &self.compile_stats
+    }
 }
 
 pub fn compile_program(program: &Program) -> CompiledProgram {
+    let (chunk, compile_stats) = Compiler::compile_program(program);
     CompiledProgram {
-        chunk: Compiler::compile_program(program),
+        chunk,
+        compile_stats,
     }
 }
 
@@ -448,8 +462,9 @@ pub fn profile_compiled<H: ToolHost>(
     );
     vm.enable_profile();
     let result = vm.run();
-    let profile = vm.take_profile();
+    let mut profile = vm.take_profile();
     state.globals = vm.into_globals();
+    profile.compile_stats = program.compile_stats;
     result.map(|outcome| (outcome, profile))
 }
 
@@ -463,6 +478,7 @@ pub enum ExecutionOutcome {
 pub struct ProfileReport {
     instruction_stats: Vec<ProfileStat>,
     builtin_stats: Vec<ProfileStat>,
+    compile_stats: CompileStats,
 }
 
 impl ProfileReport {
@@ -474,9 +490,36 @@ impl ProfileReport {
         &self.builtin_stats
     }
 
+    pub fn compile_stats(&self) -> &CompileStats {
+        &self.compile_stats
+    }
+
     pub fn merge(&mut self, other: &Self) {
         merge_stats(&mut self.instruction_stats, &other.instruction_stats);
         merge_stats(&mut self.builtin_stats, &other.builtin_stats);
+        self.compile_stats.merge(&other.compile_stats);
+    }
+}
+
+/// Compile-time statistics captured when a program is compiled. Independent
+/// of run-time profiling — these counts reflect the shape of the compiled
+/// program itself (how many Type literals it contains, how many got
+/// const-folded, etc.). Runtime cost of `Type` evaluation appears in the
+/// instruction profile under `build_type_ref` / `build_record` / etc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompileStats {
+    pub type_literals_total: u64,
+    pub type_literals_const_folded: u64,
+    pub type_literals_dynamic: u64,
+    pub type_ref_sites: u64,
+}
+
+impl CompileStats {
+    pub fn merge(&mut self, other: &Self) {
+        self.type_literals_total += other.type_literals_total;
+        self.type_literals_const_folded += other.type_literals_const_folded;
+        self.type_literals_dynamic += other.type_literals_dynamic;
+        self.type_ref_sites += other.type_ref_sites;
     }
 }
 
@@ -546,6 +589,8 @@ enum Instruction {
     ParallelCallsValue(usize),
     Parallel(usize),
     ParallelValue(usize),
+    ResolveTypeRef(usize),
+    WrapTypeLiteral,
 }
 
 #[derive(Clone, Copy)]
@@ -602,6 +647,8 @@ impl Instruction {
             Instruction::ParallelCallsValue(_) => InstructionProfileTag::Parallel,
             Instruction::Parallel(_) => InstructionProfileTag::Parallel,
             Instruction::ParallelValue(_) => InstructionProfileTag::Parallel,
+            Instruction::ResolveTypeRef(_) => InstructionProfileTag::ResolveTypeRef,
+            Instruction::WrapTypeLiteral => InstructionProfileTag::WrapTypeLiteral,
         }
     }
 }
@@ -660,9 +707,11 @@ enum InstructionProfileTag {
     IterNext,
     EndIter,
     Parallel,
+    ResolveTypeRef,
+    WrapTypeLiteral,
 }
 
-const INSTRUCTION_PROFILE_COUNT: usize = InstructionProfileTag::Parallel as usize + 1;
+const INSTRUCTION_PROFILE_COUNT: usize = InstructionProfileTag::WrapTypeLiteral as usize + 1;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -709,6 +758,7 @@ impl ProfileAccumulator {
                 &self.builtin_counts,
                 &self.builtin_times,
             ),
+            compile_stats: CompileStats::default(),
         }
     }
 }
@@ -741,6 +791,8 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "iter_next",
     "end_iter",
     "parallel",
+    "resolve_type_ref",
+    "wrap_type_literal",
 ];
 
 const BUILTIN_PROFILE_NAMES: [&str; BUILTIN_PROFILE_COUNT] = [
@@ -813,6 +865,7 @@ struct Compiler {
     key_lists: Vec<Box<[usize]>>,
     parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
     branch_sets: Vec<Box<[Chunk]>>,
+    compile_stats: Rc<RefCell<CompileStats>>,
 }
 
 #[derive(Default)]
@@ -863,17 +916,22 @@ enum PureExpr {
 }
 
 impl Compiler {
-    fn compile_program(program: &Program) -> Chunk {
-        let mut compiler = Self::new();
+    fn compile_program(program: &Program) -> (Chunk, CompileStats) {
+        let stats = Rc::new(RefCell::new(CompileStats::default()));
+        let mut compiler = Self::with_slots_and_stats(
+            Rc::new(RefCell::new(SlotTable::default())),
+            stats.clone(),
+        );
         compiler.compile_block(&program.statements);
-        compiler.finish()
+        let chunk = compiler.finish();
+        let compile_stats = *stats.borrow();
+        (chunk, compile_stats)
     }
 
-    fn new() -> Self {
-        Self::with_slots(Rc::new(RefCell::new(SlotTable::default())))
-    }
-
-    fn with_slots(slots: Rc<RefCell<SlotTable>>) -> Self {
+    fn with_slots_and_stats(
+        slots: Rc<RefCell<SlotTable>>,
+        compile_stats: Rc<RefCell<CompileStats>>,
+    ) -> Self {
         Self {
             code: Vec::new(),
             constants: Vec::new(),
@@ -883,6 +941,7 @@ impl Compiler {
             key_lists: Vec::new(),
             parallel_call_sets: Vec::new(),
             branch_sets: Vec::new(),
+            compile_stats,
         }
     }
 
@@ -1169,6 +1228,15 @@ impl Compiler {
                 op: *op,
                 right: Box::new(self.compile_pure_expr(right)?),
             }),
+            Expr::TypeLiteral(ty) => {
+                let schema = fold_type(ty).ok_or_else(|| RuntimeError::ValueError {
+                    message: "Type literals with `Ref` are not allowed in pure expressions"
+                        .to_string(),
+                })?;
+                let mut wrapper = record_with_capacity(1);
+                wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
+                Ok(PureExpr::Const(Value::Record(Arc::new(wrapper))))
+            }
         }
     }
 
@@ -1251,6 +1319,7 @@ impl Compiler {
                 self.compile_expr(else_expr);
                 self.patch_jump(jump_to_end, self.code.len());
             }
+            Expr::TypeLiteral(ty) => self.compile_type_literal(ty),
             Expr::Binary { left, op, right } => match op {
                 BinaryOp::And => {
                     self.compile_expr(left);
@@ -1315,7 +1384,8 @@ impl Compiler {
         let branches = branches
             .iter()
             .map(|branch| {
-                let mut compiler = Self::with_slots(self.slots.clone());
+                let mut compiler =
+                    Self::with_slots_and_stats(self.slots.clone(), self.compile_stats.clone());
                 compiler.compile_stmt(branch);
                 compiler.finish()
             })
@@ -1344,6 +1414,85 @@ impl Compiler {
         let index = self.code.len();
         self.code.push(Instruction::Jump(usize::MAX));
         index
+    }
+
+    fn compile_type_literal(&mut self, ty: &TypeExpr) {
+        self.compile_stats.borrow_mut().type_literals_total += 1;
+
+        if let Some(schema) = fold_type(ty) {
+            let mut wrapper = record_with_capacity(1);
+            wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
+            let idx = self.push_const(Value::Record(Arc::new(wrapper)));
+            self.code.push(Instruction::PushConst(idx));
+            self.compile_stats.borrow_mut().type_literals_const_folded += 1;
+            return;
+        }
+
+        self.compile_type_expr(ty);
+        self.code.push(Instruction::WrapTypeLiteral);
+        self.compile_stats.borrow_mut().type_literals_dynamic += 1;
+    }
+
+    fn compile_type_expr(&mut self, ty: &TypeExpr) {
+        if let Some(value) = fold_type(ty) {
+            let idx = self.push_const(value);
+            self.code.push(Instruction::PushConst(idx));
+            return;
+        }
+
+        match ty {
+            TypeExpr::Ref(name) => {
+                let slot = self.push_slot(name);
+                self.code.push(Instruction::ResolveTypeRef(slot));
+                self.compile_stats.borrow_mut().type_ref_sites += 1;
+            }
+            TypeExpr::List(inner) => {
+                let kind_idx = self.push_const(Value::String("array".into()));
+                self.code.push(Instruction::PushConst(kind_idx));
+                self.compile_type_expr(inner);
+                let keys = self.push_key_list(["type", "items"].into_iter());
+                self.code.push(Instruction::BuildRecord(keys));
+            }
+            TypeExpr::Object(fields) => {
+                let kind_idx = self.push_const(Value::String("object".into()));
+                self.code.push(Instruction::PushConst(kind_idx));
+
+                for field in fields {
+                    self.compile_type_expr(&field.ty);
+                }
+                let prop_keys =
+                    self.push_key_list(fields.iter().map(|f| f.name.as_str()));
+                self.code.push(Instruction::BuildRecord(prop_keys));
+
+                let required: Vec<&str> = fields
+                    .iter()
+                    .filter(|f| !f.optional)
+                    .map(|f| f.name.as_str())
+                    .collect();
+                for name in &required {
+                    let idx = self.push_const(Value::String((*name).into()));
+                    self.code.push(Instruction::PushConst(idx));
+                }
+                self.code.push(Instruction::BuildList(required.len()));
+
+                let false_idx = self.push_const(Value::Bool(false));
+                self.code.push(Instruction::PushConst(false_idx));
+
+                let obj_keys = self.push_key_list(
+                    ["type", "properties", "required", "additionalProperties"].into_iter(),
+                );
+                self.code.push(Instruction::BuildRecord(obj_keys));
+            }
+            TypeExpr::Any
+            | TypeExpr::Str
+            | TypeExpr::Int
+            | TypeExpr::Float
+            | TypeExpr::Bool
+            | TypeExpr::Dict
+            | TypeExpr::Enum(_) => {
+                unreachable!("scalar/enum types must const-fold")
+            }
+        }
     }
 
     fn patch_jump(&mut self, index: usize, target: usize) {
@@ -1451,10 +1600,13 @@ impl<'a, H: ToolHost> Vm<'a, H> {
     fn run_inner(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
         while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
             self.ip += 1;
-            let tag = instruction.profile_tag();
-            let start = self.profile.as_ref().map(|_| Instant::now());
+            // Profiling is the cold path; skip both tag lookup and timer when off.
+            let probe = self
+                .profile
+                .as_ref()
+                .map(|_| (instruction.profile_tag(), Instant::now()));
             let result = self.execute_instruction(instruction);
-            if let Some(start) = start {
+            if let Some((tag, start)) = probe {
                 self.record_instruction_profile(tag, start.elapsed().as_nanos());
             }
             if let Some(outcome) = result? {
@@ -1493,12 +1645,12 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::BuildRecord(keys) => {
                 let key_indices = &self.chunk.key_lists[keys];
-                let values = self.stack_tail(key_indices.len())?;
+                let start = self.stack_drain_start(key_indices.len())?;
                 let mut record = record_with_capacity(key_indices.len());
-                for (key, value) in key_indices.iter().zip(values.iter()) {
-                    record.insert_symbol(self.chunk.names[*key].symbol, value.clone());
+                for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
+                    let name_entry = &self.chunk.names[*key];
+                    record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
                 }
-                self.stack.truncate(self.stack.len() - key_indices.len());
                 self.stack.push(Value::Record(Arc::new(record)));
             }
             Instruction::Field(field) => {
@@ -1543,12 +1695,12 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::CallTool { name, keys } => {
                 let key_indices = &self.chunk.key_lists[keys];
-                let values = self.stack_tail(key_indices.len())?;
+                let start = self.stack_drain_start(key_indices.len())?;
                 let mut args = record_with_capacity(key_indices.len());
-                for (key, value) in key_indices.iter().zip(values.iter()) {
-                    args.insert_symbol(self.chunk.names[*key].symbol, value.clone());
+                for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
+                    let name_entry = &self.chunk.names[*key];
+                    args.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
                 }
-                self.stack.truncate(self.stack.len() - key_indices.len());
                 let result = match self.host.call(self.chunk.names[name].text.as_ref(), &args) {
                     Ok(value) => success(value),
                     Err(error) => error_value(error.to_string()),
@@ -1557,12 +1709,12 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::StartCallTool { name, keys } => {
                 let key_indices = &self.chunk.key_lists[keys];
-                let values = self.stack_tail(key_indices.len())?;
+                let start = self.stack_drain_start(key_indices.len())?;
                 let mut args = record_with_capacity(key_indices.len());
-                for (key, value) in key_indices.iter().zip(values.iter()) {
-                    args.insert_symbol(self.chunk.names[*key].symbol, value.clone());
+                for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
+                    let name_entry = &self.chunk.names[*key];
+                    args.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
                 }
-                self.stack.truncate(self.stack.len() - key_indices.len());
                 let result = self
                     .host
                     .start_call(self.chunk.names[name].text.as_ref(), &args)
@@ -1697,6 +1849,28 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let value = self.exec_parallel_value(branches)?;
                 self.last_value = Some(value.clone());
                 self.stack.push(value);
+            }
+            Instruction::ResolveTypeRef(slot) => {
+                let slot_name = &self.chunk.slot_names[slot];
+                let value = self.slots.get(slot).cloned().ok_or_else(|| {
+                    RuntimeError::UndefinedVariable {
+                        name: slot_name.clone(),
+                    }
+                })?;
+                let schema = unwrap_type_value(&value)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::TypeError {
+                        message: format!(
+                            "`{slot_name}` is not a Type value (missing `{LASH_TYPE_KEY}`)"
+                        ),
+                    })?;
+                self.stack.push(schema);
+            }
+            Instruction::WrapTypeLiteral => {
+                let schema = self.pop_stack()?;
+                let mut wrapper = record_with_capacity(1);
+                wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
+                self.stack.push(Value::Record(Arc::new(wrapper)));
             }
         }
         Ok(None)
@@ -1980,6 +2154,15 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(&self.stack[self.stack.len() - len..])
     }
 
+    fn stack_drain_start(&self, len: usize) -> Result<usize, RuntimeError> {
+        self.stack
+            .len()
+            .checked_sub(len)
+            .ok_or_else(|| RuntimeError::ValueError {
+                message: "vm stack underflow".to_string(),
+            })
+    }
+
     fn unwind_iterators(&mut self) {
         while let Some(iter_state) = self.iter_stack.pop() {
             self.slots
@@ -2083,7 +2266,102 @@ fn is_pure_expr(expr: &Expr) -> bool {
             else_expr,
         } => is_pure_expr(condition) && is_pure_expr(then_expr) && is_pure_expr(else_expr),
         Expr::Binary { left, right, .. } => is_pure_expr(left) && is_pure_expr(right),
+        Expr::TypeLiteral(ty) => fold_type(ty).is_some(),
     }
+}
+
+/// Best-effort compile-time construction of a JSON-Schema Value for a
+/// [`TypeExpr`]. Returns `None` when the expression contains a [`TypeExpr::Ref`]
+/// (or a nested composite that contains one) — those must be resolved at
+/// runtime via [`Instruction::ResolveTypeRef`].
+fn fold_type(ty: &TypeExpr) -> Option<Value> {
+    match ty {
+        TypeExpr::Any => Some(interned_scalar_schema(ScalarSchemaKind::Any)),
+        TypeExpr::Str => Some(interned_scalar_schema(ScalarSchemaKind::Str)),
+        TypeExpr::Int => Some(interned_scalar_schema(ScalarSchemaKind::Int)),
+        TypeExpr::Float => Some(interned_scalar_schema(ScalarSchemaKind::Float)),
+        TypeExpr::Bool => Some(interned_scalar_schema(ScalarSchemaKind::Bool)),
+        TypeExpr::Dict => Some(interned_scalar_schema(ScalarSchemaKind::Dict)),
+        TypeExpr::Enum(values) => {
+            let mut rec = record_with_capacity(2);
+            rec.insert("type".into(), Value::String("string".into()));
+            let items: Vec<Value> = values
+                .iter()
+                .map(|v| Value::String(v.clone().into()))
+                .collect();
+            rec.insert("enum".into(), Value::List(items.into()));
+            Some(Value::Record(Arc::new(rec)))
+        }
+        TypeExpr::List(inner) => {
+            let inner_value = fold_type(inner)?;
+            let mut rec = record_with_capacity(2);
+            rec.insert("type".into(), Value::String("array".into()));
+            rec.insert("items".into(), inner_value);
+            Some(Value::Record(Arc::new(rec)))
+        }
+        TypeExpr::Object(fields) => {
+            let mut properties = record_with_capacity(fields.len());
+            for field in fields {
+                properties.insert(field.name.clone(), fold_type(&field.ty)?);
+            }
+            let required: Vec<Value> = fields
+                .iter()
+                .filter(|f| !f.optional)
+                .map(|f| Value::String(f.name.clone().into()))
+                .collect();
+            let mut rec = record_with_capacity(4);
+            rec.insert("type".into(), Value::String("object".into()));
+            rec.insert("properties".into(), Value::Record(Arc::new(properties)));
+            rec.insert("required".into(), Value::List(required.into()));
+            rec.insert("additionalProperties".into(), Value::Bool(false));
+            Some(Value::Record(Arc::new(rec)))
+        }
+        TypeExpr::Ref(_) => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScalarSchemaKind {
+    Any,
+    Str,
+    Int,
+    Float,
+    Bool,
+    Dict,
+}
+
+/// Returns an `Arc`-shared schema for a scalar. All sites referencing `str`
+/// point at the same `Arc<Record>`, so emitting a Type literal with N string
+/// fields allocates one record, not N.
+fn interned_scalar_schema(kind: ScalarSchemaKind) -> Value {
+    static CACHE: OnceLock<[Value; 6]> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        let build = |ty: &str| {
+            let mut rec = record_with_capacity(1);
+            rec.insert("type".into(), Value::String(ty.into()));
+            Value::Record(Arc::new(rec))
+        };
+        [
+            Value::Record(Arc::new(record_with_capacity(0))), // Any == {}
+            build("string"),
+            build("integer"),
+            build("number"),
+            build("boolean"),
+            build("object"),
+        ]
+    });
+    cache[kind as usize].clone()
+}
+
+/// Unwrap a `Value::Record` that carries the `$lash_type` marker back into the
+/// inner JSON-Schema value. Returns `None` when the value is not a wrapped
+/// Type literal.
+pub fn unwrap_type_value(value: &Value) -> Option<&Value> {
+    let record = value.as_record()?;
+    if record.len() != 1 {
+        return None;
+    }
+    record.get(LASH_TYPE_KEY)
 }
 
 fn eval_pure_expr(
@@ -2112,8 +2390,10 @@ fn eval_pure_expr(
         PureExpr::Record(entries) => {
             let mut record = record_with_capacity(entries.len());
             for (key, value) in entries.iter() {
-                record.insert_symbol(
-                    names[*key].symbol,
+                let name_entry = &names[*key];
+                record.insert_symbolized(
+                    name_entry.symbol,
+                    name_entry.text.clone(),
                     eval_pure_expr(value, slots, names, slot_names)?,
                 );
             }

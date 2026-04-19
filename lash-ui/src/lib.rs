@@ -133,6 +133,10 @@ pub enum UiHostEffect {
     QueueTurn {
         input: String,
     },
+    QueuePreparedTurn {
+        display_text: String,
+        effective_text: String,
+    },
     WakeSession {
         input: String,
     },
@@ -1204,8 +1208,14 @@ impl UiExtension for PlanModeUiExtension {
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.trim().is_empty())
             {
-                effects.push(UiHostEffect::QueueTurn {
-                    input: input.to_string(),
+                let display_text = result
+                    .get("confirmation_display")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(input);
+                effects.push(UiHostEffect::QueuePreparedTurn {
+                    display_text: display_text.to_string(),
+                    effective_text: input.to_string(),
                 });
             }
             if result
@@ -1334,6 +1344,7 @@ mod tests {
             result: json!({
                 "approved": true,
                 "execution_mode": "current_session",
+                "confirmation_display": "Start implementing now",
                 "next_turn_input": "Execute the approved plan."
             }),
             success: true,
@@ -1350,8 +1361,9 @@ mod tests {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string()
                 },
-                UiHostEffect::QueueTurn {
-                    input: "Execute the approved plan.".to_string()
+                UiHostEffect::QueuePreparedTurn {
+                    display_text: "Start implementing now".to_string(),
+                    effective_text: "Execute the approved plan.".to_string()
                 }
             ]
         );

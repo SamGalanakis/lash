@@ -1,8 +1,29 @@
 use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use async_trait::async_trait;
+use lash::{Part, PruneState};
 use lash_ui::{SlashCommandSpec, UiContext, UiExtension, UiExtensions, UiHostEffect};
 use std::sync::Arc;
+
+fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
+    Message {
+        id: id.to_string(),
+        role,
+        parts: vec![Part {
+            id: format!("{id}.p0"),
+            kind: PartKind::Text,
+            content: content.to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_item_id: None,
+            prune_state: PruneState::Intact,
+        }],
+        user_input: None,
+        origin: None,
+    }
+}
+
 fn other_variant_name(block: &DisplayBlock) -> &'static str {
     match block {
         DisplayBlock::TurnStart(_) => "TurnStart",
@@ -637,6 +658,7 @@ fn plan_exit_tool_queues_follow_up_turn() {
             args: serde_json::json!({}),
             result: serde_json::json!({
                 "approved": true,
+                "confirmation_display": "Start implementing now\n\nNote: safe slice first",
                 "plan_path": ".lash/plans/session.md",
                 "execution_mode": "current_session",
                 "next_turn_input": "Execute the plan in `.lash/plans/session.md`."
@@ -650,8 +672,57 @@ fn plan_exit_tool_queues_follow_up_turn() {
     assert!(!was_pending);
     assert_eq!(
         queued.display_text,
+        "Start implementing now\n\nNote: safe slice first"
+    );
+    assert_eq!(
+        queued.effective_text,
         "Execute the plan in `.lash/plans/session.md`."
     );
+}
+
+#[test]
+fn plan_exit_tool_call_consumes_pending_prompt_response() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let (tx, _rx) = std::sync::mpsc::channel();
+    app.show_prompt(PromptState {
+        request: lash::PromptRequest::single(
+            "Review the plan",
+            vec!["Start implementing now".into(), "Keep planning".into()],
+        )
+        .with_optional_note(),
+        focus: crate::overlay::PromptFocus::Text,
+        cursor: 0,
+        scroll_offset: 0,
+        selected: Default::default(),
+        reply_text: "safe slice first".into(),
+        reply_cursor: "safe slice first".len(),
+        response_tx: tx,
+    });
+
+    let response = app.take_prompt_response();
+    assert_eq!(
+        response.as_deref(),
+        Some("1. Start implementing now\n\nNote: safe slice first")
+    );
+    assert!(app.blocks.iter().all(|block| !matches!(block, DisplayBlock::UserInput(_))));
+
+    app.handle_session_event(SessionEvent::ToolCall {
+        call_id: Some("tc-plan-exit".into()),
+        name: "plan_exit".into(),
+        args: serde_json::json!({}),
+        result: serde_json::json!({
+            "approved": true,
+            "confirmation_display": "Start implementing now\n\nNote: safe slice first",
+            "execution_mode": "current_session",
+            "next_turn_input": "Execute the plan in `.lash/plans/session.md`."
+        }),
+        success: true,
+        duration_ms: 5,
+    });
+
+    assert!(app.blocks.iter().all(|block| {
+        !matches!(block, DisplayBlock::UserInput(text) if text.contains("Start implementing now"))
+    }));
 }
 
 #[test]
@@ -773,6 +844,68 @@ fn interrupted_projection_preserves_partial_assistant_text() {
         blocks.last(),
         Some(DisplayBlock::SystemMessage(msg)) if msg == "Cancelled."
     ));
+}
+
+#[test]
+fn interrupted_projection_does_not_duplicate_already_committed_prose() {
+    // Codex emits multiple prose chunks intermixed with tool calls. Each
+    // prose chunk is committed as a separate assistant message, and on
+    // interrupt the runtime hands the UI the entire concatenation as
+    // `interrupted_assistant_text`. The projection must not re-render that
+    // concat as an additional block on top of the already-projected ones.
+    let messages = vec![
+        text_message("m0", MessageRole::User, "go"),
+        text_message("m1", MessageRole::Assistant, "first prose"),
+        text_message("m2", MessageRole::Assistant, "second prose"),
+    ];
+    let blocks = project_interrupted_blocks(
+        &messages,
+        &[],
+        &UiResumeState {
+            interrupted_assistant_text: Some("first prose\n\nsecond prose".into()),
+            ..UiResumeState::default()
+        },
+        "Cancelled.",
+    );
+
+    let assistant_texts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            DisplayBlock::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["first prose", "second prose"]);
+}
+
+#[test]
+fn interrupted_projection_appends_only_uncommitted_tail() {
+    // If the streamed text contains everything in the committed messages
+    // PLUS a trailing chunk the model was mid-stream on when the abort
+    // landed, only that trailing chunk should be appended as a new block.
+    let messages = vec![text_message(
+        "m0",
+        MessageRole::Assistant,
+        "first prose",
+    )];
+    let blocks = project_interrupted_blocks(
+        &messages,
+        &[],
+        &UiResumeState {
+            interrupted_assistant_text: Some("first prose\n\nmid stream tail".into()),
+            ..UiResumeState::default()
+        },
+        "Cancelled.",
+    );
+
+    let assistant_texts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            DisplayBlock::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["first prose", "mid stream tail"]);
 }
 
 #[test]
@@ -1015,6 +1148,54 @@ fn accepted_injected_turn_input_removes_matching_pending_steer_without_popping_w
 
     assert_eq!(app.pending_steers.len(), 1);
     assert_eq!(app.pending_steers[0].display_text, "first queued steer");
+}
+
+#[test]
+fn injected_messages_committed_do_not_duplicate_user_input_after_assistant_work() {
+    // Regression: when the runtime fires `InjectedMessagesCommitted` after the
+    // assistant has already streamed text and tool calls (codex prose-between-
+    // tool-calls flow), the existing UserInput block is no longer at the
+    // tail of `app.blocks` — so the old `blocks.last()` dedup let a duplicate
+    // through. Dedup must scan the whole current turn.
+    let mut app = App::new("test-model".into(), "test".into());
+    let turn = PreparedTurn::new("Why are you still dillydallying".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
+    app.queue_pending_steer(turn.clone());
+
+    // Assistant streams some prose, then runs a tool — this pushes an
+    // AssistantText and an Activity block in front of the original UserInput.
+    app.handle_session_event(SessionEvent::TextDelta {
+        content: "You're right.".into(),
+    });
+    app.handle_session_event(SessionEvent::ToolCall {
+        name: "fs_read".into(),
+        args: serde_json::json!({"path": "lash/src/plugin.rs"}),
+        result: serde_json::json!({"output": "..."}),
+        success: true,
+        duration_ms: 12,
+        call_id: None,
+    });
+
+    // Now the late commit arrives.
+    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
+        messages: vec![PluginMessage::text(
+            MessageRole::User,
+            "Why are you still dillydallying",
+        )],
+        checkpoint: lash::CheckpointKind::AfterWork,
+    });
+
+    let matching_blocks = app
+        .blocks
+        .iter()
+        .filter(|block| {
+            matches!(
+                block,
+                DisplayBlock::UserInput(text) if text == "Why are you still dillydallying"
+            )
+        })
+        .count();
+    assert_eq!(matching_blocks, 1);
 }
 
 #[test]

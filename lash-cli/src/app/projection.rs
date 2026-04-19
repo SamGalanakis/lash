@@ -40,6 +40,52 @@ fn append_interrupted_assistant_block(blocks: &mut Vec<DisplayBlock>, ui_state: 
     if cleaned.is_empty() {
         return;
     }
+    // Providers like codex emit prose between tool calls and commit each
+    // chunk as its own assistant message, so the transcript already
+    // projected into multiple AssistantText blocks for the current turn.
+    // The runtime hands us the ENTIRE accumulated `text_deltas` as
+    // `interrupted_assistant_text` on abort — pushing it whole would
+    // duplicate every prose block already on screen. Walk the current
+    // turn's AssistantText blocks in order and peel each from the front
+    // of `cleaned`; any leftover is the uncommitted mid-stream tail.
+    let scan_start = blocks
+        .iter()
+        .rposition(|block| {
+            matches!(
+                block,
+                DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
+            )
+        })
+        .unwrap_or(0);
+    let mut peeled_count = 0usize;
+    let mut peel_failed = false;
+    let mut remaining = cleaned.as_str();
+    for block in &blocks[scan_start..] {
+        let DisplayBlock::AssistantText(existing) = block else {
+            continue;
+        };
+        let normalized = normalize_assistant_text(existing);
+        if normalized.is_empty() {
+            continue;
+        }
+        match remaining.strip_prefix(normalized.as_str()) {
+            Some(rest) => {
+                remaining = rest.trim_start_matches('\n');
+                peeled_count += 1;
+            }
+            None => {
+                peel_failed = true;
+                break;
+            }
+        }
+    }
+    if peeled_count > 0 && !peel_failed {
+        let trailing = remaining.trim();
+        if !trailing.is_empty() {
+            let _ = push_assistant_text_block(blocks, trailing);
+        }
+        return;
+    }
     if let Some(DisplayBlock::AssistantText(existing)) = blocks.last_mut() {
         if cleaned.starts_with(existing.as_str()) {
             if *existing != cleaned {

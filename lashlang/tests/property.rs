@@ -277,4 +277,138 @@ proptest! {
 
         prop_assert_eq!(actual, expected);
     }
+
+    #[test]
+    fn generated_type_literal_always_produces_valid_json_schema(
+        ty in gen_type_strategy(6)
+    ) {
+        let source = format!("x = {}\nfinish x\n", ty.to_source());
+        let host = DeterministicHost;
+        let mut state = State::new();
+        let outcome = execute(&source, &mut state, &host);
+        let value = finished(outcome.expect("Type literal should execute"));
+        let inner = lashlang::unwrap_type_value(&value).expect("wrapped type");
+        let schema = inner.as_record().expect("schema record");
+        // Every generated type is an object at the top level.
+        prop_assert_eq!(&schema["type"], &Value::String("object".into()));
+        // `required` always exists as a list (possibly empty if everything is optional).
+        prop_assert!(matches!(&schema["required"], Value::List(_)));
+        prop_assert_eq!(&schema["additionalProperties"], &Value::Bool(false));
+    }
+}
+
+// ------------------------------------------------------------------
+//  Generator for arbitrary Type literals. Used only by property tests.
+// ------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum GenType {
+    Scalar(&'static str),
+    Enum(Vec<String>),
+    List(Box<GenType>),
+    Object(Vec<(String, GenType, bool)>),
+}
+
+impl GenType {
+    fn to_source(&self) -> String {
+        // Only Object is a valid top-level Type literal; others appear as
+        // field types. Caller must wrap scalars/lists/enums in a field.
+        match self {
+            Self::Scalar(name) => (*name).to_string(),
+            Self::Enum(values) => {
+                let rendered: Vec<String> = values
+                    .iter()
+                    .map(|v| encode_string(v))
+                    .collect();
+                format!("enum[{}]", rendered.join(", "))
+            }
+            Self::List(inner) => format!("list[{}]", inner.to_source()),
+            Self::Object(fields) => {
+                let rendered: Vec<String> = fields
+                    .iter()
+                    .map(|(name, ty, optional)| {
+                        let opt = if *optional { "?" } else { "" };
+                        format!("{name}: {}{opt}", ty.to_source())
+                    })
+                    .collect();
+                format!("Type {{ {} }}", rendered.join(", "))
+            }
+        }
+    }
+}
+
+fn gen_field_name() -> impl Strategy<Value = String> {
+    // Lowercase ASCII identifiers to avoid collision with keywords.
+    "[a-z][a-z0-9_]{0,6}".prop_map(|s| {
+        // Avoid reserved identifiers that could shadow keywords.
+        const RESERVED: &[&str] = &[
+            "if", "else", "for", "in", "parallel", "start", "await", "cancel",
+            "finish", "observe", "call", "and", "or", "not", "true", "false",
+            "null",
+        ];
+        if RESERVED.iter().any(|r| *r == s) {
+            format!("{s}_")
+        } else {
+            s
+        }
+    })
+}
+
+fn gen_enum_value() -> impl Strategy<Value = String> {
+    "[a-z]{1,5}".prop_map(|s| s)
+}
+
+fn gen_scalar_name() -> impl Strategy<Value = GenType> {
+    prop_oneof![
+        Just(GenType::Scalar("str")),
+        Just(GenType::Scalar("int")),
+        Just(GenType::Scalar("float")),
+        Just(GenType::Scalar("bool")),
+        Just(GenType::Scalar("dict")),
+        Just(GenType::Scalar("any")),
+    ]
+}
+
+fn gen_type_strategy(max_depth: u32) -> impl Strategy<Value = GenType> {
+    gen_type_expr(max_depth).prop_flat_map(|inner| {
+        // Wrap in an Object if the inner isn't already one — the top-level
+        // Type literal must always be an Object in our grammar.
+        match inner {
+            GenType::Object(fields) => Just(GenType::Object(fields)).boxed(),
+            other => (gen_field_name(), Just(other))
+                .prop_map(|(name, ty)| GenType::Object(vec![(name, ty, false)]))
+                .boxed(),
+        }
+    })
+}
+
+fn gen_type_expr(_max_depth: u32) -> BoxedStrategy<GenType> {
+    let leaf = prop_oneof![
+        gen_scalar_name(),
+        prop::collection::vec(gen_enum_value(), 1..4).prop_map(|values| {
+            // Deduplicate to keep JSON-Schema enums valid.
+            let mut seen = std::collections::HashSet::new();
+            let unique: Vec<String> = values
+                .into_iter()
+                .filter(|v| seen.insert(v.clone()))
+                .collect();
+            GenType::Enum(unique)
+        }),
+    ];
+    leaf.prop_recursive(3, 32, 4, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(|ty| GenType::List(Box::new(ty))),
+            prop::collection::vec((gen_field_name(), inner, any::<bool>()), 1..4).prop_map(
+                |fields| {
+                    let mut seen = std::collections::HashSet::new();
+                    let unique: Vec<(String, GenType, bool)> = fields
+                        .into_iter()
+                        .filter(|(name, _, _)| seen.insert(name.clone()))
+                        .collect();
+                    GenType::Object(unique)
+                }
+            ),
+        ]
+    })
+    .boxed()
 }

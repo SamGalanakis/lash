@@ -72,6 +72,28 @@ pub enum Expr {
         op: BinaryOp,
         right: Box<Expr>,
     },
+    TypeLiteral(Box<TypeExpr>),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TypeExpr {
+    Any,
+    Str,
+    Int,
+    Float,
+    Bool,
+    Dict,
+    Enum(Vec<String>),
+    List(Box<TypeExpr>),
+    Object(Vec<TypeField>),
+    Ref(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TypeField {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub optional: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

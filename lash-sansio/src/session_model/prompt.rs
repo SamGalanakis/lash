@@ -133,13 +133,11 @@ pub fn default_prompt_template() -> PromptTemplate {
 
 pub const MAIN_AGENT_INTRO: &str = "You are an AI coding assistant piloting the lash harness.";
 
-pub const CORE_GUIDANCE_SECTION: &str = r#"- Be clear, direct, and natural. Avoid filler, hedging, and performative tone.
-- Take initiative when the user's intent is clear. Default to acting without asking; ask only when progress is blocked and user intervention is strictly required.
-- Before a grouped set of tool calls or a substantial action, send a very brief preamble about the immediate next step. Skip it for trivial actions.
-- Fix root causes instead of masking symptoms.
-- Do not stop at partial progress; follow the task through to completion.
-- Prefer the simplest correct solution over cleverness or unnecessary abstraction.
-- Keep final answers focused and well-written. Use short numbered next steps only when there are real next steps."#;
+pub const CORE_GUIDANCE_SECTION: &str = r#"- Be concise. Avoid filler, hedging, and performative tone.
+- Take initiative when the user's intent is clear. Ask only when progress is blocked.
+- Do not restate a conclusion you already stated. Once a fix location is identified, act on it in the same turn.
+- Stop exploring once you have enough to act. A second confirming read is waste.
+- Prefer the simplest correct solution over cleverness or unnecessary abstraction."#;
 
 fn grouped_contributions(prompt: &PromptContext) -> HashMap<PromptSlot, Vec<PromptContribution>> {
     let mut grouped: HashMap<PromptSlot, Vec<PromptContribution>> = HashMap::new();
@@ -246,7 +244,7 @@ mod tests {
         assert!(text.contains("## Execution"));
         assert!(text.contains("mode execution"));
         assert!(text.contains("## Guidance"));
-        assert!(text.contains("Fix root causes instead of masking symptoms"));
+        assert!(text.contains("Stop exploring once you have enough to act"));
     }
 
     #[test]
@@ -273,7 +271,7 @@ mod tests {
         let text = template.render(&prompt);
         assert!(text.contains("## Guidance"));
         assert!(text.contains("### Custom"));
-        assert!(!text.contains("Fix root causes instead of masking symptoms"));
+        assert!(!text.contains("Stop exploring once you have enough to act"));
     }
 
     #[test]

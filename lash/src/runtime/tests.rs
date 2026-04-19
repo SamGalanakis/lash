@@ -909,6 +909,60 @@ impl crate::ToolProvider for EchoTool {
     }
 }
 
+/// Tool that sleeps for 10 seconds unless its future is aborted or the
+/// execution-context cancellation token fires. Used to verify that turn
+/// cancellation unwinds in-flight tool tasks promptly.
+struct SlowTool {
+    observed_cancel: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for SlowTool {
+    fn definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition {
+            name: "slow_tool".to_string(),
+            description: "Sleep for a long time; respects cancellation.".to_string(),
+            params: vec![],
+            returns: "json".to_string(),
+            examples: vec![],
+            enabled: true,
+            injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
+        }]
+    }
+
+    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        crate::ToolResult::ok(serde_json::json!({"status": "completed"}))
+    }
+
+    async fn execute_streaming_with_context(
+        &self,
+        _name: &str,
+        _args: &serde_json::Value,
+        context: &crate::ToolExecutionContext,
+        _progress: Option<&crate::ProgressSender>,
+    ) -> crate::ToolResult {
+        let observed = Arc::clone(&self.observed_cancel);
+        if let Some(token) = context.cancellation_token.as_ref() {
+            let token = token.clone();
+            tokio::select! {
+                _ = token.cancelled() => {
+                    observed.store(true, Ordering::SeqCst);
+                    crate::ToolResult::err_fmt("cancelled")
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                    crate::ToolResult::ok(serde_json::json!({"status": "completed"}))
+                }
+            }
+        } else {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            crate::ToolResult::ok(serde_json::json!({"status": "completed"}))
+        }
+    }
+}
+
 #[tokio::test]
 async fn session_config_change_hook_receives_context_window_updates() {
     let observed = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -2187,6 +2241,64 @@ fn assembler_prefers_state_output_when_streamed_text_is_a_truncated_prefix() {
 }
 
 #[test]
+fn assembler_state_output_excludes_tool_call_payload() {
+    // Regression: codex commits an assistant message containing a prose
+    // part followed by a tool-call part whose `content` is the raw JSON
+    // arguments. On interrupt the assembler falls back to the last
+    // assistant message's parts; concatenating EVERY part's content
+    // leaks the tool-call JSON into safe_text and the UI then renders it
+    // as a literal AssistantText block. Only Text/Prose/Image parts
+    // should appear in safe_text.
+    let mut state = default_state();
+    append_message(
+        &mut state,
+        Message {
+            id: "m0".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part {
+                    id: "m0.p0".to_string(),
+                    kind: PartKind::Prose,
+                    content: "Searching for the relevant code.".to_string(),
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_item_id: None,
+                    prune_state: PruneState::Intact,
+                },
+                Part {
+                    id: "m0.p1".to_string(),
+                    kind: PartKind::ToolCall,
+                    content: "{\"tool_calls\":[{\"tool\":\"grep\",\"parameters\":{\"query\":\"x\"}}]}"
+                        .to_string(),
+                    attachment: None,
+                    tool_call_id: Some("tc1".to_string()),
+                    tool_name: Some("batch".to_string()),
+                    tool_item_id: None,
+                    prune_state: PruneState::Intact,
+                },
+            ],
+            user_input: None,
+            origin: None,
+        },
+    );
+    let mut assembler = TurnAssembler::default();
+    let out = assembler.finish(
+        state.export_state(),
+        true,
+        None,
+        &SanitizerPolicy::default(),
+        &TerminationPolicy::default(),
+    );
+    assert_eq!(out.status, TurnStatus::Interrupted);
+    assert_eq!(
+        out.assistant_output.safe_text,
+        "Searching for the relevant code."
+    );
+    assert!(!out.assistant_output.raw_text.contains("tool_calls"));
+}
+
+#[test]
 fn assembler_marks_tool_failure() {
     let mut assembler = TurnAssembler::default();
     assembler.push(&SessionEvent::ToolCall {
@@ -2449,6 +2561,85 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
         })
         .collect();
     assert_eq!(streamed_text, expected);
+}
+
+#[tokio::test]
+async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
+    // Model emits one tool call that would sleep for 10s; we cancel the turn
+    // and expect run_tool_calls to tear down promptly (< 2s), either via
+    // JoinSet::abort_all or via the tool observing the cancellation token.
+    let transport = MockTransport::new(vec![
+        MockCall {
+            stream_events: vec![
+                LlmStreamEvent::Part(LlmOutputPart::ToolCall {
+                    call_id: "slow-1".to_string(),
+                    tool_name: "slow_tool".to_string(),
+                    input_json: "{}".to_string(),
+                    id: None,
+                }),
+                LlmStreamEvent::Usage(LlmUsage {
+                    input_tokens: 10,
+                    output_tokens: 1,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 0,
+                }),
+            ],
+            response: Ok(LlmResponse::default()),
+        },
+        // Extra call not expected to happen — provided as a safety net in case
+        // the turn machine makes a second LLM call before noticing cancel.
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "stopped".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "stopped".to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let observed_cancel = Arc::new(AtomicBool::new(false));
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(SlowTool {
+        observed_cancel: Arc::clone(&observed_cancel),
+    });
+    let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
+    let cancel = CancellationToken::new();
+    let cancel_trigger = cancel.clone();
+    tokio::spawn(async move {
+        // Give the turn time to spawn the slow tool before we cancel.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_trigger.cancel();
+    });
+
+    let start = std::time::Instant::now();
+    let _ = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "trigger slow tool".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+            },
+            cancel,
+        )
+        .await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "turn cancellation did not tear down in-flight tool call quickly: elapsed={elapsed:?}"
+    );
+    // The tool either saw the cancellation token and returned, or its future
+    // was aborted by the JoinSet. Either outcome is acceptable — what matters
+    // is the prompt return above. We still assert cooperative observation as a
+    // stronger signal that the token is now plumbed through to tool context.
+    assert!(
+        observed_cancel.load(Ordering::SeqCst),
+        "slow tool did not observe cancellation token through ToolExecutionContext"
+    );
 }
 
 #[tokio::test]

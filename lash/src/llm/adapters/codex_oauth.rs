@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::llm::adapters::streaming::{drive_sse_response, emit_progress};
 use crate::llm::timeouts::{
@@ -328,6 +329,12 @@ impl Default for CodexOAuthAdapter {
 impl CodexOAuthAdapter {
     const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
     const CODEX_RESPONSES_URL: &'static str = "https://chatgpt.com/backend-api/codex/responses";
+    /// Maximum number of submission attempts (1 initial + up to 2 retries).
+    /// Mirrors pi's `MAX_RETRIES = 3` semantics (pi iterates `attempt <= MAX_RETRIES`).
+    const MAX_ATTEMPTS: u32 = 3;
+    /// Base delay for exponential backoff between retries (ms).
+    /// Matches pi-mono `BASE_DELAY_MS` at `openai-codex-responses.ts:47`.
+    const BASE_DELAY_MS: u64 = 1000;
 
     pub fn new(timeouts: LlmTimeouts) -> Self {
         Self {
@@ -335,6 +342,41 @@ impl CodexOAuthAdapter {
             request_timeout: timeouts.request_timeout,
             chunk_timeout: timeouts.chunk_timeout,
         }
+    }
+
+    /// Decide whether an HTTP failure should be retried.
+    ///
+    /// Mirrors the rules in pi-mono (`openai-codex-responses.ts:94-99`, `:229`):
+    /// - 429 is retryable *except* when the body reports `"type": "usage_limit_reached"`
+    ///   (the user has exhausted their quota and retrying won't help).
+    /// - 5xx (500-599) is retryable.
+    /// - All other statuses (2xx/3xx, and 4xx other than 429) are not retryable.
+    /// - Once `attempt_number` reaches `MAX_ATTEMPTS - 1` (the final attempt), no more retries.
+    fn should_retry(status: u16, body_text: &str, attempt_number: u32) -> bool {
+        if attempt_number + 1 >= Self::MAX_ATTEMPTS {
+            return false;
+        }
+        if status == 429 {
+            return !Self::is_usage_limit_error(body_text);
+        }
+        (500..600).contains(&status)
+    }
+
+    /// Detect pi's "usage limit reached" marker in an error body.
+    /// Pi matches the literal string `"type":"usage_limit_reached"` (see
+    /// `openai-codex-responses.ts:891`, which tests `/usage_limit_reached/`).
+    fn is_usage_limit_error(body_text: &str) -> bool {
+        // JSON serialisers don't insert whitespace between `"type":` and the value,
+        // but be lenient across a single space just in case.
+        body_text.contains("\"type\":\"usage_limit_reached\"")
+            || body_text.contains("\"type\": \"usage_limit_reached\"")
+    }
+
+    /// Exponential backoff for retry attempt `attempt`.
+    /// attempt=0 -> 1000ms, attempt=1 -> 2000ms, attempt=2 -> 4000ms (mirrors pi's
+    /// `BASE_DELAY_MS * 2 ** attempt`).
+    fn backoff_delay(attempt: u32) -> Duration {
+        Duration::from_millis(Self::BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(16)))
     }
 
     fn input_image_part(att: &crate::llm::types::LlmAttachment) -> Value {
@@ -377,9 +419,12 @@ impl CodexOAuthAdapter {
     fn build_input(req: &LlmRequest) -> (String, Vec<Value>) {
         let mut input = Vec::new();
         let mut instructions = Vec::new();
-        for chunk in coalesce_replay_messages(&req.messages) {
-            match chunk {
+        let chunks = coalesce_replay_messages(&req.messages);
+        let mut i = 0;
+        while i < chunks.len() {
+            match &chunks[i] {
                 LlmReplayChunk::Message(msg) => {
+                    let msg = msg.clone();
                     if matches!(msg.role, LlmRole::System) && msg.kind != "tool_result" {
                         if !msg.content.is_empty() {
                             instructions.push(msg.content);
@@ -401,6 +446,7 @@ impl CodexOAuthAdapter {
                             && prev.get("content").is_some_and(|c| c.is_array())
                         {
                             prev["content"].as_array_mut().unwrap().push(part);
+                            i += 1;
                             continue;
                         }
                         input.push(json!({
@@ -410,38 +456,111 @@ impl CodexOAuthAdapter {
                     }
                 }
                 LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    if let Some(text) = text.filter(|text| !text.is_empty()) {
+                    if let Some(text) = text.clone().filter(|text| !text.is_empty()) {
                         input.push(json!({
                             "role": "assistant",
                             "content": [{"type": "output_text", "text": text}],
                         }));
                     }
-                    input.extend(tool_calls.into_iter().map(|call| {
+                    input.extend(tool_calls.iter().cloned().map(|call| {
+                        let crate::llm::types::LlmToolCall {
+                            call_id,
+                            tool_name,
+                            input_json,
+                            id,
+                        } = call;
                         let mut item = json!({
                             "type": "function_call",
-                            "call_id": call.call_id,
-                            "name": call.tool_name,
-                            "arguments": call.input_json,
+                            "call_id": call_id,
+                            "name": tool_name,
+                            "arguments": input_json,
                         });
                         // Codex uses `id` (e.g. `fc_...`) to pair function_call
                         // items with their sibling reasoning items across turns.
                         // Omit when absent so we don't send a bogus id.
-                        if let Some(item_id) = call.id {
+                        if let Some(item_id) = id {
                             item["id"] = json!(item_id);
                         }
                         item
                     }));
                 }
                 LlmReplayChunk::ToolResults { results } => {
-                    input.extend(results.into_iter().map(|msg| {
+                    input.extend(results.iter().cloned().map(|msg| {
                         json!({
                             "type": "function_call_output",
                             "call_id": msg.tool_call_id.unwrap_or_default(),
                             "output": msg.content,
                         })
                     }));
+
+                    // Tool result images are emitted by the sansio renderer as
+                    // user-role image messages that immediately follow the
+                    // tool_result messages (each preceded by a
+                    // "[Tool image: ...]" text placeholder sharing the same
+                    // user Message). To match pi's shape, fold those images
+                    // into the preceding function_call_output's `output` as a
+                    // structured content array of {input_text, input_image}
+                    // parts, instead of leaving them as a separate trailing
+                    // user message that silently drops the image.
+                    let mut j = i + 1;
+                    while j < chunks.len() {
+                        let LlmReplayChunk::Message(next) = &chunks[j] else {
+                            break;
+                        };
+                        if !matches!(next.role, LlmRole::User) {
+                            break;
+                        }
+                        if next.kind == "text" && next.content.starts_with("[Tool image:") {
+                            // Skip the placeholder text that precedes the
+                            // actual image; the image itself carries the
+                            // content.
+                            j += 1;
+                            continue;
+                        }
+                        if next.kind != "image" {
+                            break;
+                        }
+                        let idx = next.image_idx.max(0) as usize;
+                        let Some(att) = req.attachments.get(idx) else {
+                            break;
+                        };
+                        let Some(last) = input.last_mut() else {
+                            break;
+                        };
+                        if last.get("type").and_then(|v| v.as_str())
+                            != Some("function_call_output")
+                        {
+                            break;
+                        }
+                        // Promote `output` from a bare string to a structured
+                        // content array on first image.
+                        if !last["output"].is_array() {
+                            let existing_text = last["output"]
+                                .as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_default();
+                            let mut parts: Vec<Value> = Vec::new();
+                            if !existing_text.is_empty() {
+                                parts.push(json!({
+                                    "type": "input_text",
+                                    "text": existing_text,
+                                }));
+                            }
+                            last["output"] = Value::Array(parts);
+                        }
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+                        let data_url = format!("data:{};base64,{}", att.mime, b64);
+                        last["output"].as_array_mut().unwrap().push(json!({
+                            "type": "input_image",
+                            "image_url": data_url,
+                        }));
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
                 }
             }
+            i += 1;
         }
         (instructions.join("\n\n"), input)
     }
@@ -479,6 +598,36 @@ impl CodexOAuthAdapter {
         )
     }
 
+    /// Clamp an incoming reasoning effort string to a value the Codex
+    /// Responses API will accept for the given model. Mirrors the
+    /// `clampReasoningEffort` helper in pi-mono's
+    /// `openai-codex-responses.ts` so that invalid combinations like
+    /// `minimal` on gpt-5.4 or `xhigh` on gpt-5.1-codex-mini don't 4xx.
+    fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
+        // Strip any provider prefix (e.g. "openai/gpt-5.4").
+        let id = match model.rsplit_once('/') {
+            Some((_, tail)) => tail,
+            None => model,
+        };
+
+        if (id.starts_with("gpt-5.2") || id.starts_with("gpt-5.3") || id.starts_with("gpt-5.4"))
+            && effort == "minimal"
+        {
+            return "low".to_string();
+        }
+        if id == "gpt-5.1" && effort == "xhigh" {
+            return "high".to_string();
+        }
+        if id == "gpt-5.1-codex-mini" {
+            return if effort == "high" || effort == "xhigh" {
+                "high".to_string()
+            } else {
+                "medium".to_string()
+            };
+        }
+        effort.to_string()
+    }
+
     fn build_request_body(req: &LlmRequest, stream: bool) -> Value {
         let tools = Self::build_tools(req);
         let (instructions, input) = Self::build_input(req);
@@ -494,7 +643,10 @@ impl CodexOAuthAdapter {
             "include": [],
         });
         if let Some(effort) = req.model_variant.as_deref() {
-            body["reasoning"] = json!({"effort": effort});
+            body["reasoning"] = json!({
+                "effort": Self::clamp_reasoning_effort(&req.model, effort),
+                "summary": "auto",
+            });
         }
         if let Some(session_id) = req.session_id.as_deref() {
             body["prompt_cache_key"] = json!(session_id);
@@ -930,82 +1082,141 @@ impl LlmTransport for CodexOAuthAdapter {
         let body = Self::build_request_body(&req, stream_events.is_some());
 
         let request_body = serde_json::to_string(&body).ok();
-        let mut http = self
-            .client
-            .post(Self::CODEX_RESPONSES_URL)
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("originator", Self::CODEX_ORIGINATOR)
-            .header("User-Agent", Self::codex_user_agent())
-            .json(&body);
-        if let Some(session_id) = req.session_id.as_deref() {
-            http = http
-                .header("session_id", session_id)
-                .header("x-client-request-id", session_id);
-        }
-        if let Some(id) = account_id {
-            http = http.header("ChatGPT-Account-ID", id);
-        }
 
-        let resp = send_request(
-            http,
-            request_body.clone(),
-            response_start_timeout(
-                self.request_timeout,
-                self.chunk_timeout,
-                stream_events.is_some(),
-            ),
-            "Codex response start timed out",
-        )
-        .await?;
+        // Build the HTTP request fresh on each attempt — reqwest's RequestBuilder
+        // doesn't universally implement Clone once `.json()` has been called, and
+        // rebuilding keeps each attempt self-contained.
+        let build_request = || {
+            let mut http = self
+                .client
+                .post(Self::CODEX_RESPONSES_URL)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .header("originator", Self::CODEX_ORIGINATOR)
+                .header("User-Agent", Self::codex_user_agent())
+                .json(&body);
+            if let Some(session_id) = req.session_id.as_deref() {
+                http = http
+                    .header("session_id", session_id)
+                    .header("x-client-request-id", session_id);
+            }
+            if let Some(id) = account_id.as_deref() {
+                http = http.header("ChatGPT-Account-ID", id);
+            }
+            http
+        };
 
-        let status = resp.status();
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        if !status.is_success() {
-            let text = match read_response_text(
-                resp,
-                self.request_timeout,
-                "Codex response body timed out",
+        // Retry loop: short-circuit locally on 429/5xx and transient network
+        // errors with exponential backoff. Mirrors pi-mono
+        // `openai-codex-responses.ts:206-256`. The adapter still sets
+        // `retryable: true` on the final error so upstream retry infrastructure
+        // keeps working for non-Codex providers; this loop just cuts down
+        // round-trips the user has to endure.
+        let mut attempt: u32 = 0;
+        let (resp, _status, content_type) = loop {
+            let http = build_request();
+            let send_result = send_request(
+                http,
+                request_body.clone(),
+                response_start_timeout(
+                    self.request_timeout,
+                    self.chunk_timeout,
+                    stream_events.is_some(),
+                ),
+                "Codex response start timed out",
             )
-            .await
-            {
-                Ok(text) => text,
-                Err(err) => {
+            .await;
+
+            match send_result {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let content_type = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    if status.is_success() {
+                        break (resp, status, content_type);
+                    }
+
+                    // Non-success: read body text, decide whether to retry.
+                    let text = match read_response_text(
+                        resp,
+                        self.request_timeout,
+                        "Codex response body timed out",
+                    )
+                    .await
+                    {
+                        Ok(text) => text,
+                        Err(err) => {
+                            return Err(LlmTransportError {
+                                message: format!(
+                                    "Codex request failed with {} and unreadable body: {}",
+                                    status.as_u16(),
+                                    err.message
+                                ),
+                                retryable: err.retryable
+                                    || status.as_u16() == 429
+                                    || status.as_u16() >= 500,
+                                raw: err.raw,
+                                code: Some(status.as_u16().to_string()),
+                                request_body: request_body.clone().or(err.request_body),
+                            });
+                        }
+                    };
+
+                    if Self::should_retry(status.as_u16(), &text, attempt) {
+                        let delay = Self::backoff_delay(attempt);
+                        tracing::debug!(
+                            target: "lash::llm::codex_oauth",
+                            status = status.as_u16(),
+                            attempt,
+                            delay_ms = delay.as_millis() as u64,
+                            "Codex request returned retryable status; sleeping before retry"
+                        );
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+
                     return Err(LlmTransportError {
                         message: format!(
-                            "Codex request failed with {} and unreadable body: {}",
+                            "Codex request failed with {}{}",
                             status.as_u16(),
-                            err.message
+                            content_type
+                                .as_deref()
+                                .map(|ct| format!(" ({ct})"))
+                                .unwrap_or_default()
                         ),
-                        retryable: err.retryable
-                            || status.as_u16() == 429
-                            || status.as_u16() >= 500,
-                        raw: err.raw,
+                        retryable: status.as_u16() == 429 || status.as_u16() >= 500,
+                        raw: Some(text),
                         code: Some(status.as_u16().to_string()),
-                        request_body: request_body.clone().or(err.request_body),
+                        request_body: request_body.clone(),
                     });
                 }
-            };
-            return Err(LlmTransportError {
-                message: format!(
-                    "Codex request failed with {}{}",
-                    status.as_u16(),
-                    content_type
-                        .as_deref()
-                        .map(|ct| format!(" ({ct})"))
-                        .unwrap_or_default()
-                ),
-                retryable: status.as_u16() == 429 || status.as_u16() >= 500,
-                raw: Some(text),
-                code: Some(status.as_u16().to_string()),
-                request_body,
-            });
-        }
+                Err(err) => {
+                    // Transient network / body / decode errors: pi retries
+                    // these the same way it retries HTTP 5xx. Respect the
+                    // flag set by `send_request` (timeouts + reqwest
+                    // is_connect / is_body / is_decode).
+                    if err.retryable && attempt + 1 < Self::MAX_ATTEMPTS {
+                        let delay = Self::backoff_delay(attempt);
+                        tracing::debug!(
+                            target: "lash::llm::codex_oauth",
+                            attempt,
+                            delay_ms = delay.as_millis() as u64,
+                            err = %err.message,
+                            "Codex request failed with transient network error; sleeping before retry"
+                        );
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        };
 
         let is_sse = content_type
             .as_deref()
@@ -1551,6 +1762,129 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
     }
 
     #[test]
+    fn tool_result_text_only_keeps_bare_string_output() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "{\"path\":\"README.md\"}".to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "file contents".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
+                },
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call_1");
+        // Text-only results stay a bare string (common case Codex accepts).
+        assert_eq!(input[1]["output"], "file contents");
+        assert!(input[1]["output"].is_string());
+    }
+
+    #[test]
+    fn tool_result_with_image_emits_structured_output_array() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "{}".to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_img".to_string()),
+                    tool_name: Some("get_circle".to_string()),
+                    tool_item_id: None,
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "A red circle.".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_img".to_string()),
+                    tool_name: Some("get_circle".to_string()),
+                    tool_item_id: None,
+                },
+                // Placeholder text that the sansio renderer emits before
+                // the actual image message; it should be folded away.
+                message(LlmRole::User, "text", "[Tool image: circle-0]"),
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: String::new(),
+                    kind: "image".to_string(),
+                    image_idx: 0,
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_item_id: None,
+                },
+                message(LlmRole::User, "text", "what color is it?"),
+            ],
+            attachments: vec![crate::llm::types::LlmAttachment {
+                mime: "image/png".to_string(),
+                data: vec![0x89, 0x50, 0x4E, 0x47],
+            }],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+
+        // function_call + function_call_output(with image folded in) +
+        // trailing user question. No stray trailing image/user placeholder
+        // items should be emitted.
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call_img");
+
+        let output = &input[1]["output"];
+        assert!(
+            output.is_array(),
+            "expected structured output array when tool result carries an image"
+        );
+        let items = output.as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "input_text");
+        assert_eq!(items[0]["text"], "A red circle.");
+        assert_eq!(items[1]["type"], "input_image");
+        assert_eq!(
+            items[1]["image_url"],
+            "data:image/png;base64,iVBORw=="
+        );
+
+        // Trailing user question should still be present as its own user
+        // message, and must not contain the image.
+        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[2]["content"][0]["text"], "what color is it?");
+    }
+
+    #[test]
     fn build_request_body_sets_prompt_cache_key_from_session_id() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
@@ -1765,5 +2099,207 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         assert_eq!(part["image_url"], "data:image/png;base64,AAECAw==");
         assert!(part.get("image_base64").is_none());
         assert!(part.get("mime_type").is_none());
+    }
+
+    #[test]
+    fn clamp_reasoning_effort_promotes_minimal_on_gpt_5_2_3_4() {
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.2", "minimal"),
+            "low"
+        );
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.3", "minimal"),
+            "low"
+        );
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.4", "minimal"),
+            "low"
+        );
+        // Provider-prefixed ids are normalised before matching.
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("openai/gpt-5.4", "minimal"),
+            "low"
+        );
+        // Non-minimal efforts pass through unchanged on these models.
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.4", "high"),
+            "high"
+        );
+    }
+
+    #[test]
+    fn clamp_reasoning_effort_downgrades_xhigh_on_gpt_5_1() {
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1", "xhigh"),
+            "high"
+        );
+        // Other efforts pass through.
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1", "minimal"),
+            "minimal"
+        );
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1", "medium"),
+            "medium"
+        );
+    }
+
+    #[test]
+    fn clamp_reasoning_effort_codex_mini_only_high_or_medium() {
+        // xhigh is capped at high.
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "xhigh"),
+            "high"
+        );
+        // high stays high.
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "high"),
+            "high"
+        );
+        // Everything else collapses to medium (codex-mini only supports
+        // medium/high per pi-mono's clampReasoningEffort).
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "minimal"),
+            "medium"
+        );
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "low"),
+            "medium"
+        );
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "medium"),
+            "medium"
+        );
+    }
+
+    #[test]
+    fn clamp_reasoning_effort_passthrough_for_other_models() {
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.0", "minimal"),
+            "minimal"
+        );
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("o4-mini", "high"),
+            "high"
+        );
+        assert_eq!(
+            CodexOAuthAdapter::clamp_reasoning_effort("some-future-model", "xhigh"),
+            "xhigh"
+        );
+    }
+
+    #[test]
+    fn reasoning_object_includes_summary_auto_and_clamped_effort() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![message(LlmRole::User, "text", "hi")],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: Some("minimal".to_string()),
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let body = CodexOAuthAdapter::build_request_body(&req, false);
+        let reasoning = body.get("reasoning").expect("reasoning present");
+        // minimal on gpt-5.4 clamps to low.
+        assert_eq!(reasoning["effort"], "low");
+        // summary: "auto" is always included.
+        assert_eq!(reasoning["summary"], "auto");
+    }
+
+    #[test]
+    fn reasoning_omitted_when_no_variant_provided() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![message(LlmRole::User, "text", "hi")],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let body = CodexOAuthAdapter::build_request_body(&req, false);
+        assert!(body.get("reasoning").is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Retry / backoff (fix for audit finding 1.5)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn should_retry_skips_429_usage_limit_reached() {
+        // Pi explicitly does not retry usage_limit_reached errors — the user
+        // has no quota, so retrying burns latency for a guaranteed failure.
+        let body = r#"{"error":{"type":"usage_limit_reached","message":"You've hit your ChatGPT usage limit","plan_type":"plus"}}"#;
+        assert!(!CodexOAuthAdapter::should_retry(429, body, 0));
+        // Still false on subsequent attempts, just in case the loop somehow
+        // gets there.
+        assert!(!CodexOAuthAdapter::should_retry(429, body, 1));
+    }
+
+    #[test]
+    fn should_retry_retries_normal_429() {
+        let body = r#"{"error":{"type":"rate_limit_exceeded","message":"Too many requests"}}"#;
+        assert!(CodexOAuthAdapter::should_retry(429, body, 0));
+        assert!(CodexOAuthAdapter::should_retry(429, body, 1));
+        // The final attempt must not retry (we've used all attempts).
+        assert!(!CodexOAuthAdapter::should_retry(
+            429,
+            body,
+            CodexOAuthAdapter::MAX_ATTEMPTS - 1
+        ));
+    }
+
+    #[test]
+    fn should_retry_retries_5xx() {
+        assert!(CodexOAuthAdapter::should_retry(500, "internal error", 0));
+        assert!(CodexOAuthAdapter::should_retry(502, "bad gateway", 0));
+        assert!(CodexOAuthAdapter::should_retry(
+            503,
+            "service unavailable",
+            1
+        ));
+        assert!(CodexOAuthAdapter::should_retry(504, "gateway timeout", 0));
+        // 599 is still 5xx.
+        assert!(CodexOAuthAdapter::should_retry(599, "", 0));
+        // 600 is not 5xx.
+        assert!(!CodexOAuthAdapter::should_retry(600, "", 0));
+    }
+
+    #[test]
+    fn should_retry_does_not_retry_4xx_other_than_429() {
+        assert!(!CodexOAuthAdapter::should_retry(400, "bad request", 0));
+        assert!(!CodexOAuthAdapter::should_retry(401, "unauthorized", 0));
+        assert!(!CodexOAuthAdapter::should_retry(403, "forbidden", 0));
+        assert!(!CodexOAuthAdapter::should_retry(404, "not found", 0));
+        assert!(!CodexOAuthAdapter::should_retry(
+            418, "I'm a teapot", 0,
+        ));
+    }
+
+    #[test]
+    fn backoff_delay_matches_pi_exponential_schedule() {
+        // Pi's schedule is `BASE_DELAY_MS * 2 ** attempt`:
+        //   attempt 0 -> 1000ms
+        //   attempt 1 -> 2000ms
+        //   attempt 2 -> 4000ms
+        assert_eq!(
+            CodexOAuthAdapter::backoff_delay(0),
+            Duration::from_millis(1000)
+        );
+        assert_eq!(
+            CodexOAuthAdapter::backoff_delay(1),
+            Duration::from_millis(2000)
+        );
+        assert_eq!(
+            CodexOAuthAdapter::backoff_delay(2),
+            Duration::from_millis(4000)
+        );
     }
 }

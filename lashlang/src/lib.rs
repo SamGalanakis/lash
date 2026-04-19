@@ -3,13 +3,13 @@ mod lexer;
 mod parser;
 mod runtime;
 
-pub use ast::{BinaryOp, CallExpr, Expr, Program, Stmt, UnaryOp};
+pub use ast::{BinaryOp, CallExpr, Expr, Program, Stmt, TypeExpr, TypeField, UnaryOp};
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use parser::{ParseError, parse};
 pub use runtime::{
-    CompiledProgram, ExecutionOutcome, ProfileReport, ProfileStat, Record, RuntimeError, Snapshot,
-    State, ToolHost, ToolHostError, Value, compile_program, execute_compiled, execute_program,
-    profile_compiled,
+    CompileStats, CompiledProgram, ExecutionOutcome, LASH_TYPE_KEY, ProfileReport, ProfileStat,
+    Record, RuntimeError, Snapshot, State, ToolHost, ToolHostError, Value, compile_program,
+    execute_compiled, execute_program, profile_compiled, unwrap_type_value,
 };
 
 pub fn execute<H: ToolHost>(

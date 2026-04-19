@@ -102,6 +102,8 @@ fn rlm_subagent_tool_definitions() -> Vec<ToolDefinition> {
         spawn_agent_definition(vec![
             r#"worker = call spawn_agent { task_name: "inspect_auth", task: "Summarize the auth flow", capability: "low" }"#.into(),
             r#"typed = call spawn_agent { task_name: "extract_line", task: "Find the longest line in src/main.rs", capability: "low", output: { line: "str", length: "int" } }"#.into(),
+            r#"Shape = Type { name: str, tags: list[str], status: enum["ok", "err"] }"#.into(),
+            r#"signed = call spawn_agent { task_name: "catalog", task: "Parse the book listing", capability: "low", output: Shape }"#.into(),
             r#"wait = start call wait_agent { targets: [worker.path], timeout_ms: 30000 }"#.into(),
             r#"update = await wait"#.into(),
         ]),
@@ -122,7 +124,7 @@ fn rlm_subagent_tool_definitions() -> Vec<ToolDefinition> {
 fn spawn_agent_definition(examples: Vec<String>) -> ToolDefinition {
     ToolDefinition {
         name: "spawn_agent".into(),
-        description: "Spawn a subagent under the current agent path and start it in the background. Pick `capability` from `low`, `medium`, or `high`. Set `fork_turns` to `none`, `all`, or a positive integer string to control inherited context. If `output` is present, the subagent must return a value matching that shape. `task_name` is auto-normalized (lowercased; spaces, hyphens, and other non-alphanumeric characters collapse to `_`); the response includes a `task_name_note` when normalization changed what you sent.".into(),
+        description: "Spawn a subagent under the current agent path and start it in the background. Pick `capability` from `low`, `medium`, or `high`. Set `fork_turns` to `none`, `all`, or a positive integer string to control inherited context. If `output` is present, the subagent must return a value matching that shape — pass either a record of scalar type descriptors (`{ line: \"str\", length: \"int\" }`) or a `Type { ... }` literal (supports nested objects, enums, `list[T]`, and `?` optional fields). `task_name` is auto-normalized (lowercased; spaces, hyphens, and other non-alphanumeric characters collapse to `_`); the response includes a `task_name_note` when normalization changed what you sent.".into(),
         params: vec![
             ToolParam::typed("task_name", "str"),
             ToolParam::typed("task", "str"),

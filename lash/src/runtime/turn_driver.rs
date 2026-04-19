@@ -125,7 +125,7 @@ impl RuntimeTurnDriver {
                         machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
                     }
                     Effect::ToolCalls { id, calls } => {
-                        let results = self.run_tool_calls(calls, &event_tx).await;
+                        let results = self.run_tool_calls(calls, &event_tx, &cancel).await;
                         Arc::make_mut(&mut self.tool_calls).extend(results.iter().map(|outcome| {
                             ToolCallRecord {
                                 call_id: Some(outcome.call_id.clone()),
@@ -667,6 +667,7 @@ impl RuntimeTurnDriver {
         &mut self,
         pending_tools: Vec<crate::sansio::PendingToolCall>,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
     ) -> Vec<crate::sansio::CompletedToolCall> {
         let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
         let runtime_event_tx = event_tx.clone();
@@ -689,12 +690,17 @@ impl RuntimeTurnDriver {
             event_tx: tool_event_tx,
             turn_injection_bridge: self.session.turn_injection_bridge().clone(),
         });
+        // Tools get a child of the turn-level cancellation token so they can
+        // cooperatively bail out when the turn is cancelled. We also abort the
+        // JoinSet below on cancel to force-terminate tasks that don't check.
+        let tool_cancel = cancel.child_token();
         let mut join_set = tokio::task::JoinSet::new();
         for (index, pending_tool) in pending_tools.into_iter().enumerate() {
             let dispatch = Arc::clone(&dispatch);
             let plugins = Arc::clone(&plugins);
             let projector_manager = Arc::clone(&projector_manager);
             let event_tx_clone = event_tx.clone();
+            let task_cancel = tool_cancel.clone();
             join_set.spawn(async move {
                 let call_id = pending_tool.call_id;
                 let tool_name = pending_tool.tool_name;
@@ -715,8 +721,20 @@ impl RuntimeTurnDriver {
                         }
                     }
                 });
-                let outcome =
-                    dispatch_tool_call(&dispatch, tool_name, args, Some(&progress_tx)).await;
+                let tool_context = crate::ToolExecutionContext {
+                    session_id: dispatch.session_id.clone(),
+                    host: Arc::clone(&dispatch.host),
+                    cancellation_token: Some(task_cancel.clone()),
+                    async_task_id: None,
+                };
+                let outcome = dispatch_tool_call_with_execution_context(
+                    &dispatch,
+                    tool_name,
+                    args,
+                    Some(&progress_tx),
+                    tool_context,
+                )
+                .await;
                 drop(progress_tx);
                 let _ = progress_handle.await;
                 let raw_result = crate::ToolResult {
@@ -770,25 +788,57 @@ impl RuntimeTurnDriver {
         }
 
         let mut outcomes = Vec::new();
-        while let Some(joined) = join_set.join_next().await {
-            match joined {
-                Ok(outcome) => outcomes.push(outcome),
-                Err(e) => outcomes.push((
-                    usize::MAX,
-                    crate::sansio::CompletedToolCall {
-                        call_id: uuid::Uuid::new_v4().to_string(),
-                        tool_name: "unknown".to_string(),
-                        args: serde_json::json!({}),
-                        state_result: crate::ToolResult::err_fmt(format!(
-                            "tool task panicked: {e}"
+        let mut cancelled = false;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled(), if !cancelled => {
+                    // Turn cancellation: signal cooperative shutdown to any
+                    // tool that is checking the token, then hard-abort the
+                    // JoinSet to ensure we return promptly.
+                    tool_cancel.cancel();
+                    join_set.abort_all();
+                    cancelled = true;
+                }
+                joined = join_set.join_next() => {
+                    let Some(joined) = joined else { break; };
+                    match joined {
+                        Ok(outcome) => outcomes.push(outcome),
+                        Err(e) if e.is_cancelled() => {
+                            // Aborted due to turn cancellation — synthesize a
+                            // cancellation result so the turn machine receives
+                            // a response for every pending call.
+                            outcomes.push((
+                                usize::MAX,
+                                crate::sansio::CompletedToolCall {
+                                    call_id: uuid::Uuid::new_v4().to_string(),
+                                    tool_name: "unknown".to_string(),
+                                    args: serde_json::json!({}),
+                                    state_result: crate::ToolResult::err_fmt("tool call cancelled"),
+                                    model_result: crate::ToolResult::err_fmt("tool call cancelled"),
+                                    duration_ms: 0,
+                                    item_id: None,
+                                },
+                            ));
+                        }
+                        Err(e) => outcomes.push((
+                            usize::MAX,
+                            crate::sansio::CompletedToolCall {
+                                call_id: uuid::Uuid::new_v4().to_string(),
+                                tool_name: "unknown".to_string(),
+                                args: serde_json::json!({}),
+                                state_result: crate::ToolResult::err_fmt(format!(
+                                    "tool task panicked: {e}"
+                                )),
+                                model_result: crate::ToolResult::err_fmt(format!(
+                                    "tool task panicked: {e}"
+                                )),
+                                duration_ms: 0,
+                                item_id: None,
+                            },
                         )),
-                        model_result: crate::ToolResult::err_fmt(format!(
-                            "tool task panicked: {e}"
-                        )),
-                        duration_ms: 0,
-                        item_id: None,
-                    },
-                )),
+                    }
+                }
             }
         }
         drop(dispatch);
