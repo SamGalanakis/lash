@@ -14,7 +14,7 @@ use crate::tools::{PatchAction, inspect_patch_ops};
 use crate::{
     MessageRole, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
     SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolDefinition,
-    ToolExecutionContext, ToolProvider, ToolResult,
+    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
 
 const PLAN_MODE_BADGE_KEY: &str = "mode";
@@ -558,6 +558,7 @@ impl ToolProvider for PlanModeTools {
             injected: false,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
 

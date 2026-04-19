@@ -964,7 +964,7 @@ fn append_assistant_text_part(out: &mut String, next: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ToolDefinition, ToolParam};
+    use crate::{ToolDefinition, ToolExecutionMode, ToolParam};
 
     fn tool(name: &str, injected: bool) -> ToolDefinition {
         ToolDefinition {
@@ -977,6 +977,7 @@ mod tests {
             injected,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }
     }
 

@@ -1329,6 +1329,7 @@ mod tests {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "wait_for_cancel".into(),
@@ -1340,6 +1341,7 @@ mod tests {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
             ]
         }

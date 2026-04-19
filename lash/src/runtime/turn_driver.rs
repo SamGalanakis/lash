@@ -7,6 +7,90 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
     }
 }
 
+/// Run a single pending tool call through the dispatch context and result
+/// projection pipeline, returning the completed call annotated with its
+/// original emission index.
+///
+/// Extracted from `run_tool_calls` so the same per-call logic can be used
+/// both inside a `JoinSet` (for parallel-safe tools) and in a sequential
+/// loop (for [`crate::ToolExecutionMode::Serial`] tools).
+async fn run_one_tool_call(
+    index: usize,
+    pending_tool: crate::sansio::PendingToolCall,
+    dispatch: Arc<crate::tool_dispatch::ToolDispatchContext>,
+    plugins: Arc<crate::PluginSession>,
+    projector_manager: Arc<dyn SessionManager>,
+    event_tx: mpsc::Sender<RuntimeStreamEvent>,
+) -> (usize, crate::sansio::CompletedToolCall) {
+    let call_id = pending_tool.call_id;
+    let tool_name = pending_tool.tool_name;
+    let args = pending_tool.args;
+    let (progress_tx, mut progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
+    let progress_event_tx = event_tx.clone();
+    let progress_handle = tokio::spawn(async move {
+        while let Some(sandbox_msg) = progress_rx.recv().await {
+            if sandbox_msg.kind != "final" {
+                let _ = progress_event_tx
+                    .send(RuntimeStreamEvent::Session(SessionEvent::Message {
+                        text: sandbox_msg.text,
+                        kind: sandbox_msg.kind,
+                    }))
+                    .await;
+            }
+        }
+    });
+    let outcome = dispatch_tool_call(&dispatch, tool_name, args, Some(&progress_tx)).await;
+    drop(progress_tx);
+    let _ = progress_handle.await;
+    let raw_result = crate::ToolResult {
+        success: outcome.record.success,
+        result: outcome.record.result,
+        images: outcome.images,
+    };
+    let state_result = match plugins
+        .project_tool_result(crate::plugin::ToolResultProjectionContext {
+            hook: crate::plugin::ToolResultProjectionHook::BeforeState,
+            session_id: dispatch.session_id.clone(),
+            tool_name: outcome.record.tool.clone(),
+            args: outcome.record.args.clone(),
+            result: raw_result.clone(),
+            duration_ms: outcome.record.duration_ms,
+            host: Arc::clone(&projector_manager),
+        })
+        .await
+    {
+        Ok(projected) => projected,
+        Err(err) => crate::ToolResult::err_fmt(err.to_string()),
+    };
+    let model_result = match plugins
+        .project_tool_result(crate::plugin::ToolResultProjectionContext {
+            hook: crate::plugin::ToolResultProjectionHook::BeforeModel,
+            session_id: dispatch.session_id.clone(),
+            tool_name: outcome.record.tool.clone(),
+            args: outcome.record.args.clone(),
+            result: raw_result.clone(),
+            duration_ms: outcome.record.duration_ms,
+            host: Arc::clone(&projector_manager),
+        })
+        .await
+    {
+        Ok(projected) => projected,
+        Err(err) => crate::ToolResult::err_fmt(err.to_string()),
+    };
+    (
+        index,
+        crate::sansio::CompletedToolCall {
+            call_id,
+            tool_name: outcome.record.tool,
+            args: outcome.record.args,
+            state_result,
+            model_result,
+            duration_ms: outcome.record.duration_ms,
+        },
+    )
+}
+
 async fn emit_plugin_surface_events_runtime(
     event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     plugin_id: &str,
@@ -689,85 +773,47 @@ impl RuntimeTurnDriver {
             event_tx: tool_event_tx,
             turn_injection_bridge: self.session.turn_injection_bridge().clone(),
         });
-        let mut join_set = tokio::task::JoinSet::new();
+        // Partition pending tool calls by declared [`ToolExecutionMode`]:
+        // parallel-safe tools spawn onto a JoinSet to run concurrently,
+        // while tools declared `Serial` (apply_patch, exec_command,
+        // write_stdin, followup_task, ...) run one-at-a-time afterwards so
+        // they can't interleave with each other or clobber shared state.
+        // Order is preserved by the caller-provided `index` and the final
+        // sort below.
+        let mut parallel_calls: Vec<(usize, crate::sansio::PendingToolCall)> = Vec::new();
+        let mut serial_calls: Vec<(usize, crate::sansio::PendingToolCall)> = Vec::new();
         for (index, pending_tool) in pending_tools.into_iter().enumerate() {
+            let mode = crate::tool_dispatch::resolve_tool_execution_mode(
+                &dispatch,
+                &pending_tool.tool_name,
+            );
+            match mode {
+                crate::ToolExecutionMode::Parallel => parallel_calls.push((index, pending_tool)),
+                crate::ToolExecutionMode::Serial => serial_calls.push((index, pending_tool)),
+            }
+        }
+
+        let mut outcomes: Vec<(usize, crate::sansio::CompletedToolCall)> = Vec::new();
+
+        let mut join_set = tokio::task::JoinSet::new();
+        for (index, pending_tool) in parallel_calls.into_iter() {
             let dispatch = Arc::clone(&dispatch);
             let plugins = Arc::clone(&plugins);
             let projector_manager = Arc::clone(&projector_manager);
             let event_tx_clone = event_tx.clone();
             join_set.spawn(async move {
-                let call_id = pending_tool.call_id;
-                let tool_name = pending_tool.tool_name;
-                let args = pending_tool.args;
-                let (progress_tx, mut progress_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
-                let progress_event_tx = event_tx_clone.clone();
-                let progress_handle = tokio::spawn(async move {
-                    while let Some(sandbox_msg) = progress_rx.recv().await {
-                        if sandbox_msg.kind != "final" {
-                            let _ = progress_event_tx
-                                .send(RuntimeStreamEvent::Session(SessionEvent::Message {
-                                    text: sandbox_msg.text,
-                                    kind: sandbox_msg.kind,
-                                }))
-                                .await;
-                        }
-                    }
-                });
-                let outcome =
-                    dispatch_tool_call(&dispatch, tool_name, args, Some(&progress_tx)).await;
-                drop(progress_tx);
-                let _ = progress_handle.await;
-                let raw_result = crate::ToolResult {
-                    success: outcome.record.success,
-                    result: outcome.record.result,
-                    images: outcome.images,
-                };
-                let state_result = match plugins
-                    .project_tool_result(ToolResultProjectionContext {
-                        hook: ToolResultProjectionHook::BeforeState,
-                        session_id: dispatch.session_id.clone(),
-                        tool_name: outcome.record.tool.clone(),
-                        args: outcome.record.args.clone(),
-                        result: raw_result.clone(),
-                        duration_ms: outcome.record.duration_ms,
-                        host: Arc::clone(&projector_manager),
-                    })
-                    .await
-                {
-                    Ok(projected) => projected,
-                    Err(err) => crate::ToolResult::err_fmt(err.to_string()),
-                };
-                let model_result = match plugins
-                    .project_tool_result(ToolResultProjectionContext {
-                        hook: ToolResultProjectionHook::BeforeModel,
-                        session_id: dispatch.session_id.clone(),
-                        tool_name: outcome.record.tool.clone(),
-                        args: outcome.record.args.clone(),
-                        result: raw_result.clone(),
-                        duration_ms: outcome.record.duration_ms,
-                        host: Arc::clone(&projector_manager),
-                    })
-                    .await
-                {
-                    Ok(projected) => projected,
-                    Err(err) => crate::ToolResult::err_fmt(err.to_string()),
-                };
-                (
+                run_one_tool_call(
                     index,
-                    crate::sansio::CompletedToolCall {
-                        call_id,
-                        tool_name: outcome.record.tool,
-                        args: outcome.record.args,
-                        state_result,
-                        model_result,
-                        duration_ms: outcome.record.duration_ms,
-                    },
+                    pending_tool,
+                    dispatch,
+                    plugins,
+                    projector_manager,
+                    event_tx_clone,
                 )
+                .await
             });
         }
 
-        let mut outcomes = Vec::new();
         while let Some(joined) = join_set.join_next().await {
             match joined {
                 Ok(outcome) => outcomes.push(outcome),
@@ -788,6 +834,22 @@ impl RuntimeTurnDriver {
                 )),
             }
         }
+
+        // Serial tools run sequentially, in original emission order.
+        serial_calls.sort_by_key(|(index, _)| *index);
+        for (index, pending_tool) in serial_calls.into_iter() {
+            let outcome = run_one_tool_call(
+                index,
+                pending_tool,
+                Arc::clone(&dispatch),
+                Arc::clone(&plugins),
+                Arc::clone(&projector_manager),
+                event_tx.clone(),
+            )
+            .await;
+            outcomes.push(outcome);
+        }
+
         drop(dispatch);
         let _ = tool_event_forwarder.await;
         outcomes.sort_by_key(|(index, _)| *index);

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lash::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
 use regex::RegexBuilder;
 use serde_json::json;
 
@@ -208,6 +208,7 @@ impl ToolProvider for LongMemEvalSessionTools {
                 injected: false,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             },
             ToolDefinition {
                 name: "get_session".to_string(),
@@ -219,6 +220,7 @@ impl ToolProvider for LongMemEvalSessionTools {
                 injected: false,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             },
             ToolDefinition {
                 name: "search_sessions".to_string(),
@@ -233,6 +235,7 @@ impl ToolProvider for LongMemEvalSessionTools {
                 injected: false,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             },
             ToolDefinition {
                 name: "grep_sessions".to_string(),
@@ -247,6 +250,7 @@ impl ToolProvider for LongMemEvalSessionTools {
                 injected: false,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             },
         ]
     }

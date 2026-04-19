@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::{
-    DynamicToolProvider, ReconfigureError, ToolDefinition, ToolExecutionAdapter, ToolImage,
-    ToolParam, ToolResult,
+    DynamicToolProvider, ReconfigureError, ToolDefinition, ToolExecutionAdapter, ToolExecutionMode,
+    ToolImage, ToolParam, ToolResult,
 };
 
 const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 10_000;
@@ -546,6 +546,7 @@ fn import_tools(
                     injected: true,
                     input_schema_override: Some(input_schema),
                     output_schema_override: None,
+                    execution_mode: ToolExecutionMode::Parallel,
                 },
             },
         );

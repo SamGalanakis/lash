@@ -893,6 +893,7 @@ impl crate::ToolProvider for EchoTool {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: crate::ToolExecutionMode::Parallel,
         }]
     }
 
@@ -1751,6 +1752,7 @@ impl crate::ToolProvider for MemoryProbeTool {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: crate::ToolExecutionMode::Parallel,
         }]
     }
 
@@ -1774,6 +1776,7 @@ impl crate::ToolProvider for ChildSessionTool {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: crate::ToolExecutionMode::Parallel,
         }]
     }
 

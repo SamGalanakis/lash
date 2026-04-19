@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
 
 use super::{compact_diff, require_str, run_blocking};
 
@@ -102,6 +102,9 @@ impl ToolProvider for ApplyPatchTool {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            // apply_patch mutates the working tree; it must not run in
+            // parallel with other mutating tools in the same batch.
+            execution_mode: ToolExecutionMode::Serial,
         }]
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

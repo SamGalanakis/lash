@@ -9,7 +9,8 @@ use crate::plugin::{
     SessionPlugin,
 };
 use crate::{
-    MessageRole, PluginMessage, ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult,
+    MessageRole, PluginMessage, ToolDefinition, ToolExecutionMode, ToolImage, ToolParam,
+    ToolProvider, ToolResult,
 };
 
 use super::{parse_optional_usize_arg, require_str, run_blocking};
@@ -132,6 +133,7 @@ impl ToolProvider for ReadFile {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
 

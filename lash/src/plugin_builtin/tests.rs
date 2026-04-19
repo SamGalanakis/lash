@@ -52,6 +52,7 @@ impl ToolProvider for PlanModeDynamicTools {
             injected: false,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: crate::ToolExecutionMode::Parallel,
         }]
     }
 
@@ -264,6 +265,7 @@ fn rlm_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "read_file".to_string(),
@@ -275,6 +277,7 @@ fn rlm_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "apply_patch".to_string(),
@@ -286,6 +289,7 @@ fn rlm_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Serial,
                 },
             ],
         })
@@ -329,6 +333,7 @@ fn rlm_tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "read_file".to_string(),
@@ -340,6 +345,7 @@ fn rlm_tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
             ],
         })
@@ -604,6 +610,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "show_snippet_to_user".to_string(),
@@ -615,6 +622,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "read_file".to_string(),
@@ -626,6 +634,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "search_web".to_string(),
@@ -637,6 +646,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "apply_patch".to_string(),
@@ -648,6 +658,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Serial,
                 },
                 ToolDefinition {
                     name: "plan_exit".to_string(),
@@ -659,6 +670,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
             ],
         })

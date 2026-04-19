@@ -11,7 +11,7 @@ use fff_search::{
 };
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
 
 use super::require_str;
 
@@ -310,6 +310,7 @@ impl ToolProvider for Grep {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
 

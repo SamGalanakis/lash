@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use lash::provider::AgentModels;
-use lash::{PromptContribution, SessionPolicy, ToolDefinition, ToolParam};
+use lash::{PromptContribution, SessionPolicy, ToolDefinition, ToolExecutionMode, ToolParam};
 
 use crate::Capability;
 
@@ -136,6 +136,7 @@ fn spawn_agent_definition(examples: Vec<String>) -> ToolDefinition {
         injected: true,
         input_schema_override: Some(spawn_agent_input_schema()),
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }
 
@@ -150,6 +151,7 @@ fn send_message_definition(examples: Vec<String>) -> ToolDefinition {
         injected: true,
         input_schema_override: None,
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }
 
@@ -168,6 +170,7 @@ fn followup_task_definition(examples: Vec<String>) -> ToolDefinition {
         injected: true,
         input_schema_override: None,
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Serial,
     }
 }
 
@@ -185,6 +188,7 @@ fn wait_agent_definition(examples: Vec<String>) -> ToolDefinition {
         injected: true,
         input_schema_override: Some(wait_agent_input_schema()),
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }
 
@@ -199,6 +203,7 @@ fn list_agents_definition(examples: Vec<String>) -> ToolDefinition {
         injected: true,
         input_schema_override: None,
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }
 

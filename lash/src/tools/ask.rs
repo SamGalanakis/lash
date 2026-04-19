@@ -1,6 +1,6 @@
 use crate::{
-    PromptRequest, PromptSelectionMode, ToolDefinition, ToolExecutionContext, ToolParam,
-    ToolProvider, ToolResult,
+    PromptRequest, PromptSelectionMode, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
+    ToolParam, ToolProvider, ToolResult,
 };
 
 #[derive(Clone, Default)]
@@ -184,6 +184,7 @@ impl ToolProvider for AskTool {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
     async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
