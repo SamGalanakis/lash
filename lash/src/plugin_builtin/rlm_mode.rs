@@ -68,7 +68,12 @@ impl SessionPlugin for RlmModePlugin {
         reg.mode().session(Arc::new(RlmModeSession {
             config: self.config.clone(),
         }))?;
-        reg.mode().native_tools(Arc::new(RlmModeNativeTools))?;
+        // The native-tools slot is owned by `StandardModePlugin`, which
+        // surfaces the execution-mode-agnostic runtime-control tools
+        // (`monitor`, `tasks_list`, `tasks_stop`) in both modes. RLM has
+        // no extra native tools to add — orchestration primitives like
+        // `parallel { }` / `start call` live in lashlang itself — so we
+        // don't claim the slot here.
         reg.tools()
             .provider(Arc::clone(&self.provider) as Arc<dyn crate::ToolProvider>)?;
         reg.prompt().contribute(Arc::new(move |ctx| {

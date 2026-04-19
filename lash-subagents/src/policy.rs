@@ -55,16 +55,10 @@ pub(super) fn denied_tools(capability: Capability) -> HashSet<&'static str> {
 }
 
 pub(super) fn subagent_prompt_contributions() -> Vec<PromptContribution> {
-    vec![
-        PromptContribution::guidance(
-            "Subagents",
-            "Use `spawn_agent` for bounded subagent work that can run in parallel with your current step. Use `capability` to match the task: `low` for read-heavy exploration, `medium` for contained implementation or validation, and `high` for larger independent ownership. Keep each spawned task concrete and scoped. In user-facing prose, call them subagents, not delegates or child agents. Avoid overlapping file edits across concurrently running subagents.",
-        ),
-        PromptContribution::guidance(
-            "Agent Lifecycle",
-            "Use `send_message` for concise out-of-band notes, `followup_task` to give an existing subagent more work, `wait_agent` to consume subagent updates or completions, and `list_agents` to inspect the live tree. Stop a subagent subtree with the shared `tasks_stop` tool (target id is `subagent:{path}`). `send_message` may target `/root`; `followup_task` may not. `fork_turns` controls how much of the current session context a new subagent receives: `none`, `all`, or a positive integer string for only the most recent turns.",
-        ),
-    ]
+    vec![PromptContribution::guidance(
+        "Subagents",
+        "Use `spawn_agent` for bounded subagent work that can run in parallel with your current step. Pick `capability` to match the task: `low` for read-heavy exploration, `medium` for contained implementation or validation, `high` for larger independent ownership. Keep each spawned task concrete and scoped, and avoid overlapping file edits across concurrently running subagents. In user-facing prose, call them subagents, not delegates or child agents.\n\nLifecycle: `send_message` (concise out-of-band notes; may target `/root`), `followup_task` (hand an existing subagent more work; cannot target `/root`; set `interrupt: true` to cancel its current turn), `wait_agent` (consume subagent updates or completions), `list_agents` (inspect the live tree), and `tasks_stop` with `target: \"subagent:{path}\"` to stop a subtree.\n\n`fork_turns` controls how much of the current session context a new subagent receives: `none`, `all`, or a positive integer string for only the most recent turns.",
+    )]
 }
 
 pub(super) fn subagent_tool_definitions(

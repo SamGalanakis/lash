@@ -38,11 +38,18 @@ impl SessionPlugin for StandardModePlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        if !self.active {
-            return Ok(());
+        if self.active {
+            reg.mode().session(Arc::new(StandardModeSession))?;
         }
-        reg.mode().session(Arc::new(StandardModeSession))?;
-        reg.mode().native_tools(Arc::new(StandardModeNativeTools))?;
+        // This capability is a session-wide singleton, so one plugin owns
+        // the full native-tools surface regardless of execution mode.
+        // `StandardModeNativeTools` filters which tools it exposes based
+        // on `active`: in Standard it exposes all of them; in RLM it
+        // drops `batch` (which is redundant with `parallel { }`) and
+        // keeps the mode-agnostic control tools (`monitor`, `tasks_list`,
+        // `tasks_stop`).
+        reg.mode()
+            .native_tools(Arc::new(StandardModeNativeTools { active: self.active }))?;
         Ok(())
     }
 }
@@ -60,17 +67,23 @@ impl ModeSessionPlugin for StandardModeSession {
     }
 }
 
-struct StandardModeNativeTools;
+struct StandardModeNativeTools {
+    active: bool,
+}
 
 #[async_trait::async_trait]
 impl ModeNativeToolsPlugin for StandardModeNativeTools {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![
-            batch_tool_definition(),
+        let mut tools = vec![
             monitor_tool_definition(),
             tasks_list_tool_definition(),
             tasks_stop_tool_definition(),
-        ]
+        ];
+        if self.active {
+            // `batch` only makes sense in Standard mode; RLM has `parallel { }`.
+            tools.insert(0, batch_tool_definition());
+        }
+        tools
     }
 
     async fn execute(
@@ -81,7 +94,7 @@ impl ModeNativeToolsPlugin for StandardModeNativeTools {
         progress: Option<&ProgressSender>,
     ) -> Option<ToolResult> {
         match name {
-            "batch" => Some(execute_batch_tool_call(context, args, progress).await),
+            "batch" if self.active => Some(execute_batch_tool_call(context, args, progress).await),
             "monitor" => Some(execute_monitor_tool_call(context, args).await),
             "tasks_list" => Some(execute_tasks_list_tool_call(context).await),
             "tasks_stop" => Some(execute_tasks_stop_tool_call(context, args).await),

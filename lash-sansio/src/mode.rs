@@ -21,54 +21,44 @@ const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution
 - After applying a change, verify the end-state. Do not re-verify before acting.
 - For direct conversational requests that need no tools, respond in prose only."#;
 
-const RLM_EXECUTION_SECTION: &str = r#"In this mode you write `lashlang` code inside your prose response and the runtime executes it. There is no native tool-call envelope — you embed code directly.
+const RLM_EXECUTION_SECTION: &str = r#"In RLM mode, **all execution goes through `lashlang`**. Emit a fenced `lashlang` block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value from prior results. Plain prose is **only** for direct conversational replies that need no action.
 
-Format every work step like this:
+### Turn shape
+
+- At most one ` ```lashlang ` fenced block per response — only the first runs, the rest are ignored.
+- Keep the prose around the block to one or two sentences of reasoning. Do not describe an action in prose instead of executing it; if you say you will read a file, the block must contain the `call read_file`.
+- After each result, decide: another fenced block (more work), or a prose-only reply (done).
+- Verify the end-state with a lashlang check before finalizing when possible.
+
+Example format:
 
 ````
-Brief reasoning here in plain prose (one or two sentences is fine).
+Reading the manifest to find the bound version.
 
 ```lashlang
-result = call tool_name { arg: value }
-observe result
+content = call read_file { path: "Cargo.toml" }
+finish split(content, "\n")[2]
 ```
 ````
 
-- Wrap each work step in **exactly one** ` ```lashlang ` fenced block. Only the first block runs per turn — additional blocks are ignored.
-- Plain prose alongside the block becomes your reasoning trace; keep it short.
-- After each execution result, decide whether to write another fenced block (more work to do) or finish the turn in pure prose with no fenced block (task complete).
-- When the task is complete, reply with prose only — no fenced lashlang block — and that ends the turn.
-- Work iteratively: inspect, act, observe, continue. Most tasks take multiple lashlang steps, not one large step.
-- Verify the concrete end state before finalizing in prose when possible.
-- Do not describe what you would do instead of doing it.
+### Language
 
-### RLM Language
-
-`lashlang` is a small workflow language for tool orchestration.
-
-- Values are null, booleans, numbers, strings, lists, and records.
-- List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`. Tool-argument records follow the same rule.
-- Assign with `name = expr`. Variables persist across iterations — anything you bind in one fenced block is still in scope on the next.
-- If the prompt includes a **Bound Variables** section, those names are already in scope. Access them directly in lashlang instead of rebuilding them from prose.
-- Bare expressions are valid statements. In `parallel { ... }`, a bare-expression branch contributes that value to the result list.
-- Call tools with `call tool_name { arg: expr }`.
-- Start any tool call in the background with `start call tool_name { arg: expr }`. This returns a handle value.
-- Resolve a background handle with `await handle`. If you already have a list of handles, `await handles` returns a list of results in order.
-- Stop a background handle with `cancel handle`. Cancellation is best-effort: Lash always stops waiting locally, and cooperative tools are also asked to stop their underlying work.
-- Use `parallel { ... }` only for independent tool calls. If one call needs another call's output, do not put them in the same `parallel { ... }`.
-- `parallel { ... }` returns a list of branch results in order.
-- Use ternary expressions for inline branching: `cond ? yes : no`. There is no expression-form `if`.
-- Control flow is limited to statement `if` and `for`.
-- Boolean negation supports both `!cond` and `not cond`.
-- Use `observe expr` to inspect a value and continue execution.
-- `observe` output and tool results are fed back into the next iteration (your context), so inspect first and refine on the next step if needed.
-- You must explicitly use `observe` to inspect values and make progress based on them. Do not rely on implicit inspection through tool results or execution errors.
+- Values: null, booleans, numbers, strings, lists, records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
+- Assign with `name = expr`. Variables persist across fenced blocks within the turn.
+- Call a tool: `call tool { arg: expr }`.
+- Background start: `start call tool { arg: expr }` returns a handle. Resolve with `await handle` (or `await [h1, h2]` for a list in order). Cancel with `cancel handle` (best-effort).
+- Independent parallel tool calls: `parallel { ... }`. Returns branch results as a list, in order. Do not use it when one branch needs another branch's output.
+- `observe expr` inspects a value mid-turn. `observe` output and tool results feed into the next turn's context — so inspect first, refine on the next step.
+- `finish <expr>` ends the turn with the given value. Required when the session declares a typed output schema; otherwise optional — a prose-only reply also ends the turn.
+- Control flow: statement `if`/`for`; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`.
+- Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
+- If the prompt includes a **Bound Variables** section, those names are already in scope — use them, don't rebuild them from prose.
 
 ### Builtins
 
-Call these as functions — e.g. `len(x)`, `slice(s, 0, 200)`. For `slice`, `null` bounds mean "from start" / "to end"; negative bounds count from the end.
+Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bounds mean start/end; negative bounds count from the end.
 
-- `len(x)` — length of a string/list/record (0 for null)
+- `len(x)` — length of string/list/record (0 for null)
 - `empty(x)` — true if length is 0
 - `slice(s, start, end)` — substring or sublist
 - `split(s, sep)` / `join(list, sep)` — string split/join
@@ -81,24 +71,20 @@ Call these as functions — e.g. `len(x)`, `slice(s, 0, 200)`. For `slice`, `nul
 
 ### Decomposition
 
-- Break large tasks into smaller, self-contained steps.
-- Prefer narrow checks over brute-force scanning when the input is large.
-- Use focused intermediate observations to verify subquestions before finalizing.
-- Keep each step concrete and bounded instead of attempting the whole task at once.
-- Use `start`/`await` when a long-running tool can make progress in the background while you do other work. This is especially useful for `wait_agent`.
+- Break big tasks into small steps. Prefer narrow checks over brute-force scans.
+- Use `observe` to verify a subquestion before acting on it.
+- Use `start`/`await` when a long-running tool can progress in the background while you do other work — especially `wait_agent`.
 
-Example fanout pattern:
+Example fanout to two subagents:
 
 ```lashlang
 h1 = call spawn_agent { task_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "low", output: { claim: "str" } }
 h2 = call spawn_agent { task_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "low", output: { claim: "str" } }
-handles = [
+events = await [
   start call wait_agent { targets: [h1.path], timeout_ms: 30000 },
-  start call wait_agent { targets: [h2.path], timeout_ms: 30000 }
+  start call wait_agent { targets: [h2.path], timeout_ms: 30000 },
 ]
-events = await handles
-results = [events[0].events[0].result, events[1].events[0].result]
-finish results
+finish [events[0].events[0].result, events[1].events[0].result]
 ```"#;
 
 #[derive(Clone)]
