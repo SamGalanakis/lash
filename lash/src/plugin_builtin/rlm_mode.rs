@@ -4,12 +4,10 @@ use std::sync::Arc;
 mod rlm_support;
 
 use crate::plugin::{
-    ModeNativeToolsPlugin, ModeSessionPlugin, PluginError, PluginFactory, PluginRegistrar,
-    PluginSessionContext, SessionPlugin,
+    ModeSessionPlugin, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
+    SessionPlugin,
 };
-use crate::{
-    ExecutionMode, ProgressSender, SessionError, ToolResult, ToolResultProjectionPluginConfig,
-};
+use crate::{ExecutionMode, SessionError, ToolResultProjectionPluginConfig};
 
 use self::rlm_support::{SearchToolsProvider, bound_variables_prompt_contributions};
 
@@ -151,21 +149,3 @@ impl ModeSessionPlugin for RlmModeSession {
     }
 }
 
-struct RlmModeNativeTools;
-
-#[async_trait::async_trait]
-impl ModeNativeToolsPlugin for RlmModeNativeTools {
-    fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        Vec::new()
-    }
-
-    async fn execute(
-        &self,
-        _context: &crate::tool_dispatch::ToolDispatchContext,
-        _name: &str,
-        _args: &serde_json::Value,
-        _progress: Option<&ProgressSender>,
-    ) -> Option<ToolResult> {
-        None
-    }
-}
