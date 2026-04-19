@@ -1162,7 +1162,9 @@ mod tests {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
+            reasoning_meta: None,
         };
 
         let msgs = vec![Message {
@@ -1256,6 +1258,7 @@ mod tests {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
             reasoning_meta: Some(ReasoningMeta {
                 id: "rs_xyz".to_string(),

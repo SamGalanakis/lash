@@ -529,7 +529,6 @@ impl ProtocolDriverHandle for RlmDriver {
         })];
 
         let mut assistant_text = String::new();
-        let mut reasoning_paragraphs: Vec<String> = Vec::new();
         for part in normalized_response_parts(&llm_response) {
             match part {
                 LlmOutputPart::Text { text } => {

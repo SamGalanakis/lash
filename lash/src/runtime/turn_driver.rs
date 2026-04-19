@@ -1323,10 +1323,6 @@ pub(super) fn llm_response_has_content(response: &LlmResponse) -> bool {
         // adapter's stream-fallback buffer is preserved for replay.
         LlmOutputPart::Reasoning { .. } => true,
         LlmOutputPart::ToolCall { .. } => true,
-        // Reasoning alone is not "content" for the purposes of deciding
-        // whether the response is empty — the model must also produce
-        // text or a tool call.
-        LlmOutputPart::Reasoning { .. } => false,
     })
 }
 

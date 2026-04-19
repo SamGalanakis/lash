@@ -2294,6 +2294,7 @@ fn assembler_state_output_excludes_tool_call_payload() {
                     tool_name: None,
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+                    reasoning_meta: None,
                 },
                 Part {
                     id: "m0.p1".to_string(),
@@ -2305,13 +2306,14 @@ fn assembler_state_output_excludes_tool_call_payload() {
                     tool_name: Some("batch".to_string()),
                     tool_item_id: None,
                     prune_state: PruneState::Intact,
+                    reasoning_meta: None,
                 },
             ],
             user_input: None,
             origin: None,
         },
     );
-    let mut assembler = TurnAssembler::default();
+    let assembler = TurnAssembler::default();
     let out = assembler.finish(
         state.export_state(),
         true,

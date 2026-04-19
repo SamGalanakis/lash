@@ -2283,8 +2283,11 @@ data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"i
         assert_eq!(
             parts[0],
             LlmOutputPart::Reasoning {
-                text: "Checking the codebase.".to_string(),
-            }
+                    text: "Checking the codebase.".to_string(),
+                    id: String::new(),
+                    summary: Vec::new(),
+                    encrypted_content: None,
+                }
         );
         assert_eq!(
             parts[1],
@@ -2320,9 +2323,15 @@ data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"i
             vec![
                 LlmOutputPart::Reasoning {
                     text: "First paragraph.".to_string(),
+                    id: String::new(),
+                    summary: Vec::new(),
+                    encrypted_content: None,
                 },
                 LlmOutputPart::Reasoning {
                     text: "Second paragraph.".to_string(),
+                    id: String::new(),
+                    summary: Vec::new(),
+                    encrypted_content: None,
                 }
             ]
         );
@@ -2539,8 +2548,11 @@ data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"i
         assert_eq!(
             parts[0],
             LlmOutputPart::Reasoning {
-                text: "Looking at it.".to_string(),
-            }
+                    text: "Looking at it.".to_string(),
+                    id: String::new(),
+                    summary: Vec::new(),
+                    encrypted_content: None,
+                }
         );
     }
 }

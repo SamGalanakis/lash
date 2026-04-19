@@ -1511,6 +1511,7 @@ mod tests {
                     image_idx: -1,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                 },
             ],
             attachments: vec![],
