@@ -382,15 +382,13 @@ impl Parser {
     fn parse_list(&mut self) -> Result<Expr, ParseError> {
         self.expect_exact(TokenKind::LBracket, "`[`")?;
         let mut items = Vec::new();
-        if !matches!(self.peek_kind(), TokenKind::RBracket) {
-            loop {
-                items.push(self.parse_expr()?);
-                if matches!(self.peek_kind(), TokenKind::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
+        while !matches!(self.peek_kind(), TokenKind::RBracket) {
+            items.push(self.parse_expr()?);
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.bump();
+                continue;
             }
+            break;
         }
         self.expect_exact(TokenKind::RBracket, "`]`")?;
         Ok(Expr::List(items))
@@ -405,18 +403,16 @@ impl Parser {
 
     fn parse_record_entries(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {
         let mut entries = Vec::new();
-        if !matches!(self.peek_kind(), TokenKind::RBrace) {
-            loop {
-                let key = self.expect_ident()?;
-                self.expect_exact(TokenKind::Colon, "`:`")?;
-                let value = self.parse_expr()?;
-                entries.push((key, value));
-                if matches!(self.peek_kind(), TokenKind::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
+        while !matches!(self.peek_kind(), TokenKind::RBrace) {
+            let key = self.expect_ident()?;
+            self.expect_exact(TokenKind::Colon, "`:`")?;
+            let value = self.parse_expr()?;
+            entries.push((key, value));
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.bump();
+                continue;
             }
+            break;
         }
         Ok(entries)
     }
@@ -434,32 +430,30 @@ impl Parser {
         self.expect_exact(TokenKind::LBrace, "`{`")?;
         let mut fields = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        if !matches!(self.peek_kind(), TokenKind::RBrace) {
-            loop {
-                let name_token_span = self.peek().span;
-                let name = self.expect_ident()?;
-                if !seen.insert(name.clone()) {
-                    return Err(ParseError::Expected {
-                        expected: "unique field name",
-                        found: format!("duplicate field `{name}`"),
-                        span: name_token_span,
-                    });
-                }
-                self.expect_exact(TokenKind::Colon, "`:`")?;
-                let ty = self.parse_type_expr()?;
-                let optional = if matches!(self.peek_kind(), TokenKind::Question) {
-                    self.bump();
-                    true
-                } else {
-                    false
-                };
-                fields.push(TypeField { name, ty, optional });
-                if matches!(self.peek_kind(), TokenKind::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
+        while !matches!(self.peek_kind(), TokenKind::RBrace) {
+            let name_token_span = self.peek().span;
+            let name = self.expect_ident()?;
+            if !seen.insert(name.clone()) {
+                return Err(ParseError::Expected {
+                    expected: "unique field name",
+                    found: format!("duplicate field `{name}`"),
+                    span: name_token_span,
+                });
             }
+            self.expect_exact(TokenKind::Colon, "`:`")?;
+            let ty = self.parse_type_expr()?;
+            let optional = if matches!(self.peek_kind(), TokenKind::Question) {
+                self.bump();
+                true
+            } else {
+                false
+            };
+            fields.push(TypeField { name, ty, optional });
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.bump();
+                continue;
+            }
+            break;
         }
         self.expect_exact(TokenKind::RBrace, "`}`")?;
         Ok(TypeExpr::Object(fields))
@@ -1000,11 +994,18 @@ mod tests {
     }
 
     #[test]
-    fn type_literal_parses_without_trailing_comma_or_with_one() {
-        parse("x = Type { a: str, b: int }").expect("should parse");
-        // trailing comma not supported (matches record literal behavior)
-        let err = parse("x = Type { a: str, }").expect_err("trailing comma rejected");
-        assert!(matches!(err, ParseError::Expected { .. }));
+    fn type_literal_parses_with_or_without_trailing_comma() {
+        parse("x = Type { a: str, b: int }").expect("no trailing comma should parse");
+        parse("x = Type { a: str, b: int, }").expect("trailing comma should parse");
+    }
+
+    #[test]
+    fn list_and_record_literals_accept_trailing_commas() {
+        parse("x = [1, 2, 3,]\nfinish x").expect("list trailing comma");
+        parse("x = { a: 1, b: 2, }\nfinish x").expect("record trailing comma");
+        // Empty literals still work.
+        parse("x = []\nfinish x").expect("empty list");
+        parse("x = {}\nfinish x").expect("empty record");
     }
 
     #[test]

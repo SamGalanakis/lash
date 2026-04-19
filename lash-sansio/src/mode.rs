@@ -46,7 +46,7 @@ finish split(r.value, "\n")[2]
 - Values: null, booleans, numbers, strings, lists, records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
 - Assign with `name = expr`. Variables persist across fenced blocks within the turn.
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. Always reach through `.value` to read the underlying result (e.g. `r = call read_file { path: "Cargo.toml" }`; then `r.value` is the file text, `r.ok` is the success flag).
-- Background start: `start call tool { arg: expr }` returns a handle. Resolve with `await handle` (or `await [h1, h2]` for a list in order). Cancel with `cancel handle` (best-effort).
+- Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Resolve it with `await handle` — that returns the same `{ ok, value }` wrapper as a synchronous `call`. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort).
 - Independent parallel tool calls: `parallel { ... }`. Returns branch results as a list, in order. Do not use it when one branch needs another branch's output.
 - `observe expr` inspects a value mid-turn. `observe` output and tool results feed into the next turn's context — so inspect first, refine on the next step.
 - `finish <expr>` ends the turn with the given value as the assistant's final answer. The value is stringified: strings stay as-is, other values are rendered as pretty JSON. When a **Required output** section is present in the task, the value must match that schema. Alternative in interactive chat: you can instead reply with prose and no fenced block — useful when you want streamed text. Either way the turn ends.
@@ -67,7 +67,7 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `keys(record)` / `values(record)`
 - `to_string(x)` / `to_int(x)` / `to_float(x)`
 - `json_parse(s)` — parse a JSON string into a value
-- `format(template, record)` — string interpolation
+- `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces
 
 ### Decomposition
 
@@ -75,16 +75,16 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - Use `observe` to verify a subquestion before acting on it.
 - Use `start`/`await` when a long-running tool can progress in the background while you do other work — especially `wait_agent`.
 
-Example fanout to two subagents:
+Example fanout to two subagents (note `.value` on every tool-call wrapper):
 
 ```lashlang
-h1 = call spawn_agent { task_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "low", output: { claim: "str" } }
-h2 = call spawn_agent { task_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "low", output: { claim: "str" } }
+a = call spawn_agent { task_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "low", output: { claim: "str" } }
+b = call spawn_agent { task_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "low", output: { claim: "str" } }
 events = await [
-  start call wait_agent { targets: [h1.path], timeout_ms: 30000 },
-  start call wait_agent { targets: [h2.path], timeout_ms: 30000 },
+  start call wait_agent { targets: [a.value.path], timeout_ms: 30000 },
+  start call wait_agent { targets: [b.value.path], timeout_ms: 30000 },
 ]
-finish [events[0].events[0].result, events[1].events[0].result]
+finish [events[0].value.events[0].result, events[1].value.events[0].result]
 ```"#;
 
 #[derive(Clone)]
