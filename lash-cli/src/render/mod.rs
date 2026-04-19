@@ -1039,9 +1039,38 @@ fn render_block_into(
         DisplayBlock::PluginPanel(panel) => {
             render_section_panel_block(&panel.title, &panel.content, lines, viewport_width);
         }
+        DisplayBlock::LashlangCode(code) => {
+            // Only shown at full expansion (Alt+O). At lower levels the
+            // block contributes zero lines — its tool activities carry
+            // the visible story already.
+            if expand_level >= 2 {
+                render_lashlang_code_block(code, lines, viewport_width);
+            }
+        }
         DisplayBlock::Splash => {
             render_splash(lines, viewport_width, viewport_height, blocks.len() == 1)
         }
+    }
+}
+
+/// Render the captured `lashlang` source for an RLM turn, with a dim `╎`
+/// gutter to mark it as "what the model ran" (distinct from the `│`
+/// shell gutter and `┊` reasoning gutter).
+fn render_lashlang_code_block(
+    code: &str,
+    lines: &mut Vec<Line<'static>>,
+    _viewport_width: usize,
+) {
+    let header_style = theme::code_chrome();
+    let gutter_style = theme::code_chrome();
+    let body_style = theme::system_output();
+
+    lines.push(Line::from(Span::styled("lashlang", header_style)));
+    for line in code.lines() {
+        lines.push(Line::from(vec![
+            Span::styled("╎ ", gutter_style),
+            Span::styled(line.to_string(), body_style),
+        ]));
     }
 }
 

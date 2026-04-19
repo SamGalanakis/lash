@@ -575,6 +575,13 @@ impl ProtocolDriverHandle for RlmDriver {
         actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
             assistant_text,
         )]));
+        // Emit the raw lashlang source as a `Message` with kind
+        // `lashlang_code` so the CLI can reveal it in the full-expand
+        // view (Alt+O) above the tool activities it produced.
+        actions.push(DriverAction::Emit(SessionEvent::Message {
+            text: fence.code.clone(),
+            kind: "lashlang_code".to_string(),
+        }));
         actions.push(DriverAction::StartExec {
             code: fence.code,
             driver_state: driver_state(state),

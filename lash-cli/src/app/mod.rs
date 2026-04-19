@@ -312,6 +312,11 @@ pub enum DisplayBlock {
     /// Informational message from the system (e.g. /help output).
     SystemMessage(String),
     PluginPanel(PluginPanelBlock),
+    /// The fenced `lashlang` source from an RLM turn, captured so the
+    /// transcript can reveal the code that produced the subsequent tool
+    /// activities. Hidden by default; shown when the user presses
+    /// `Alt+O` (expand_level 2) so the full executed program is visible.
+    LashlangCode(String),
     Splash,
 }
 
@@ -1209,7 +1214,16 @@ impl App {
                 self.scroll_to_bottom();
             }
             SessionEvent::Message { text, kind } => {
-                if kind == "tool_output" {
+                if kind == "lashlang_code" {
+                    // Captured source of the fenced lashlang block the
+                    // model just emitted. Pushed as its own DisplayBlock
+                    // so the renderer can hide it by default and reveal
+                    // it when the user hits Alt+O (full expansion).
+                    self.finalize_live_assistant();
+                    self.blocks.push(DisplayBlock::LashlangCode(text));
+                    self.invalidate_live_tool_output_cache();
+                    self.scroll_to_bottom();
+                } else if kind == "tool_output" {
                     // Explicit policy:
                     // - live tool output can be disabled via env var
                     // - shell result streams can render text to the TUI

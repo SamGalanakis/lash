@@ -36,6 +36,7 @@ fn other_variant_name(block: &DisplayBlock) -> &'static str {
         DisplayBlock::Error(_) => "Error",
         DisplayBlock::SystemMessage(_) => "SystemMessage",
         DisplayBlock::PluginPanel(_) => "PluginPanel",
+        DisplayBlock::LashlangCode(_) => "LashlangCode",
         DisplayBlock::Splash => "Splash",
     }
 }
