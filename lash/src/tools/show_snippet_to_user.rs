@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
 
 use super::{require_str, run_blocking};
 
@@ -56,6 +56,7 @@ impl ToolProvider for ShowSnippetToUser {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
 

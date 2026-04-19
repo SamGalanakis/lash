@@ -10,7 +10,8 @@ use crate::tool_dispatch::{
 use crate::tools::batch::batch_tool_definition;
 use crate::{
     ExecutionMode, MAX_MONITOR_TIMEOUT_MS, ManagedRunState, ManagedTaskKind, MonitorRunState,
-    MonitorSpec, ProgressSender, SessionError, ToolDefinition, ToolParam, ToolResult,
+    MonitorSpec, ProgressSender, SessionError, ToolDefinition, ToolExecutionMode, ToolParam,
+    ToolResult,
 };
 
 pub(crate) struct StandardModePluginFactory;
@@ -147,6 +148,7 @@ fn monitor_tool_definition() -> ToolDefinition {
         injected: true,
         input_schema_override: None,
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }
 
@@ -375,6 +377,7 @@ fn tasks_list_tool_definition() -> ToolDefinition {
         injected: true,
         input_schema_override: None,
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }
 
@@ -398,6 +401,7 @@ fn tasks_stop_tool_definition() -> ToolDefinition {
         injected: true,
         input_schema_override: None,
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }
 

@@ -584,6 +584,7 @@ mod tests {
                 injected: false,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: crate::ToolExecutionMode::Parallel,
             }]
         }
 
@@ -606,6 +607,7 @@ mod tests {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "disabled_tool".to_string(),
@@ -617,6 +619,7 @@ mod tests {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
                 },
             ]
         }
@@ -650,6 +653,7 @@ mod tests {
                     "additionalProperties": false
                 })),
                 output_schema_override: None,
+                execution_mode: crate::ToolExecutionMode::Parallel,
             }]
         }
 
@@ -684,6 +688,7 @@ mod tests {
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: crate::ToolExecutionMode::Parallel,
             }]
         }
 

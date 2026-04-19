@@ -70,7 +70,8 @@ mod tests {
     use super::*;
     use crate::mode::{ModeBuildInput, build_mode_preamble};
     use crate::{
-        ExecutionMode, PromptContribution, ToolDefinition, ToolParam, default_prompt_template,
+        ExecutionMode, PromptContribution, ToolDefinition, ToolExecutionMode, ToolParam,
+        default_prompt_template,
     };
 
     fn tool(name: &str) -> ToolDefinition {
@@ -84,6 +85,7 @@ mod tests {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }
     }
 

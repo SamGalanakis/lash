@@ -13,7 +13,7 @@ use lash::plugin::{
 };
 use lash::{
     MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolDefinition,
-    ToolExecutionContext, ToolParam, ToolProvider, ToolResult, TurnStatus,
+    ToolExecutionContext, ToolExecutionMode, ToolParam, ToolProvider, ToolResult, TurnStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -371,6 +371,7 @@ impl ToolProvider for AutoresearchTools {
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             },
             ToolDefinition {
                 name: "run_experiment".into(),
@@ -399,6 +400,7 @@ impl ToolProvider for AutoresearchTools {
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             },
             ToolDefinition {
                 name: "log_experiment".into(),
@@ -437,6 +439,7 @@ impl ToolProvider for AutoresearchTools {
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             },
         ]
     }

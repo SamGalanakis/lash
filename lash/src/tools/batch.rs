@@ -1,4 +1,4 @@
-use crate::{ToolDefinition, ToolParam};
+use crate::{ToolDefinition, ToolExecutionMode, ToolParam};
 
 pub(crate) fn batch_tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -19,5 +19,6 @@ pub(crate) fn batch_tool_definition() -> ToolDefinition {
         injected: true,
         input_schema_override: None,
         output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }

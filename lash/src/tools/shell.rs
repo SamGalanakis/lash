@@ -14,8 +14,8 @@ use serde_json::json;
 use tokio::sync::Notify;
 
 use crate::{
-    ProgressSender, PromptContribution, SandboxMessage, ToolDefinition, ToolParam, ToolProvider,
-    ToolResult,
+    ProgressSender, PromptContribution, SandboxMessage, ToolDefinition, ToolExecutionMode,
+    ToolParam, ToolProvider, ToolResult,
 };
 
 use super::require_str;
@@ -756,6 +756,10 @@ impl ToolProvider for StandardShell {
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
+                // exec_command can fork/move/delete files and mutate shell
+                // state (cwd, env, background processes); serialize it so
+                // concurrent commands don't race.
+                execution_mode: ToolExecutionMode::Serial,
             },
             ToolDefinition {
                 name: "write_stdin".into(),
@@ -803,6 +807,9 @@ impl ToolProvider for StandardShell {
                 injected: true,
                 input_schema_override: None,
                 output_schema_override: None,
+                // write_stdin targets a specific running command session and
+                // mutates its state; serialize it alongside exec_command.
+                execution_mode: ToolExecutionMode::Serial,
             },
         ]
     }

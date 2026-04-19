@@ -142,6 +142,7 @@ pub(super) fn register_builtin_tool(
                 injected: false,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             };
             adapter.register_tool(def.clone(), handler);
             def
@@ -163,6 +164,7 @@ pub(super) fn register_builtin_tool(
                 injected: false,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             };
             adapter.register_tool(def.clone(), handler);
             def
@@ -184,6 +186,7 @@ pub(super) fn register_builtin_tool(
                 injected: false,
                 input_schema_override: None,
                 output_schema_override: None,
+                execution_mode: ToolExecutionMode::Parallel,
             };
             adapter.register_tool(def.clone(), handler);
             def

@@ -5,7 +5,7 @@ use super::{
     build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
     rg_file_list, run_blocking,
 };
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
 
 /// List filesystem entries in a directory tree.
 #[derive(Default)]
@@ -87,6 +87,7 @@ impl ToolProvider for Ls {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

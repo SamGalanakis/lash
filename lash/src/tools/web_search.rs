@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
 
 /// Web search via Tavily API.
 pub struct WebSearch {
@@ -39,6 +39,7 @@ impl ToolProvider for WebSearch {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
 

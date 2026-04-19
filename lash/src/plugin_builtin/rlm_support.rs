@@ -11,7 +11,8 @@ use crate::plugin::PromptHookContext;
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
 use crate::tools::run_blocking;
 use crate::{
-    PromptContribution, ToolDefinition, ToolExecutionContext, ToolParam, ToolProvider, ToolResult,
+    PromptContribution, ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolParam,
+    ToolProvider, ToolResult,
 };
 
 #[derive(Clone)]
@@ -588,6 +589,7 @@ impl ToolProvider for SearchToolsProvider {
             injected: false,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
 
@@ -766,6 +768,7 @@ mod tests {
                         injected: false,
                         input_schema_override: None,
                         output_schema_override: None,
+                        execution_mode: ToolExecutionMode::Parallel,
                     },
                     ToolDefinition {
                         name: "read_file".to_string(),
@@ -777,6 +780,7 @@ mod tests {
                         injected: true,
                         input_schema_override: None,
                         output_schema_override: None,
+                        execution_mode: ToolExecutionMode::Parallel,
                     },
                 ],
             })

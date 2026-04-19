@@ -168,7 +168,7 @@ fn apply_contribution(surface: &mut ToolSurface, contribution: ToolSurfaceContri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ToolParam, ToolSurfaceOverride};
+    use crate::{ToolExecutionMode, ToolParam, ToolSurfaceOverride};
 
     fn tool(name: &str, injected: bool) -> ToolDefinition {
         ToolDefinition {
@@ -181,6 +181,7 @@ mod tests {
             injected,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }
     }
 

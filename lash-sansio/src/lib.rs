@@ -104,6 +104,37 @@ impl ToolParam {
     }
 }
 
+/// How a tool's invocations should be scheduled relative to other tools in
+/// the same batch of model-produced tool calls.
+///
+/// Tools that only *read* state (`read_file`, `grep`, `glob`, ...) can run
+/// in parallel safely and should use the default [`ToolExecutionMode::Parallel`].
+/// Tools that *mutate* shared state (`apply_patch`, `exec_command`,
+/// `write_stdin`, `followup_task`) should declare
+/// [`ToolExecutionMode::Serial`] so the dispatcher runs them one-at-a-time
+/// and avoids interleaving with each other.
+///
+/// The name is intentionally distinct from the turn-level [`ExecutionMode`]
+/// (which selects the `Rlm` vs `Standard` driver) so the two concepts don't
+/// collide in scope.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionMode {
+    /// Safe to run concurrently with other parallel tools in the same batch.
+    #[default]
+    Parallel,
+    /// Must run one-at-a-time relative to other serial tools in the batch.
+    Serial,
+}
+
+fn default_tool_execution_mode() -> ToolExecutionMode {
+    ToolExecutionMode::default()
+}
+
+fn is_default_tool_execution_mode(mode: &ToolExecutionMode) -> bool {
+    *mode == ToolExecutionMode::default()
+}
+
 /// A tool definition exposed to the runtime.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
@@ -127,6 +158,13 @@ pub struct ToolDefinition {
     pub input_schema_override: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema_override: Option<serde_json::Value>,
+    /// How this tool should be scheduled relative to peers when the model
+    /// emits a batch of tool calls. Defaults to [`ToolExecutionMode::Parallel`].
+    #[serde(
+        default = "default_tool_execution_mode",
+        skip_serializing_if = "is_default_tool_execution_mode"
+    )]
+    pub execution_mode: ToolExecutionMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,6 +332,7 @@ mod tests {
                 "required": ["hits"],
                 "additionalProperties": false
             })),
+            execution_mode: ToolExecutionMode::Parallel,
         };
 
         let model_tool = tool.model_tool();

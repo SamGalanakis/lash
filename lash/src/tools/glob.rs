@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
 
 use super::{
     build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
@@ -71,6 +71,7 @@ impl ToolProvider for Glob {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: ToolExecutionMode::Parallel,
         }]
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

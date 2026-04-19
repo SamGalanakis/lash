@@ -370,6 +370,7 @@ mod tests {
             injected: true,
             input_schema_override: None,
             output_schema_override: None,
+            execution_mode: crate::ToolExecutionMode::Parallel,
         }
     }
 

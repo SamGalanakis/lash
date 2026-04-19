@@ -17,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use crate::plugin::{
     CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
-    ToolResultProjectionContext, ToolResultProjectionHook,
     plugin_surface_event_renders_visible_output,
 };
 use crate::provider::Provider;
