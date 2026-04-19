@@ -147,6 +147,9 @@ fn render_part(
                 render_pre_block(out, "tool-result-inline", &part.content);
             }
         }
+        // Reasoning summaries render as a muted/italic block in exported
+        // HTML for parity with the TUI presentation.
+        PartKind::Reasoning => render_text_block(out, "reasoning", &part.content),
     }
 }
 
@@ -349,6 +352,7 @@ body {
 .parts { display: flex; flex-direction: column; gap: 10px; }
 .part { white-space: normal; }
 .part--text, .part--user-text { color: var(--fg); }
+.part--reasoning { color: var(--muted); font-style: italic; font-size: 13px; border-left: 2px solid var(--border); padding-left: 10px; margin: 6px 0; }
 .part--pruned { color: var(--muted); font-style: italic; font-size: 13px; }
 .part--image img { max-width: 100%; border-radius: 6px; border: 1px solid var(--border); }
 pre.part {

@@ -95,6 +95,82 @@ pub fn render_assistant_text_block(
     lines
 }
 
+pub fn push_assistant_reasoning_block(blocks: &mut Vec<DisplayBlock>, text: &str) -> bool {
+    let cleaned = normalize_assistant_text(text);
+    if cleaned.is_empty() {
+        return false;
+    }
+    if let Some(DisplayBlock::AssistantReasoning(existing)) = blocks.last_mut() {
+        // Consecutive reasoning blocks get merged into a single,
+        // paragraph-separated block so the renderer draws one continuous
+        // "thinking" span instead of a stack of near-identical
+        // separators.
+        if !existing.is_empty() {
+            existing.push_str("\n\n");
+        }
+        existing.push_str(&cleaned);
+        return true;
+    }
+    blocks.push(DisplayBlock::AssistantReasoning(cleaned));
+    true
+}
+
+pub fn render_assistant_reasoning_block(
+    text: &str,
+    viewport_width: usize,
+    add_spacing_before: bool,
+) -> Vec<Line<'static>> {
+    let cleaned = normalize_assistant_text(text);
+    if cleaned.is_empty() {
+        return Vec::new();
+    }
+
+    // Pi's reasoning uses italic + muted with no marker. Lash keeps the
+    // two-column indent so reasoning lines up flush with assistant text
+    // immediately below — same "■ " column slot, but the marker is a
+    // faint vertical rule and the body is italicized.
+    let first_prefix = "┊ ";
+    let continuation_prefix = "┊ ";
+    let prefix_w = UnicodeWidthStr::width(first_prefix);
+    let content_width = viewport_width.saturating_sub(prefix_w);
+
+    let mut lines = Vec::new();
+    if add_spacing_before {
+        lines.push(Line::from(""));
+    }
+
+    let body_style = theme::assistant_reasoning();
+    let bar_style = theme::assistant_reasoning_bar();
+
+    for logical_line in cleaned.split('\n') {
+        if logical_line.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                continuation_prefix.to_string(),
+                bar_style,
+            )]));
+            continue;
+        }
+        let segments = if content_width == 0 {
+            vec![(0, logical_line.len())]
+        } else {
+            text_layout::wrap_text_ranges_wordwise(logical_line, content_width)
+        };
+        for (i, (seg_start, seg_end)) in segments.into_iter().enumerate() {
+            let prefix = if i == 0 {
+                first_prefix
+            } else {
+                continuation_prefix
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix.to_string(), bar_style),
+                Span::styled(logical_line[seg_start..seg_end].to_string(), body_style),
+            ]));
+        }
+    }
+
+    lines
+}
+
 pub fn render_live_assistant_text_block(text: &str, viewport_width: usize) -> Vec<Line<'static>> {
     let cleaned = normalize_assistant_text(text);
     if cleaned.is_empty() {

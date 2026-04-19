@@ -52,6 +52,12 @@ pub struct ErrorEnvelope {
 pub enum SessionEvent {
     #[serde(rename = "text_delta")]
     TextDelta { content: String },
+    /// Streaming update for the model's reasoning summary ("thinking").
+    /// The UI renders these incrementally in a muted/italic style;
+    /// reasoning content is never fed back to the model on subsequent
+    /// turns.
+    #[serde(rename = "reasoning_delta")]
+    ReasoningDelta { content: String },
     #[serde(rename = "tool_call")]
     ToolCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]

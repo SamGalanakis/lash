@@ -870,6 +870,13 @@ impl TurnMachine {
                     "text": text,
                 })),
                 LlmOutputPart::Text { .. } => None,
+                LlmOutputPart::Reasoning { text } if !text.is_empty() => {
+                    Some(serde_json::json!({
+                        "type": "reasoning",
+                        "text": text,
+                    }))
+                }
+                LlmOutputPart::Reasoning { .. } => None,
                 LlmOutputPart::ToolCall {
                     call_id,
                     tool_name,

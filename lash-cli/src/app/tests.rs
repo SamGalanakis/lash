@@ -8,6 +8,7 @@ fn other_variant_name(block: &DisplayBlock) -> &'static str {
         DisplayBlock::TurnStart(_) => "TurnStart",
         DisplayBlock::UserInput(_) => "UserInput",
         DisplayBlock::AssistantText(_) => "AssistantText",
+        DisplayBlock::AssistantReasoning(_) => "AssistantReasoning",
         DisplayBlock::Activity(_) => "Activity",
         DisplayBlock::ShellOutput { .. } => "ShellOutput",
         DisplayBlock::Error(_) => "Error",

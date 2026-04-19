@@ -963,10 +963,25 @@ fn render_block_into(
                 && !matches!(
                     blocks[idx - 1],
                     DisplayBlock::AssistantText(_)
+                        | DisplayBlock::AssistantReasoning(_)
                         | DisplayBlock::Splash
                         | DisplayBlock::TurnStart(_)
                 );
             lines.extend(assistant_text::render_assistant_text_block(
+                text,
+                viewport_width,
+                add_spacing_before,
+            ));
+        }
+        DisplayBlock::AssistantReasoning(text) => {
+            let add_spacing_before = idx > 0
+                && !matches!(
+                    blocks[idx - 1],
+                    DisplayBlock::AssistantReasoning(_)
+                        | DisplayBlock::Splash
+                        | DisplayBlock::TurnStart(_)
+                );
+            lines.extend(assistant_text::render_assistant_reasoning_block(
                 text,
                 viewport_width,
                 add_spacing_before,

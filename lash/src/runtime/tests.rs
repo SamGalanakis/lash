@@ -27,6 +27,24 @@ async fn drain_standard_stream_queue(
                 }
             }
             LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+            LlmStreamEvent::Part(LlmOutputPart::Reasoning { text }) => {
+                if !text.is_empty() {
+                    crate::session_model::send_event(
+                        event_tx,
+                        SessionEvent::ReasoningDelta { content: text },
+                    )
+                    .await;
+                }
+            }
+            LlmStreamEvent::ReasoningDelta(delta) => {
+                if !delta.is_empty() {
+                    crate::session_model::send_event(
+                        event_tx,
+                        SessionEvent::ReasoningDelta { content: delta },
+                    )
+                    .await;
+                }
+            }
             LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
         }
     }

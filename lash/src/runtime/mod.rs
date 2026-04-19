@@ -673,6 +673,18 @@ impl StandardStreamFallback {
         }
     }
 
+    fn push_reasoning(&mut self, piece: &str) {
+        if piece.is_empty() {
+            return;
+        }
+        match self.parts.last_mut() {
+            Some(LlmOutputPart::Reasoning { text }) => text.push_str(piece),
+            _ => self.parts.push(LlmOutputPart::Reasoning {
+                text: piece.to_string(),
+            }),
+        }
+    }
+
     fn push_tool_call(&mut self, call_id: String, tool_name: String, input_json: String) {
         self.parts.push(LlmOutputPart::ToolCall {
             call_id,
@@ -685,6 +697,7 @@ impl StandardStreamFallback {
         !self.parts.iter().any(|part| match part {
             LlmOutputPart::Text { text } => !text.is_empty(),
             LlmOutputPart::ToolCall { .. } => true,
+            LlmOutputPart::Reasoning { .. } => false,
         })
     }
 
