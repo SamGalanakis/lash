@@ -36,8 +36,8 @@ Example format:
 Reading the manifest to find the bound version.
 
 ```lashlang
-content = call read_file { path: "Cargo.toml" }
-finish split(content, "\n")[2]
+r = call read_file { path: "Cargo.toml" }
+finish split(r.value, "\n")[2]
 ```
 ````
 
@@ -45,7 +45,7 @@ finish split(content, "\n")[2]
 
 - Values: null, booleans, numbers, strings, lists, records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
 - Assign with `name = expr`. Variables persist across fenced blocks within the turn.
-- Call a tool: `call tool { arg: expr }`.
+- Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. Always reach through `.value` to read the underlying result (e.g. `r = call read_file { path: "Cargo.toml" }`; then `r.value` is the file text, `r.ok` is the success flag).
 - Background start: `start call tool { arg: expr }` returns a handle. Resolve with `await handle` (or `await [h1, h2]` for a list in order). Cancel with `cancel handle` (best-effort).
 - Independent parallel tool calls: `parallel { ... }`. Returns branch results as a list, in order. Do not use it when one branch needs another branch's output.
 - `observe expr` inspects a value mid-turn. `observe` output and tool results feed into the next turn's context — so inspect first, refine on the next step.
@@ -662,17 +662,23 @@ impl ProtocolDriverHandle for RlmDriver {
             }
 
             // `finish <expr>` terminates both the lashlang program and the
-            // turn in both modes. The value becomes the assistant's final
-            // text; non-string values are JSON-stringified. Typed-RLM
-            // additionally emits a TypedFinish event so schema consumers
-            // can pick up the raw value.
+            // turn in both modes. Render the value as the assistant's final
+            // text: strings pass through; other values are JSON-stringified.
+            // `null` / empty string become an empty assistant message so the
+            // UI doesn't show the literal word "null" when the model ended
+            // with `finish` on a null-valued expression (e.g. a wrong field
+            // lookup). Typed-RLM additionally emits a TypedFinish event so
+            // schema consumers can pick up the raw value.
             let rendered = match finish_value {
+                serde_json::Value::Null => String::new(),
                 serde_json::Value::String(text) => text.clone(),
                 other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
             };
-            actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
-                rendered,
-            )]));
+            if !rendered.trim().is_empty() {
+                actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
+                    rendered,
+                )]));
+            }
             if matches!(ctx.rlm_termination(), RlmTermination::Finish { .. }) {
                 actions.push(DriverAction::Emit(SessionEvent::TypedFinish {
                     value: finish_value.clone(),
