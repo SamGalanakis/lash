@@ -49,7 +49,7 @@ finish split(content, "\n")[2]
 - Background start: `start call tool { arg: expr }` returns a handle. Resolve with `await handle` (or `await [h1, h2]` for a list in order). Cancel with `cancel handle` (best-effort).
 - Independent parallel tool calls: `parallel { ... }`. Returns branch results as a list, in order. Do not use it when one branch needs another branch's output.
 - `observe expr` inspects a value mid-turn. `observe` output and tool results feed into the next turn's context — so inspect first, refine on the next step.
-- `finish <expr>` terminates the lashlang program with a value. In typed-RLM sessions (the prompt will include a **Required output** section when a schema is declared), the value is the session's final answer and must match that schema. Otherwise the value is captured as an observation for the next turn. **The turn itself ends when you reply with prose only — no fenced block.** `finish` ends the *program*, not the turn.
+- `finish <expr>` ends the turn with the given value as the assistant's final answer. The value is stringified: strings stay as-is, other values are rendered as pretty JSON. When a **Required output** section is present in the task, the value must match that schema. Alternative in interactive chat: you can instead reply with prose and no fenced block — useful when you want streamed text. Either way the turn ends.
 - Control flow: statement `if`/`for`; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
 - If the prompt includes a **Bound Variables** section, those names are already in scope — use them, don't rebuild them from prose.
@@ -643,10 +643,11 @@ impl ProtocolDriverHandle for RlmDriver {
             }
         }
 
-        if let Some(finish_value) = &state.terminal_finish
-            && let RlmTermination::Finish { schema } = ctx.rlm_termination()
-        {
-            if let Some(schema) = schema
+        if let Some(finish_value) = &state.terminal_finish {
+            // Typed-RLM: validate against the declared schema. If it fails,
+            // surface the error to the model and loop; otherwise fall
+            // through to the shared terminate-with-value path below.
+            if let RlmTermination::Finish { schema: Some(schema) } = ctx.rlm_termination()
                 && let Err(error_text) = validate_finish_value(finish_value, schema)
             {
                 actions.push(DriverAction::AppendMessages(vec![
@@ -660,6 +661,11 @@ impl ProtocolDriverHandle for RlmDriver {
                 return actions;
             }
 
+            // `finish <expr>` terminates both the lashlang program and the
+            // turn in both modes. The value becomes the assistant's final
+            // text; non-string values are JSON-stringified. Typed-RLM
+            // additionally emits a TypedFinish event so schema consumers
+            // can pick up the raw value.
             let rendered = match finish_value {
                 serde_json::Value::String(text) => text.clone(),
                 other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
@@ -667,9 +673,11 @@ impl ProtocolDriverHandle for RlmDriver {
             actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
                 rendered,
             )]));
-            actions.push(DriverAction::Emit(SessionEvent::TypedFinish {
-                value: finish_value.clone(),
-            }));
+            if matches!(ctx.rlm_termination(), RlmTermination::Finish { .. }) {
+                actions.push(DriverAction::Emit(SessionEvent::TypedFinish {
+                    value: finish_value.clone(),
+                }));
+            }
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish,

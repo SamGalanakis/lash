@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn run_code_captures_finish_as_observation_after_tool_call() {
+    async fn run_code_returns_terminal_finish_after_tool_call() {
         let temp = tempfile::tempdir().expect("tempdir");
         let snippet_path = temp.path().join("note.md");
         std::fs::write(&snippet_path, "# Note\nship it\n").expect("write snippet");
@@ -1429,22 +1429,14 @@ finish "ok"
             .await
             .expect("exec response");
 
-        // Default RLM: `finish "ok"` is captured as an observation rather
-        // than rejected with a hard error — the tool call stays successful
-        // and the model has the finish value visible for its prose reply.
+        // `finish "ok"` terminates the lashlang program and delivers the
+        // value through `terminal_finish` regardless of mode. The prior
+        // tool call stays successful; no error is surfaced.
         assert_eq!(response.error, None);
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].tool, "show_snippet_to_user");
         assert!(response.tool_calls[0].success);
-        let finish_observation = response
-            .observations
-            .iter()
-            .find(|obs| obs.contains("ok"))
-            .expect("finish value should be captured as an observation");
-        assert!(
-            finish_observation.starts_with("[finish value]"),
-            "observation should be tagged: {finish_observation:?}",
-        );
+        assert_eq!(response.terminal_finish, Some(serde_json::json!("ok")));
     }
 
     #[cfg(feature = "tool-impls")]

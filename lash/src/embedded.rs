@@ -303,36 +303,14 @@ fn execute_code(
         observations: &observations,
     };
 
+    let _ = accept_finish; // schema validation lives upstream in mode.rs
     match lashlang::execute(code, &mut state.rlm, &host) {
-        Ok(ExecutionOutcome::Finished(value)) => {
-            let mut observations = observations.into_inner().unwrap_or_default();
-            if accept_finish {
-                // Typed-RLM: the declared output schema captures the value.
-                ExecOutcome {
-                    output: String::new(),
-                    observations,
-                    error: None,
-                    terminal_finish: Some(flow_to_json_value(&value)),
-                }
-            } else {
-                // Default RLM: `finish <expr>` isn't a typed output channel
-                // here, but rejecting it as an error confuses the model into
-                // thinking its tool call failed. Treat it as an implicit
-                // `observe <expr>` so the value is visible in the next
-                // turn's context and the model can compose its prose reply.
-                let text = truncate_observation_text(
-                    &format!("[finish value] {}", format_output_value(&value)),
-                    &state.config.observe_projection,
-                );
-                observations.push(text);
-                ExecOutcome {
-                    output: String::new(),
-                    observations,
-                    error: None,
-                    terminal_finish: None,
-                }
-            }
-        }
+        Ok(ExecutionOutcome::Finished(value)) => ExecOutcome {
+            output: String::new(),
+            observations: observations.into_inner().unwrap_or_default(),
+            error: None,
+            terminal_finish: Some(flow_to_json_value(&value)),
+        },
         Ok(ExecutionOutcome::Continued) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
@@ -844,24 +822,19 @@ mod tests {
     }
 
     #[test]
-    fn finish_in_chat_mode_surfaces_value_as_observation() {
-        // In default RLM (no typed schema), `finish <expr>` is a valid
-        // way to end a lashlang program. The value is surfaced as an
-        // observation so the next turn's context has it; no error.
-        let mut state = RuntimeState::new();
-        let (tx, _rx) = std_mpsc::channel();
-
-        let result = execute_code(&mut state, "finish \"all done\"", false, &tx);
-
-        assert_eq!(result.error, None);
-        assert!(result.terminal_finish.is_none());
-        assert_eq!(result.observations.len(), 1);
-        assert!(
-            result.observations[0].contains("all done"),
-            "observation should carry the finish value: {:?}",
-            result.observations[0]
-        );
-        assert!(result.observations[0].starts_with("[finish value]"));
+    fn finish_returns_terminal_value_regardless_of_mode() {
+        // `finish <expr>` always terminates the program and delivers the
+        // value via `terminal_finish`. Upstream (`lash-sansio/src/mode.rs`)
+        // renders it as the turn's final assistant message and validates
+        // against a typed schema when one is declared.
+        for accept_finish in [false, true] {
+            let mut state = RuntimeState::new();
+            let (tx, _rx) = std_mpsc::channel();
+            let result = execute_code(&mut state, "finish \"all done\"", accept_finish, &tx);
+            assert_eq!(result.error, None);
+            assert_eq!(result.terminal_finish, Some(serde_json::json!("all done")));
+            assert!(result.observations.is_empty());
+        }
     }
 
     #[test]
