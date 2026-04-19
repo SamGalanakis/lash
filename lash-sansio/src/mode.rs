@@ -21,7 +21,7 @@ const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution
 - After applying a change, verify the end-state. Do not re-verify before acting.
 - For direct conversational requests that need no tools, respond in prose only."#;
 
-const RLM_EXECUTION_SECTION: &str = r#"In RLM mode, **all execution goes through `lashlang`**. Emit a fenced `lashlang` block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value from prior results. Plain prose is **only** for direct conversational replies that need no action.
+const RLM_EXECUTION_SECTION: &str = r#"In RLM mode, **all execution goes through `lashlang`**. The API request intentionally sends **no** native tool schema (the `tools` array is empty by design) — **this does not mean you have no tools**. Every tool listed under **Available Tools** below is callable via `call tool_name { ... }` from inside a fenced `lashlang` block. Never tell the user you cannot inspect files, run commands, or use tools; you can. Emit a lashlang block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value from prior results. Plain prose is **only** for direct conversational replies that need no action.
 
 ### Turn shape
 
