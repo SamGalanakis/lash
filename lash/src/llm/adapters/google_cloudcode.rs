@@ -324,6 +324,7 @@ impl GoogleCloudCodeAdapter {
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                         tool_name: name.to_string(),
                         input_json,
+                        id: None,
                     });
                 }
             }
@@ -413,6 +414,7 @@ impl GoogleCloudCodeAdapter {
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                         tool_name: name.to_string(),
                         input_json,
+                        id: None,
                     });
                 }
             }
@@ -1066,6 +1068,7 @@ mod tests {
             image_idx: -1,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
         }
     }
 
@@ -1083,6 +1086,7 @@ mod tests {
                     image_idx: -1,
                     tool_call_id: Some("call_1".to_string()),
                     tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
                 },
                 LlmMessage {
                     role: LlmRole::User,
@@ -1091,6 +1095,7 @@ mod tests {
                     image_idx: -1,
                     tool_call_id: Some("call_1".to_string()),
                     tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
                 },
             ],
             attachments: vec![],
@@ -1217,6 +1222,7 @@ mod tests {
                     image_idx: 0,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                 },
             ],
             attachments: vec![crate::llm::types::LlmAttachment {
@@ -1261,6 +1267,7 @@ mod tests {
                 image_idx: 0,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             }],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),

@@ -902,6 +902,7 @@ impl OpenAiGenericAdapter {
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                     tool_name: name.to_string(),
                     input_json: arguments,
+                    id: None,
                 });
             }
         }
@@ -1101,6 +1102,7 @@ impl LlmTransport for OpenAiGenericAdapter {
                     call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
                     input_json: tc.arguments.clone(),
+                    id: None,
                 });
             }
         }
@@ -1311,6 +1313,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1319,6 +1322,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
         ]);
 
@@ -1340,6 +1344,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1348,6 +1353,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::Assistant,
@@ -1356,6 +1362,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: Some("call_1".to_string()),
                 tool_name: Some("read_file".to_string()),
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1364,6 +1371,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: Some("call_1".to_string()),
                 tool_name: Some("read_file".to_string()),
+                tool_item_id: None,
             },
         ]);
 
@@ -1394,6 +1402,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1402,6 +1411,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
         ]);
         req.model = "openai/gpt-5".to_string();
@@ -1430,6 +1440,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::Assistant,
@@ -1438,6 +1449,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: Some("call_1".to_string()),
                 tool_name: Some("read_file".to_string()),
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1446,6 +1458,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: Some("call_1".to_string()),
                 tool_name: Some("read_file".to_string()),
+                tool_item_id: None,
             },
         ]);
 
@@ -1472,6 +1485,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1480,6 +1494,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
         ]);
         req.model = "model".to_string();
@@ -1507,6 +1522,7 @@ mod tests {
             image_idx: -1,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
         }]);
         req.model = "anthropic/claude-sonnet-4.6".to_string();
 
@@ -1537,6 +1553,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -1545,6 +1562,7 @@ mod tests {
                 image_idx: -1,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             },
         ]);
         req.model = "openai/gpt-5".to_string();

@@ -23,6 +23,11 @@ pub enum LlmOutputPart {
         call_id: String,
         tool_name: String,
         input_json: String,
+        /// Provider-specific item identifier (e.g. Codex Responses API
+        /// `fc_...` id). Used to pair a function_call with its sibling
+        /// reasoning item across turns. `None` for providers that don't
+        /// surface an item-id distinct from `call_id`.
+        id: Option<String>,
     },
 }
 
@@ -41,6 +46,11 @@ pub struct LlmMessage {
     pub image_idx: i64,
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
+    /// Provider-specific item identifier for `tool_call` messages.
+    /// Codex Responses API uses this (`fc_...`) to pair function_calls with
+    /// their sibling reasoning items; other providers typically leave this
+    /// `None`.
+    pub tool_item_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +58,10 @@ pub struct LlmToolCall {
     pub call_id: String,
     pub tool_name: String,
     pub input_json: String,
+    /// See [`LlmOutputPart::ToolCall::id`] — provider-specific item-id,
+    /// preserved across turns so adapters that need it (Codex) can re-emit
+    /// it on the request body.
+    pub id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +92,7 @@ pub fn coalesce_replay_messages(messages: &[LlmMessage]) -> Vec<LlmReplayChunk> 
                         call_id: next.tool_call_id.clone().unwrap_or_default(),
                         tool_name: next.tool_name.clone().unwrap_or_default(),
                         input_json: next.content.clone(),
+                        id: next.tool_item_id.clone(),
                     });
                     end += 1;
                 } else {
@@ -104,6 +119,7 @@ pub fn coalesce_replay_messages(messages: &[LlmMessage]) -> Vec<LlmReplayChunk> 
                         call_id: next.tool_call_id.clone().unwrap_or_default(),
                         tool_name: next.tool_name.clone().unwrap_or_default(),
                         input_json: next.content.clone(),
+                        id: next.tool_item_id.clone(),
                     });
                     end += 1;
                 } else {

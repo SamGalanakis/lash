@@ -28,6 +28,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 });
             }
@@ -39,6 +40,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 });
             }
@@ -50,6 +52,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 });
             }
@@ -72,6 +75,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     }),
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 });
             }

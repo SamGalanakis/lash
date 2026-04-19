@@ -39,6 +39,7 @@ pub(crate) fn plugin_message_to_message(
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }]
     } else {
@@ -59,6 +60,7 @@ pub(crate) fn plugin_message_to_message(
             }),
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }));
     }

@@ -312,6 +312,7 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: lash::PruneState::Intact,
         }],
         user_input: Some(lash::UserInputProvenance {

@@ -212,7 +212,7 @@ impl ProtocolDriverHandle for StandardDriver {
     ) -> Vec<DriverAction> {
         let response_parts = normalized_response_parts(&llm_response);
         let mut assistant_text = String::new();
-        let mut tool_calls: Vec<(String, String, String)> = Vec::new();
+        let mut tool_calls: Vec<(String, String, String, Option<String>)> = Vec::new();
         let mut actions = Vec::new();
 
         for part in response_parts {
@@ -232,8 +232,9 @@ impl ProtocolDriverHandle for StandardDriver {
                     call_id,
                     tool_name,
                     input_json,
+                    id,
                 } => {
-                    tool_calls.push((call_id, tool_name, input_json));
+                    tool_calls.push((call_id, tool_name, input_json, id));
                 }
             }
         }
@@ -276,12 +277,13 @@ impl ProtocolDriverHandle for StandardDriver {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
                 prune_state: PruneState::Intact,
             });
         }
 
         let mut calls = Vec::new();
-        for (call_id, tool_name, input_json) in tool_calls {
+        for (call_id, tool_name, input_json, item_id) in tool_calls {
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
                 kind: PartKind::ToolCall,
@@ -289,6 +291,7 @@ impl ProtocolDriverHandle for StandardDriver {
                 attachment: None,
                 tool_call_id: Some(call_id.clone()),
                 tool_name: Some(tool_name.clone()),
+                tool_item_id: item_id.clone(),
                 prune_state: PruneState::Intact,
             });
 
@@ -298,6 +301,7 @@ impl ProtocolDriverHandle for StandardDriver {
                 call_id,
                 tool_name,
                 args,
+                item_id,
             });
         }
 
@@ -334,6 +338,7 @@ impl ProtocolDriverHandle for StandardDriver {
                 attachment: None,
                 tool_call_id: Some(outcome.call_id.clone()),
                 tool_name: Some(outcome.tool_name.clone()),
+                tool_item_id: None,
                 prune_state: PruneState::Intact,
             });
 
@@ -345,6 +350,7 @@ impl ProtocolDriverHandle for StandardDriver {
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 });
                 result_parts.push(Part {
@@ -358,6 +364,7 @@ impl ProtocolDriverHandle for StandardDriver {
                     }),
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 });
             }
@@ -659,6 +666,7 @@ fn assistant_prose_message(content: String) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }],
         user_input: None,
@@ -678,6 +686,7 @@ fn typed_rlm_finish_reminder_message() -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }],
         user_input: None,
@@ -699,6 +708,7 @@ fn typed_rlm_schema_error_message(error_text: &str) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }],
         user_input: None,
@@ -718,6 +728,7 @@ fn turn_limit_exhausted_message(max_turns: usize) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }],
         user_input: None,
@@ -734,6 +745,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
         attachment: None,
         tool_call_id: None,
         tool_name: None,
+        tool_item_id: None,
         prune_state: PruneState::Intact,
     }];
     for (image_offset, image) in images.iter().enumerate() {
@@ -744,6 +756,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         });
         parts.push(Part {
@@ -757,6 +770,7 @@ fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage
             }),
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         });
     }

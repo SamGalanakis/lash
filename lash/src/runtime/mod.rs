@@ -673,11 +673,18 @@ impl StandardStreamFallback {
         }
     }
 
-    fn push_tool_call(&mut self, call_id: String, tool_name: String, input_json: String) {
+    fn push_tool_call(
+        &mut self,
+        call_id: String,
+        tool_name: String,
+        input_json: String,
+        id: Option<String>,
+    ) {
         self.parts.push(LlmOutputPart::ToolCall {
             call_id,
             tool_name,
             input_json,
+            id,
         });
     }
 
@@ -2073,6 +2080,7 @@ impl LashRuntime {
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 }],
                 user_input: None,
@@ -2095,6 +2103,7 @@ impl LashRuntime {
                         attachment: None,
                         tool_call_id: None,
                         tool_name: None,
+                        tool_item_id: None,
                         prune_state: PruneState::Intact,
                     });
                 }
@@ -2113,6 +2122,7 @@ impl LashRuntime {
                         }),
                         tool_call_id: None,
                         tool_name: None,
+                        tool_item_id: None,
                         prune_state: PruneState::Intact,
                     });
                 }
@@ -2126,6 +2136,7 @@ impl LashRuntime {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
                 prune_state: PruneState::Intact,
             });
         }

@@ -174,6 +174,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 },
                 Part {
@@ -190,6 +191,7 @@ mod tests {
                     }),
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 },
                 Part {
@@ -199,6 +201,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 },
             ],
@@ -229,6 +232,7 @@ fn normalize_message_ids(messages: &mut [Message]) {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
                 prune_state: PruneState::Intact,
             });
         }

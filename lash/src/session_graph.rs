@@ -962,6 +962,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
                 prune_state: PruneState::Intact,
             }],
             user_input: None,

@@ -25,6 +25,10 @@ struct CodexStreamingToolCall {
     call_id: String,
     tool_name: String,
     input_json: String,
+    /// Codex Responses API item-id (e.g. `fc_...`). Preserved so we can
+    /// re-emit it on the next request body alongside `call_id`; Codex uses
+    /// it to pair the function_call with its sibling reasoning item.
+    item_id: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -202,6 +206,9 @@ impl CodexStreamState {
     fn update_tool_call_from_item(&mut self, item: &Value) -> Option<String> {
         let item_id = item.get("id").and_then(|v| v.as_str())?.to_string();
         let tool_call = self.tool_calls.entry(item_id.clone()).or_default();
+        if tool_call.item_id.is_empty() {
+            tool_call.item_id = item_id.clone();
+        }
         if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
             tool_call.call_id = call_id.to_string();
         }
@@ -252,6 +259,11 @@ impl CodexStreamState {
             call_id: tool_call.call_id,
             tool_name: tool_call.tool_name,
             input_json: tool_call.input_json,
+            id: if tool_call.item_id.is_empty() {
+                None
+            } else {
+                Some(tool_call.item_id)
+            },
         };
         if !self.parts.iter().any(|existing| existing == &part) {
             self.parts.push(part.clone());
@@ -405,12 +417,19 @@ impl CodexOAuthAdapter {
                         }));
                     }
                     input.extend(tool_calls.into_iter().map(|call| {
-                        json!({
+                        let mut item = json!({
                             "type": "function_call",
                             "call_id": call.call_id,
                             "name": call.tool_name,
                             "arguments": call.input_json,
-                        })
+                        });
+                        // Codex uses `id` (e.g. `fc_...`) to pair function_call
+                        // items with their sibling reasoning items across turns.
+                        // Omit when absent so we don't send a bogus id.
+                        if let Some(item_id) = call.id {
+                            item["id"] = json!(item_id);
+                        }
+                        item
                     }));
                 }
                 LlmReplayChunk::ToolResults { results } => {
@@ -823,6 +842,10 @@ impl CodexOAuthAdapter {
                                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                             tool_name: name.to_string(),
                             input_json,
+                            id: item
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
                         });
                     }
                     _ => {}
@@ -1110,6 +1133,7 @@ mod tests {
             image_idx: -1,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
         }
     }
 
@@ -1173,6 +1197,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
                 call_id: "call_1".to_string(),
                 tool_name: "read_file".to_string(),
                 input_json: "{\"path\":\"README.md\"}".to_string(),
+                id: None,
             }]
         );
     }
@@ -1204,6 +1229,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                 call_id: "call_1".to_string(),
                 tool_name: "exec_command".to_string(),
                 input_json: "{\"cmd\":\"date -u\"}".to_string(),
+                id: Some("fc_1".to_string()),
             }]
         );
         assert_eq!(state.usage.input_tokens, 12);
@@ -1335,6 +1361,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                     image_idx: -1,
                     tool_call_id: Some("call_1".to_string()),
                     tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
                 },
                 LlmMessage {
                     role: LlmRole::User,
@@ -1343,6 +1370,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                     image_idx: -1,
                     tool_call_id: Some("call_1".to_string()),
                     tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
                 },
                 message(LlmRole::User, "text", "new turn"),
             ],
@@ -1367,6 +1395,118 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
     }
 
     #[test]
+    fn build_input_emits_function_call_id_alongside_call_id() {
+        // Simulates a replay where Codex previously returned a function_call
+        // with both `call_id` ("call_1") and item-id ("fc_abc"). The adapter
+        // must re-emit the item-id on the next turn so Codex can pair it with
+        // its sibling reasoning item.
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "question"),
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "{\"path\":\"README.md\"}".to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                    tool_item_id: Some("fc_abc".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "ok".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
+                },
+                message(LlmRole::User, "text", "next"),
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_1");
+        assert_eq!(input[1]["id"], "fc_abc");
+    }
+
+    #[test]
+    fn build_input_omits_function_call_id_when_not_captured() {
+        // Replay from a provider that didn't surface an item-id: the adapter
+        // must not synthesize one or leave a bogus value on the request body.
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "question"),
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "{}".to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_x".to_string()),
+                    tool_name: Some("noop".to_string()),
+                    tool_item_id: None,
+                },
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_x");
+        assert!(input[1].get("id").is_none());
+    }
+
+    #[test]
+    fn sse_stream_captures_function_call_item_id() {
+        // The SSE parser should pull `fc_...` off the function_call item and
+        // surface it on the resulting `LlmOutputPart::ToolCall::id`.
+        let payload = r#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"fc_zzz","type":"function_call","status":"in_progress","arguments":"","call_id":"call_1","name":"exec_command"},"output_index":0}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","arguments":"{\"cmd\":\"date\"}","item_id":"fc_zzz","output_index":0}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"fc_zzz","type":"function_call","status":"completed","arguments":"{\"cmd\":\"date\"}","call_id":"call_1","name":"exec_command"},"output_index":0}
+
+event: response.completed
+data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":1,"output_tokens":1}}}
+"#;
+
+        let mut state = CodexStreamState::default();
+        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
+
+        assert_eq!(
+            state.response_parts(),
+            vec![LlmOutputPart::ToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "exec_command".to_string(),
+                input_json: "{\"cmd\":\"date\"}".to_string(),
+                id: Some("fc_zzz".to_string()),
+            }]
+        );
+    }
+
+    #[test]
     fn structured_messages_preserve_empty_function_call_output() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
@@ -1378,6 +1518,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                     image_idx: -1,
                     tool_call_id: Some("call_ask".to_string()),
                     tool_name: Some("ask".to_string()),
+                    tool_item_id: None,
                 },
                 LlmMessage {
                     role: LlmRole::User,
@@ -1386,6 +1527,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                     image_idx: -1,
                     tool_call_id: Some("call_ask".to_string()),
                     tool_name: Some("ask".to_string()),
+                    tool_item_id: None,
                 },
                 message(LlmRole::User, "text", "continue"),
             ],
@@ -1565,6 +1707,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                 image_idx: 0,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             }],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),
@@ -1602,6 +1745,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                 image_idx: 0,
                 tool_call_id: None,
                 tool_name: None,
+                tool_item_id: None,
             }],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),

@@ -33,6 +33,10 @@ pub struct PendingToolCall {
     pub call_id: String,
     pub tool_name: String,
     pub args: Value,
+    /// Provider-specific item-id (e.g. Codex `fc_...`). Carried through so
+    /// it can be re-emitted on the next request body. `None` for providers
+    /// that don't surface a distinct item-id.
+    pub item_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +47,8 @@ pub struct CompletedToolCall {
     pub state_result: ToolResult,
     pub model_result: ToolResult,
     pub duration_ms: u64,
+    /// See [`PendingToolCall::item_id`].
+    pub item_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +244,7 @@ impl<'a> DriverContextView<'a> {
                     image_idx: -1,
                     tool_call_id: None,
                     tool_name: None,
+                    tool_item_id: None,
                 },
             );
         }
@@ -672,6 +679,7 @@ impl TurnMachine {
                         attachment: None,
                         tool_call_id: None,
                         tool_name: None,
+                        tool_item_id: None,
                         prune_state: PruneState::Intact,
                     }]
                 } else {
@@ -692,6 +700,7 @@ impl TurnMachine {
                         }),
                         tool_call_id: None,
                         tool_name: None,
+                        tool_item_id: None,
                         prune_state: PruneState::Intact,
                     }));
                 }
@@ -874,11 +883,13 @@ impl TurnMachine {
                     call_id,
                     tool_name,
                     input_json,
+                    id,
                 } => Some(serde_json::json!({
                     "type": "tool_call",
                     "call_id": call_id,
                     "tool_name": tool_name,
                     "input_json": input_json,
+                    "id": id,
                 })),
             })
             .collect::<Vec<_>>();

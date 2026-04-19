@@ -699,6 +699,7 @@ impl RuntimeTurnDriver {
                 let call_id = pending_tool.call_id;
                 let tool_name = pending_tool.tool_name;
                 let args = pending_tool.args;
+                let item_id = pending_tool.item_id;
                 let (progress_tx, mut progress_rx) =
                     tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
                 let progress_event_tx = event_tx_clone.clone();
@@ -762,6 +763,7 @@ impl RuntimeTurnDriver {
                         state_result,
                         model_result,
                         duration_ms: outcome.record.duration_ms,
+                        item_id,
                     },
                 )
             });
@@ -784,6 +786,7 @@ impl RuntimeTurnDriver {
                             "tool task panicked: {e}"
                         )),
                         duration_ms: 0,
+                        item_id: None,
                     },
                 )),
             }
@@ -1048,6 +1051,7 @@ impl RuntimeTurnDriver {
                 call_id,
                 tool_name,
                 input_json,
+                id,
             }) => {
                 self.log_llm_stream_event(
                     state.debug,
@@ -1069,7 +1073,7 @@ impl RuntimeTurnDriver {
                 );
                 state
                     .streamed_output
-                    .push_tool_call(call_id, tool_name, input_json);
+                    .push_tool_call(call_id, tool_name, input_json, id);
             }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(

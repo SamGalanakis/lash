@@ -210,6 +210,7 @@ pub(crate) fn build_llm_request(
                             image_idx: -1,
                             tool_call_id: None,
                             tool_name: None,
+                            tool_item_id: None,
                         });
                     }
                 }
@@ -221,6 +222,7 @@ pub(crate) fn build_llm_request(
                         image_idx: idx as i64,
                         tool_call_id: None,
                         tool_name: None,
+                        tool_item_id: None,
                     });
                 }
             }

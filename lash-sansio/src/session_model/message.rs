@@ -47,6 +47,12 @@ pub struct Part {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Provider-specific item-id for a `ToolCall` part (e.g. Codex
+    /// Responses API `fc_...`). Preserved across turns so the Codex
+    /// adapter can re-emit it on the next request body. `None` for
+    /// providers that don't surface a distinct item-id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_item_id: Option<String>,
     pub prune_state: PruneState,
 }
 
@@ -559,6 +565,7 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
             image_idx: -1,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
         }],
         attachments,
     }
@@ -603,6 +610,7 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         image_idx: -1,
                         tool_call_id: part.tool_call_id.clone(),
                         tool_name: part.tool_name.clone(),
+                        tool_item_id: part.tool_item_id.clone(),
                     });
                 }
                 PartKind::ToolResult => {
@@ -614,6 +622,7 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         image_idx: -1,
                         tool_call_id: part.tool_call_id.clone(),
                         tool_name: part.tool_name.clone(),
+                        tool_item_id: None,
                     });
                 }
                 _ => {
@@ -629,6 +638,7 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                             image_idx: image_idx as i64,
                             tool_call_id: None,
                             tool_name: None,
+                            tool_item_id: None,
                         });
                         continue;
                     }
@@ -649,6 +659,7 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         image_idx: -1,
                         tool_call_id: None,
                         tool_name: None,
+                        tool_item_id: None,
                     });
                 }
             }
@@ -676,6 +687,7 @@ mod tests {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }
     }
@@ -692,6 +704,7 @@ mod tests {
             }),
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }
     }
@@ -825,6 +838,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 }],
                 user_input: None,
@@ -840,6 +854,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 }],
                 user_input: None,
@@ -872,6 +887,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("ask_1".to_string()),
                     tool_name: Some("ask".to_string()),
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 }],
                 user_input: None,
@@ -887,6 +903,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("ask_1".to_string()),
                     tool_name: Some("ask".to_string()),
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 }],
                 user_input: None,
@@ -971,6 +988,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("exec_command".to_string()),
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 }],
                 user_input: None,
@@ -1012,6 +1030,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 }],
                 user_input: None,
@@ -1027,6 +1046,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
+                    tool_item_id: None,
                     prune_state: PruneState::Intact,
                 }],
                 user_input: None,
@@ -1049,6 +1069,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: Some("tc1".to_string()),
                 tool_name: Some("read_file".to_string()),
+                tool_item_id: None,
                 prune_state: PruneState::Intact,
             }],
             user_input: None,

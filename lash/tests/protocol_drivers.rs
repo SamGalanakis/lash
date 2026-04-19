@@ -43,6 +43,7 @@ fn user_message(content: &str) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
+            tool_item_id: None,
             prune_state: PruneState::Intact,
         }],
         user_input: None,
@@ -148,6 +149,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
                     call_id: "tc1".to_string(),
                     tool_name: "read_file".to_string(),
                     input_json: r#"{"path":"foo.txt"}"#.to_string(),
+                    id: None,
                 },
             ],
             ..LlmResponse::default()
@@ -178,6 +180,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
             state_result: lash_sansio::ToolResult::ok(serde_json::json!("file contents")),
             model_result: lash_sansio::ToolResult::ok(serde_json::json!("file contents")),
             duration_ms: 10,
+            item_id: None,
         }],
     });
 
@@ -211,6 +214,7 @@ fn standard_max_turns_stops_iteration() {
                 call_id: "tc1".to_string(),
                 tool_name: "test".to_string(),
                 input_json: "{}".to_string(),
+                id: None,
             }],
             ..LlmResponse::default()
         }),
@@ -233,6 +237,7 @@ fn standard_max_turns_stops_iteration() {
             state_result: lash_sansio::ToolResult::ok(serde_json::json!("ok")),
             model_result: lash_sansio::ToolResult::ok(serde_json::json!("ok")),
             duration_ms: 1,
+            item_id: None,
         }],
     });
 
