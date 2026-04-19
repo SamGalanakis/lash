@@ -29,6 +29,7 @@ Thumbs.db
 .idea/
 /.agents/lash/
 /.lash/
+/.claude/
 /.tmp/
 autoresearch.jsonl
 autoresearch.md
