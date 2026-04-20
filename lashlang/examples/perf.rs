@@ -2,8 +2,8 @@ mod bench_support;
 
 use bench_support::{BenchHost, Scenario, benchmark_program, seeded_state};
 use lashlang::{
-    ExecutionOutcome, ExecutionScratch, State, compile_program, compile_source,
-    execute_compiled_with_scratch, parse, prewarm,
+    CompiledProgramCache, ExecutionOutcome, ExecutionScratch, State, compile_program,
+    compile_source, execute_compiled_with_scratch, parse, prewarm,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
@@ -82,8 +82,11 @@ enum Mode {
     Parse,
     Compile,
     Block,
+    CachedBlock,
+    CachedSessionBlock,
     ColdOnce,
     PrewarmedOnce,
+    CachedColdOnce,
     Snapshot,
 }
 
@@ -110,13 +113,16 @@ fn main() {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(match mode {
             Mode::Parse | Mode::Compile | Mode::Block => 25_000,
-            Mode::ColdOnce | Mode::PrewarmedOnce => 1,
-            Mode::Execute | Mode::Snapshot => 100_000,
+            Mode::ColdOnce | Mode::PrewarmedOnce | Mode::CachedColdOnce => 1,
+            Mode::Execute | Mode::CachedBlock | Mode::CachedSessionBlock | Mode::Snapshot => {
+                100_000
+            }
         });
 
     let source = benchmark_program(scenario);
     let host = BenchHost;
     let mut scratch = ExecutionScratch::new();
+    let mut cache = CompiledProgramCache::default();
 
     reset_alloc_counters();
     let mut started = Instant::now();
@@ -156,6 +162,40 @@ fn main() {
                 expect_finished(outcome);
             }
         }
+        Mode::CachedBlock => {
+            cache
+                .get_or_compile(source)
+                .expect("benchmark program should compile");
+            reset_alloc_counters();
+            started = Instant::now();
+            for _ in 0..iterations {
+                let mut state = seeded_state();
+                let compiled = cache
+                    .get_or_compile(std::hint::black_box(source))
+                    .expect("cached compile should succeed");
+                let outcome =
+                    execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
+                        .expect("benchmark execution should succeed");
+                expect_finished(outcome);
+            }
+        }
+        Mode::CachedSessionBlock => {
+            cache
+                .get_or_compile(source)
+                .expect("benchmark program should compile");
+            let mut state = seeded_state();
+            reset_alloc_counters();
+            started = Instant::now();
+            for _ in 0..iterations {
+                let compiled = cache
+                    .get_or_compile(std::hint::black_box(source))
+                    .expect("cached compile should succeed");
+                let outcome =
+                    execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
+                        .expect("benchmark execution should succeed");
+                expect_finished(outcome);
+            }
+        }
         Mode::ColdOnce => {
             let mut state = seeded_state();
             let compiled =
@@ -171,6 +211,15 @@ fn main() {
             let mut state = seeded_state();
             let compiled =
                 compile_source(std::hint::black_box(source)).expect("compile should succeed");
+            let outcome = execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
+                .expect("benchmark execution should succeed");
+            expect_finished(outcome);
+        }
+        Mode::CachedColdOnce => {
+            let mut state = seeded_state();
+            let compiled = cache
+                .get_or_compile(std::hint::black_box(source))
+                .expect("cached compile should succeed");
             let outcome = execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
                 .expect("benchmark execution should succeed");
             expect_finished(outcome);
@@ -199,6 +248,13 @@ fn main() {
     println!("scenario: {scenario:?}");
     println!("iterations: {iterations}");
     println!("program_bytes: {}", source.len());
+    let cache_stats = cache.stats();
+    if cache_stats.hits > 0 || cache_stats.misses > 0 {
+        println!("cache_hits: {}", cache_stats.hits);
+        println!("cache_misses: {}", cache_stats.misses);
+        println!("cache_evictions: {}", cache_stats.evictions);
+        println!("cache_entries: {}", cache_stats.entries);
+    }
     println!("elapsed_ms: {:.3}", elapsed.as_secs_f64() * 1_000.0);
     println!(
         "ns_per_iter: {:.1}",
@@ -224,11 +280,14 @@ fn parse_mode(value: &str) -> Mode {
         "parse" => Mode::Parse,
         "compile" => Mode::Compile,
         "block" => Mode::Block,
+        "cached_block" => Mode::CachedBlock,
+        "cached_session_block" => Mode::CachedSessionBlock,
         "cold_once" => Mode::ColdOnce,
         "prewarmed_once" => Mode::PrewarmedOnce,
+        "cached_cold_once" => Mode::CachedColdOnce,
         "snapshot" => Mode::Snapshot,
         other => panic!(
-            "unknown mode `{other}`; expected execute, parse, compile, block, cold_once, prewarmed_once, or snapshot"
+            "unknown mode `{other}`; expected execute, parse, compile, block, cached_block, cached_session_block, cold_once, prewarmed_once, cached_cold_once, or snapshot"
         ),
     }
 }

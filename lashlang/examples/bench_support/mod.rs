@@ -133,13 +133,45 @@ pub struct BenchHost;
 
 impl ToolHost for BenchHost {
     fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        match name {
-            "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
-            _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
+        bench_call(name, args)
+    }
+
+    fn call_batch(
+        &self,
+        calls: &[(&str, &Record)],
+        push_result: &mut dyn FnMut(Result<Value, ToolHostError>),
+    ) -> bool {
+        for (name, args) in calls {
+            push_result(bench_call(name, args));
         }
+        true
     }
 
     fn start_call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
+        Self::task_handle(name, args)
+    }
+
+    fn await_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
+        let record = handle
+            .as_record()
+            .ok_or_else(|| ToolHostError::new("expected handle record"))?;
+        Ok(record.get("value").cloned().unwrap_or(Value::Null))
+    }
+}
+
+fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
+    match name {
+        "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
+        _ => Err(unknown_tool(name)),
+    }
+}
+
+fn unknown_tool(name: &str) -> ToolHostError {
+    ToolHostError::new(format!("unknown tool: {name}"))
+}
+
+impl BenchHost {
+    fn task_handle(name: &str, args: &Record) -> Result<Value, ToolHostError> {
         match name {
             "echo" => {
                 let mut record = Record::default();
@@ -151,14 +183,7 @@ impl ToolHost for BenchHost {
                 );
                 Ok(Value::Record(Arc::new(record)))
             }
-            _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
+            _ => Err(unknown_tool(name)),
         }
-    }
-
-    fn await_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
-        let record = handle
-            .as_record()
-            .ok_or_else(|| ToolHostError::new("expected handle record"))?;
-        Ok(record.get("value").cloned().unwrap_or(Value::Null))
     }
 }

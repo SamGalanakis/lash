@@ -4,278 +4,30 @@ use compact_str::CompactString;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
-use std::ops::Index;
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use thiserror::Error;
 
-const RECORD_INDEX_THRESHOLD: usize = 8;
+mod cache;
+mod host;
+mod record;
+mod state;
+
+pub use cache::{CompiledProgramCache, CompiledProgramCacheStats};
+pub use host::{ToolHost, ToolHostError};
+pub use record::Record;
+use record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
+pub use state::{Snapshot, State};
 
 /// Marker key that wraps a Type literal at its outermost level so a host-side
 /// consumer can tell a Type value apart from a plain record. The inner value
 /// is the JSON-Schema representation of the type.
 pub const LASH_TYPE_KEY: &str = "$lash_type";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Symbol(u32);
-
-#[derive(Default)]
-struct SymbolTable {
-    lookup: FxHashMap<Arc<str>, Symbol>,
-    names: Vec<Arc<str>>,
-}
-
-fn symbol_table() -> &'static RwLock<SymbolTable> {
-    static TABLE: OnceLock<RwLock<SymbolTable>> = OnceLock::new();
-    TABLE.get_or_init(|| RwLock::new(SymbolTable::default()))
-}
-
-fn lookup_symbol(name: &str) -> Option<Symbol> {
-    symbol_table()
-        .read()
-        .expect("symbol table read lock poisoned")
-        .lookup
-        .get(name)
-        .copied()
-}
-
-fn intern_symbol(name: &str) -> Symbol {
-    if let Some(symbol) = lookup_symbol(name) {
-        return symbol;
-    }
-
-    let mut table = symbol_table()
-        .write()
-        .expect("symbol table write lock poisoned");
-    if let Some(symbol) = table.lookup.get(name) {
-        return *symbol;
-    }
-
-    let symbol = Symbol(table.names.len() as u32);
-    let text: Arc<str> = Arc::<str>::from(name);
-    table.names.push(text.clone());
-    table.lookup.insert(text, symbol);
-    symbol
-}
-
-fn symbol_name(symbol: Symbol) -> Arc<str> {
-    symbol_table()
-        .read()
-        .expect("symbol table read lock poisoned")
-        .names[symbol.0 as usize]
-        .clone()
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct RecordEntry {
-    symbol: Symbol,
-    name: Arc<str>,
-    value: Value,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Record {
-    entries: Vec<RecordEntry>,
-    index: Option<FxHashMap<Symbol, usize>>,
-}
-
-impl Record {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            entries: Vec::with_capacity(capacity),
-            index: (capacity > RECORD_INDEX_THRESHOLD)
-                .then(|| FxHashMap::with_capacity_and_hasher(capacity, Default::default())),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Value> {
-        self.get_symbol(lookup_symbol(name)?)
-    }
-
-    pub fn get_mut(&mut self, name: &str) -> Option<&mut Value> {
-        let symbol = lookup_symbol(name)?;
-        let index = self.position_for(symbol)?;
-        Some(&mut self.entries[index].value)
-    }
-
-    pub fn remove(&mut self, name: &str) -> Option<Value> {
-        let symbol = lookup_symbol(name)?;
-        self.remove_symbol(symbol)
-    }
-
-    pub fn insert(&mut self, name: String, value: Value) -> Option<Value> {
-        let symbol = intern_symbol(&name);
-        self.insert_symbolized(symbol, Arc::<str>::from(name), value)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
-        self.entries
-            .iter()
-            .map(|entry| (entry.name.as_ref(), &entry.value))
-    }
-
-    pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|entry| entry.name.as_ref())
-    }
-
-    pub fn values(&self) -> impl Iterator<Item = &Value> {
-        self.entries.iter().map(|entry| &entry.value)
-    }
-
-    fn get_symbol(&self, symbol: Symbol) -> Option<&Value> {
-        let index = self.position_for(symbol)?;
-        Some(&self.entries[index].value)
-    }
-
-    fn insert_symbol(&mut self, symbol: Symbol, value: Value) -> Option<Value> {
-        self.insert_symbolized(symbol, symbol_name(symbol), value)
-    }
-
-    fn insert_symbolized(&mut self, symbol: Symbol, name: Arc<str>, value: Value) -> Option<Value> {
-        if let Some(index) = self.position_for(symbol) {
-            return Some(std::mem::replace(&mut self.entries[index].value, value));
-        }
-
-        let index = self.entries.len();
-        self.entries.push(RecordEntry {
-            symbol,
-            name,
-            value,
-        });
-        self.reindex_after_insert(index);
-        None
-    }
-
-    fn remove_symbol(&mut self, symbol: Symbol) -> Option<Value> {
-        let index = self.position_for(symbol)?;
-        let removed = self.entries.swap_remove(index);
-        self.reindex_after_remove(symbol, index);
-        Some(removed.value)
-    }
-
-    fn position_for(&self, symbol: Symbol) -> Option<usize> {
-        if let Some(index) = &self.index {
-            return index.get(&symbol).copied();
-        }
-        self.entries.iter().position(|entry| entry.symbol == symbol)
-    }
-
-    fn rebuild_index(&mut self) {
-        self.index = (self.entries.len() > RECORD_INDEX_THRESHOLD).then(|| {
-            let mut index =
-                FxHashMap::with_capacity_and_hasher(self.entries.len(), Default::default());
-            for (slot, entry) in self.entries.iter().enumerate() {
-                index.insert(entry.symbol, slot);
-            }
-            index
-        });
-    }
-
-    fn reindex_after_insert(&mut self, index: usize) {
-        if let Some(map) = &mut self.index {
-            map.insert(self.entries[index].symbol, index);
-            return;
-        }
-        if self.entries.len() > RECORD_INDEX_THRESHOLD {
-            self.rebuild_index();
-        }
-    }
-
-    fn reindex_after_remove(&mut self, removed: Symbol, index: usize) {
-        if self.entries.len() <= RECORD_INDEX_THRESHOLD {
-            self.index = None;
-            return;
-        }
-
-        let Some(map) = &mut self.index else {
-            self.rebuild_index();
-            return;
-        };
-        map.remove(&removed);
-        if let Some(moved) = self.entries.get(index) {
-            map.insert(moved.symbol, index);
-        }
-    }
-}
-
-impl Index<&str> for Record {
-    type Output = Value;
-
-    fn index(&self, name: &str) -> &Self::Output {
-        self.get(name)
-            .unwrap_or_else(|| panic!("missing record key `{name}`"))
-    }
-}
-
-impl PartialEq for Record {
-    fn eq(&self, other: &Self) -> bool {
-        if self.len() != other.len() {
-            return false;
-        }
-        self.entries.iter().all(|entry| {
-            other
-                .get_symbol(entry.symbol)
-                .is_some_and(|value| value == &entry.value)
-        })
-    }
-}
-
-impl FromIterator<(String, Value)> for Record {
-    fn from_iter<T: IntoIterator<Item = (String, Value)>>(iter: T) -> Self {
-        let iter = iter.into_iter();
-        let (lower, _) = iter.size_hint();
-        let mut record = Record::with_capacity(lower);
-        for (name, value) in iter {
-            record.insert(name, value);
-        }
-        record
-    }
-}
-
-impl Serialize for Record {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-
-        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
-        for entry in &self.entries {
-            map.serialize_entry(entry.name.as_ref(), &entry.value)?;
-        }
-        map.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for Record {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let map = FxHashMap::<String, Value>::deserialize(deserializer)?;
-        Ok(map.into_iter().collect())
-    }
-}
-
-fn record_with_capacity(capacity: usize) -> Record {
-    Record::with_capacity(capacity)
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -315,72 +67,6 @@ impl fmt::Display for Value {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct State {
-    globals: Record,
-}
-
-impl State {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn globals(&self) -> &Record {
-        &self.globals
-    }
-
-    pub fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            globals: self.globals.clone(),
-        }
-    }
-
-    pub fn from_snapshot(snapshot: Snapshot) -> Self {
-        Self {
-            globals: snapshot.globals,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Snapshot {
-    pub globals: Record,
-}
-
-pub trait ToolHost: Sync {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError>;
-
-    fn start_call(&self, _name: &str, _args: &Record) -> Result<Value, ToolHostError> {
-        Err(ToolHostError::new("async tool starts are unavailable"))
-    }
-
-    fn await_handle(&self, _handle: &Value) -> Result<Value, ToolHostError> {
-        Err(ToolHostError::new("async tool handles are unavailable"))
-    }
-
-    fn cancel_handle(&self, _handle: &Value) -> Result<Value, ToolHostError> {
-        Err(ToolHostError::new("async tool handles are unavailable"))
-    }
-
-    fn print(&self, _value: &Value) -> Result<(), ToolHostError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-#[error("{message}")]
-pub struct ToolHostError {
-    message: String,
-}
-
-impl ToolHostError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
 #[derive(Debug, Error, PartialEq)]
 pub enum RuntimeError {
     #[error("unknown name `{name}`")]
@@ -410,6 +96,7 @@ pub struct RuntimeFailure {
 pub struct ExecutionScratch {
     stack: Vec<Value>,
     iter_stack: Vec<IterState>,
+    slot_values: Vec<Option<Value>>,
 }
 
 impl ExecutionScratch {
@@ -494,16 +181,12 @@ pub fn execute_compiled_with_scratch<H: ToolHost>(
     host: &H,
     scratch: &mut ExecutionScratch,
 ) -> Result<ExecutionOutcome, RuntimeError> {
-    let mut vm = Vm::new_with_scratch(
-        &program.chunk,
-        SlotState::from_globals(
-            std::mem::take(&mut state.globals),
-            &program.chunk.slot_names,
-        ),
-        host,
-        false,
+    let slots = SlotState::from_globals_with_scratch(
+        std::mem::take(&mut state.globals),
+        &program.chunk.slot_names,
         scratch,
     );
+    let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
     let result = vm.run();
     state.globals = vm.recycle_into_globals(scratch);
     result
@@ -534,16 +217,12 @@ pub fn execute_compiled_traced_with_scratch<H: ToolHost>(
     host: &H,
     scratch: &mut ExecutionScratch,
 ) -> Result<ExecutionOutcome, RuntimeFailure> {
-    let mut vm = Vm::new_with_scratch(
-        &program.chunk,
-        SlotState::from_globals(
-            std::mem::take(&mut state.globals),
-            &program.chunk.slot_names,
-        ),
-        host,
-        false,
+    let slots = SlotState::from_globals_with_scratch(
+        std::mem::take(&mut state.globals),
+        &program.chunk.slot_names,
         scratch,
     );
+    let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
     let result = vm.run_traced();
     state.globals = vm.recycle_into_globals(scratch);
     result
@@ -577,16 +256,12 @@ pub fn profile_compiled_with_scratch<H: ToolHost>(
     host: &H,
     scratch: &mut ExecutionScratch,
 ) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
-    let mut vm = Vm::new_with_scratch(
-        &program.chunk,
-        SlotState::from_globals(
-            std::mem::take(&mut state.globals),
-            &program.chunk.slot_names,
-        ),
-        host,
-        false,
+    let slots = SlotState::from_globals_with_scratch(
+        std::mem::take(&mut state.globals),
+        &program.chunk.slot_names,
         scratch,
     );
+    let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
     vm.enable_profile();
     let result = vm.run();
     let mut profile = vm.take_profile();
@@ -673,8 +348,10 @@ struct Chunk {
     spans: Vec<Option<Span>>,
     constants: Vec<Value>,
     names: Vec<Name>,
-    slot_names: Vec<String>,
+    slot_names: Vec<Name>,
     key_lists: Vec<Box<[usize]>>,
+    format_templates: Vec<CompiledFormatTemplate>,
+    compiled_schemas: Vec<CompiledSchema>,
     parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
     named_parallel_call_sets: Vec<Box<[NamedParallelCallBranch]>>,
     pure_parallel_sets: Vec<Box<[PureExpr]>>,
@@ -689,6 +366,61 @@ struct Name {
     text: Arc<str>,
 }
 
+#[derive(Clone)]
+struct CompiledFormatTemplate {
+    parts: Box<[CompiledFormatPart]>,
+    argc: usize,
+    min_capacity: usize,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+enum CompiledFormatPart {
+    Literal(Arc<str>),
+    Arg(usize),
+}
+
+#[derive(Clone)]
+struct CompiledSchema {
+    kind: CompiledSchemaKind,
+}
+
+#[derive(Clone)]
+enum CompiledSchemaKind {
+    Any,
+    Type(SchemaType),
+    Enum(Box<[Value]>),
+    List(Box<CompiledSchema>),
+    Object {
+        required: Box<[CompiledSchemaField]>,
+        properties: Box<[CompiledSchemaField]>,
+    },
+}
+
+#[derive(Clone)]
+struct CompiledSchemaField {
+    symbol: Symbol,
+    name: Arc<str>,
+    schema: CompiledSchema,
+}
+
+struct ResultWrapperNames {
+    ok: Name,
+    value: Name,
+    error: Name,
+}
+
+#[derive(Clone, Copy)]
+enum SchemaType {
+    String,
+    Number,
+    Integer,
+    Boolean,
+    Array,
+    Object,
+    Null,
+}
+
 fn transient_name(name: &str) -> Name {
     let symbol = intern_symbol(name);
     Name {
@@ -697,14 +429,25 @@ fn transient_name(name: &str) -> Name {
     }
 }
 
+fn result_wrapper_names() -> &'static ResultWrapperNames {
+    static NAMES: OnceLock<ResultWrapperNames> = OnceLock::new();
+    NAMES.get_or_init(|| ResultWrapperNames {
+        ok: transient_name("ok"),
+        value: transient_name("value"),
+        error: transient_name("error"),
+    })
+}
+
 #[derive(Clone, Copy)]
 enum Instruction {
     PushConst(usize),
     LoadName(usize),
     StoreName(usize),
+    StoreConst { slot: usize, constant: usize },
     BuildList(usize),
     BuildRecord(usize),
     LoadField { slot: usize, field: usize },
+    LoadFieldUnwrap { slot: usize, field: usize },
     Field(usize),
     Index,
     ResultUnwrap,
@@ -724,9 +467,10 @@ enum Instruction {
     Len,
     Join,
     Validate,
+    ValidateCompiled(usize),
     Push,
     Range { argc: usize },
-    FormatLiteral { template: usize, argc: usize },
+    FormatCompiled(usize),
     AddAssign(usize),
     AppendAssign(usize),
     Print,
@@ -777,12 +521,16 @@ impl Instruction {
         match self {
             Instruction::PushConst(_) => InstructionProfileTag::PushConst,
             Instruction::LoadName(_) => InstructionProfileTag::LoadName,
-            Instruction::StoreName(_) => InstructionProfileTag::StoreName,
+            Instruction::StoreName(_) | Instruction::StoreConst { .. } => {
+                InstructionProfileTag::StoreName
+            }
             Instruction::BuildList(_) => InstructionProfileTag::BuildList,
             Instruction::BuildRecord(_) => InstructionProfileTag::BuildRecord,
             Instruction::LoadField { .. } | Instruction::Field(_) => InstructionProfileTag::Field,
             Instruction::Index => InstructionProfileTag::Index,
-            Instruction::ResultUnwrap => InstructionProfileTag::ResultUnwrap,
+            Instruction::ResultUnwrap | Instruction::LoadFieldUnwrap { .. } => {
+                InstructionProfileTag::ResultUnwrap
+            }
             Instruction::Unary(_) => InstructionProfileTag::Unary,
             Instruction::Binary(_) => InstructionProfileTag::Binary,
             Instruction::ToBool => InstructionProfileTag::ToBool,
@@ -801,9 +549,10 @@ impl Instruction {
             | Instruction::Len
             | Instruction::Join
             | Instruction::Validate
+            | Instruction::ValidateCompiled(_)
             | Instruction::Push
             | Instruction::Range { .. }
-            | Instruction::FormatLiteral { .. } => InstructionProfileTag::CallBuiltin,
+            | Instruction::FormatCompiled(_) => InstructionProfileTag::CallBuiltin,
             Instruction::AddAssign(_) => InstructionProfileTag::AddAssign,
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
             Instruction::Print => InstructionProfileTag::Print,
@@ -1049,6 +798,8 @@ struct Compiler {
     name_lookup: FxHashMap<Symbol, usize>,
     slots: Rc<RefCell<SlotTable>>,
     key_lists: Vec<Box<[usize]>>,
+    format_templates: Vec<CompiledFormatTemplate>,
+    compiled_schemas: Vec<CompiledSchema>,
     parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
     named_parallel_call_sets: Vec<Box<[NamedParallelCallBranch]>>,
     pure_parallel_sets: Vec<Box<[PureExpr]>>,
@@ -1061,8 +812,8 @@ struct Compiler {
 
 #[derive(Default)]
 struct SlotTable {
-    names: Vec<String>,
-    lookup: FxHashMap<String, usize>,
+    names: Vec<Name>,
+    lookup: FxHashMap<Symbol, usize>,
 }
 
 #[derive(Clone)]
@@ -1093,6 +844,10 @@ enum PureExpr {
     Record(Box<[(usize, PureExpr)]>),
     Builtin {
         builtin: Builtin,
+        args: Box<[PureExpr]>,
+    },
+    Format {
+        template: CompiledFormatTemplate,
         args: Box<[PureExpr]>,
     },
     ResultUnwrap(Box<PureExpr>),
@@ -1143,6 +898,8 @@ impl Compiler {
             name_lookup: FxHashMap::default(),
             slots,
             key_lists: Vec::new(),
+            format_templates: Vec::new(),
+            compiled_schemas: Vec::new(),
             parallel_call_sets: Vec::new(),
             named_parallel_call_sets: Vec::new(),
             pure_parallel_sets: Vec::new(),
@@ -1165,6 +922,8 @@ impl Compiler {
             names: self.names,
             slot_names,
             key_lists: self.key_lists,
+            format_templates: self.format_templates,
+            compiled_schemas: self.compiled_schemas,
             parallel_call_sets: self.parallel_call_sets,
             named_parallel_call_sets: self.named_parallel_call_sets,
             pure_parallel_sets: self.pure_parallel_sets,
@@ -1196,17 +955,20 @@ impl Compiler {
     }
 
     fn push_slot(&mut self, name: &str) -> usize {
+        let symbol = intern_symbol(name);
         let mut slots = self.slots.borrow_mut();
-        if let Some(index) = slots.lookup.get(name) {
+        if let Some(index) = slots.lookup.get(&symbol) {
             let index = *index;
             drop(slots);
             self.ensure_const_slot(index);
             return index;
         }
         let index = slots.names.len();
-        let owned = name.to_string();
-        slots.names.push(owned.clone());
-        slots.lookup.insert(owned, index);
+        slots.names.push(Name {
+            symbol,
+            text: symbol_name(symbol),
+        });
+        slots.lookup.insert(symbol, index);
         drop(slots);
         self.ensure_const_slot(index);
         index
@@ -1219,6 +981,19 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         self.key_lists.push(keys);
+        index
+    }
+
+    fn push_format_template(&mut self, template: &str, argc: usize) -> usize {
+        let index = self.format_templates.len();
+        self.format_templates
+            .push(compile_format_template(template, argc));
+        index
+    }
+
+    fn push_compiled_schema(&mut self, schema: &Value) -> usize {
+        let index = self.compiled_schemas.len();
+        self.compiled_schemas.push(compile_schema_value(schema));
         index
     }
 
@@ -1280,8 +1055,9 @@ impl Compiler {
     }
 
     fn const_for_name(&self, name: &str) -> Option<Value> {
+        let symbol = lookup_symbol(name)?;
         let slots = self.slots.borrow();
-        let slot = *slots.lookup.get(name)?;
+        let slot = *slots.lookup.get(&symbol)?;
         drop(slots);
         self.const_for_slot(slot)
     }
@@ -1362,6 +1138,13 @@ impl Compiler {
                     self.compile_expr(right);
                     self.code.push(Instruction::AddAssign(slot));
                     self.set_const_slot(slot, None);
+                    return;
+                }
+
+                if let Some(value) = const_value.clone() {
+                    let constant = self.push_const(value);
+                    self.code.push(Instruction::StoreConst { slot, constant });
+                    self.set_const_slot(slot, const_value);
                     return;
                 }
 
@@ -1483,8 +1266,9 @@ impl Compiler {
     ) -> Option<Vec<NamedParallelCallBranch>> {
         let mut compiled = Vec::with_capacity(branches.len());
         for branch in branches {
-            let Stmt::Expr(Expr::ToolCall(call)) = &branch.stmt else {
-                return None;
+            let call = match &branch.stmt {
+                Stmt::Call(call) | Stmt::Expr(Expr::ToolCall(call)) => call,
+                _ => return None,
             };
             if call.args.iter().any(|(_, expr)| !is_pure_expr(expr)) {
                 return None;
@@ -1557,14 +1341,29 @@ impl Compiler {
             Expr::ResultUnwrap(expr) => Ok(PureExpr::ResultUnwrap(Box::new(
                 self.compile_pure_expr(expr)?,
             ))),
-            Expr::BuiltinCall { name, args } => Ok(PureExpr::Builtin {
-                builtin: self.resolve_builtin(name),
-                args: args
-                    .iter()
-                    .map(|arg| self.compile_pure_expr(arg))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_boxed_slice(),
-            }),
+            Expr::BuiltinCall { name, args } => {
+                if name == "format"
+                    && let Some((Expr::String(template), value_args)) = args.split_first()
+                {
+                    return Ok(PureExpr::Format {
+                        template: compile_format_template(template, value_args.len()),
+                        args: value_args
+                            .iter()
+                            .map(|arg| self.compile_pure_expr(arg))
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
+                    });
+                }
+
+                Ok(PureExpr::Builtin {
+                    builtin: self.resolve_builtin(name),
+                    args: args
+                        .iter()
+                        .map(|arg| self.compile_pure_expr(arg))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice(),
+                })
+            }
             Expr::Field { target, field } => Ok(PureExpr::Field {
                 target: Box::new(self.compile_pure_expr(target)?),
                 field: self.push_name(field),
@@ -1724,11 +1523,8 @@ impl Compiler {
             for arg in value_args {
                 self.compile_expr(arg);
             }
-            let template = self.push_const(Value::String(template.clone()));
-            self.code.push(Instruction::FormatLiteral {
-                template,
-                argc: value_args.len(),
-            });
+            let template = self.push_format_template(template, value_args.len());
+            self.code.push(Instruction::FormatCompiled(template));
             return;
         }
 
@@ -1743,6 +1539,15 @@ impl Compiler {
                 self.code.push(Instruction::Join);
             }
             ("validate", 2) => {
+                if let Some(schema_wrapper) = self.fold_compile_time_expr(&args[1])
+                    && let Some(schema) = unwrap_type_value(&schema_wrapper).cloned()
+                {
+                    self.compile_expr(&args[0]);
+                    let schema = self.push_compiled_schema(&schema);
+                    self.code.push(Instruction::ValidateCompiled(schema));
+                    return;
+                }
+
                 self.compile_expr(&args[0]);
                 self.compile_expr(&args[1]);
                 self.code.push(Instruction::Validate);
@@ -1832,6 +1637,12 @@ impl Compiler {
                 } else if let Expr::Await(handle) = expr.as_ref() {
                     self.compile_expr(handle);
                     self.code.push(Instruction::AwaitHandleUnwrap);
+                } else if let Expr::Field { target, field } = expr.as_ref()
+                    && let Expr::Variable(name) = target.as_ref()
+                {
+                    let slot = self.push_slot(name);
+                    let field = self.push_name(field);
+                    self.code.push(Instruction::LoadFieldUnwrap { slot, field });
                 } else {
                     self.compile_expr(expr);
                     self.code.push(Instruction::ResultUnwrap);
@@ -2125,10 +1936,29 @@ struct SlotState {
 }
 
 impl SlotState {
-    fn from_globals(mut globals: Record, slot_names: &[String]) -> Self {
+    fn from_globals(mut globals: Record, slot_names: &[Name]) -> Self {
         let mut values = Vec::with_capacity(slot_names.len());
         for name in slot_names {
-            values.push(globals.remove(name));
+            values.push(globals.remove_symbol(name.symbol));
+        }
+        Self {
+            values,
+            extras: globals,
+        }
+    }
+
+    fn from_globals_with_scratch(
+        mut globals: Record,
+        slot_names: &[Name],
+        scratch: &mut ExecutionScratch,
+    ) -> Self {
+        let mut values = std::mem::take(&mut scratch.slot_values);
+        values.clear();
+        if values.capacity() < slot_names.len() {
+            values.reserve(slot_names.len() - values.capacity());
+        }
+        for name in slot_names {
+            values.push(globals.remove_symbol(name.symbol));
         }
         Self {
             values,
@@ -2154,18 +1984,40 @@ impl SlotState {
         self.values[slot] = restore.previous;
     }
 
-    fn into_globals(self, slot_names: &[String]) -> Record {
+    fn into_globals(self, slot_names: &[Name]) -> Record {
         let mut extras = self.extras;
         for (name, value) in slot_names.iter().zip(self.values) {
             match value {
                 Some(value) => {
-                    extras.insert(name.clone(), value);
+                    extras.insert_symbolized(name.symbol, name.text.clone(), value);
                 }
                 None => {
-                    extras.remove(name);
+                    extras.remove_symbol(name.symbol);
                 }
             }
         }
+        extras
+    }
+
+    fn recycle_into_globals(
+        self,
+        slot_names: &[Name],
+        slot_values: &mut Vec<Option<Value>>,
+    ) -> Record {
+        let mut extras = self.extras;
+        let mut values = self.values;
+        for (name, value) in slot_names.iter().zip(values.iter_mut()) {
+            match value.take() {
+                Some(value) => {
+                    extras.insert_symbolized(name.symbol, name.text.clone(), value);
+                }
+                None => {
+                    extras.remove_symbol(name.symbol);
+                }
+            }
+        }
+        values.clear();
+        *slot_values = values;
         extras
     }
 }
@@ -2237,17 +2089,26 @@ impl<'a, H: ToolHost> Vm<'a, H> {
     }
 
     fn run_inner(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
+        if self.profile.is_some() {
+            return self.run_inner_profiled();
+        }
+
         while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
             self.ip += 1;
-            // Profiling is the cold path; skip both tag lookup and timer when off.
-            let probe = self
-                .profile
-                .as_ref()
-                .map(|_| (instruction.profile_tag(), Instant::now()));
-            let result = self.execute_instruction(instruction);
-            if let Some((tag, start)) = probe {
-                self.record_instruction_profile(tag, start.elapsed().as_nanos());
+            if let Some(outcome) = self.execute_instruction(instruction)? {
+                return Ok(outcome);
             }
+        }
+        Ok(ExecutionOutcome::Continued)
+    }
+
+    fn run_inner_profiled(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
+        while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
+            self.ip += 1;
+            let tag = instruction.profile_tag();
+            let start = Instant::now();
+            let result = self.execute_instruction(instruction);
+            self.record_instruction_profile(tag, start.elapsed().as_nanos());
             if let Some(outcome) = result? {
                 return Ok(outcome);
             }
@@ -2256,21 +2117,45 @@ impl<'a, H: ToolHost> Vm<'a, H> {
     }
 
     fn run_inner_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
+        if self.profile.is_some() {
+            return self.run_inner_traced_profiled();
+        }
+
         while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
-            let span = self.chunk.spans.get(self.ip).copied().flatten();
+            let instruction_ip = self.ip;
             self.ip += 1;
-            let probe = self
-                .profile
-                .as_ref()
-                .map(|_| (instruction.profile_tag(), Instant::now()));
             let result = self.execute_instruction(instruction);
-            if let Some((tag, start)) = probe {
-                self.record_instruction_profile(tag, start.elapsed().as_nanos());
-            }
             match result {
                 Ok(Some(outcome)) => return Ok(outcome),
                 Ok(None) => {}
-                Err(error) => return Err(RuntimeFailure { error, span }),
+                Err(error) => {
+                    return Err(RuntimeFailure {
+                        error,
+                        span: self.chunk.spans.get(instruction_ip).copied().flatten(),
+                    });
+                }
+            }
+        }
+        Ok(ExecutionOutcome::Continued)
+    }
+
+    fn run_inner_traced_profiled(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
+        while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
+            let instruction_ip = self.ip;
+            self.ip += 1;
+            let tag = instruction.profile_tag();
+            let start = Instant::now();
+            let result = self.execute_instruction(instruction);
+            self.record_instruction_profile(tag, start.elapsed().as_nanos());
+            match result {
+                Ok(Some(outcome)) => return Ok(outcome),
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(RuntimeFailure {
+                        error,
+                        span: self.chunk.spans.get(instruction_ip).copied().flatten(),
+                    });
+                }
             }
         }
         Ok(ExecutionOutcome::Continued)
@@ -2285,12 +2170,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.stack.push(self.chunk.constants[index].clone());
             }
             Instruction::LoadName(name) => {
-                let slot_name = &self.chunk.slot_names[name];
-                let value = self.slots.get(name).cloned().ok_or_else(|| {
-                    RuntimeError::UndefinedVariable {
-                        name: slot_name.clone(),
-                    }
-                })?;
+                let value = self.load_slot(name)?.clone();
                 self.stack.push(value);
             }
             Instruction::StoreName(name) => {
@@ -2299,29 +2179,28 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.record_assignment(name);
                 self.last_value = Some(value);
             }
+            Instruction::StoreConst { slot, constant } => {
+                let value = self.chunk.constants[constant].clone();
+                self.slots.assign(slot, value.clone());
+                self.record_assignment(slot);
+                self.last_value = Some(value);
+            }
             Instruction::LoadField { slot, field } => {
-                let slot_name = &self.chunk.slot_names[slot];
-                let value =
-                    self.slots
-                        .get(slot)
-                        .ok_or_else(|| RuntimeError::UndefinedVariable {
-                            name: slot_name.clone(),
-                        })?;
+                let value = self.load_slot(slot)?;
                 self.stack
                     .push(read_field_ref(value, &self.chunk.names[field])?);
+            }
+            Instruction::LoadFieldUnwrap { slot, field } => {
+                let value = self.load_slot(slot)?;
+                let value = read_field_ref(value, &self.chunk.names[field])?;
+                self.stack.push(unwrap_tool_result(value)?);
             }
             Instruction::BuildList(len) => {
                 let values = self.pop_n(len)?;
                 self.stack.push(Value::List(values.into()));
             }
             Instruction::BuildRecord(keys) => {
-                let key_indices = &self.chunk.key_lists[keys];
-                let start = self.stack_drain_start(key_indices.len())?;
-                let mut record = record_with_capacity(key_indices.len());
-                for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
-                    let name_entry = &self.chunk.names[*key];
-                    record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
-                }
+                let record = self.drain_record_from_stack(keys)?;
                 self.stack.push(Value::Record(Arc::new(record)));
             }
             Instruction::Field(field) => {
@@ -2369,13 +2248,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 }
             }
             Instruction::CallTool { name, keys } => {
-                let key_indices = &self.chunk.key_lists[keys];
-                let start = self.stack_drain_start(key_indices.len())?;
-                let mut args = record_with_capacity(key_indices.len());
-                for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
-                    let name_entry = &self.chunk.names[*key];
-                    args.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
-                }
+                let args = self.drain_record_from_stack(keys)?;
                 let result = match self.host.call(self.chunk.names[name].text.as_ref(), &args) {
                     Ok(value) => success(value),
                     Err(error) => error_value(error.to_string()),
@@ -2383,13 +2256,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.stack.push(result);
             }
             Instruction::CallToolUnwrap { name, keys } => {
-                let key_indices = &self.chunk.key_lists[keys];
-                let start = self.stack_drain_start(key_indices.len())?;
-                let mut args = record_with_capacity(key_indices.len());
-                for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
-                    let name_entry = &self.chunk.names[*key];
-                    args.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
-                }
+                let args = self.drain_record_from_stack(keys)?;
                 let value = self
                     .host
                     .call(self.chunk.names[name].text.as_ref(), &args)
@@ -2399,13 +2266,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.stack.push(value);
             }
             Instruction::StartCallTool { name, keys } => {
-                let key_indices = &self.chunk.key_lists[keys];
-                let start = self.stack_drain_start(key_indices.len())?;
-                let mut args = record_with_capacity(key_indices.len());
-                for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
-                    let name_entry = &self.chunk.names[*key];
-                    args.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
-                }
+                let args = self.drain_record_from_stack(keys)?;
                 let result = self
                     .host
                     .start_call(self.chunk.names[name].text.as_ref(), &args)
@@ -2473,6 +2334,15 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 }
                 self.stack.push(value);
             }
+            Instruction::ValidateCompiled(schema) => {
+                let value = self.pop_stack()?;
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let value = execute_compiled_validate(value, &self.chunk.compiled_schemas[schema])?;
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Validate, start.elapsed().as_nanos());
+                }
+                self.stack.push(value);
+            }
             Instruction::Push => {
                 let item = self.pop_stack()?;
                 let list = self.pop_stack()?;
@@ -2493,19 +2363,15 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.stack.truncate(start_index);
                 self.stack.push(value);
             }
-            Instruction::FormatLiteral { template, argc } => {
-                let values = self.stack_tail(argc)?;
+            Instruction::FormatCompiled(template) => {
+                let template = &self.chunk.format_templates[template];
+                let values = self.stack_tail(template.argc)?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let Value::String(template) = &self.chunk.constants[template] else {
-                    return Err(RuntimeError::TypeError {
-                        message: "`format` template must be a string".to_string(),
-                    });
-                };
-                let value = Value::String(apply_format(template, values)?.into());
+                let value = Value::String(execute_compiled_format(template, values)?.into());
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Format, start.elapsed().as_nanos());
                 }
-                self.stack.truncate(self.stack.len() - argc);
+                self.stack.truncate(self.stack.len() - template.argc);
                 self.stack.push(value);
             }
             Instruction::AddAssign(slot) => {
@@ -2513,7 +2379,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let slot_name = &self.chunk.slot_names[slot];
                 let left = self.slots.get(slot).cloned().ok_or_else(|| {
                     RuntimeError::UndefinedVariable {
-                        name: slot_name.clone(),
+                        name: slot_name.text.to_string(),
                     }
                 })?;
                 let value = add_values(left, right)?;
@@ -2526,7 +2392,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let slot_name = &self.chunk.slot_names[slot];
                 let current = self.slots.get(slot).cloned().ok_or_else(|| {
                     RuntimeError::UndefinedVariable {
-                        name: slot_name.clone(),
+                        name: slot_name.text.to_string(),
                     }
                 })?;
                 let value = match current {
@@ -2638,7 +2504,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let slot_name = &self.chunk.slot_names[slot];
                 let value = self.slots.get(slot).cloned().ok_or_else(|| {
                     RuntimeError::UndefinedVariable {
-                        name: slot_name.clone(),
+                        name: slot_name.text.to_string(),
                     }
                 })?;
                 let schema =
@@ -2646,7 +2512,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                         .cloned()
                         .ok_or_else(|| RuntimeError::TypeError {
                             message: format!(
-                                "`{slot_name}` is not a Type value (missing `{LASH_TYPE_KEY}`)"
+                                "`{}` is not a Type value (missing `{LASH_TYPE_KEY}`)",
+                                slot_name.text
                             ),
                         })?;
                 self.stack.push(schema);
@@ -2777,112 +2644,122 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         branches_index: usize,
     ) -> Result<Value, RuntimeError> {
         let branches = &self.chunk.named_parallel_call_sets[branches_index];
-        let mut calls = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let value = eval_pure_expr(
-                &branch.args,
-                &self.slots,
-                &self.chunk.names,
-                &self.chunk.slot_names,
-            )?;
-            let Value::Record(args) = value else {
-                return Err(RuntimeError::TypeError {
-                    message: "parallel call args must compile to a record".to_string(),
-                });
-            };
-            calls.push(PreparedNamedParallelCall {
-                output_name: branch.output_name,
-                name: branch.name,
-                args: Arc::unwrap_or_clone(args),
-            });
+        match branches.len() {
+            0 => return Ok(Value::Record(Arc::new(Record::default()))),
+            1 => {
+                let call = self.prepare_named_parallel_call(&branches[0])?;
+                let result = Self::run_prepared_named_call(self.chunk, &call, self.host)?;
+                let mut record = record_with_capacity(1);
+                self.insert_named_parallel_call_result(&mut record, result);
+                return Ok(Value::Record(Arc::new(record)));
+            }
+            2 => {
+                let left_call = self.prepare_named_parallel_call(&branches[0])?;
+                let right_call = self.prepare_named_parallel_call(&branches[1])?;
+                let calls = [left_call, right_call];
+                let results = if let Some(results) =
+                    Self::run_prepared_named_calls_batch_2(self.chunk, &calls, self.host)
+                {
+                    results?
+                } else {
+                    let (left, right) = rayon::join(
+                        || Self::run_prepared_named_call(self.chunk, &calls[0], self.host),
+                        || Self::run_prepared_named_call(self.chunk, &calls[1], self.host),
+                    );
+                    [left?, right?]
+                };
+                let mut record = record_with_capacity(2);
+                for result in results {
+                    self.insert_named_parallel_call_result(&mut record, result);
+                }
+                return Ok(Value::Record(Arc::new(record)));
+            }
+            _ => {}
         }
 
-        let results = match calls.len() {
-            0 => Vec::new(),
-            1 => vec![Self::run_prepared_named_call(
-                self.chunk, &calls[0], self.host,
-            )?],
-            2 => {
-                let (left, right) = rayon::join(
-                    || Self::run_prepared_named_call(self.chunk, &calls[0], self.host),
-                    || Self::run_prepared_named_call(self.chunk, &calls[1], self.host),
-                );
-                vec![left?, right?]
-            }
-            _ => calls
-                .par_iter()
-                .map(|call| Self::run_prepared_named_call(self.chunk, call, self.host))
-                .collect::<Result<Vec<_>, _>>()?,
-        };
+        let mut calls = Vec::with_capacity(branches.len());
+        for branch in branches {
+            calls.push(self.prepare_named_parallel_call(branch)?);
+        }
 
+        let results = if let Some(results) =
+            Self::run_prepared_named_calls_batch(self.chunk, &calls, self.host)
+        {
+            results?
+        } else {
+            SmallVec::from_vec(
+                calls
+                    .par_iter()
+                    .map(|call| Self::run_prepared_named_call(self.chunk, call, self.host))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        };
         let mut record = record_with_capacity(results.len());
         for result in results {
-            let name_entry = &self.chunk.names[result.output_name];
-            record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), result.output);
+            self.insert_named_parallel_call_result(&mut record, result);
         }
         Ok(Value::Record(Arc::new(record)))
     }
 
     fn exec_parallel_calls(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
         let branches = &self.chunk.parallel_call_sets[branches_index];
-        if branches.is_empty() {
-            return Ok(());
-        }
-
-        let mut calls = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let value = eval_pure_expr(
-                &branch.args,
-                &self.slots,
-                &self.chunk.names,
-                &self.chunk.slot_names,
-            )?;
-            let Value::Record(args) = value else {
-                return Err(RuntimeError::TypeError {
-                    message: "parallel call args must compile to a record".to_string(),
-                });
-            };
-            calls.push(PreparedParallelCall {
-                slot: branch.slot,
-                name: branch.name,
-                args: Arc::unwrap_or_clone(args),
-            });
-        }
-
-        match calls.len() {
+        match branches.len() {
+            0 => Ok(()),
             1 => {
-                let result = Self::run_prepared_call(self.chunk, &calls[0], self.host)?;
+                let call = self.prepare_parallel_call(&branches[0])?;
+                let result = Self::run_prepared_call(self.chunk, &call, self.host)?;
                 self.slots.assign(result.slot, result.output);
                 self.record_assignment(result.slot);
                 Ok(())
             }
             2 => {
+                let left_call = self.prepare_parallel_call(&branches[0])?;
+                let right_call = self.prepare_parallel_call(&branches[1])?;
+                let calls = [left_call, right_call];
                 if calls[0].slot == calls[1].slot {
                     return Err(RuntimeError::ParallelConflict {
-                        name: self.chunk.slot_names[calls[0].slot].clone(),
+                        name: self.chunk.slot_names[calls[0].slot].text.to_string(),
                     });
                 }
-                let (left, right) = rayon::join(
-                    || Self::run_prepared_call(self.chunk, &calls[0], self.host),
-                    || Self::run_prepared_call(self.chunk, &calls[1], self.host),
-                );
-                let left = left?;
-                let right = right?;
-                self.slots.assign(left.slot, left.output);
-                self.record_assignment(left.slot);
-                self.slots.assign(right.slot, right.output);
-                self.record_assignment(right.slot);
+                let results = if let Some(results) =
+                    Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host)
+                {
+                    results?
+                } else {
+                    let (left, right) = rayon::join(
+                        || Self::run_prepared_call(self.chunk, &calls[0], self.host),
+                        || Self::run_prepared_call(self.chunk, &calls[1], self.host),
+                    );
+                    [left?, right?]
+                };
+                for result in results {
+                    self.slots.assign(result.slot, result.output);
+                    self.record_assignment(result.slot);
+                }
                 Ok(())
             }
             _ => {
-                let results = calls
-                    .par_iter()
-                    .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
-                    .collect::<Vec<_>>();
-                for result in results {
-                    let result = result?;
-                    self.slots.assign(result.slot, result.output);
-                    self.record_assignment(result.slot);
+                let mut calls = Vec::with_capacity(branches.len());
+                for branch in branches {
+                    calls.push(self.prepare_parallel_call(branch)?);
+                }
+                self.ensure_distinct_parallel_call_slots(&calls)?;
+                if let Some(results) = Self::run_prepared_calls_batch(self.chunk, &calls, self.host)
+                {
+                    for result in results? {
+                        self.slots.assign(result.slot, result.output);
+                        self.record_assignment(result.slot);
+                    }
+                } else {
+                    let results = calls
+                        .par_iter()
+                        .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
+                        .collect::<Vec<_>>();
+                    for result in results {
+                        let result = result?;
+                        self.slots.assign(result.slot, result.output);
+                        self.record_assignment(result.slot);
+                    }
                 }
                 Ok(())
             }
@@ -2891,73 +2768,314 @@ impl<'a, H: ToolHost> Vm<'a, H> {
 
     fn exec_parallel_calls_value(&mut self, branches_index: usize) -> Result<Value, RuntimeError> {
         let branches = &self.chunk.parallel_call_sets[branches_index];
-        if branches.is_empty() {
-            return Ok(Value::List(Vec::<Value>::new().into()));
-        }
-
-        let mut calls = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let value = eval_pure_expr(
-                &branch.args,
-                &self.slots,
-                &self.chunk.names,
-                &self.chunk.slot_names,
-            )?;
-            let Value::Record(args) = value else {
-                return Err(RuntimeError::TypeError {
-                    message: "parallel call args must compile to a record".to_string(),
-                });
-            };
-            calls.push(PreparedParallelCall {
-                slot: branch.slot,
-                name: branch.name,
-                args: Arc::unwrap_or_clone(args),
-            });
-        }
-
-        match calls.len() {
+        match branches.len() {
+            0 => Ok(Value::List(Vec::<Value>::new().into())),
             1 => {
-                let result = Self::run_prepared_call(self.chunk, &calls[0], self.host)?;
+                let call = self.prepare_parallel_call(&branches[0])?;
+                let result = Self::run_prepared_call(self.chunk, &call, self.host)?;
                 let output = result.output.clone();
                 self.slots.assign(result.slot, result.output);
                 self.record_assignment(result.slot);
                 Ok(Value::List(vec![output].into()))
             }
             2 => {
+                let left_call = self.prepare_parallel_call(&branches[0])?;
+                let right_call = self.prepare_parallel_call(&branches[1])?;
+                let calls = [left_call, right_call];
                 if calls[0].slot == calls[1].slot {
                     return Err(RuntimeError::ParallelConflict {
-                        name: self.chunk.slot_names[calls[0].slot].clone(),
+                        name: self.chunk.slot_names[calls[0].slot].text.to_string(),
                     });
                 }
-                let (left, right) = rayon::join(
-                    || Self::run_prepared_call(self.chunk, &calls[0], self.host),
-                    || Self::run_prepared_call(self.chunk, &calls[1], self.host),
-                );
-                let left = left?;
-                let right = right?;
-                let outputs = vec![left.output.clone(), right.output.clone()];
-                self.slots.assign(left.slot, left.output);
-                self.record_assignment(left.slot);
-                self.slots.assign(right.slot, right.output);
-                self.record_assignment(right.slot);
-                Ok(Value::List(outputs.into()))
-            }
-            _ => {
-                let results = calls
-                    .par_iter()
-                    .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
-                    .collect::<Vec<_>>();
-
-                let mut outputs = Vec::with_capacity(results.len());
+                let results = if let Some(results) =
+                    Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host)
+                {
+                    results?
+                } else {
+                    let (left, right) = rayon::join(
+                        || Self::run_prepared_call(self.chunk, &calls[0], self.host),
+                        || Self::run_prepared_call(self.chunk, &calls[1], self.host),
+                    );
+                    [left?, right?]
+                };
+                let mut outputs = Vec::with_capacity(2);
                 for result in results {
-                    let result = result?;
                     outputs.push(result.output.clone());
                     self.slots.assign(result.slot, result.output);
                     self.record_assignment(result.slot);
                 }
                 Ok(Value::List(outputs.into()))
             }
+            _ => {
+                let mut calls = Vec::with_capacity(branches.len());
+                for branch in branches {
+                    calls.push(self.prepare_parallel_call(branch)?);
+                }
+                self.ensure_distinct_parallel_call_slots(&calls)?;
+                if let Some(results) = Self::run_prepared_calls_batch(self.chunk, &calls, self.host)
+                {
+                    let results = results?;
+                    let mut outputs = Vec::with_capacity(results.len());
+                    for result in results {
+                        outputs.push(result.output.clone());
+                        self.slots.assign(result.slot, result.output);
+                        self.record_assignment(result.slot);
+                    }
+                    Ok(Value::List(outputs.into()))
+                } else {
+                    let results = calls
+                        .par_iter()
+                        .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
+                        .collect::<Vec<_>>();
+
+                    let mut outputs = Vec::with_capacity(results.len());
+                    for result in results {
+                        let result = result?;
+                        outputs.push(result.output.clone());
+                        self.slots.assign(result.slot, result.output);
+                        self.record_assignment(result.slot);
+                    }
+                    Ok(Value::List(outputs.into()))
+                }
+            }
         }
+    }
+
+    fn prepare_parallel_call(
+        &self,
+        branch: &ParallelCallBranch,
+    ) -> Result<PreparedParallelCall, RuntimeError> {
+        let value = eval_pure_expr(
+            &branch.args,
+            &self.slots,
+            &self.chunk.names,
+            &self.chunk.slot_names,
+        )?;
+        let Value::Record(args) = value else {
+            return Err(RuntimeError::TypeError {
+                message: "parallel call args must compile to a record".to_string(),
+            });
+        };
+        Ok(PreparedParallelCall {
+            slot: branch.slot,
+            name: branch.name,
+            args: Arc::unwrap_or_clone(args),
+        })
+    }
+
+    fn ensure_distinct_parallel_call_slots(
+        &self,
+        calls: &[PreparedParallelCall],
+    ) -> Result<(), RuntimeError> {
+        for (index, call) in calls.iter().enumerate() {
+            if calls[..index]
+                .iter()
+                .any(|previous| previous.slot == call.slot)
+            {
+                return Err(RuntimeError::ParallelConflict {
+                    name: self.chunk.slot_names[call.slot].text.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_named_parallel_call(
+        &self,
+        branch: &NamedParallelCallBranch,
+    ) -> Result<PreparedNamedParallelCall, RuntimeError> {
+        let value = eval_pure_expr(
+            &branch.args,
+            &self.slots,
+            &self.chunk.names,
+            &self.chunk.slot_names,
+        )?;
+        let Value::Record(args) = value else {
+            return Err(RuntimeError::TypeError {
+                message: "parallel call args must compile to a record".to_string(),
+            });
+        };
+        Ok(PreparedNamedParallelCall {
+            output_name: branch.output_name,
+            name: branch.name,
+            args: Arc::unwrap_or_clone(args),
+        })
+    }
+
+    fn insert_named_parallel_call_result(
+        &self,
+        record: &mut Record,
+        result: NamedParallelCallResult,
+    ) {
+        let name_entry = &self.chunk.names[result.output_name];
+        record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), result.output);
+    }
+
+    fn run_host_batch<const N: usize>(
+        host_calls: &[(&str, &Record)],
+        host: &'a H,
+    ) -> HostBatchRun<N>
+    where
+        [HostBatchItemResult; N]: smallvec::Array<Item = HostBatchItemResult>,
+    {
+        let mut results = HostBatchResults::<N>::new();
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            host.call_batch(host_calls, &mut |result| results.push(result))
+        }));
+        match run {
+            Ok(true) => Some(Ok(results)),
+            Ok(false) => None,
+            Err(_) => Some(Err(RuntimeError::ValueError {
+                message: "parallel branch panicked".to_string(),
+            })),
+        }
+    }
+
+    fn run_prepared_calls_batch(
+        chunk: &'a Chunk,
+        calls: &[PreparedParallelCall],
+        host: &'a H,
+    ) -> Option<Result<SmallVec<[ParallelCallResult; 4]>, RuntimeError>> {
+        let host_calls = calls
+            .iter()
+            .map(|call| (chunk.names[call.name].text.as_ref(), &call.args))
+            .collect::<SmallVec<[(&str, &Record); 4]>>();
+        let results = Self::run_host_batch::<4>(&host_calls, host)?;
+        Some(results.and_then(|results| Self::finish_prepared_calls_batch(calls, results)))
+    }
+
+    fn run_prepared_calls_batch_2(
+        chunk: &'a Chunk,
+        calls: &[PreparedParallelCall; 2],
+        host: &'a H,
+    ) -> Option<Result<[ParallelCallResult; 2], RuntimeError>> {
+        let host_calls = [
+            (chunk.names[calls[0].name].text.as_ref(), &calls[0].args),
+            (chunk.names[calls[1].name].text.as_ref(), &calls[1].args),
+        ];
+        let results = Self::run_host_batch::<2>(&host_calls, host)?;
+        Some(results.and_then(|results| Self::finish_prepared_calls_batch_2(calls, results)))
+    }
+
+    fn finish_prepared_call_result(
+        call: &PreparedParallelCall,
+        result: Result<Value, ToolHostError>,
+    ) -> ParallelCallResult {
+        ParallelCallResult {
+            slot: call.slot,
+            output: match result {
+                Ok(value) => success(value),
+                Err(error) => error_value(error.to_string()),
+            },
+        }
+    }
+
+    fn finish_host_batch_pair(
+        results: HostBatchResults<2>,
+    ) -> Result<[HostBatchItemResult; 2], RuntimeError> {
+        if results.len() != 2 {
+            return Err(RuntimeError::ValueError {
+                message: "parallel call batch returned the wrong number of results".to_string(),
+            });
+        }
+        let mut results = results.into_iter();
+        Ok([
+            results.next().expect("length checked"),
+            results.next().expect("length checked"),
+        ])
+    }
+
+    fn finish_prepared_calls_batch_2(
+        calls: &[PreparedParallelCall; 2],
+        results: HostBatchResults<2>,
+    ) -> Result<[ParallelCallResult; 2], RuntimeError> {
+        let [left, right] = Self::finish_host_batch_pair(results)?;
+        Ok([
+            Self::finish_prepared_call_result(&calls[0], left),
+            Self::finish_prepared_call_result(&calls[1], right),
+        ])
+    }
+
+    fn finish_prepared_calls_batch(
+        calls: &[PreparedParallelCall],
+        results: HostBatchResults<4>,
+    ) -> Result<SmallVec<[ParallelCallResult; 4]>, RuntimeError> {
+        if results.len() != calls.len() {
+            return Err(RuntimeError::ValueError {
+                message: "parallel call batch returned the wrong number of results".to_string(),
+            });
+        }
+        Ok(calls
+            .iter()
+            .zip(results)
+            .map(|(call, result)| Self::finish_prepared_call_result(call, result))
+            .collect())
+    }
+
+    fn run_prepared_named_calls_batch(
+        chunk: &'a Chunk,
+        calls: &[PreparedNamedParallelCall],
+        host: &'a H,
+    ) -> Option<Result<SmallVec<[NamedParallelCallResult; 4]>, RuntimeError>> {
+        let host_calls = calls
+            .iter()
+            .map(|call| (chunk.names[call.name].text.as_ref(), &call.args))
+            .collect::<SmallVec<[(&str, &Record); 4]>>();
+        let results = Self::run_host_batch::<4>(&host_calls, host)?;
+        Some(results.and_then(|results| Self::finish_prepared_named_calls_batch(calls, results)))
+    }
+
+    fn run_prepared_named_calls_batch_2(
+        chunk: &'a Chunk,
+        calls: &[PreparedNamedParallelCall; 2],
+        host: &'a H,
+    ) -> Option<Result<[NamedParallelCallResult; 2], RuntimeError>> {
+        let host_calls = [
+            (chunk.names[calls[0].name].text.as_ref(), &calls[0].args),
+            (chunk.names[calls[1].name].text.as_ref(), &calls[1].args),
+        ];
+        let results = Self::run_host_batch::<2>(&host_calls, host)?;
+        Some(results.and_then(|results| Self::finish_prepared_named_calls_batch_2(calls, results)))
+    }
+
+    fn finish_prepared_named_call_result(
+        call: &PreparedNamedParallelCall,
+        result: Result<Value, ToolHostError>,
+    ) -> NamedParallelCallResult {
+        NamedParallelCallResult {
+            output_name: call.output_name,
+            output: match result {
+                Ok(value) => success(value),
+                Err(error) => error_value(error.to_string()),
+            },
+        }
+    }
+
+    fn finish_prepared_named_calls_batch_2(
+        calls: &[PreparedNamedParallelCall; 2],
+        results: HostBatchResults<2>,
+    ) -> Result<[NamedParallelCallResult; 2], RuntimeError> {
+        let [left, right] = Self::finish_host_batch_pair(results)?;
+        Ok([
+            Self::finish_prepared_named_call_result(&calls[0], left),
+            Self::finish_prepared_named_call_result(&calls[1], right),
+        ])
+    }
+
+    fn finish_prepared_named_calls_batch(
+        calls: &[PreparedNamedParallelCall],
+        results: HostBatchResults<4>,
+    ) -> Result<SmallVec<[NamedParallelCallResult; 4]>, RuntimeError> {
+        if results.len() != calls.len() {
+            return Err(RuntimeError::ValueError {
+                message: "parallel call batch returned the wrong number of results".to_string(),
+            });
+        }
+        Ok(calls
+            .iter()
+            .zip(results)
+            .map(|(call, result)| Self::finish_prepared_named_call_result(call, result))
+            .collect())
     }
 
     fn run_branch(
@@ -3032,7 +3150,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         for (slot, value) in result.values {
             if std::mem::replace(&mut merged_names[slot], true) {
                 return Err(RuntimeError::ParallelConflict {
-                    name: self.chunk.slot_names[slot].clone(),
+                    name: self.chunk.slot_names[slot].text.to_string(),
                 });
             }
             self.slots.assign(slot, value);
@@ -3045,6 +3163,25 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         self.stack.pop().ok_or_else(|| RuntimeError::ValueError {
             message: "vm stack underflow".to_string(),
         })
+    }
+
+    fn load_slot(&self, slot: usize) -> Result<&Value, RuntimeError> {
+        self.slots
+            .get(slot)
+            .ok_or_else(|| RuntimeError::UndefinedVariable {
+                name: self.chunk.slot_names[slot].text.to_string(),
+            })
+    }
+
+    fn drain_record_from_stack(&mut self, keys: usize) -> Result<Record, RuntimeError> {
+        let key_indices = &self.chunk.key_lists[keys];
+        let start = self.stack_drain_start(key_indices.len())?;
+        let mut record = record_with_capacity(key_indices.len());
+        for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
+            let name_entry = &self.chunk.names[*key];
+            record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
+        }
+        Ok(record)
     }
 
     fn await_value(&self, handle: Value) -> Value {
@@ -3163,7 +3300,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         self.iter_stack.clear();
         scratch.stack = std::mem::take(&mut self.stack);
         scratch.iter_stack = std::mem::take(&mut self.iter_stack);
-        self.slots.into_globals(&self.chunk.slot_names)
+        self.slots
+            .recycle_into_globals(&self.chunk.slot_names, &mut scratch.slot_values)
     }
 
     fn record_instruction_profile(&mut self, tag: InstructionProfileTag, elapsed_ns: u128) {
@@ -3218,6 +3356,10 @@ struct PreparedNamedParallelCall {
     name: usize,
     args: Record,
 }
+
+type HostBatchItemResult = Result<Value, ToolHostError>;
+type HostBatchResults<const N: usize> = SmallVec<[HostBatchItemResult; N]>;
+type HostBatchRun<const N: usize> = Option<Result<HostBatchResults<N>, RuntimeError>>;
 
 struct IterState {
     values: Arc<[Value]>,
@@ -3425,7 +3567,7 @@ fn eval_pure_expr(
     expr: &PureExpr,
     slots: &SlotState,
     names: &[Name],
-    slot_names: &[String],
+    slot_names: &[Name],
 ) -> Result<Value, RuntimeError> {
     match expr {
         PureExpr::Const(value) => Ok(value.clone()),
@@ -3434,7 +3576,7 @@ fn eval_pure_expr(
                 .get(*slot)
                 .cloned()
                 .ok_or_else(|| RuntimeError::UndefinedVariable {
-                    name: slot_names[*slot].clone(),
+                    name: slot_names[*slot].text.to_string(),
                 })
         }
         PureExpr::List(items) => Ok(Value::List(
@@ -3457,11 +3599,20 @@ fn eval_pure_expr(
             Ok(Value::Record(Arc::new(record)))
         }
         PureExpr::Builtin { builtin, args } => {
-            let values = args
-                .iter()
-                .map(|arg| eval_pure_expr(arg, slots, names, slot_names))
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut values = SmallVec::<[Value; 8]>::with_capacity(args.len());
+            for arg in args.iter() {
+                values.push(eval_pure_expr(arg, slots, names, slot_names)?);
+            }
             execute_builtin(*builtin, names, &values)
+        }
+        PureExpr::Format { template, args } => {
+            let mut values = SmallVec::<[Value; 8]>::with_capacity(args.len());
+            for arg in args.iter() {
+                values.push(eval_pure_expr(arg, slots, names, slot_names)?);
+            }
+            Ok(Value::String(
+                execute_compiled_format(template, &values)?.into(),
+            ))
         }
         PureExpr::ResultUnwrap(expr) => {
             let value = eval_pure_expr(expr, slots, names, slot_names)?;
@@ -3728,8 +3879,22 @@ fn execute_validate_builtin(value: Value, schema: &Value) -> Result<Value, Runti
     let schema = unwrap_type_value(schema).ok_or_else(|| RuntimeError::TypeError {
         message: "`validate` requires a Type literal as the second argument".to_string(),
     })?;
+    execute_validate_schema(value, schema)
+}
+
+fn execute_validate_schema(value: Value, schema: &Value) -> Result<Value, RuntimeError> {
     validate_value_against_schema(&value, schema).map_err(|message| RuntimeError::ValueError {
         message: format!("validation failed: {message}"),
+    })?;
+    Ok(value)
+}
+
+fn execute_compiled_validate(value: Value, schema: &CompiledSchema) -> Result<Value, RuntimeError> {
+    let mut path = SmallVec::<[PathSegment<'_>; 8]>::new();
+    validate_compiled_schema_node(&value, schema, &mut path).map_err(|message| {
+        RuntimeError::ValueError {
+            message: format!("validation failed: {message}"),
+        }
     })?;
     Ok(value)
 }
@@ -3799,9 +3964,230 @@ fn build_range(start: i64, end: i64) -> Result<Value, RuntimeError> {
     ))
 }
 
+fn compile_schema_value(schema: &Value) -> CompiledSchema {
+    let Some(schema_obj) = schema.as_record() else {
+        return CompiledSchema {
+            kind: CompiledSchemaKind::Any,
+        };
+    };
+
+    if let Some(Value::List(allowed)) = schema_obj.get("enum") {
+        return CompiledSchema {
+            kind: CompiledSchemaKind::Enum(allowed.iter().cloned().collect::<Vec<_>>().into()),
+        };
+    }
+
+    let schema_type = match schema_obj.get("type") {
+        Some(Value::String(expected)) => SchemaType::from_schema_name(expected.as_str()),
+        _ => None,
+    };
+
+    match schema_type {
+        Some(SchemaType::Array) => {
+            let item_schema =
+                schema_obj
+                    .get("items")
+                    .map(compile_schema_value)
+                    .unwrap_or(CompiledSchema {
+                        kind: CompiledSchemaKind::Any,
+                    });
+            CompiledSchema {
+                kind: CompiledSchemaKind::List(Box::new(item_schema)),
+            }
+        }
+        Some(SchemaType::Object) => {
+            let required = match schema_obj.get("required") {
+                Some(Value::List(required)) => required
+                    .iter()
+                    .filter_map(|field| match field {
+                        Value::String(name) => Some(CompiledSchemaField {
+                            symbol: intern_symbol(name.as_str()),
+                            name: Arc::<str>::from(name.as_str()),
+                            schema: CompiledSchema {
+                                kind: CompiledSchemaKind::Any,
+                            },
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                _ => Box::default(),
+            };
+            let properties = match schema_obj.get("properties") {
+                Some(Value::Record(properties)) => properties
+                    .entries
+                    .iter()
+                    .map(|entry| CompiledSchemaField {
+                        symbol: entry.symbol,
+                        name: entry.name.clone(),
+                        schema: compile_schema_value(&entry.value),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                _ => Box::default(),
+            };
+            CompiledSchema {
+                kind: CompiledSchemaKind::Object {
+                    required,
+                    properties,
+                },
+            }
+        }
+        Some(kind) => CompiledSchema {
+            kind: CompiledSchemaKind::Type(kind),
+        },
+        None => CompiledSchema {
+            kind: CompiledSchemaKind::Any,
+        },
+    }
+}
+
 fn validate_value_against_schema(value: &Value, schema: &Value) -> Result<(), String> {
     let mut path = "$".to_string();
     validate_schema_node(value, schema, &mut path)
+}
+
+#[derive(Clone, Copy)]
+enum PathSegment<'a> {
+    Field(&'a str),
+    Index(usize),
+}
+
+impl SchemaType {
+    fn from_schema_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "string" => Self::String,
+            "number" => Self::Number,
+            "integer" => Self::Integer,
+            "boolean" => Self::Boolean,
+            "array" => Self::Array,
+            "object" => Self::Object,
+            "null" => Self::Null,
+            _ => return None,
+        })
+    }
+
+    fn schema_name(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Array => "array",
+            Self::Object => "object",
+            Self::Null => "null",
+        }
+    }
+
+    fn matches(self, value: &Value) -> bool {
+        match self {
+            Self::String => matches!(value, Value::String(_)),
+            Self::Number => matches!(value, Value::Number(number) if number.is_finite()),
+            Self::Integer => {
+                matches!(value, Value::Number(number) if number.is_finite() && number.fract() == 0.0)
+            }
+            Self::Boolean => matches!(value, Value::Bool(_)),
+            Self::Array => matches!(value, Value::List(_)),
+            Self::Object => matches!(value, Value::Record(_)),
+            Self::Null => matches!(value, Value::Null),
+        }
+    }
+}
+
+fn validate_compiled_schema_type(
+    value: &Value,
+    expected: SchemaType,
+    path: &[PathSegment<'_>],
+) -> Result<(), String> {
+    if expected.matches(value) {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: expected {}, got {}",
+        format_schema_path(path),
+        expected.schema_name(),
+        schema_value_type_name(value)
+    ))
+}
+
+fn validate_compiled_schema_node<'a>(
+    value: &Value,
+    schema: &'a CompiledSchema,
+    path: &mut SmallVec<[PathSegment<'a>; 8]>,
+) -> Result<(), String> {
+    match &schema.kind {
+        CompiledSchemaKind::Any => Ok(()),
+        CompiledSchemaKind::Type(expected) => validate_compiled_schema_type(value, *expected, path),
+        CompiledSchemaKind::Enum(allowed) => {
+            validate_compiled_schema_type(value, SchemaType::String, path)?;
+            if allowed.iter().any(|candidate| candidate == value) {
+                return Ok(());
+            }
+            let allowed = allowed
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "{}: expected one of [{allowed}], got {value}",
+                format_schema_path(path)
+            ))
+        }
+        CompiledSchemaKind::List(items_schema) => {
+            validate_compiled_schema_type(value, SchemaType::Array, path)?;
+            let Value::List(items) = value else {
+                return Ok(());
+            };
+            for (index, item) in items.iter().enumerate() {
+                path.push(PathSegment::Index(index));
+                validate_compiled_schema_node(item, items_schema, path)?;
+                path.pop();
+            }
+            Ok(())
+        }
+        CompiledSchemaKind::Object {
+            required,
+            properties,
+        } => {
+            validate_compiled_schema_type(value, SchemaType::Object, path)?;
+            let Value::Record(record) = value else {
+                return Ok(());
+            };
+            for field in required.iter() {
+                if record.get_symbol(field.symbol).is_none() {
+                    return Err(format!(
+                        "{}: missing required field `{}`",
+                        format_schema_path(path),
+                        field.name
+                    ));
+                }
+            }
+            for field in properties.iter() {
+                if let Some(field_value) = record.get_symbol(field.symbol) {
+                    path.push(PathSegment::Field(field.name.as_ref()));
+                    validate_compiled_schema_node(field_value, &field.schema, path)?;
+                    path.pop();
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn format_schema_path(path: &[PathSegment<'_>]) -> String {
+    let mut formatted = "$".to_string();
+    for segment in path {
+        match segment {
+            PathSegment::Field(name) => {
+                formatted.push('.');
+                formatted.push_str(name);
+            }
+            PathSegment::Index(index) => {
+                write!(formatted, "[{index}]").expect("string writes should not fail");
+            }
+        }
+    }
+    formatted
 }
 
 fn validate_schema_node(value: &Value, schema: &Value, path: &mut String) -> Result<(), String> {
@@ -3921,19 +4307,17 @@ fn unwrap_tool_result(value: Value) -> Result<Value, RuntimeError> {
         });
     };
 
-    match record.get("ok") {
-        Some(Value::Bool(true)) => {
-            record
-                .get("value")
-                .cloned()
-                .ok_or_else(|| RuntimeError::TypeError {
-                    message: "`?` found a successful tool result wrapper missing `value`"
-                        .to_string(),
-                })
-        }
+    let result_names = result_wrapper_names();
+    match record.get_symbol(result_names.ok.symbol) {
+        Some(Value::Bool(true)) => record
+            .get_symbol(result_names.value.symbol)
+            .cloned()
+            .ok_or_else(|| RuntimeError::TypeError {
+                message: "`?` found a successful tool result wrapper missing `value`".to_string(),
+            }),
         Some(Value::Bool(false)) => {
             let message = record
-                .get("error")
+                .get_symbol(result_names.error.symbol)
                 .map(Value::to_string)
                 .unwrap_or_else(|| "unknown error".to_string());
             Err(RuntimeError::ValueError {
@@ -4109,16 +4493,34 @@ fn is_truthy(value: &Value) -> bool {
 }
 
 fn success(value: Value) -> Value {
+    let result_names = result_wrapper_names();
     let mut record = record_with_capacity(2);
-    record.insert_symbol(intern_symbol("ok"), Value::Bool(true));
-    record.insert_symbol(intern_symbol("value"), value);
+    record.insert_symbolized(
+        result_names.ok.symbol,
+        result_names.ok.text.clone(),
+        Value::Bool(true),
+    );
+    record.insert_symbolized(
+        result_names.value.symbol,
+        result_names.value.text.clone(),
+        value,
+    );
     Value::Record(Arc::new(record))
 }
 
 fn error_value(message: String) -> Value {
+    let result_names = result_wrapper_names();
     let mut record = record_with_capacity(2);
-    record.insert_symbol(intern_symbol("ok"), Value::Bool(false));
-    record.insert_symbol(intern_symbol("error"), Value::String(message.into()));
+    record.insert_symbolized(
+        result_names.ok.symbol,
+        result_names.ok.text.clone(),
+        Value::Bool(false),
+    );
+    record.insert_symbolized(
+        result_names.error.symbol,
+        result_names.error.text.clone(),
+        Value::String(message.into()),
+    );
     Value::Record(Arc::new(record))
 }
 
@@ -4204,6 +4606,7 @@ fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> 
     let mut uses_sequential = false;
     let mut uses_indexed = false;
     let mut next_sequential = 0usize;
+    let mut used_indexed_bits = 0u64;
     let mut used_indexed_args: Option<Vec<bool>> = None;
     while index < bytes.len() {
         match bytes[index] {
@@ -4246,16 +4649,20 @@ fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> 
                         });
                     }
                     uses_indexed = true;
-                    let used_args =
-                        used_indexed_args.get_or_insert_with(|| vec![false; args.len()]);
                     let digits = &template[index + 1..cursor];
                     let slot = digits
                         .parse::<usize>()
                         .map_err(|_| RuntimeError::ValueError {
                             message: format!("bad format slot `{digits}`"),
                         })?;
-                    if slot < used_args.len() {
-                        used_args[slot] = true;
+                    if slot < args.len() {
+                        if args.len() <= u64::BITS as usize {
+                            used_indexed_bits |= 1u64 << slot;
+                        } else {
+                            let used_args =
+                                used_indexed_args.get_or_insert_with(|| vec![false; args.len()]);
+                            used_args[slot] = true;
+                        }
                     }
                     (slot, Some(digits))
                 };
@@ -4291,9 +4698,13 @@ fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> 
     let unused_index = if uses_sequential {
         (next_sequential < args.len()).then_some(next_sequential)
     } else if uses_indexed {
-        used_indexed_args
-            .as_ref()
-            .and_then(|used_args| used_args.iter().position(|used| !*used))
+        if args.len() <= u64::BITS as usize {
+            (0..args.len()).find(|slot| used_indexed_bits & (1u64 << slot) == 0)
+        } else {
+            used_indexed_args
+                .as_ref()
+                .and_then(|used_args| used_args.iter().position(|used| !*used))
+        }
     } else {
         (!args.is_empty()).then_some(0)
     };
@@ -4301,6 +4712,160 @@ fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> 
         return Err(RuntimeError::ValueError {
             message: format!("format argument `{unused_index}` is unused"),
         });
+    }
+    Ok(output)
+}
+
+fn compile_format_template(template: &str, argc: usize) -> CompiledFormatTemplate {
+    match parse_format_template(template, argc) {
+        Ok(parts) => CompiledFormatTemplate {
+            parts: parts.into_boxed_slice(),
+            argc,
+            min_capacity: template.len(),
+            error: None,
+        },
+        Err(message) => CompiledFormatTemplate {
+            parts: Box::new([]),
+            argc,
+            min_capacity: template.len(),
+            error: Some(message),
+        },
+    }
+}
+
+fn parse_format_template(template: &str, argc: usize) -> Result<Vec<CompiledFormatPart>, String> {
+    let mut parts = Vec::new();
+    let bytes = template.as_bytes();
+    let mut index = 0;
+    let mut last_literal = 0;
+    let mut uses_sequential = false;
+    let mut uses_indexed = false;
+    let mut next_sequential = 0usize;
+    let mut used_indexed_bits = 0u64;
+    let mut used_indexed_args: Option<Vec<bool>> = None;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' if bytes.get(index + 1) == Some(&b'{') => {
+                push_format_literal(&mut parts, &template[last_literal..index]);
+                push_format_literal(&mut parts, "{");
+                index += 2;
+                last_literal = index;
+                continue;
+            }
+            b'{' => {
+                push_format_literal(&mut parts, &template[last_literal..index]);
+                let mut cursor = index + 1;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                    cursor += 1;
+                }
+
+                let (slot, slot_text) = if cursor >= bytes.len() {
+                    return Err("unmatched `{` in format string".to_string());
+                } else if bytes[cursor] != b'}' {
+                    return Err("invalid format placeholder".to_string());
+                } else if cursor == index + 1 {
+                    if uses_indexed {
+                        return Err("can't mix `{}` and indexed format placeholders".to_string());
+                    }
+                    uses_sequential = true;
+                    let slot = next_sequential;
+                    next_sequential += 1;
+                    (slot, None)
+                } else {
+                    if uses_sequential {
+                        return Err("can't mix `{}` and indexed format placeholders".to_string());
+                    }
+                    uses_indexed = true;
+                    let digits = &template[index + 1..cursor];
+                    let slot = digits
+                        .parse::<usize>()
+                        .map_err(|_| format!("bad format slot `{digits}`"))?;
+                    if slot < argc {
+                        if argc <= u64::BITS as usize {
+                            used_indexed_bits |= 1u64 << slot;
+                        } else {
+                            let used_args =
+                                used_indexed_args.get_or_insert_with(|| vec![false; argc]);
+                            used_args[slot] = true;
+                        }
+                    }
+                    (slot, Some(digits))
+                };
+
+                if slot >= argc {
+                    return Err(match slot_text {
+                        Some(slot_text) => format!("format slot `{slot_text}` is out of range"),
+                        None => "format slot `{}` is out of range".to_string(),
+                    });
+                }
+                parts.push(CompiledFormatPart::Arg(slot));
+                index = cursor + 1;
+                last_literal = index;
+                continue;
+            }
+            b'}' if bytes.get(index + 1) == Some(&b'}') => {
+                push_format_literal(&mut parts, &template[last_literal..index]);
+                push_format_literal(&mut parts, "}");
+                index += 2;
+                last_literal = index;
+                continue;
+            }
+            b'}' => {
+                return Err("unmatched `}` in format string".to_string());
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    push_format_literal(&mut parts, &template[last_literal..]);
+    let unused_index = if uses_sequential {
+        (next_sequential < argc).then_some(next_sequential)
+    } else if uses_indexed {
+        if argc <= u64::BITS as usize {
+            (0..argc).find(|slot| used_indexed_bits & (1u64 << slot) == 0)
+        } else {
+            used_indexed_args
+                .as_ref()
+                .and_then(|used_args| used_args.iter().position(|used| !*used))
+        }
+    } else {
+        (argc > 0).then_some(0)
+    };
+    if let Some(unused_index) = unused_index {
+        return Err(format!("format argument `{unused_index}` is unused"));
+    }
+    Ok(parts)
+}
+
+fn push_format_literal(parts: &mut Vec<CompiledFormatPart>, literal: &str) {
+    if !literal.is_empty() {
+        parts.push(CompiledFormatPart::Literal(Arc::<str>::from(literal)));
+    }
+}
+
+fn execute_compiled_format(
+    template: &CompiledFormatTemplate,
+    args: &[Value],
+) -> Result<String, RuntimeError> {
+    if let Some(message) = &template.error {
+        return Err(RuntimeError::ValueError {
+            message: message.clone(),
+        });
+    }
+
+    let mut output = String::with_capacity(template.min_capacity);
+    for part in template.parts.iter() {
+        match part {
+            CompiledFormatPart::Literal(literal) => output.push_str(literal),
+            CompiledFormatPart::Arg(slot) => {
+                let value = args.get(*slot).ok_or_else(|| RuntimeError::ValueError {
+                    message: format!("format slot `{slot}` is out of range"),
+                })?;
+                append_stringified_value(&mut output, value)?;
+            }
+        }
     }
     Ok(output)
 }

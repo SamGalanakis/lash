@@ -1,11 +1,10 @@
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 
 use lashlang::{
-    CompiledProgram, ExecutionOutcome, ExecutionScratch, ParseError as FlowParseError,
+    CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ParseError as FlowParseError,
     Record as FlowRecord, Snapshot as FlowSnapshot, State as FlowState, ToolHost, ToolHostError,
     Value as FlowValue,
 };
@@ -64,6 +63,10 @@ pub enum LashlangResponse {
         args: Value,
         result_tx: std_mpsc::Sender<LashlangToolReply>,
     },
+    ToolBatchCall {
+        calls: Vec<LashlangToolBatchItem>,
+        result_tx: std_mpsc::Sender<Vec<LashlangToolReply>>,
+    },
     StartToolCall {
         id: String,
         name: String,
@@ -108,6 +111,13 @@ pub enum LashlangResponse {
     CheckCompleteResult {
         is_complete: bool,
     },
+}
+
+#[derive(Debug)]
+pub struct LashlangToolBatchItem {
+    pub id: String,
+    pub name: String,
+    pub args: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -208,7 +218,7 @@ impl RuntimeConfig {
 struct RuntimeState {
     config: RuntimeConfig,
     rlm: FlowState,
-    program_cache: ProgramCache,
+    program_cache: CompiledProgramCache,
     scratch: ExecutionScratch,
 }
 
@@ -218,45 +228,9 @@ impl RuntimeState {
         Self {
             config: RuntimeConfig::default(),
             rlm: FlowState::new(),
-            program_cache: ProgramCache::default(),
+            program_cache: CompiledProgramCache::default(),
             scratch: ExecutionScratch::new(),
         }
-    }
-}
-
-const PROGRAM_CACHE_CAPACITY: usize = 64;
-
-#[derive(Default)]
-struct ProgramCache {
-    entries: VecDeque<CachedProgram>,
-}
-
-struct CachedProgram {
-    source: String,
-    compiled: Arc<CompiledProgram>,
-}
-
-impl ProgramCache {
-    fn get_or_compile(&mut self, source: &str) -> Result<Arc<CompiledProgram>, FlowParseError> {
-        if let Some(index) = self.entries.iter().position(|entry| entry.source == source) {
-            let entry = self
-                .entries
-                .remove(index)
-                .expect("cache index came from existing entry");
-            let compiled = entry.compiled.clone();
-            self.entries.push_back(entry);
-            return Ok(compiled);
-        }
-
-        let compiled = Arc::new(lashlang::compile_source(source)?);
-        if self.entries.len() == PROGRAM_CACHE_CAPACITY {
-            self.entries.pop_front();
-        }
-        self.entries.push_back(CachedProgram {
-            source: source.to_string(),
-            compiled: compiled.clone(),
-        });
-        Ok(compiled)
     }
 }
 
@@ -421,23 +395,54 @@ struct HostBridge<'a> {
 
 impl ToolHost for HostBridge<'_> {
     fn call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
-        let mut payload = flow_to_json_value(&FlowValue::Record(Arc::new(args.clone())));
-        if let Some(obj) = payload.as_object_mut() {
-            obj.entry("__session_id__".to_string())
-                .or_insert_with(|| Value::String(self.session_id.clone()));
-        }
-
+        let payload = self.tool_payload(args);
         let result_rx = send_tool_call(self.response_tx, name, payload)?;
         wait_tool_result(result_rx)
     }
 
-    fn start_call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
-        let mut payload = flow_to_json_value(&FlowValue::Record(Arc::new(args.clone())));
-        if let Some(obj) = payload.as_object_mut() {
-            obj.entry("__session_id__".to_string())
-                .or_insert_with(|| Value::String(self.session_id.clone()));
+    fn call_batch(
+        &self,
+        calls: &[(&str, &FlowRecord)],
+        push_result: &mut dyn FnMut(Result<FlowValue, ToolHostError>),
+    ) -> bool {
+        if calls.is_empty() {
+            return true;
         }
 
+        let mut batch = Vec::with_capacity(calls.len());
+        for (name, args) in calls {
+            batch.push(LashlangToolBatchItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: (*name).to_string(),
+                args: self.tool_payload(args),
+            });
+        }
+
+        match send_tool_batch_call(self.response_tx, batch).and_then(wait_tool_batch_results) {
+            Ok(results) if results.len() == calls.len() => {
+                for result in results {
+                    push_result(result);
+                }
+            }
+            Ok(_) => {
+                for _ in calls {
+                    push_result(Err(ToolHostError::new(
+                        "tool batch returned the wrong number of results",
+                    )));
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                for _ in calls {
+                    push_result(Err(ToolHostError::new(message.clone())));
+                }
+            }
+        }
+        true
+    }
+
+    fn start_call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
+        let payload = self.tool_payload(args);
         let result_rx = send_start_tool_call(self.response_tx, name, payload)?;
         wait_tool_result(result_rx)
     }
@@ -462,6 +467,17 @@ impl ToolHost for HostBridge<'_> {
     }
 }
 
+impl HostBridge<'_> {
+    fn tool_payload(&self, args: &FlowRecord) -> Value {
+        let mut payload = flow_record_to_json_value(args);
+        if let Some(obj) = payload.as_object_mut() {
+            obj.entry("__session_id__".to_string())
+                .or_insert_with(|| Value::String(self.session_id.clone()));
+        }
+        payload
+    }
+}
+
 fn send_tool_call(
     response_tx: &std_mpsc::Sender<LashlangResponse>,
     name: &str,
@@ -476,6 +492,17 @@ fn send_tool_call(
             result_tx,
         })
         .map_err(|_| ToolHostError::new(format!("failed to dispatch tool `{name}`")))?;
+    Ok(result_rx)
+}
+
+fn send_tool_batch_call(
+    response_tx: &std_mpsc::Sender<LashlangResponse>,
+    calls: Vec<LashlangToolBatchItem>,
+) -> Result<std_mpsc::Receiver<Vec<LashlangToolReply>>, ToolHostError> {
+    let (result_tx, result_rx) = std_mpsc::channel();
+    response_tx
+        .send(LashlangResponse::ToolBatchCall { calls, result_tx })
+        .map_err(|_| ToolHostError::new("failed to dispatch tool batch"))?;
     Ok(result_rx)
 }
 
@@ -533,6 +560,15 @@ fn wait_tool_result(
         .recv()
         .map_err(|_| ToolHostError::new("tool result channel closed"))?;
     decode_tool_reply(reply)
+}
+
+fn wait_tool_batch_results(
+    result_rx: std_mpsc::Receiver<Vec<LashlangToolReply>>,
+) -> Result<Vec<Result<FlowValue, ToolHostError>>, ToolHostError> {
+    let replies = result_rx
+        .recv()
+        .map_err(|_| ToolHostError::new("tool batch result channel closed"))?;
+    Ok(replies.into_iter().map(decode_tool_reply).collect())
 }
 
 fn decode_tool_reply(reply: LashlangToolReply) -> Result<FlowValue, ToolHostError> {
@@ -599,13 +635,17 @@ fn flow_to_json_value(value: &FlowValue) -> Value {
         FlowValue::Number(value) => json_number(*value),
         FlowValue::String(value) => Value::String(value.to_string()),
         FlowValue::List(values) => Value::Array(values.iter().map(flow_to_json_value).collect()),
-        FlowValue::Record(record) => Value::Object(
-            record
-                .iter()
-                .map(|(key, value)| (key.to_string(), flow_to_json_value(value)))
-                .collect(),
-        ),
+        FlowValue::Record(record) => flow_record_to_json_value(record),
     }
+}
+
+fn flow_record_to_json_value(record: &FlowRecord) -> Value {
+    Value::Object(
+        record
+            .iter()
+            .map(|(key, value)| (key.to_string(), flow_to_json_value(value)))
+            .collect(),
+    )
 }
 
 fn json_number(value: f64) -> Value {
@@ -750,6 +790,48 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tool_calls_are_dispatched_as_one_batch() {
+        let mut state = RuntimeState::new();
+        let (tx, rx) = std_mpsc::channel();
+
+        let tool_thread = std::thread::spawn(move || {
+            let message = rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("tool batch should be sent");
+            let LashlangResponse::ToolBatchCall { calls, result_tx } = message else {
+                panic!("expected tool batch call");
+            };
+            assert_eq!(calls.len(), 2);
+            let replies = calls
+                .into_iter()
+                .map(|call| {
+                    assert_eq!(call.name, "echo");
+                    LashlangToolReply::success(call.args["value"].clone())
+                })
+                .collect();
+            result_tx
+                .send(replies)
+                .expect("tool batch result should be delivered");
+        });
+
+        let result = execute_code(
+            &mut state,
+            r#"
+            result = parallel {
+              left: call echo { value: "a" }
+              right: call echo { value: "b" }
+            }
+            submit format("{0},{1}", result.left?, result.right?)
+            "#,
+            true,
+            &tx,
+        );
+        tool_thread.join().expect("tool thread should finish");
+        assert_eq!(result.error, None);
+        assert_eq!(result.terminal_finish, Some(json!("a,b")));
+    }
+
+    #[test]
     fn whole_numbers_serialize_as_json_integers_for_tool_args() {
         assert_eq!(json_number(1.0), serde_json::json!(1));
         assert_eq!(json_number(1.5), serde_json::json!(1.5));
@@ -766,7 +848,7 @@ mod tests {
 
     #[test]
     fn program_cache_reuses_exact_source() {
-        let mut cache = ProgramCache::default();
+        let mut cache = CompiledProgramCache::default();
         let first = cache
             .get_or_compile("submit 1")
             .expect("program should compile");
@@ -780,6 +862,8 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &other));
         assert!(cache.get_or_compile("submit @").is_err());
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().misses, 3);
     }
 
     #[test]
