@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::json;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
@@ -17,6 +18,9 @@ use crate::{
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
+
+type RlmToolTaskOutput = Vec<(ToolCallRecord, Vec<ToolImage>)>;
+type RlmToolTaskHandle = tokio::task::JoinHandle<RlmToolTaskOutput>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ToolSurfaceCacheKey {
@@ -804,8 +808,8 @@ impl Session {
             event_tx: event_tx.clone(),
             turn_injection_bridge: self.turn_injection_bridge().clone(),
         });
-        let mut tool_handles: Vec<tokio::task::JoinHandle<(ToolCallRecord, Vec<ToolImage>)>> =
-            Vec::new();
+        let mut tool_handles: Vec<RlmToolTaskHandle> = Vec::new();
+        let mut tool_call_count = 0usize;
 
         // Use block_in_place so tokio knows this thread is blocked and can
         // schedule drain tasks (prompt forwarding, message forwarding) on other threads.
@@ -820,7 +824,8 @@ impl Session {
                     args,
                     result_tx,
                 } => {
-                    let tc_num = tool_handles.len();
+                    let tc_num = tool_call_count;
+                    tool_call_count += 1;
                     tracing::info!(
                         "PARALLEL: ToolCall #{tc_num} '{name}' received at t+{:.3}s",
                         start.elapsed().as_secs_f64()
@@ -858,7 +863,76 @@ impl Session {
                             run_start.elapsed().as_secs_f64()
                         );
 
-                        (outcome.record, outcome.images)
+                        vec![(outcome.record, outcome.images)]
+                    });
+                    tool_handles.push(handle);
+                }
+                LashlangResponse::ToolBatchCall { calls, result_tx } => {
+                    let call_count = calls.len();
+                    let base_index = tool_call_count;
+                    tool_call_count += call_count;
+                    tracing::info!(
+                        "PARALLEL: ToolBatchCall {} calls received at t+{:.3}s",
+                        call_count,
+                        start.elapsed().as_secs_f64()
+                    );
+                    let msg_tx = self.message_tx.clone();
+                    let run_start = start;
+                    let dispatch = Arc::clone(&dispatch);
+
+                    let handle = tokio::spawn(async move {
+                        let mut pending = FuturesUnordered::new();
+                        for (offset, call) in calls.into_iter().enumerate() {
+                            let dispatch = Arc::clone(&dispatch);
+                            let msg_tx = msg_tx.clone();
+                            pending.push(async move {
+                                let tc_num = base_index + offset;
+                                let tool_name_for_log = call.name.clone();
+                                tracing::info!(
+                                    "PARALLEL: batch task #{tc_num} '{}' executing at t+{:.3}s",
+                                    call.name,
+                                    run_start.elapsed().as_secs_f64()
+                                );
+                                let outcome = dispatch_parallel_tool_call(
+                                    Arc::clone(&dispatch),
+                                    ParallelToolCallSpec {
+                                        index: tc_num,
+                                        tool_name: call.name,
+                                        args: call.args,
+                                    },
+                                    msg_tx,
+                                )
+                                .await;
+                                tracing::info!(
+                                    "PARALLEL: batch task #{tc_num} '{tool_name_for_log}' done at t+{:.3}s",
+                                    run_start.elapsed().as_secs_f64()
+                                );
+                                (offset, outcome)
+                            });
+                        }
+
+                        let mut outcomes = Vec::with_capacity(call_count);
+                        while let Some(outcome) = pending.next().await {
+                            outcomes.push(outcome);
+                        }
+                        outcomes.sort_by_key(|(offset, _)| *offset);
+
+                        let replies = outcomes
+                            .iter()
+                            .map(|(_, outcome)| {
+                                if outcome.record.success {
+                                    LashlangToolReply::success(outcome.record.result.clone())
+                                } else {
+                                    LashlangToolReply::error(outcome.record.result.clone())
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let _ = result_tx.send(replies);
+
+                        outcomes
+                            .into_iter()
+                            .map(|(_, outcome)| (outcome.record, outcome.images))
+                            .collect::<Vec<_>>()
                     });
                     tool_handles.push(handle);
                 }
@@ -906,9 +980,11 @@ impl Session {
                     // resolved, so these awaits are instant.
                     for handle in tool_handles {
                         match handle.await {
-                            Ok((record, images)) => {
-                                self.tool_calls.push(record);
-                                self.tool_images.extend(images);
+                            Ok(results) => {
+                                for (record, images) in results {
+                                    self.tool_calls.push(record);
+                                    self.tool_images.extend(images);
+                                }
                             }
                             Err(e) => {
                                 self.tool_calls.push(ToolCallRecord {

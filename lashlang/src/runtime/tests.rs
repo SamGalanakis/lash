@@ -1,5 +1,8 @@
 use super::*;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[derive(Default)]
 struct Host;
@@ -920,6 +923,62 @@ fn parallel_branch_panics_are_reported_as_runtime_errors() {
             message: "parallel branch panicked".to_string()
         }
     );
+}
+
+#[test]
+fn parallel_tool_calls_use_host_batch_when_available() {
+    struct BatchHost {
+        calls: AtomicUsize,
+        batches: AtomicUsize,
+    }
+
+    impl ToolHost for BatchHost {
+        fn call(&self, _name: &str, _args: &Record) -> Result<Value, ToolHostError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(ToolHostError::new("single call should not be used"))
+        }
+
+        fn call_batch(
+            &self,
+            calls: &[(&str, &Record)],
+            push_result: &mut dyn FnMut(Result<Value, ToolHostError>),
+        ) -> bool {
+            self.batches.fetch_add(1, Ordering::Relaxed);
+            for (name, args) in calls {
+                push_result(match *name {
+                    "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
+                    other => Err(ToolHostError::new(format!("unknown tool: {other}"))),
+                });
+            }
+            true
+        }
+    }
+
+    let host = BatchHost {
+        calls: AtomicUsize::new(0),
+        batches: AtomicUsize::new(0),
+    };
+    let program = crate::parse(
+        r#"
+        result = parallel {
+          left: call echo { value: "a" }
+          right: call echo { value: "b" }
+        }
+        submit [result.left?, result.right?]
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &host).expect("program should run");
+
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::Finished(Value::List(
+            vec![Value::String("a".into()), Value::String("b".into())].into()
+        ))
+    );
+    assert_eq!(host.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(host.batches.load(Ordering::Relaxed), 1);
 }
 
 #[test]

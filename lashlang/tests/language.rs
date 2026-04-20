@@ -1323,6 +1323,56 @@ fn parallel_rejects_conflicting_assignments() {
 }
 
 #[test]
+fn optimized_parallel_tool_calls_reject_conflicts_across_three_branches() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let error = execute(
+        r#"
+        parallel {
+          result = call sleep_echo { value: "a" }
+          other = call sleep_echo { value: "b" }
+          result = call sleep_echo { value: "c" }
+        }
+        submit result
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect_err("execution should fail");
+
+    assert!(matches!(
+        error,
+        lashlang::ExecuteError::Runtime(RuntimeError::ParallelConflict { name }) if name == "result"
+    ));
+}
+
+#[test]
+fn optimized_parallel_expression_tool_calls_reject_conflicts_across_three_branches() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let error = execute(
+        r#"
+        values = parallel {
+          result = call sleep_echo { value: "a" }
+          other = call sleep_echo { value: "b" }
+          result = call sleep_echo { value: "c" }
+        }
+        submit values
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect_err("execution should fail");
+
+    assert!(matches!(
+        error,
+        lashlang::ExecuteError::Runtime(RuntimeError::ParallelConflict { name }) if name == "result"
+    ));
+}
+
+#[test]
 fn snapshot_round_trip_preserves_repl_like_state() {
     let host = TestHost::default();
     let mut state = State::new();

@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lashlang::{
-    ExecutionOutcome, Record, State, ToolHost, ToolHostError, Value, compile_program, execute,
-    execute_compiled, parse,
+    CompiledProgramCache, ExecutionOutcome, Record, State, ToolHost, ToolHostError, Value,
+    compile_program, execute, execute_compiled, parse,
 };
 use std::hint::black_box;
 use std::time::Duration;
@@ -24,6 +24,41 @@ fn lashlang_benchmarks(c: &mut Criterion) {
             black_box(expect_finished(outcome));
         });
     });
+
+    group.bench_function(BenchmarkId::new("cached_block", source.len()), |b| {
+        let mut cache = CompiledProgramCache::default();
+        cache
+            .get_or_compile(source)
+            .expect("benchmark program should compile");
+        b.iter(|| {
+            let mut state = seeded_state();
+            let compiled = cache
+                .get_or_compile(black_box(source))
+                .expect("benchmark cache lookup");
+            let outcome = execute_compiled(black_box(&compiled), &mut state, &host)
+                .expect("benchmark execution");
+            black_box(expect_finished(outcome));
+        });
+    });
+
+    group.bench_function(
+        BenchmarkId::new("cached_session_block", source.len()),
+        |b| {
+            let mut cache = CompiledProgramCache::default();
+            cache
+                .get_or_compile(source)
+                .expect("benchmark program should compile");
+            let mut state = seeded_state();
+            b.iter(|| {
+                let compiled = cache
+                    .get_or_compile(black_box(source))
+                    .expect("benchmark cache lookup");
+                let outcome = execute_compiled(black_box(&compiled), &mut state, &host)
+                    .expect("benchmark execution");
+                black_box(expect_finished(outcome));
+            });
+        },
+    );
 
     group.bench_function(BenchmarkId::new("execute_only", source.len()), |b| {
         b.iter(|| {
@@ -123,10 +158,25 @@ struct BenchHost;
 
 impl ToolHost for BenchHost {
     fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        match name {
-            "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
-            _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
+        bench_call(name, args)
+    }
+
+    fn call_batch(
+        &self,
+        calls: &[(&str, &Record)],
+        push_result: &mut dyn FnMut(Result<Value, ToolHostError>),
+    ) -> bool {
+        for (name, args) in calls {
+            push_result(bench_call(name, args));
         }
+        true
+    }
+}
+
+fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
+    match name {
+        "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
+        _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
     }
 }
 
