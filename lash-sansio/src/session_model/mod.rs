@@ -122,7 +122,7 @@ pub enum SessionEvent {
         plugin_id: String,
         event: PluginSurfaceEvent,
     },
-    /// Emitted when a typed RLM session terminates via `finish <expr>`.
+    /// Emitted when a typed RLM session terminates via `submit <expr>`.
     /// The `value` is the captured (and schema-validated) result.
     /// Hosts that want the typed shape back (e.g. the parent of a
     /// typed subagent workflow) listen for this event on the child's stream;
@@ -324,8 +324,9 @@ impl TurnTerminationPolicyState {
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             }],
             user_input: None,
             origin: None,

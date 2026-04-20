@@ -716,8 +716,8 @@ mod tests {
         assert!(registry.enabled_tools().contains("enabled_tool"));
         assert!(!registry.enabled_tools().contains("disabled_tool"));
         let snapshot = registry.export_state();
-        assert_eq!(snapshot.tools["enabled_tool"].definition.enabled, true);
-        assert_eq!(snapshot.tools["disabled_tool"].definition.enabled, false);
+        assert!(snapshot.tools["enabled_tool"].definition.enabled);
+        assert!(!snapshot.tools["disabled_tool"].definition.enabled);
     }
 
     #[test]

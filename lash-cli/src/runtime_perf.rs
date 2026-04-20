@@ -767,6 +767,7 @@ async fn run_once(
                     image_blobs: Default::default(),
                     user_input: None,
                     mode: Some(RunMode::Normal),
+                    rlm_termination_override: None,
                 },
                 CancellationToken::new(),
             )

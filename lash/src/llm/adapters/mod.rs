@@ -1,3 +1,4 @@
+pub mod anthropic;
 pub mod codex_oauth;
 pub mod google_cloudcode;
 pub mod openrouter;

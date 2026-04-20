@@ -1,6 +1,6 @@
 mod apply_patch;
 mod ask;
-pub(crate) mod batch;
+pub mod batch;
 mod composite;
 mod fetch_url;
 #[cfg(feature = "tool-impls")]
@@ -181,7 +181,7 @@ where
 }
 
 /// Run blocking filesystem work off the async runtime.
-pub(crate) async fn run_blocking<F>(f: F) -> ToolResult
+pub async fn run_blocking<F>(f: F) -> ToolResult
 where
     F: FnOnce() -> ToolResult + Send + 'static,
 {

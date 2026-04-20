@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use lash::ExecutionMode;
 use lash::sansio::{self, Effect, ProtocolDriverHandle, Response, TurnMachine, TurnMachineConfig};
-use lash::{ExecutionMode, RlmDriver, StandardDriver};
+use lash_mode_rlm::RlmDriver;
+use lash_mode_standard::StandardDriver;
 use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 use lash_sansio::{CheckpointKind, Message, MessageRole, Part, PartKind, PruneState};
 
@@ -44,6 +46,7 @@ fn user_message(content: &str) -> Message {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         }],
@@ -150,7 +153,8 @@ fn standard_tool_calls_produce_effects_and_loop() {
                     call_id: "tc1".to_string(),
                     tool_name: "read_file".to_string(),
                     input_json: r#"{"path":"foo.txt"}"#.to_string(),
-                    id: None,
+                    item_id: None,
+                    signature: None,
                 },
             ],
             ..LlmResponse::default()
@@ -215,7 +219,8 @@ fn standard_max_turns_stops_iteration() {
                 call_id: "tc1".to_string(),
                 tool_name: "test".to_string(),
                 input_json: "{}".to_string(),
-                id: None,
+                item_id: None,
+                signature: None,
             }],
             ..LlmResponse::default()
         }),
@@ -291,9 +296,9 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "Quick check.\n\n```lashlang\nobserve \"hi\"\n```\n".to_string(),
+            full_text: "Quick check.\n\n```lashlang\nprint \"hi\"\n```\n".to_string(),
             parts: vec![LlmOutputPart::Text {
-                text: "Quick check.\n\n```lashlang\nobserve \"hi\"\n```\n".to_string(),
+                text: "Quick check.\n\n```lashlang\nprint \"hi\"\n```\n".to_string(),
             }],
             ..LlmResponse::default()
         }),
@@ -306,7 +311,7 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
     });
     assert_eq!(
         exec_effect.as_ref().map(|(_, code)| code.as_str()),
-        Some("observe \"hi\"")
+        Some("print \"hi\"")
     );
 
     machine.handle_response(Response::ExecResult {
@@ -350,9 +355,9 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nfinish { ok: true }\n```".to_string(),
+            full_text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nfinish { ok: true }\n```".to_string(),
+                text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
             }],
             ..LlmResponse::default()
         }),
@@ -420,9 +425,9 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nfinish { missing: true }\n```".to_string(),
+            full_text: "```lashlang\nsubmit { missing: true }\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nfinish { missing: true }\n```".to_string(),
+                text: "```lashlang\nsubmit { missing: true }\n```".to_string(),
             }],
             ..LlmResponse::default()
         }),

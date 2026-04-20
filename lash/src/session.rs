@@ -6,7 +6,7 @@ use serde_json::json;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime};
+use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime, LashlangToolReply};
 use crate::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, ToolDispatchOutcome, dispatch_parallel_tool_call,
     dispatch_tool_call_with_execution_context,
@@ -186,12 +186,12 @@ impl AsyncToolReply {
         }
     }
 
-    fn into_wire(self) -> String {
-        json!({
-            "success": self.success,
-            "result": serde_json::to_string(&self.value).unwrap_or_else(|_| "null".to_string()),
-        })
-        .to_string()
+    fn into_lashlang_reply(self) -> LashlangToolReply {
+        if self.success {
+            LashlangToolReply::success(self.value)
+        } else {
+            LashlangToolReply::error(self.value)
+        }
     }
 }
 
@@ -241,7 +241,10 @@ impl Session {
 
         let mode_session = Arc::clone(session.plugins().mode_session());
         mode_session
-            .initialize_session(&mut session, session_id)
+            .initialize_session(crate::plugin::ModeSessionContext::new(
+                &mut session,
+                session_id,
+            ))
             .await?;
 
         Ok(session)
@@ -257,7 +260,7 @@ impl Session {
         self.rlm_runtime.is_some()
     }
 
-    pub(crate) fn set_rlm_observe_projection_config(
+    pub(crate) fn set_execution_output_projection(
         &mut self,
         config: crate::ToolResultProjectionPluginConfig,
     ) {
@@ -266,26 +269,18 @@ impl Session {
 
     pub(crate) fn mode_extra_prompt_contributions(
         &self,
-        mode: crate::ExecutionMode,
+        _mode: crate::ExecutionMode,
     ) -> Vec<PromptContribution> {
-        match mode {
-            crate::ExecutionMode::Standard => Vec::new(),
-            crate::ExecutionMode::Rlm => vec![PromptContribution::execution(
-                "Observe Output",
-                format!(
-                    "Observe output is capped before reinjection using the current RLM observe limit (mode: `{}`, limit: {}, max_lines: {}). If you see a cap/truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
-                    match self.rlm_observe_projection_config.mode {
-                        crate::ToolResultProjectionMode::Bytes => "bytes",
-                        crate::ToolResultProjectionMode::Tokens => "tokens",
-                    },
-                    self.rlm_observe_projection_config.limit,
-                    self.rlm_observe_projection_config.max_lines,
-                ),
-            )],
-        }
+        // Mode-specific prompt contributions are owned by the mode
+        // plugins (`lash-mode-standard`, `lash-mode-rlm`) via their
+        // `reg.prompt().contribute(...)` hooks. Nothing to add here.
+        Vec::new()
     }
 
-    pub(crate) async fn start_rlm_runtime(&mut self, session_id: &str) -> Result<(), SessionError> {
+    pub(crate) async fn start_lashlang_runtime(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), SessionError> {
         if self.rlm_runtime.is_some() {
             return Ok(());
         }
@@ -368,11 +363,28 @@ impl Session {
                 tracing::warn!("failed to resolve tool surface: {err}");
                 crate::ToolSurface::from_tools(fallback_tools)
             });
-        let preamble = crate::build_mode_preamble(crate::ModeBuildInput {
+        let input = crate::ModeBuildInput {
             mode,
             tool_surface: surface.clone(),
             extra_prompt_contributions: self.mode_extra_prompt_contributions(mode),
+        };
+        let driver = self.plugins().mode_protocol_driver().unwrap_or_else(|| {
+            panic!(
+                "no protocol driver registered for execution mode `{}` — \
+                 did you forget to register the mode plugin (e.g. \
+                 `lash_mode_standard::BuiltinStandardModePluginFactory` or \
+                 `lash_mode_rlm::BuiltinRlmModePluginFactory`)?",
+                mode.plugin_id()
+            )
         });
+        assert_eq!(
+            driver.mode_id(),
+            mode.plugin_id(),
+            "protocol driver `{}` does not match session mode `{}`",
+            driver.mode_id(),
+            mode.plugin_id(),
+        );
+        let preamble = driver.build_preamble(input);
         let surface = Arc::new(surface);
         ToolSurfaceHandle(Arc::new(ToolSurfaceArtifact {
             surface,
@@ -453,22 +465,22 @@ impl Session {
         })
     }
 
-    fn parse_async_tool_handle(handle: &str) -> Result<(String, Option<String>), String> {
-        let value: serde_json::Value =
-            serde_json::from_str(handle).map_err(|err| format!("Invalid async handle: {err}"))?;
-        let kind = value
+    fn parse_async_tool_handle(
+        handle: &serde_json::Value,
+    ) -> Result<(String, Option<String>), String> {
+        let kind = handle
             .get("__handle__")
             .and_then(|value| value.as_str())
             .ok_or_else(|| "Invalid async handle: missing `__handle__`".to_string())?;
         if kind != ASYNC_TOOL_HANDLE_KIND {
             return Err(format!("Invalid async handle kind: {kind}"));
         }
-        let id = value
+        let id = handle
             .get("id")
             .and_then(|value| value.as_str())
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "Invalid async handle: missing `id`".to_string())?;
-        let tool_name = value
+        let tool_name = handle
             .get("tool")
             .and_then(|value| value.as_str())
             .map(str::to_string);
@@ -498,7 +510,7 @@ impl Session {
         dispatch: Arc<ToolDispatchContext>,
         tool_name: String,
         args: serde_json::Value,
-    ) -> String {
+    ) -> LashlangToolReply {
         let handle_id = uuid::Uuid::new_v4().to_string();
         let state = Arc::new(StdMutex::new(AsyncToolHandleState {
             join_handle: None,
@@ -576,17 +588,21 @@ impl Session {
             success: true,
             duration_ms: 0,
         });
-        AsyncToolReply::success(handle_value).into_wire()
+        AsyncToolReply::success(handle_value).into_lashlang_reply()
     }
 
-    async fn await_async_tool_handle(&mut self, _call_id: String, handle: String) -> String {
+    async fn await_async_tool_handle(
+        &mut self,
+        _call_id: String,
+        handle: serde_json::Value,
+    ) -> LashlangToolReply {
         let (handle_id, _hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
             Ok(parsed) => parsed,
-            Err(err) => return AsyncToolReply::error(json!(err)).into_wire(),
+            Err(err) => return AsyncToolReply::error(json!(err)).into_lashlang_reply(),
         };
         let Some(entry) = self.async_tool_handle_entry(&handle_id) else {
             return AsyncToolReply::error(json!(format!("Unknown async handle: {handle_id}")))
-                .into_wire();
+                .into_lashlang_reply();
         };
 
         loop {
@@ -630,27 +646,34 @@ impl Session {
             Some(AsyncToolTerminal::Completed(outcome)) => {
                 self.tool_images.extend(outcome.images.clone());
                 if outcome.record.success {
-                    AsyncToolReply::success(outcome.record.result).into_wire()
+                    AsyncToolReply::success(outcome.record.result).into_lashlang_reply()
                 } else {
-                    AsyncToolReply::error(outcome.record.result).into_wire()
+                    AsyncToolReply::error(outcome.record.result).into_lashlang_reply()
                 }
             }
             Some(AsyncToolTerminal::Cancelled) => {
-                AsyncToolReply::error(json!("async task was cancelled")).into_wire()
+                AsyncToolReply::error(json!("async task was cancelled")).into_lashlang_reply()
             }
-            Some(AsyncToolTerminal::Failed(err)) => AsyncToolReply::error(json!(err)).into_wire(),
-            None => AsyncToolReply::error(json!("async task did not produce a result")).into_wire(),
+            Some(AsyncToolTerminal::Failed(err)) => {
+                AsyncToolReply::error(json!(err)).into_lashlang_reply()
+            }
+            None => AsyncToolReply::error(json!("async task did not produce a result"))
+                .into_lashlang_reply(),
         }
     }
 
-    async fn cancel_async_tool_handle(&mut self, _call_id: String, handle: String) -> String {
+    async fn cancel_async_tool_handle(
+        &mut self,
+        _call_id: String,
+        handle: serde_json::Value,
+    ) -> LashlangToolReply {
         let (handle_id, _hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
             Ok(parsed) => parsed,
-            Err(err) => return AsyncToolReply::error(json!(err)).into_wire(),
+            Err(err) => return AsyncToolReply::error(json!(err)).into_lashlang_reply(),
         };
         let Some(entry) = self.async_tool_handle_entry(&handle_id) else {
             return AsyncToolReply::error(json!(format!("Unknown async handle: {handle_id}")))
-                .into_wire();
+                .into_lashlang_reply();
         };
 
         entry.cancellation.cancel();
@@ -682,7 +705,7 @@ impl Session {
         entry.done_notify.notify_waiters();
         self.flush_async_tool_messages(&entry);
 
-        AsyncToolReply::success(serde_json::Value::Null).into_wire()
+        AsyncToolReply::success(serde_json::Value::Null).into_lashlang_reply()
     }
 
     async fn cancel_all_async_tool_handles(&self) {
@@ -802,8 +825,6 @@ impl Session {
                         "PARALLEL: ToolCall #{tc_num} '{name}' received at t+{:.3}s",
                         start.elapsed().as_secs_f64()
                     );
-                    let parsed_args: serde_json::Value =
-                        serde_json::from_str(&args).unwrap_or(json!({}));
                     let msg_tx = self.message_tx.clone();
                     let run_start = start;
                     let dispatch = Arc::clone(&dispatch);
@@ -819,19 +840,19 @@ impl Session {
                             ParallelToolCallSpec {
                                 index: tc_num,
                                 tool_name: name,
-                                args: parsed_args,
+                                args,
                             },
                             msg_tx,
                         )
                         .await;
 
                         // Send the tool result back to the embedded lashlang runtime.
-                        let result_json = json!({
-                            "success": outcome.record.success,
-                            "result": serde_json::to_string(&outcome.record.result)
-                                .unwrap_or_else(|_| "null".to_string()),
-                        });
-                        let _ = result_tx.send(result_json.to_string());
+                        let reply = if outcome.record.success {
+                            LashlangToolReply::success(outcome.record.result.clone())
+                        } else {
+                            LashlangToolReply::error(outcome.record.result.clone())
+                        };
+                        let _ = result_tx.send(reply);
                         tracing::info!(
                             "PARALLEL: task #{tc_num} '{tool_name_for_log}' done at t+{:.3}s",
                             run_start.elapsed().as_secs_f64()
@@ -847,10 +868,8 @@ impl Session {
                     args,
                     result_tx,
                 } => {
-                    let parsed_args: serde_json::Value =
-                        serde_json::from_str(&args).unwrap_or(json!({}));
                     let reply = self
-                        .start_async_tool_call(call_id, Arc::clone(&dispatch), name, parsed_args)
+                        .start_async_tool_call(call_id, Arc::clone(&dispatch), name, args)
                         .await;
                     let _ = result_tx.send(reply);
                 }
@@ -1420,7 +1439,7 @@ call show_snippet_to_user {{
   start_line: 1,
   end_line: 1
 }}
-finish "ok"
+submit "ok"
 "#,
                     snippet_path.display()
                 ),
@@ -1429,7 +1448,7 @@ finish "ok"
             .await
             .expect("exec response");
 
-        // `finish "ok"` terminates the lashlang program and delivers the
+        // `submit "ok"` terminates the lashlang program and delivers the
         // value through `terminal_finish` regardless of mode. The prior
         // tool call stays successful; no error is surfaced.
         assert_eq!(response.error, None);
@@ -1484,8 +1503,8 @@ finish "ok"
                 r#"
 files = call ls { path: "." }
 match = call grep { query: "fn main" }
-observe files
-observe match
+print files
+print match
 "#,
                 false,
             )
@@ -1540,7 +1559,7 @@ observe match
                 r#"
 handle = start call echo_async { text: "hello" }
 result = await handle
-observe result
+print result
 "#,
                 false,
             )
@@ -1608,7 +1627,7 @@ observe result
                 r#"
 handle = start call wait_for_cancel {}
 cancel handle
-observe "cancelled"
+print "cancelled"
 "#,
                 false,
             )
@@ -1633,60 +1652,7 @@ observe "cancelled"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rlm_run_code_caps_observe_output_via_mode_plugin_config() {
-        let plugin_host = PluginHost::new(vec![Arc::new(crate::BuiltinRlmModePluginFactory::new(
-            crate::RlmModePluginConfig {
-                observe_projection: crate::ToolResultProjectionPluginConfig {
-                    mode: crate::ToolResultProjectionMode::Bytes,
-                    limit: 24,
-                    max_lines: 2,
-                },
-            },
-        ))]);
-        let plugin_session = plugin_host
-            .build_session(
-                "root",
-                crate::ExecutionMode::Rlm,
-                crate::ContextApproach::default(),
-                None,
-            )
-            .expect("plugin session");
-        let mut session = Session::new(
-            crate::RuntimeServices::new(plugin_session),
-            "root",
-            crate::ExecutionMode::Rlm,
-        )
-        .await
-        .expect("session");
-
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
-
-        let response = session
-            .run_code(
-                "root",
-                manager,
-                &event_tx,
-                r#"
-observe "abcdefghijklmnopqrstuvwxyz0123456789"
-"#,
-                false,
-            )
-            .await
-            .expect("exec response");
-
-        assert!(
-            response.error.is_none(),
-            "unexpected rlm error: {:?}",
-            response.error
-        );
-        let observation = response
-            .observations
-            .first()
-            .expect("expected one observation");
-        assert!(observation.contains("truncated"));
-        assert!(observation.contains("observe output was capped at 24 bytes and 2 lines max"));
-        assert!(observation.contains("Use a narrower `observe` expression"));
-    }
+    // `rlm_run_code_caps_observe_output_via_mode_plugin_config` moved
+    // to `lash-mode-rlm` integration tests (lash itself no longer
+    // knows about the RLM plugin factory after the crate split).
 }

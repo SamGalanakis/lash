@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use lash::{
-    AssembledTurn, InputItem, ManagedRunState, ManagedTaskKind, ManagedTaskSpec,
-    SessionCreateRequest, SessionManager, TurnInput, TurnStatus,
+    AssembledTurn, InputItem, ManagedRunState, ManagedTaskKind, ManagedTaskSpec, MessageRole,
+    PluginMessage, SessionCreateRequest, SessionManager, TurnInput, TurnStatus,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -26,12 +27,21 @@ impl Capability {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
+        value.parse().ok()
+    }
+}
+
+impl FromStr for Capability {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            _ => None,
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            _ => Err(()),
         }
     }
 }
@@ -304,6 +314,13 @@ struct QueuedTask {
     turn_input: TurnInput,
 }
 
+struct PreparedTaskLaunch {
+    session_id: String,
+    task: String,
+    turn_input: TurnInput,
+    notify: Arc<tokio::sync::Notify>,
+}
+
 impl LocalSubagentHost {
     fn state_lock(&self) -> Result<std::sync::MutexGuard<'_, HostState>, String> {
         self.state
@@ -315,7 +332,7 @@ impl LocalSubagentHost {
         &self,
         root_session_id: &str,
         path: &str,
-    ) -> Result<Option<(String, String, TurnInput, Arc<tokio::sync::Notify>)>, String> {
+    ) -> Result<Option<PreparedTaskLaunch>, String> {
         let mut state = self.state_lock()?;
         let tree = match state.trees.get_mut(root_session_id) {
             Some(tree) => tree,
@@ -336,12 +353,12 @@ impl LocalSubagentHost {
             let inbox = agent.inbox.drain(..).collect::<Vec<_>>();
             queued.turn_input = merge_inbox_into_turn_input(queued.turn_input, &inbox);
         }
-        Ok(Some((
-            agent.session_id.clone(),
-            queued.task,
-            queued.turn_input,
-            tree.notify.clone(),
-        )))
+        Ok(Some(PreparedTaskLaunch {
+            session_id: agent.session_id.clone(),
+            task: queued.task,
+            turn_input: queued.turn_input,
+            notify: tree.notify.clone(),
+        }))
     }
 
     fn ensure_current_agent_locked(state: &mut HostState, session_id: &str) -> AgentLocator {
@@ -392,7 +409,7 @@ impl LocalSubagentHost {
             return Ok("/root".to_string());
         }
         if let Some(rest) = target.strip_prefix('/') {
-            return Ok(normalize_absolute_path(rest)?);
+            return normalize_absolute_path(rest);
         }
         let relative = normalize_relative_path(target)?;
         Ok(join_path(current_path, &relative))
@@ -493,13 +510,11 @@ impl LocalSubagentHost {
         root_session_id: String,
         path: String,
     ) -> Result<(), String> {
-        let Some((session_id, task, turn_input, notify)) =
-            self.prepare_task_launch(&root_session_id, &path)?
-        else {
+        let Some(launch) = self.prepare_task_launch(&root_session_id, &path)? else {
             return Ok(());
         };
         let turn = manager
-            .start_turn_stream(&session_id, turn_input)
+            .start_turn_stream(&launch.session_id, launch.turn_input)
             .await
             .map_err(|err| format!("failed to start child turn: {err}"))?;
         let turn_id = turn.turn_id.clone();
@@ -517,14 +532,14 @@ impl LocalSubagentHost {
                     .get_mut(&path)
                     .ok_or_else(|| "subagent disappeared".to_string())?;
                 agent.active_task = Some(ActiveTask {
-                    task: task.clone(),
+                    task: launch.task.clone(),
                     turn_id: turn_id.clone(),
                 });
                 agent.last_status = "running".to_string();
                 WaitAgentEvent::TaskStarted {
                     path: path.clone(),
-                    task: task.clone(),
-                    session_id: session_id.clone(),
+                    task: launch.task.clone(),
+                    session_id: launch.session_id.clone(),
                     capability: agent
                         .capability
                         .map(|capability| capability.as_str().to_string())
@@ -535,7 +550,26 @@ impl LocalSubagentHost {
             };
             Self::queue_event(tree, event);
         }
-        notify.notify_waiters();
+        launch.notify.notify_waiters();
+
+        // If this task is starting on an already-registered subagent
+        // (i.e. a follow-up that flipped the registry to `Idle`),
+        // transition back to `Running` so `tasks_list` reflects the
+        // active turn.
+        let owner_session_id = if let Ok(state) = self.state_lock() {
+            Self::owner_session_id_for_path(&state, &root_session_id, &path)
+        } else {
+            None
+        };
+        if let Some(owner) = owner_session_id {
+            manager
+                .transition_background_task_live_state(
+                    &owner,
+                    &format!("subagent:{path}"),
+                    ManagedRunState::Running,
+                )
+                .await;
+        }
 
         let host = self.clone();
         tokio::spawn(async move {
@@ -555,85 +589,80 @@ impl LocalSubagentHost {
     ) {
         let mut close_session_id = None;
         let mut start_next = false;
-        if let Ok(mut state) = self.state_lock() {
-            if let Some(tree) = state.trees.get_mut(&root_session_id)
-                && tree.agents.contains_key(&path)
-            {
-                let (event, closing_session_id, queued_more) = {
-                    let agent = tree
-                        .agents
-                        .get_mut(&path)
-                        .expect("checked contains_key above");
-                    let completed_task = agent.active_task.take().map(|active| active.task);
-                    let event = match &outcome {
-                        Ok(turn) => {
-                            let task = completed_task.unwrap_or_else(|| "task".to_string());
-                            let status = turn_status_label(&turn.status);
-                            agent.last_status = status.to_string();
-                            let session = build_session_summary(agent, &task, turn);
-                            WaitAgentEvent::TaskCompleted {
-                                path: path.clone(),
+        if let Ok(mut state) = self.state_lock()
+            && let Some(tree) = state.trees.get_mut(&root_session_id)
+            && tree.agents.contains_key(&path)
+        {
+            let (event, closing_session_id, queued_more) = {
+                let agent = tree
+                    .agents
+                    .get_mut(&path)
+                    .expect("checked contains_key above");
+                let completed_task = agent.active_task.take().map(|active| active.task);
+                let event = match &outcome {
+                    Ok(turn) => {
+                        let task = completed_task.unwrap_or_else(|| "task".to_string());
+                        let status = turn_status_label(&turn.status);
+                        agent.last_status = status.to_string();
+                        let session = build_session_summary(agent, &task, turn);
+                        WaitAgentEvent::TaskCompleted {
+                            path: path.clone(),
+                            task,
+                            status: status.to_string(),
+                            result: task_result_value(turn),
+                            error: None,
+                            session,
+                        }
+                    }
+                    Err(err) => {
+                        let task = completed_task.unwrap_or_else(|| "task".to_string());
+                        agent.last_status = "failed".to_string();
+                        WaitAgentEvent::TaskCompleted {
+                            path: path.clone(),
+                            task: task.clone(),
+                            status: "failed".to_string(),
+                            result: Value::Null,
+                            error: Some(err.to_string()),
+                            session: WaitAgentSessionSummary {
+                                id: agent.session_id.clone(),
+                                parent_session_id: agent.parent_session_id.clone(),
                                 task,
-                                status: status.to_string(),
-                                result: task_result_value(turn),
-                                error: None,
-                                session,
-                            }
+                                iterations: 0,
+                                tool_calls: 0,
+                                tool_call_details: Vec::new(),
+                                model: agent.model.clone(),
+                                model_variant: agent.model_variant.clone(),
+                                token_usage: json!({
+                                    "input_tokens": 0,
+                                    "output_tokens": 0,
+                                    "cached_input_tokens": 0,
+                                    "reasoning_tokens": 0,
+                                    "total_tokens": 0,
+                                }),
+                            },
                         }
-                        Err(err) => {
-                            let task = completed_task.unwrap_or_else(|| "task".to_string());
-                            agent.last_status = "failed".to_string();
-                            WaitAgentEvent::TaskCompleted {
-                                path: path.clone(),
-                                task: task.clone(),
-                                status: "failed".to_string(),
-                                result: Value::Null,
-                                error: Some(err.to_string()),
-                                session: WaitAgentSessionSummary {
-                                    id: agent.session_id.clone(),
-                                    parent_session_id: agent.parent_session_id.clone(),
-                                    task,
-                                    iterations: 0,
-                                    tool_calls: 0,
-                                    tool_call_details: Vec::new(),
-                                    model: agent.model.clone(),
-                                    model_variant: agent.model_variant.clone(),
-                                    token_usage: json!({
-                                        "input_tokens": 0,
-                                        "output_tokens": 0,
-                                        "cached_input_tokens": 0,
-                                        "reasoning_tokens": 0,
-                                        "total_tokens": 0,
-                                    }),
-                                },
-                            }
-                        }
-                    };
-                    let closing_session_id = if agent.closing {
-                        Some(agent.session_id.clone())
-                    } else {
-                        None
-                    };
-                    (event, closing_session_id, !agent.queued_tasks.is_empty())
+                    }
                 };
+                let closing_session_id = if agent.closing {
+                    Some(agent.session_id.clone())
+                } else {
+                    None
+                };
+                (event, closing_session_id, !agent.queued_tasks.is_empty())
+            };
 
-                Self::queue_event(tree, event);
-                close_session_id = closing_session_id;
-                start_next = close_session_id.is_none() && queued_more;
-            }
+            Self::queue_event(tree, event);
+            close_session_id = closing_session_id;
+            start_next = close_session_id.is_none() && queued_more;
         }
 
         if let Some(session_id) = close_session_id {
             let _ = manager.close_session(&session_id).await;
             let owner_session_id = {
                 if let Ok(mut state) = self.state_lock() {
-                    let owner =
-                        Self::owner_session_id_for_path(&state, &root_session_id, &path);
+                    let owner = Self::owner_session_id_for_path(&state, &root_session_id, &path);
                     if let Some(tree) = state.trees.get_mut(&root_session_id) {
-                        Self::queue_event(
-                            tree,
-                            WaitAgentEvent::AgentClosed { path: path.clone() },
-                        );
+                        Self::queue_event(tree, WaitAgentEvent::AgentClosed { path: path.clone() });
                     }
                     Self::remove_agent_locked(&mut state, &root_session_id, &path);
                     owner
@@ -659,6 +688,25 @@ impl LocalSubagentHost {
                 let handle = tokio::runtime::Handle::current();
                 let _ = handle.block_on(host.start_next_task(manager, root_session_id, path));
             });
+        } else {
+            // Task finished, session kept alive, nothing queued — the
+            // subagent is now idle, awaiting a follow-up. Reflect that
+            // in the background-task registry so `tasks_list` can
+            // distinguish idle subagents from actively running ones.
+            let owner_session_id = if let Ok(state) = self.state_lock() {
+                Self::owner_session_id_for_path(&state, &root_session_id, &path)
+            } else {
+                None
+            };
+            if let Some(owner) = owner_session_id {
+                manager
+                    .transition_background_task_live_state(
+                        &owner,
+                        &format!("subagent:{path}"),
+                        ManagedRunState::Idle,
+                    )
+                    .await;
+            }
         }
     }
 
@@ -862,7 +910,13 @@ impl SubagentHost for LocalSubagentHost {
         context: &lash::ToolExecutionContext,
         request: SendMessageRequest,
     ) -> Result<SendMessageResponse, String> {
-        let (from, to) = {
+        // Decide how the message should be delivered: if the target is
+        // actively running a turn, push it through the target session's
+        // turn-input injection bridge so it lands at the next iteration
+        // boundary (between tool results and the next LLM call). If the
+        // target is idle, fall back to the existing inbox path so the
+        // note is merged into the next task's initial input.
+        let (from, to, active_session_id) = {
             let mut state = self.state_lock()?;
             let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
             let to = Self::resolve_target(&locator.path, &request.target)?;
@@ -874,10 +928,16 @@ impl SubagentHost for LocalSubagentHost {
                 .agents
                 .get_mut(&to)
                 .ok_or_else(|| format!("unknown agent `{to}`"))?;
-            target.inbox.push_back(InboxMessage {
-                from: locator.path.clone(),
-                message: request.message.clone(),
-            });
+            let active_session_id = target
+                .active_task
+                .as_ref()
+                .map(|_| target.session_id.clone());
+            if active_session_id.is_none() {
+                target.inbox.push_back(InboxMessage {
+                    from: locator.path.clone(),
+                    message: request.message.clone(),
+                });
+            }
             Self::queue_event(
                 tree,
                 WaitAgentEvent::Message {
@@ -886,8 +946,43 @@ impl SubagentHost for LocalSubagentHost {
                     message: request.message.clone(),
                 },
             );
-            (locator.path, to)
+            (locator.path, to, active_session_id)
         };
+
+        if let Some(session_id) = active_session_id {
+            let text = format!("## Inbox\n\n- from {from}: {}", request.message);
+            let plugin_message = PluginMessage {
+                role: MessageRole::User,
+                content: text,
+                parts: Vec::new(),
+                images: Vec::new(),
+                user_input: None,
+            };
+            if let Err(err) = context
+                .host
+                .inject_turn_input(&session_id, plugin_message)
+                .await
+            {
+                // Bridge injection failed (session closed mid-flight,
+                // etc.). Fall back to the inbox path so the note isn't
+                // lost — it will merge into the next task start.
+                if let Ok(mut state) = self.state_lock()
+                    && let Some(locator) = state.session_agents.get(&context.session_id).cloned()
+                    && let Some(tree) = state.trees.get_mut(&locator.root_session_id)
+                    && let Some(target) = tree.agents.get_mut(&to)
+                {
+                    target.inbox.push_back(InboxMessage {
+                        from: from.clone(),
+                        message: request.message.clone(),
+                    });
+                }
+                tracing::debug!(
+                    target = %to,
+                    error = %err,
+                    "send_message bridge injection failed; fell back to inbox"
+                );
+            }
+        }
 
         Ok(SendMessageResponse {
             from,
@@ -1243,38 +1338,6 @@ fn join_path(parent: &str, relative: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{normalize_relative_path, validate_segment};
-
-    #[test]
-    fn slugifies_mixed_case_and_hyphens() {
-        assert_eq!(validate_segment("Task-Lifecycle Test").unwrap(), "task_lifecycle_test");
-        assert_eq!(validate_segment("InspectAuth").unwrap(), "inspectauth");
-        assert_eq!(validate_segment("foo__bar").unwrap(), "foo_bar");
-        assert_eq!(validate_segment("foo-").unwrap(), "foo");
-    }
-
-    #[test]
-    fn rejects_segment_with_no_alphanumerics() {
-        assert!(validate_segment("---").is_err());
-        assert!(validate_segment("").is_err());
-    }
-
-    #[test]
-    fn passes_through_already_valid_segment() {
-        assert_eq!(validate_segment("foo_bar").unwrap(), "foo_bar");
-    }
-
-    #[test]
-    fn normalize_relative_path_handles_multiple_segments() {
-        assert_eq!(
-            normalize_relative_path("Auth Flow/Stage 1").unwrap(),
-            "auth_flow/stage_1"
-        );
-    }
-}
-
 fn is_same_or_descendant(path: &str, prefix: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
 }
@@ -1315,4 +1378,39 @@ pub fn truncate_snapshot_to_recent_turns(
         .collect::<Vec<_>>();
     snapshot.replace_projection(&kept_messages, &kept_tool_calls);
     snapshot
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_relative_path, validate_segment};
+
+    #[test]
+    fn slugifies_mixed_case_and_hyphens() {
+        assert_eq!(
+            validate_segment("Task-Lifecycle Test").unwrap(),
+            "task_lifecycle_test"
+        );
+        assert_eq!(validate_segment("InspectAuth").unwrap(), "inspectauth");
+        assert_eq!(validate_segment("foo__bar").unwrap(), "foo_bar");
+        assert_eq!(validate_segment("foo-").unwrap(), "foo");
+    }
+
+    #[test]
+    fn rejects_segment_with_no_alphanumerics() {
+        assert!(validate_segment("---").is_err());
+        assert!(validate_segment("").is_err());
+    }
+
+    #[test]
+    fn passes_through_already_valid_segment() {
+        assert_eq!(validate_segment("foo_bar").unwrap(), "foo_bar");
+    }
+
+    #[test]
+    fn normalize_relative_path_handles_multiple_segments() {
+        assert_eq!(
+            normalize_relative_path("Auth Flow/Stage 1").unwrap(),
+            "auth_flow/stage_1"
+        );
+    }
 }

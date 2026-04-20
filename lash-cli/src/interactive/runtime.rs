@@ -29,8 +29,9 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 });
             }
             InputItem::FileRef { path } => {
@@ -42,8 +43,9 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 });
             }
             InputItem::DirRef { path } => {
@@ -55,8 +57,9 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 });
             }
             InputItem::ImageRef { id } => {
@@ -79,8 +82,9 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 });
             }
         }
@@ -503,6 +507,7 @@ mod tests {
                 }],
             }),
             mode: Some(RunMode::Normal),
+            rlm_termination_override: None,
         };
         let graph = pending_turn_graph(&SessionGraph::default(), &turn_input);
 

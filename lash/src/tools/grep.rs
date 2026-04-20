@@ -73,37 +73,7 @@ impl Grep {
 
     fn shared_backend(&self) -> Result<Arc<GrepBackend>, String> {
         let base_path = self.base_path.as_ref().map_err(Clone::clone)?;
-        let cache_key = std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.clone());
-        let cache = shared_backend_cache();
-        let mut cache = cache
-            .lock()
-            .map_err(|_| "failed to lock shared grep backend cache".to_string())?;
-        if let Some(existing) = cache.get(&cache_key) {
-            return existing.clone();
-        }
-        let backend = self.initialize_backend(base_path).map(Arc::new);
-        cache.insert(cache_key, backend.clone());
-        backend
-    }
-
-    fn initialize_backend(&self, base_path: &Path) -> Result<GrepBackend, String> {
-        let picker = SharedPicker::default();
-        FilePicker::new_with_shared_state(
-            picker.clone(),
-            SharedFrecency::default(),
-            FilePickerOptions {
-                base_path: base_path.to_string_lossy().into_owned(),
-                // Keep the indexed backend lightweight until it is actually
-                // used. Long-lived sessions should not pay for watcher or mmap
-                // state just because the grep tool exists in the catalog.
-                warmup_mmap_cache: false,
-                mode: FFFMode::Ai,
-                cache_budget: None,
-                watch: false,
-            },
-        )
-        .map_err(|err| format!("failed to initialize indexed grep backend: {err}"))?;
-        Ok(GrepBackend { picker })
+        backend_for_base(base_path)
     }
 
     fn lock_cursors(&self) -> Result<MutexGuard<'_, CursorStore>, ToolResult> {
@@ -269,7 +239,7 @@ impl ToolProvider for Grep {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "grep".into(),
-            description: "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. Filter files with constraints (e.g. '*.rs query', 'src/ query'). Use filename, directory (ending with /) or glob expressions to prefilter. See server instructions for constraint syntax and core rules.".into(),
+            description: "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. By default searches the current workspace. Pass `path` to point the search at a specific file or directory anywhere on the filesystem (including outside the workspace). Within a search root, use inline constraints in the query to further narrow (e.g. '*.rs query', 'src/ query'). See server instructions for constraint syntax and core rules.".into(),
             params: vec![
                 ToolParam {
                     name: "query".into(),
@@ -277,6 +247,13 @@ impl ToolProvider for Grep {
                     description: "Search text or regex query with optional constraint prefixes. Matches within single lines only; use one specific term, not multiple words.".into(),
                     default_value: None,
                     required: true,
+                },
+                ToolParam {
+                    name: "path".into(),
+                    r#type: "str".into(),
+                    description: "Optional file or directory to search within. Accepts absolute paths or paths relative to the workspace root. A directory becomes the search root; a file searches that one file only. When omitted, searches the current workspace.".into(),
+                    default_value: None,
+                    required: false,
                 },
                 ToolParam {
                     name: "maxResults".into(),
@@ -315,7 +292,7 @@ impl ToolProvider for Grep {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let query = match require_str(args, "query") {
+        let raw_query = match require_str(args, "query") {
             Ok(query) => query,
             Err(err) => return err,
         };
@@ -325,24 +302,140 @@ impl ToolProvider for Grep {
         };
         let cursor = args.get("cursor").and_then(|value| value.as_str());
         let output_mode = OutputMode::new(args.get("output_mode").and_then(|value| value.as_str()));
+        let path_arg = args
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
 
-        let backend = match self.ensure_ready() {
-            Ok(backend) => backend,
-            Err(err) => return err,
+        let default_base = self.base_path.as_ref().cloned().ok();
+
+        let (backend, query) = match path_arg {
+            Some(path) => match resolve_path_scope(default_base.as_deref(), path) {
+                Ok(scope) => {
+                    let backend = match backend_for_base(&scope.base_path) {
+                        Ok(backend) => backend,
+                        Err(err) => return ToolResult::err_fmt(format_args!("{err}")),
+                    };
+                    let query = match scope.file_constraint {
+                        Some(filename) => format!("{filename} {raw_query}"),
+                        None => raw_query.to_string(),
+                    };
+                    if !backend.picker.wait_for_scan(Duration::from_secs(30)) {
+                        return ToolResult::err_fmt(format_args!(
+                            "fff-search initial scan timed out for {}",
+                            scope.base_path.display()
+                        ));
+                    }
+                    (backend, query)
+                }
+                Err(err) => return err,
+            },
+            None => match self.ensure_ready() {
+                Ok(backend) => (backend, raw_query.to_string()),
+                Err(err) => return err,
+            },
         };
 
-        let grep_text = QueryParser::new(AiGrepConfig).parse(query).grep_text();
+        let grep_text = QueryParser::new(AiGrepConfig).parse(&query).grep_text();
         let mode = if has_regex_metacharacters(&grep_text) {
             GrepMode::Regex
         } else {
             GrepMode::PlainText
         };
 
-        match self.perform_grep(&backend, query, mode, max_results, cursor, output_mode) {
+        match self.perform_grep(&backend, &query, mode, max_results, cursor, output_mode) {
             Ok(text) => ToolResult::ok(json!(text)),
             Err(err) => err,
         }
     }
+}
+
+struct PathScope {
+    base_path: PathBuf,
+    file_constraint: Option<String>,
+}
+
+/// Resolve a user-supplied `path` into a search root and optional
+/// single-file filter. A directory becomes the search root directly; a
+/// file becomes its parent directory plus a `<filename>` constraint.
+/// Relative paths resolve against the workspace root when available
+/// and fall back to the current directory otherwise.
+fn resolve_path_scope(
+    default_base: Option<&Path>,
+    requested: &str,
+) -> Result<PathScope, ToolResult> {
+    let candidate = Path::new(requested);
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else if let Some(base) = default_base {
+        base.join(candidate)
+    } else {
+        std::env::current_dir()
+            .map_err(|err| {
+                ToolResult::err_fmt(format_args!("failed to resolve current directory: {err}"))
+            })?
+            .join(candidate)
+    };
+    let canonical = std::fs::canonicalize(&absolute).map_err(|err| {
+        ToolResult::err_fmt(format_args!(
+            "`path` {requested} does not exist or is not accessible: {err}"
+        ))
+    })?;
+    if canonical.is_dir() {
+        Ok(PathScope {
+            base_path: canonical,
+            file_constraint: None,
+        })
+    } else {
+        let filename = canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .ok_or_else(|| {
+                ToolResult::err_fmt(format_args!("`path` {requested} has no filename component"))
+            })?;
+        let parent = canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
+            ToolResult::err_fmt(format_args!("`path` {requested} has no parent directory"))
+        })?;
+        Ok(PathScope {
+            base_path: parent,
+            file_constraint: Some(filename),
+        })
+    }
+}
+
+/// Look up — or create — a shared fff-search backend rooted at
+/// `base_path`. Reuses the process-wide backend cache so repeat
+/// searches against the same path avoid the initial scan cost.
+fn backend_for_base(base_path: &Path) -> Result<Arc<GrepBackend>, String> {
+    let cache_key = std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
+    let cache = shared_backend_cache();
+    let mut cache = cache
+        .lock()
+        .map_err(|_| "failed to lock shared grep backend cache".to_string())?;
+    if let Some(existing) = cache.get(&cache_key) {
+        return existing.clone();
+    }
+    let backend = initialize_backend_at(base_path).map(Arc::new);
+    cache.insert(cache_key, backend.clone());
+    backend
+}
+
+fn initialize_backend_at(base_path: &Path) -> Result<GrepBackend, String> {
+    let picker = SharedPicker::default();
+    FilePicker::new_with_shared_state(
+        picker.clone(),
+        SharedFrecency::default(),
+        FilePickerOptions {
+            base_path: base_path.to_string_lossy().into_owned(),
+            warmup_mmap_cache: false,
+            mode: FFFMode::Ai,
+            cache_budget: None,
+            watch: false,
+        },
+    )
+    .map_err(|err| format!("failed to initialize indexed grep backend: {err}"))?;
+    Ok(GrepBackend { picker })
 }
 
 struct GrepBackend {
@@ -997,6 +1090,97 @@ mod tests {
         let result = tool.execute("grep", &json!({"query": "ctx"})).await;
         assert!(result.success);
         assert!(tool.backend.get().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_grep_path_scopes_search_to_subdirectory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("inner")).unwrap();
+        std::fs::write(dir.path().join("outer.txt"), "banana at root\n").unwrap();
+        std::fs::write(dir.path().join("inner/inner.txt"), "banana in inner\n").unwrap();
+
+        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let result = tool
+            .execute("grep", &json!({"query": "banana", "path": "inner"}))
+            .await;
+        assert!(result.success);
+        let text = result.result.as_str().unwrap_or("");
+        assert!(
+            text.contains("inner.txt"),
+            "expected inner.txt match, got {text:?}"
+        );
+        assert!(
+            !text.contains("outer.txt"),
+            "path scope should exclude outer.txt, got {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_path_constrains_search_to_single_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "banana\n").unwrap();
+        std::fs::write(dir.path().join("other.txt"), "banana\n").unwrap();
+
+        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let result = tool
+            .execute("grep", &json!({"query": "banana", "path": "notes.txt"}))
+            .await;
+        assert!(result.success);
+        let text = result.result.as_str().unwrap_or("");
+        assert!(
+            text.contains("notes.txt"),
+            "expected notes.txt match, got {text:?}"
+        );
+        assert!(
+            !text.contains("other.txt"),
+            "file path should exclude other.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_path_can_search_outside_workspace() {
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("external.txt"), "banana\n").unwrap();
+
+        let tool = Grep::with_base_path(workspace.path().to_path_buf());
+        let result = tool
+            .execute(
+                "grep",
+                &json!({
+                    "query": "banana",
+                    "path": outside.path().to_string_lossy(),
+                }),
+            )
+            .await;
+        assert!(
+            result.success,
+            "expected search outside workspace to succeed, got {:?}",
+            result.result
+        );
+        let text = result.result.as_str().unwrap_or("");
+        assert!(
+            text.contains("external.txt"),
+            "expected external.txt match, got {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_path_missing_returns_clear_error() {
+        let workspace = TempDir::new().unwrap();
+        let tool = Grep::with_base_path(workspace.path().to_path_buf());
+        let result = tool
+            .execute(
+                "grep",
+                &json!({"query": "banana", "path": "/nonexistent/totally/fake"}),
+            )
+            .await;
+        assert!(!result.success);
+        let message = result.result.as_str().unwrap_or("");
+        assert!(
+            message.contains("does not exist"),
+            "expected missing-path error, got {message:?}"
+        );
     }
 
     #[tokio::test]

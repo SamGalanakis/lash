@@ -1,3 +1,4 @@
+use crate::llm::adapters::anthropic::AnthropicAdapter;
 use crate::llm::adapters::codex_oauth::CodexOAuthAdapter;
 use crate::llm::adapters::google_cloudcode::GoogleCloudCodeAdapter;
 use crate::llm::adapters::openrouter::OpenAiGenericAdapter;
@@ -10,5 +11,6 @@ pub fn adapter_for(provider: &Provider) -> Box<dyn LlmTransport> {
         Provider::OpenAiGeneric { .. } => Box::new(OpenAiGenericAdapter::new(timeouts)),
         Provider::Codex { .. } => Box::new(CodexOAuthAdapter::new(timeouts)),
         Provider::GoogleOAuth { .. } => Box::new(GoogleCloudCodeAdapter::new(timeouts)),
+        Provider::Anthropic { .. } => Box::new(AnthropicAdapter::new(timeouts)),
     }
 }

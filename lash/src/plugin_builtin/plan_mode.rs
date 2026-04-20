@@ -502,7 +502,7 @@ impl PlanModeTools {
                         "Start in fresh context".to_string(),
                     ],
                 )
-                .with_markdown_panel("PLAN", &report.approval_content())
+                .with_markdown_panel("PLAN", report.approval_content())
                 .with_optional_note(),
             )
             .await

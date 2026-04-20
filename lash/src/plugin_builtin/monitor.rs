@@ -952,7 +952,7 @@ mod tests {
             .get("slow")
             .expect("seeded monitor entry");
         assert_eq!(entry.status.run_state, MonitorRunState::Failed);
-        assert_eq!(entry.status.armed, false);
+        assert!(!entry.status.armed);
         assert!(
             entry
                 .status

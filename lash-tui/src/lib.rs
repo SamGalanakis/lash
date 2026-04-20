@@ -6,6 +6,7 @@ mod prof;
 mod scroll;
 mod selection;
 mod table;
+mod table_wrap;
 
 pub use core::{
     Buffer, Color, Frame, Line, Modifier, Rect, ScreenCell, ScreenSnapshot, Span, Style, Terminal,

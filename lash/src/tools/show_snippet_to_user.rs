@@ -39,7 +39,7 @@ impl ToolProvider for ShowSnippetToUser {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "show_snippet_to_user".into(),
-            description: "Show a specific line range from a file as a framed snippet to the user. This is only for sharing a snippet with the user, not for your own viewing or model-context ingestion."
+            description: "Show a specific line range from a file as a framed snippet to the user. Only for sharing a snippet with the user — not for your own viewing or model-context ingestion. On success the tool returns `{ displayed: true, path, start_line, end_line, ... }`; that `displayed: true` flag is the confirmation that the snippet card was dispatched to the UI. There is no separate user-acknowledgement signal."
                 .into(),
             params: vec![
                 ToolParam::typed("path", "str"),
@@ -153,6 +153,7 @@ fn execute_show_snippet_to_user(
     let (render_mode, language) = classify_path(path, &content);
 
     ToolResult::ok(json!({
+        "displayed": true,
         "path": display_path,
         "start_line": start_line,
         "end_line": end_line,
@@ -257,6 +258,11 @@ mod tests {
             .await;
 
         assert!(result.success);
+        assert_eq!(
+            result.result["displayed"],
+            json!(true),
+            "tool must explicitly signal the snippet was dispatched to the UI"
+        );
         assert!(
             result.result["path"]
                 .as_str()

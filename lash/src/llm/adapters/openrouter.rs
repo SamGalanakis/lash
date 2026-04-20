@@ -9,8 +9,8 @@ use crate::llm::timeouts::{
 };
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmEventSender, LlmMessage, LlmOutputPart, LlmOutputSpec, LlmReplayChunk, LlmRequest,
-    LlmResponse, LlmRole, LlmStreamEvent, LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmContentBlock, LlmEventSender, LlmMessage, LlmOutputPart, LlmOutputSpec, LlmRequest,
+    LlmResponse, LlmRole, LlmStreamEvent, LlmUsage, ModelSelection,
 };
 use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
@@ -139,6 +139,12 @@ struct StreamingToolCall {
     id: String,
     name: String,
     arguments: String,
+    /// Serialized `reasoning_details` entry keyed to this tool call's
+    /// id. OpenRouter emits `{ type: "reasoning.encrypted", id, data }`
+    /// on a separate channel, which we must echo back as the
+    /// `reasoning_details` field on the assistant message to round-trip
+    /// the encrypted chain-of-thought.
+    signature: Option<String>,
 }
 
 /// Accumulator for reasoning summary text produced by providers that
@@ -190,6 +196,57 @@ impl ReasoningAccumulator {
     }
 }
 
+struct SseEventState<'a> {
+    full: &'a mut String,
+    retained_deltas: Option<&'a mut Vec<String>>,
+    usage: &'a mut LlmUsage,
+    prev_usage: &'a LlmUsage,
+    stream_events: Option<&'a LlmEventSender>,
+    tool_calls: Option<&'a mut Vec<StreamingToolCall>>,
+    provider_usage: Option<&'a mut Option<Value>>,
+    reasoning: Option<&'a mut ReasoningAccumulator>,
+}
+
+impl<'a> SseEventState<'a> {
+    fn new(full: &'a mut String, usage: &'a mut LlmUsage, prev_usage: &'a LlmUsage) -> Self {
+        Self {
+            full,
+            retained_deltas: None,
+            usage,
+            prev_usage,
+            stream_events: None,
+            tool_calls: None,
+            provider_usage: None,
+            reasoning: None,
+        }
+    }
+
+    fn with_retained_deltas_opt(mut self, retained_deltas: Option<&'a mut Vec<String>>) -> Self {
+        self.retained_deltas = retained_deltas;
+        self
+    }
+
+    fn with_stream_events(mut self, stream_events: Option<&'a LlmEventSender>) -> Self {
+        self.stream_events = stream_events;
+        self
+    }
+
+    fn with_tool_calls(mut self, tool_calls: &'a mut Vec<StreamingToolCall>) -> Self {
+        self.tool_calls = Some(tool_calls);
+        self
+    }
+
+    fn with_provider_usage(mut self, provider_usage: &'a mut Option<Value>) -> Self {
+        self.provider_usage = Some(provider_usage);
+        self
+    }
+
+    fn with_reasoning(mut self, reasoning: &'a mut ReasoningAccumulator) -> Self {
+        self.reasoning = Some(reasoning);
+        self
+    }
+}
+
 #[derive(Deserialize)]
 struct OpenAiCompatStreamEvent {
     #[serde(default)]
@@ -227,6 +284,14 @@ struct OpenAiCompatMessage {
     reasoning: Option<String>,
     #[serde(default)]
     reasoning_text: Option<String>,
+    /// OpenRouter-only channel that carries encrypted reasoning. Each
+    /// entry describes a discrete reasoning item (e.g. a Claude
+    /// thinking block or OpenAI reasoning blob); when `type` is
+    /// `reasoning.encrypted` and `id` is set, the `data` payload is the
+    /// opaque blob we must round-trip on the next turn so the model
+    /// accepts the previously-made tool call.
+    #[serde(default)]
+    reasoning_details: Vec<Value>,
 }
 
 impl OpenAiCompatMessage {
@@ -296,25 +361,6 @@ impl OpenAiGenericAdapter {
         }
     }
 
-    fn content_json_for_message(req: &LlmRequest, msg: &LlmMessage) -> Value {
-        match msg.kind.as_str() {
-            "image" => {
-                let idx = msg.image_idx.max(0) as usize;
-                if let Some(att) = req.attachments.get(idx) {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-                    let data_url = format!("data:{};base64,{}", att.mime, b64);
-                    json!([{
-                        "type": "image_url",
-                        "image_url": {"url": data_url}
-                    }])
-                } else {
-                    json!("[Image attached]")
-                }
-            }
-            _ => json!(msg.content),
-        }
-    }
-
     fn role_name(role: &LlmRole) -> &'static str {
         match role {
             LlmRole::User => "user",
@@ -323,142 +369,183 @@ impl OpenAiGenericAdapter {
         }
     }
 
-    /// Build a single content part for a message. Images become `image_url` objects;
-    /// text becomes a `{"type":"text","text":"..."}` object suitable for multipart arrays.
-    fn content_part_for_message(req: &LlmRequest, msg: &LlmMessage) -> Value {
-        match msg.kind.as_str() {
-            "image" => {
-                let idx = msg.image_idx.max(0) as usize;
-                if let Some(att) = req.attachments.get(idx) {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-                    let data_url = format!("data:{};base64,{}", att.mime, b64);
-                    json!({
-                        "type": "image_url",
-                        "image_url": {"url": data_url}
-                    })
-                } else {
-                    json!({"type": "text", "text": "[Image attached]"})
-                }
-            }
-            _ => json!({"type": "text", "text": msg.content}),
+    fn image_content_part(req: &LlmRequest, attachment_idx: usize) -> Value {
+        if let Some(att) = req.attachments.get(attachment_idx) {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+            let data_url = format!("data:{};base64,{}", att.mime, b64);
+            json!({
+                "type": "image_url",
+                "image_url": {"url": data_url}
+            })
+        } else {
+            json!({"type": "text", "text": "[Image attached]"})
         }
     }
 
     fn build_messages(&self, req: &LlmRequest) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
         let mut seen_first_system = false;
-        for chunk in coalesce_replay_messages(&req.messages) {
-            match chunk {
-                LlmReplayChunk::Message(msg) => {
-                    let role = if msg.kind == "tool_result" {
-                        "tool"
-                    } else if matches!(msg.role, LlmRole::System) {
-                        // The first system message is the system prompt;
-                        // subsequent system messages are runtime feedback
-                        // (execution output, errors) which must be sent as
-                        // "user" so the conversation can end with a user
-                        // message — required by providers like Claude via
-                        // OpenRouter that reject assistant-message prefill.
+
+        for msg in &req.messages {
+            // Split each lash message into:
+            //  - an optional assistant/user/system textual message (with
+            //    tool_calls attached for assistant turns), and
+            //  - zero or more standalone `tool` messages for each
+            //    ToolResult block (Chat Completions expects one tool
+            //    message per tool_result).
+            let mut text_parts: Vec<Value> = Vec::new();
+            let mut tool_calls: Vec<Value> = Vec::new();
+            let mut tool_results: Vec<Value> = Vec::new();
+            let mut reasoning_details: Vec<Value> = Vec::new();
+            for block in &msg.blocks {
+                match block {
+                    LlmContentBlock::Text(text) => {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        text_parts.push(json!({"type": "text", "text": sanitize_surrogates(text)}));
+                    }
+                    LlmContentBlock::Image { attachment_idx } => {
+                        text_parts.push(Self::image_content_part(req, *attachment_idx));
+                    }
+                    LlmContentBlock::ToolCall {
+                        call_id,
+                        tool_name,
+                        input_json,
+                        signature,
+                        ..
+                    } => {
+                        tool_calls.push(json!({
+                            "id": normalize_tool_call_id(call_id),
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": input_json,
+                            }
+                        }));
+                        // Re-attach the encrypted reasoning detail so the
+                        // upstream model (OR-routed Claude / GPT) accepts
+                        // the stored tool call on replay.
+                        if let Some(raw) = signature.as_deref()
+                            && let Ok(detail) = serde_json::from_str::<Value>(raw)
+                        {
+                            reasoning_details.push(detail);
+                        }
+                    }
+                    LlmContentBlock::ToolResult {
+                        call_id, content, ..
+                    } => {
+                        tool_results.push(json!({
+                            "role": "tool",
+                            "tool_call_id": normalize_tool_call_id(call_id),
+                            "content": sanitize_surrogates(content),
+                        }));
+                    }
+                    LlmContentBlock::Reasoning { .. } => {
+                        // Chat Completions has no canonical reasoning replay
+                        // channel. Drop the block.
+                    }
+                }
+            }
+
+            // Collapse a single-text content array back to a bare string,
+            // the common shape Chat Completions expects for plain turns.
+            let content_value: Option<Value> = if text_parts.is_empty() {
+                if !tool_calls.is_empty() {
+                    Some(json!(""))
+                } else {
+                    None
+                }
+            } else if text_parts.len() == 1
+                && text_parts[0].get("type").and_then(|v| v.as_str()) == Some("text")
+            {
+                Some(json!(
+                    text_parts[0]
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                ))
+            } else {
+                Some(Value::Array(text_parts))
+            };
+
+            if let Some(content) = content_value {
+                let role = match msg.role {
+                    LlmRole::System => {
+                        // The first system message is the real system
+                        // prompt; later system messages (runtime feedback)
+                        // become user turns so the conversation ends on a
+                        // user boundary — required by providers like
+                        // Claude via OpenRouter.
                         if seen_first_system {
                             "user"
                         } else {
                             seen_first_system = true;
                             "system"
                         }
-                    } else {
-                        Self::role_name(&msg.role)
-                    };
-
-                    // Merge consecutive user messages into a single multipart content
-                    // array so text + images land in one API message (required by
-                    // OpenAI-compatible vision APIs).
-                    if role == "user"
-                        && msg.kind != "tool_result"
-                        && let Some(prev) = out.last_mut()
-                        && prev.get("role").and_then(|r| r.as_str()) == Some("user")
-                        && prev.get("tool_call_id").is_none()
-                    {
-                        let part = Self::content_part_for_message(req, &msg);
-                        let content = &mut prev["content"];
-                        if content.is_array() {
-                            content.as_array_mut().unwrap().push(part);
-                        } else {
-                            // Previous message had a plain string content; promote
-                            // it to a multipart array.
-                            let prev_text =
-                                content.as_str().map(|s| s.to_string()).unwrap_or_default();
-                            *content = json!([
-                                {"type": "text", "text": prev_text},
-                                part,
-                            ]);
-                        }
-                        continue;
                     }
+                    _ => Self::role_name(&msg.role),
+                };
 
-                    let content = Self::content_json_for_message(req, &msg);
+                // Merge consecutive user-role turns into a single multipart
+                // content array (OpenAI-compatible vision APIs prefer one
+                // user message carrying all user content for the turn).
+                if role == "user"
+                    && let Some(prev) = out.last_mut()
+                    && prev.get("role").and_then(|r| r.as_str()) == Some("user")
+                    && prev.get("tool_call_id").is_none()
+                {
+                    let prev_content = prev["content"].clone();
+                    let mut merged = match prev_content {
+                        Value::Array(arr) => arr,
+                        Value::String(s) => vec![json!({"type": "text", "text": s})],
+                        _ => Vec::new(),
+                    };
+                    match content {
+                        Value::Array(arr) => merged.extend(arr),
+                        Value::String(s) => merged.push(json!({"type": "text", "text": s})),
+                        other => merged.push(other),
+                    }
+                    prev["content"] = Value::Array(merged);
+                } else {
                     let mut item = json!({
                         "role": role,
-                        "content": sanitize_surrogates(
-                            &content.as_str().map(String::from).unwrap_or_else(|| content.to_string()),
-                        ),
+                        "content": content,
                     });
-                    // Restore non-string content (arrays for images etc.)
-                    if !content.is_string() {
-                        item["content"] = content;
+                    if !tool_calls.is_empty() {
+                        item["tool_calls"] = Value::Array(tool_calls.clone());
                     }
-                    if role == "tool" {
-                        let raw_id = msg.tool_call_id.clone().unwrap_or_default();
-                        item["tool_call_id"] = json!(normalize_tool_call_id(&raw_id));
+                    if !reasoning_details.is_empty() {
+                        item["reasoning_details"] = Value::Array(reasoning_details.clone());
                     }
                     out.push(item);
                 }
-                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    let content_text = text.unwrap_or_default();
-                    // Skip empty assistant messages with no tool calls (some
-                    // providers reject these).
-                    if content_text.trim().is_empty() && tool_calls.is_empty() {
-                        continue;
-                    }
-                    let mut msg = json!({
-                        "role": "assistant",
-                        "content": sanitize_surrogates(&content_text),
-                    });
-                    if !tool_calls.is_empty() {
-                        msg["tool_calls"] = json!(
-                            tool_calls
-                                .into_iter()
-                                .map(|call| json!({
-                                    "id": normalize_tool_call_id(&call.call_id),
-                                    "type": "function",
-                                    "function": {
-                                        "name": call.tool_name,
-                                        "arguments": call.input_json,
-                                    }
-                                }))
-                                .collect::<Vec<_>>()
-                        );
-                    }
-                    out.push(msg);
+            } else if !tool_calls.is_empty() {
+                let mut item = json!({
+                    "role": Self::role_name(&msg.role),
+                    "content": "",
+                    "tool_calls": tool_calls,
+                });
+                if !reasoning_details.is_empty() {
+                    item["reasoning_details"] = Value::Array(reasoning_details);
                 }
-                LlmReplayChunk::ToolResults { results } => {
-                    out.extend(results.into_iter().map(|msg| {
-                        let raw_id = msg.tool_call_id.unwrap_or_default();
-                        json!({
-                            "role": "tool",
-                            "tool_call_id": normalize_tool_call_id(&raw_id),
-                            "content": sanitize_surrogates(&msg.content),
-                        })
-                    }));
-                }
+                out.push(item);
             }
+
+            out.extend(tool_results);
         }
+
         out
     }
 
     fn has_tool_history(messages: &[LlmMessage]) -> bool {
         messages.iter().any(|msg| {
-            msg.kind == "tool_result"
-                || (matches!(msg.role, LlmRole::Assistant) && msg.kind == "tool_call")
+            msg.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    LlmContentBlock::ToolCall { .. } | LlmContentBlock::ToolResult { .. }
+                )
+            })
         })
     }
 
@@ -820,30 +907,17 @@ impl OpenAiGenericAdapter {
         deltas: &mut Vec<String>,
         usage: &mut LlmUsage,
     ) -> Result<(), LlmTransportError> {
+        let prev_usage = LlmUsage::default();
         Self::process_sse_event_with_tools(
             raw,
-            full,
-            Some(deltas),
-            usage,
-            &LlmUsage::default(),
-            None,
-            None,
-            None,
-            None,
+            SseEventState::new(full, usage, &prev_usage).with_retained_deltas_opt(Some(deltas)),
         )?;
         Ok(())
     }
 
     fn process_sse_event_with_tools(
         raw: &str,
-        full: &mut String,
-        mut retained_deltas: Option<&mut Vec<String>>,
-        usage: &mut LlmUsage,
-        prev_usage: &LlmUsage,
-        stream_events: Option<&LlmEventSender>,
-        tool_calls: Option<&mut Vec<StreamingToolCall>>,
-        provider_usage: Option<&mut Option<Value>>,
-        mut reasoning: Option<&mut ReasoningAccumulator>,
+        mut state: SseEventState<'_>,
     ) -> Result<(), LlmTransportError> {
         let raw = raw.trim();
         if raw.is_empty() || raw == "[DONE]" {
@@ -867,18 +941,18 @@ impl OpenAiGenericAdapter {
                 || new_usage.cached_input_tokens > 0
                 || new_usage.reasoning_tokens > 0)
         {
-            *usage = new_usage;
+            *state.usage = new_usage;
         }
-        if let Some(dst) = provider_usage
+        if let Some(dst) = state.provider_usage.as_deref_mut()
             && let Some(raw_usage) = event.usage.clone()
         {
             *dst = Some(raw_usage);
         }
-        if let Some(tx) = stream_events
-            && usage != prev_usage
-            && usage != &LlmUsage::default()
+        if let Some(tx) = state.stream_events
+            && state.usage != state.prev_usage
+            && state.usage != &LlmUsage::default()
         {
-            tx.send(LlmStreamEvent::Usage(usage.clone()));
+            tx.send(LlmStreamEvent::Usage(state.usage.clone()));
         }
         for choice in &event.choices {
             // Reasoning arrives before text on providers that emit it;
@@ -887,8 +961,8 @@ impl OpenAiGenericAdapter {
                 && let Some(piece) = delta.reasoning_text()
             {
                 Self::handle_reasoning_piece(
-                    reasoning.as_deref_mut(),
-                    stream_events,
+                    state.reasoning.as_deref_mut(),
+                    state.stream_events,
                     piece,
                 );
             }
@@ -896,8 +970,8 @@ impl OpenAiGenericAdapter {
                 && let Some(piece) = message.reasoning_text()
             {
                 Self::handle_reasoning_piece(
-                    reasoning.as_deref_mut(),
-                    stream_events,
+                    state.reasoning.as_deref_mut(),
+                    state.stream_events,
                     piece,
                 );
             }
@@ -907,22 +981,33 @@ impl OpenAiGenericAdapter {
             {
                 // A content delta means we're no longer streaming reasoning;
                 // close the segment so later reasoning (if any) starts fresh.
-                if let Some(acc) = reasoning.as_deref_mut() {
+                if let Some(acc) = state.reasoning.as_deref_mut() {
                     acc.close_segment();
                 }
-                Self::process_stream_content(full, &mut retained_deltas, stream_events, content);
+                Self::process_stream_content(
+                    state.full,
+                    &mut state.retained_deltas,
+                    state.stream_events,
+                    content,
+                );
             }
             if let Some(message) = &choice.message
                 && let Some(content) = message.content.as_ref()
             {
-                if let Some(acc) = reasoning.as_deref_mut() {
+                if let Some(acc) = state.reasoning.as_deref_mut() {
                     acc.close_segment();
                 }
-                Self::process_stream_content(full, &mut retained_deltas, stream_events, content);
+                Self::process_stream_content(
+                    state.full,
+                    &mut state.retained_deltas,
+                    state.stream_events,
+                    content,
+                );
             }
         }
         // Accumulate streaming tool call deltas.
-        if let Some(tool_calls) = tool_calls {
+        if let Some(tool_calls) = state.tool_calls.as_mut() {
+            let tool_calls = &mut **tool_calls;
             for choice in &event.choices {
                 for tc in choice
                     .delta
@@ -933,7 +1018,7 @@ impl OpenAiGenericAdapter {
                     // Tool-call activity also ends any in-progress
                     // reasoning segment so the next reasoning burst is
                     // its own part.
-                    if let Some(acc) = reasoning.as_deref_mut() {
+                    if let Some(acc) = state.reasoning.as_deref_mut() {
                         acc.close_segment();
                     }
                     let index = tc.index.unwrap_or(0) as usize;
@@ -953,8 +1038,49 @@ impl OpenAiGenericAdapter {
                     }
                 }
             }
+            // OpenRouter emits encrypted reasoning alongside the
+            // assistant's visible output. Pair each `reasoning.encrypted`
+            // entry with the tool call whose id it references so we can
+            // replay it as `reasoning_details` on the next request.
+            for choice in &event.choices {
+                for details in choice
+                    .delta
+                    .as_ref()
+                    .map(|d| d.reasoning_details.as_slice())
+                    .into_iter()
+                    .chain(
+                        choice
+                            .message
+                            .as_ref()
+                            .map(|m| m.reasoning_details.as_slice()),
+                    )
+                {
+                    for detail in details {
+                        Self::attach_reasoning_detail(tool_calls, detail);
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Store an OpenRouter `reasoning_details` entry on its matching
+    /// tool call by id. The entry is kept as a full JSON string so we
+    /// can splat it back into the next request unchanged.
+    fn attach_reasoning_detail(tool_calls: &mut [StreamingToolCall], detail: &Value) {
+        let detail_type = detail.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if detail_type != "reasoning.encrypted" {
+            return;
+        }
+        let Some(id) = detail.get("id").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let Some(call) = tool_calls.iter_mut().find(|tc| tc.id == id) else {
+            return;
+        };
+        if let Ok(encoded) = serde_json::to_string(detail) {
+            call.signature = Some(encoded);
+        }
     }
 
     fn handle_reasoning_piece(
@@ -1039,9 +1165,11 @@ impl OpenAiGenericAdapter {
             {
                 parts.push(LlmOutputPart::Reasoning {
                     text: text.to_string(),
-                    id: String::new(),
-                    summary: Vec::new(),
+                    signature: None,
+                    redacted: false,
+                    item_id: None,
                     encrypted_content: None,
+                    summary: Vec::new(),
                 });
                 break;
             }
@@ -1091,7 +1219,8 @@ impl OpenAiGenericAdapter {
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                     tool_name: name.to_string(),
                     input_json: arguments,
-                    id: None,
+                    item_id: None,
+                    signature: None,
                 });
             }
         }
@@ -1280,14 +1409,12 @@ impl LlmTransport for OpenAiGenericAdapter {
                 let prev_usage = usage.clone();
                 Self::process_sse_event_with_tools(
                     &raw,
-                    &mut full,
-                    retained_deltas.as_mut(),
-                    &mut usage,
-                    &prev_usage,
-                    stream_events.as_ref(),
-                    Some(&mut streaming_tool_calls),
-                    Some(&mut provider_usage),
-                    Some(&mut reasoning_acc),
+                    SseEventState::new(&mut full, &mut usage, &prev_usage)
+                        .with_retained_deltas_opt(retained_deltas.as_mut())
+                        .with_stream_events(stream_events.as_ref())
+                        .with_tool_calls(&mut streaming_tool_calls)
+                        .with_provider_usage(&mut provider_usage)
+                        .with_reasoning(&mut reasoning_acc),
                 )?;
                 Ok(())
             },
@@ -1303,9 +1430,11 @@ impl LlmTransport for OpenAiGenericAdapter {
             if !text.is_empty() {
                 parts.push(LlmOutputPart::Reasoning {
                     text,
-                    id: String::new(),
-                    summary: Vec::new(),
+                    signature: None,
+                    redacted: false,
+                    item_id: None,
                     encrypted_content: None,
+                    summary: Vec::new(),
                 });
             }
         }
@@ -1318,7 +1447,8 @@ impl LlmTransport for OpenAiGenericAdapter {
                     call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
                     input_json: tc.arguments.clone(),
-                    id: None,
+                    item_id: None,
+                    signature: tc.signature.clone(),
                 });
             }
         }
@@ -1387,17 +1517,13 @@ mod tests {
         let mut deltas = Vec::new();
         let mut usage = LlmUsage::default();
         let mut provider_usage = None;
+        let prev_usage = LlmUsage::default();
 
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2},"cost":0.95,"cost_details":{"upstream_inference_cost":19}}}"#,
-            &mut full,
-            Some(&mut deltas),
-            &mut usage,
-            &LlmUsage::default(),
-            None,
-            None,
-            Some(&mut provider_usage),
-            None,
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_retained_deltas_opt(Some(&mut deltas))
+                .with_provider_usage(&mut provider_usage),
         )
         .unwrap();
 
@@ -1415,17 +1541,12 @@ mod tests {
         let mut full = String::new();
         let mut deltas = Vec::new();
         let mut usage = LlmUsage::default();
+        let prev_usage = LlmUsage::default();
 
         let err = OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"error":{"code":502,"message":"JSON error injected into SSE stream","metadata":{"error_type":"provider_unavailable"}}}"#,
-            &mut full,
-            Some(&mut deltas),
-            &mut usage,
-            &LlmUsage::default(),
-            None,
-            None,
-            None,
-            None,
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_retained_deltas_opt(Some(&mut deltas)),
         )
         .expect_err("stream error");
 
@@ -1439,18 +1560,14 @@ mod tests {
         let mut deltas = Vec::new();
         let mut usage = LlmUsage::default();
         let mut tool_calls = Vec::new();
+        let prev_usage = LlmUsage::default();
 
         // First SSE event: tool call start with id and name
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
-            &mut full,
-            Some(&mut deltas),
-            &mut usage,
-            &LlmUsage::default(),
-            None,
-            Some(&mut tool_calls),
-            None,
-            None,
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_retained_deltas_opt(Some(&mut deltas))
+                .with_tool_calls(&mut tool_calls),
         )
         .unwrap();
         assert_eq!(tool_calls.len(), 1);
@@ -1460,28 +1577,18 @@ mod tests {
         // Second SSE event: argument chunk
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}"#,
-            &mut full,
-            Some(&mut deltas),
-            &mut usage,
-            &LlmUsage::default(),
-            None,
-            Some(&mut tool_calls),
-            None,
-            None,
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_retained_deltas_opt(Some(&mut deltas))
+                .with_tool_calls(&mut tool_calls),
         )
         .unwrap();
 
         // Third SSE event: argument continuation
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.rs\"}"}}]}}]}"#,
-            &mut full,
-            Some(&mut deltas),
-            &mut usage,
-            &LlmUsage::default(),
-            None,
-            Some(&mut tool_calls),
-            None,
-            None,
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_retained_deltas_opt(Some(&mut deltas))
+                .with_tool_calls(&mut tool_calls),
         )
         .unwrap();
 
@@ -1501,17 +1608,11 @@ mod tests {
         let tx = crate::llm::types::LlmEventSender::new(move |event| {
             tx_events.lock().unwrap().push(event);
         });
+        let prev_usage = LlmUsage::default();
 
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"content":"Hello"}}]}"#,
-            &mut full,
-            None,
-            &mut usage,
-            &LlmUsage::default(),
-            Some(&tx),
-            None,
-            None,
-            None,
+            SseEventState::new(&mut full, &mut usage, &prev_usage).with_stream_events(Some(&tx)),
         )
         .unwrap();
 
@@ -1528,24 +1629,8 @@ mod tests {
     fn build_messages_preserve_system_and_user_order() {
         let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
         let req = req(vec![
-            LlmMessage {
-                role: LlmRole::System,
-                content: "sys".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: "history".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
+            LlmMessage::text(LlmRole::System, "sys"),
+            LlmMessage::text(LlmRole::User, "history"),
         ]);
 
         let messages = adapter.build_messages(&req);
@@ -1559,42 +1644,26 @@ mod tests {
     fn build_messages_uses_structured_replay_for_standard_mode() {
         let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
         let req = req(vec![
-            LlmMessage {
-                role: LlmRole::System,
-                content: "sys".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: "question".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::Assistant,
-                content: "{\"path\":\"README.md\"}".to_string(),
-                kind: "tool_call".to_string(),
-                image_idx: -1,
-                tool_call_id: Some("call_1".to_string()),
-                tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: "ok".to_string(),
-                kind: "tool_result".to_string(),
-                image_idx: -1,
-                tool_call_id: Some("call_1".to_string()),
-                tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
-            },
+            LlmMessage::text(LlmRole::System, "sys"),
+            LlmMessage::text(LlmRole::User, "question"),
+            LlmMessage::new(
+                LlmRole::Assistant,
+                vec![LlmContentBlock::ToolCall {
+                    call_id: "call_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    input_json: r#"{"path":"README.md"}"#.to_string(),
+                    item_id: None,
+                    signature: None,
+                }],
+            ),
+            LlmMessage::new(
+                LlmRole::User,
+                vec![LlmContentBlock::ToolResult {
+                    call_id: "call_1".to_string(),
+                    content: "ok".to_string(),
+                    tool_name: Some("read_file".to_string()),
+                }],
+            ),
         ]);
 
         let messages = adapter.build_messages(&req);
@@ -1617,24 +1686,8 @@ mod tests {
             options: crate::provider::ProviderOptions::default(),
         };
         let mut req = req(vec![
-            LlmMessage {
-                role: LlmRole::System,
-                content: "sys".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: "hi".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
+            LlmMessage::text(LlmRole::System, "sys"),
+            LlmMessage::text(LlmRole::User, "hi"),
         ]);
         req.model = "openai/gpt-5".to_string();
         req.tool_choice = crate::llm::types::LlmToolChoice::None;
@@ -1655,33 +1708,25 @@ mod tests {
             options: crate::provider::ProviderOptions::default(),
         };
         let req = req(vec![
-            LlmMessage {
-                role: LlmRole::User,
-                content: "question".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::Assistant,
-                content: "{\"path\":\"README.md\"}".to_string(),
-                kind: "tool_call".to_string(),
-                image_idx: -1,
-                tool_call_id: Some("call_1".to_string()),
-                tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: "done".to_string(),
-                kind: "tool_result".to_string(),
-                image_idx: -1,
-                tool_call_id: Some("call_1".to_string()),
-                tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
-            },
+            LlmMessage::text(LlmRole::User, "question"),
+            LlmMessage::new(
+                LlmRole::Assistant,
+                vec![LlmContentBlock::ToolCall {
+                    call_id: "call_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    input_json: r#"{"path":"README.md"}"#.to_string(),
+                    item_id: None,
+                    signature: None,
+                }],
+            ),
+            LlmMessage::new(
+                LlmRole::User,
+                vec![LlmContentBlock::ToolResult {
+                    call_id: "call_1".to_string(),
+                    content: "done".to_string(),
+                    tool_name: Some("read_file".to_string()),
+                }],
+            ),
         ]);
 
         let (body, _) = adapter
@@ -1700,24 +1745,8 @@ mod tests {
             options: crate::provider::ProviderOptions::default(),
         };
         let mut req = req(vec![
-            LlmMessage {
-                role: LlmRole::System,
-                content: "sys".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: "hi".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
+            LlmMessage::text(LlmRole::System, "sys"),
+            LlmMessage::text(LlmRole::User, "hi"),
         ]);
         req.model = "model".to_string();
         req.tool_choice = crate::llm::types::LlmToolChoice::None;
@@ -1737,15 +1766,7 @@ mod tests {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             options: crate::provider::ProviderOptions::default(),
         };
-        let mut req = req(vec![LlmMessage {
-            role: LlmRole::User,
-            content: "hi".to_string(),
-            kind: "text".to_string(),
-            image_idx: -1,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-        }]);
+        let mut req = req(vec![LlmMessage::text(LlmRole::User, "hi")]);
         req.model = "anthropic/claude-sonnet-4.6".to_string();
 
         let (body, _) = adapter
@@ -1768,24 +1789,8 @@ mod tests {
             options: crate::provider::ProviderOptions::default(),
         };
         let mut req = req(vec![
-            LlmMessage {
-                role: LlmRole::System,
-                content: "sys".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: "hi".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            },
+            LlmMessage::text(LlmRole::System, "sys"),
+            LlmMessage::text(LlmRole::User, "hi"),
         ]);
         req.model = "openai/gpt-5".to_string();
         req.tool_choice = crate::llm::types::LlmToolChoice::None;
@@ -1819,43 +1824,29 @@ mod tests {
         let tx = crate::llm::types::LlmEventSender::new(move |event| {
             tx_events.lock().unwrap().push(event);
         });
+        let prev_usage = LlmUsage::default();
 
         // Reasoning delta, then content delta — simulating a provider
         // that streams its chain-of-thought before the final answer.
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"reasoning_content":"Thinking about "}}]}"#,
-            &mut full,
-            None,
-            &mut usage,
-            &LlmUsage::default(),
-            Some(&tx),
-            None,
-            None,
-            Some(&mut reasoning),
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_stream_events(Some(&tx))
+                .with_reasoning(&mut reasoning),
         )
         .unwrap();
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"reasoning_content":"the answer."}}]}"#,
-            &mut full,
-            None,
-            &mut usage,
-            &LlmUsage::default(),
-            Some(&tx),
-            None,
-            None,
-            Some(&mut reasoning),
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_stream_events(Some(&tx))
+                .with_reasoning(&mut reasoning),
         )
         .unwrap();
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"content":"Hi."}}]}"#,
-            &mut full,
-            None,
-            &mut usage,
-            &LlmUsage::default(),
-            Some(&tx),
-            None,
-            None,
-            Some(&mut reasoning),
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_stream_events(Some(&tx))
+                .with_reasoning(&mut reasoning),
         )
         .unwrap();
 
@@ -1916,17 +1907,13 @@ mod tests {
             let tx = crate::llm::types::LlmEventSender::new(move |event| {
                 tx_events.lock().unwrap().push(event);
             });
+            let prev_usage = LlmUsage::default();
 
             OpenAiGenericAdapter::process_sse_event_with_tools(
                 payload,
-                &mut full,
-                None,
-                &mut usage,
-                &LlmUsage::default(),
-                Some(&tx),
-                None,
-                None,
-                Some(&mut reasoning),
+                SseEventState::new(&mut full, &mut usage, &prev_usage)
+                    .with_stream_events(Some(&tx))
+                    .with_reasoning(&mut reasoning),
             )
             .unwrap();
 
@@ -1954,17 +1941,13 @@ mod tests {
         let tx = crate::llm::types::LlmEventSender::new(move |event| {
             tx_events.lock().unwrap().push(event);
         });
+        let prev_usage = LlmUsage::default();
 
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"content":"just text"}}]}"#,
-            &mut full,
-            None,
-            &mut usage,
-            &LlmUsage::default(),
-            Some(&tx),
-            None,
-            None,
-            Some(&mut reasoning),
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_stream_events(Some(&tx))
+                .with_reasoning(&mut reasoning),
         )
         .unwrap();
 
@@ -1989,17 +1972,11 @@ mod tests {
         let mut full = String::new();
         let mut usage = LlmUsage::default();
         let mut reasoning = ReasoningAccumulator::default();
+        let prev_usage = LlmUsage::default();
 
         OpenAiGenericAdapter::process_sse_event_with_tools(
             r#"{"choices":[{"delta":{"reasoning":""}}]}"#,
-            &mut full,
-            None,
-            &mut usage,
-            &LlmUsage::default(),
-            None,
-            None,
-            None,
-            Some(&mut reasoning),
+            SseEventState::new(&mut full, &mut usage, &prev_usage).with_reasoning(&mut reasoning),
         )
         .unwrap();
 
@@ -2017,6 +1994,7 @@ mod tests {
         let mut full = String::new();
         let mut usage = LlmUsage::default();
         let mut reasoning = ReasoningAccumulator::default();
+        let prev_usage = LlmUsage::default();
 
         for payload in [
             r#"{"choices":[{"delta":{"reasoning":"first."}}]}"#,
@@ -2025,14 +2003,8 @@ mod tests {
         ] {
             OpenAiGenericAdapter::process_sse_event_with_tools(
                 payload,
-                &mut full,
-                None,
-                &mut usage,
-                &LlmUsage::default(),
-                None,
-                None,
-                None,
-                Some(&mut reasoning),
+                SseEventState::new(&mut full, &mut usage, &prev_usage)
+                    .with_reasoning(&mut reasoning),
             )
             .unwrap();
         }
@@ -2066,9 +2038,11 @@ mod tests {
             vec![
                 LlmOutputPart::Reasoning {
                     text: "pondering".to_string(),
-                    id: String::new(),
-                    summary: Vec::new(),
+                    signature: None,
+                    redacted: false,
+                    item_id: None,
                     encrypted_content: None,
+                    summary: Vec::new(),
                 },
                 LlmOutputPart::Text {
                     text: "answer".to_string(),
@@ -2113,7 +2087,10 @@ mod tests {
     fn clamp_reasoning_effort_chat_passes_through_standard_levels() {
         for effort in ["minimal", "low", "medium", "high"] {
             assert_eq!(
-                OpenAiGenericAdapter::clamp_reasoning_effort_chat("anthropic/claude-sonnet-4.6", effort),
+                OpenAiGenericAdapter::clamp_reasoning_effort_chat(
+                    "anthropic/claude-sonnet-4.6",
+                    effort
+                ),
                 effort,
             );
         }
@@ -2166,5 +2143,74 @@ mod tests {
             OpenAiGenericAdapter::clamp_reasoning_effort_chat("openai/gpt-5", "HIGH"),
             "high",
         );
+    }
+
+    // ─── OpenRouter reasoning_details round-trip ───
+
+    #[test]
+    fn stream_attaches_reasoning_encrypted_to_matching_tool_call() {
+        let mut full = String::new();
+        let mut usage = LlmUsage::default();
+        let mut tool_calls: Vec<StreamingToolCall> = Vec::new();
+        let prev_usage = LlmUsage::default();
+
+        // First: the tool call itself arrives.
+        OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"run","arguments":"{}"}}]}}]}"#,
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_tool_calls(&mut tool_calls),
+        )
+        .unwrap();
+        // Then: the reasoning_details entry keyed to the same id.
+        OpenAiGenericAdapter::process_sse_event_with_tools(
+            r#"{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","id":"call_x","data":"CIPHER=="}]}}]}"#,
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_tool_calls(&mut tool_calls),
+        )
+        .unwrap();
+
+        assert_eq!(tool_calls.len(), 1);
+        let encoded = tool_calls[0].signature.as_deref().expect("signature");
+        assert!(encoded.contains("CIPHER=="));
+        assert!(encoded.contains("reasoning.encrypted"));
+    }
+
+    #[test]
+    fn build_messages_replays_reasoning_details_on_assistant_turn() {
+        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
+        let detail = r#"{"type":"reasoning.encrypted","id":"call_x","data":"CIPHER=="}"#;
+        let req = req(vec![
+            LlmMessage::text(LlmRole::User, "hi"),
+            LlmMessage::new(
+                LlmRole::Assistant,
+                vec![LlmContentBlock::ToolCall {
+                    call_id: "call_x".to_string(),
+                    tool_name: "run".to_string(),
+                    input_json: "{}".to_string(),
+                    item_id: None,
+                    signature: Some(detail.to_string()),
+                }],
+            ),
+            LlmMessage::new(
+                LlmRole::User,
+                vec![LlmContentBlock::ToolResult {
+                    call_id: "call_x".to_string(),
+                    content: "ok".to_string(),
+                    tool_name: None,
+                }],
+            ),
+        ]);
+        let messages = adapter.build_messages(&req);
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant turn");
+        let details = assistant["reasoning_details"]
+            .as_array()
+            .expect("reasoning_details array present");
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["type"], "reasoning.encrypted");
+        assert_eq!(details[0]["id"], "call_x");
+        assert_eq!(details[0]["data"], "CIPHER==");
     }
 }

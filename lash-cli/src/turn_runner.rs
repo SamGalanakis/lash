@@ -24,6 +24,7 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
         image_blobs,
         user_input: Some(turn.input_provenance.clone()),
         mode: Some(RunMode::Normal),
+        rlm_termination_override: None,
     }
 }
 
@@ -46,8 +47,9 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 });
             }
             InputItem::FileRef { path } => {
@@ -59,8 +61,9 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 });
             }
             InputItem::DirRef { path } => {
@@ -72,8 +75,9 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 });
             }
             InputItem::ImageRef { id } => {
@@ -96,8 +100,9 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 });
             }
         }
@@ -112,6 +117,7 @@ fn turn_input_message(turn_input: &TurnInput) -> Message {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         });
@@ -254,8 +260,9 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -298,7 +305,7 @@ mod tests {
                 configured_model: "gpt-5.4-mini".into(),
                 context_window: 0,
                 execution_mode: ExecutionMode::Rlm,
-                context_approach: ContextApproach::RollingHistory(RollingHistoryConfig::default()),
+                context_approach: ContextApproach::RollingHistory(RollingHistoryConfig),
                 model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),

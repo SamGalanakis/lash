@@ -20,7 +20,6 @@ mod render;
 mod repo_status;
 mod resume;
 mod resume_snapshot;
-mod rlm_stream_mask;
 mod runtime_perf;
 mod scratch_tui;
 mod session_log;

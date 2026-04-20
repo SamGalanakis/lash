@@ -11,7 +11,8 @@ pub mod turn;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use mode::{
-    ModeBuildInput, ModeConfig, ModePreamble, RlmDriver, StandardDriver, build_mode_preamble,
+    ModeBuildInput, ModeConfig, ModePreamble, append_assistant_text_part,
+    normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
 };
 pub use plugin::{
     CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, UserInputProvenance,
@@ -52,6 +53,19 @@ pub enum ExecutionMode {
 pub fn execution_mode_supported(mode: ExecutionMode) -> bool {
     match mode {
         ExecutionMode::Rlm | ExecutionMode::Standard => true,
+    }
+}
+
+impl ExecutionMode {
+    /// Stable string id used by mode plugins to claim the
+    /// `ModeProtocolDriverPlugin` singleton slot. A plugin returning
+    /// `"rlm"` from its `mode_id()` handles sessions whose
+    /// `ExecutionMode` is `Rlm`, and so on.
+    pub const fn plugin_id(self) -> &'static str {
+        match self {
+            Self::Rlm => "rlm",
+            Self::Standard => "standard",
+        }
     }
 }
 

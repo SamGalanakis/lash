@@ -1860,6 +1860,8 @@ dependencies = [
  "lash-autoresearch",
  "lash-default-tools",
  "lash-export",
+ "lash-mode-rlm",
+ "lash-mode-standard",
  "lash-subagents",
  "lash-tui",
  "lash-ui",
@@ -1885,7 +1887,6 @@ name = "lash-default-tools"
 version = "0.2.61"
 dependencies = [
  "lash",
- "serde_json",
 ]
 
 [[package]]
@@ -1896,6 +1897,34 @@ dependencies = [
  "clap",
  "lash",
  "serde_json",
+]
+
+[[package]]
+name = "lash-mode-rlm"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "lash",
+ "lash-mode-standard",
+ "lash-sansio",
+ "lashlang",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lash-mode-standard"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "lash",
+ "lash-sansio",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1952,6 +1981,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "smallvec",
  "thiserror 2.0.18",
 ]
 

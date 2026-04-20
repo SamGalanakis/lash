@@ -1,4 +1,4 @@
-use crate::llm::types::{LlmAttachment, LlmMessage, LlmRole};
+use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole};
 use crate::plugin::UserInputProvenance;
 use base64::Engine;
 use std::collections::HashSet;
@@ -53,6 +53,13 @@ pub struct Part {
     /// providers that don't surface a distinct item-id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_item_id: Option<String>,
+    /// Opaque signature or reasoning payload attached to a `ToolCall`
+    /// part. Gemini puts `thoughtSignature` here — required on every
+    /// function_call when Gemini 3 thinking mode is active. OpenRouter
+    /// stores a JSON-encoded `reasoning_details` entry so the Claude/
+    /// GPT variant routed through OR can round-trip its encrypted CoT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_signature: Option<String>,
     pub prune_state: PruneState,
     /// Populated only for `PartKind::Reasoning` parts. Carries the raw Codex
     /// reasoning-item fields (`id`, `summary[]`, `encrypted_content`) so the
@@ -615,15 +622,7 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
     );
 
     RenderedPrompt {
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: text,
-            kind: "text".to_string(),
-            image_idx: -1,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-        }],
+        messages: vec![LlmMessage::text(LlmRole::User, text)],
         attachments,
     }
 }
@@ -640,93 +639,76 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
 }
 
 fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
-    let mut attachment_count = 0usize;
-    let mut message_count = 0usize;
     for msg in msgs {
-        for part in &msg.parts {
-            message_count += 1;
-            if matches!(msg.role, MessageRole::User)
-                && matches!(part.kind, PartKind::Image)
-                && part.attachment.is_some()
-            {
-                attachment_count += 1;
-            }
-        }
-    }
-    rendered.attachments.reserve(attachment_count);
-    rendered.messages.reserve(message_count);
-
-    for msg in msgs {
+        let mut blocks: Vec<LlmContentBlock> = Vec::new();
         for part in &msg.parts {
             match part.kind {
                 PartKind::Reasoning => {
-                    // Only forward reasoning items that carry a payload the
-                    // adapter can actually re-emit. Parts without
-                    // `encrypted_content` are display-only (e.g. partial
-                    // streaming summaries that arrived before the item's
-                    // `output_item.done` event) and must not be sent back.
+                    // Reasoning parts carry two distinct replay payloads:
+                    //  - Codex: `reasoning_meta.encrypted_content` (opaque
+                    //    CoT blob) paired with `reasoning_meta.id` and
+                    //    `summary[*].text` entries.
+                    //  - Anthropic: `reasoning_meta.encrypted_content` is
+                    //    reused to carry the `thinking` signature (base64).
+                    //    The flat signature lives there because lash doesn't
+                    //    need to distinguish between the two until the
+                    //    adapter picks it up.
                     //
-                    // Adapters that don't understand this kind (non-Codex)
-                    // drop the message silently — see
-                    // `google_cloudcode.rs` / `openrouter.rs` skip logic.
+                    // Parts without a signature/encrypted_content are
+                    // display-only (partial streaming summaries before the
+                    // server's `output_item.done`) and MUST NOT be replayed.
                     let Some(meta) = part.reasoning_meta.as_ref() else {
                         continue;
                     };
-                    if meta.encrypted_content.is_none() {
+                    let Some(blob) = meta.encrypted_content.clone() else {
                         continue;
-                    }
-                    let payload = serde_json::to_string(meta).unwrap_or_default();
-                    if payload.is_empty() {
-                        continue;
-                    }
-                    rendered.messages.push(LlmMessage {
-                        role: LlmRole::Assistant,
-                        content: payload,
-                        kind: "reasoning".to_string(),
-                        image_idx: -1,
-                        tool_call_id: None,
-                        tool_name: None,
-                        tool_item_id: None,
+                    };
+                    blocks.push(LlmContentBlock::Reasoning {
+                        text: part.content.clone(),
+                        // lash persists one opaque string per reasoning
+                        // item. Adapters read the one they understand:
+                        // Codex reads `encrypted_content`, Anthropic reads
+                        // `signature`. Keep both fields populated with the
+                        // same payload so either adapter works without a
+                        // round-trip discriminator.
+                        signature: Some(blob.clone()),
+                        redacted: false,
+                        item_id: if meta.id.is_empty() {
+                            None
+                        } else {
+                            Some(meta.id.clone())
+                        },
+                        encrypted_content: Some(blob),
+                        summary: meta.summary.clone(),
                     });
                 }
                 PartKind::ToolCall => {
-                    rendered.messages.push(LlmMessage {
-                        role: LlmRole::Assistant,
-                        content: part.content.clone(),
-                        kind: "tool_call".to_string(),
-                        image_idx: -1,
-                        tool_call_id: part.tool_call_id.clone(),
-                        tool_name: part.tool_name.clone(),
-                        tool_item_id: part.tool_item_id.clone(),
+                    let call_id = part.tool_call_id.clone().unwrap_or_default();
+                    let tool_name = part.tool_name.clone().unwrap_or_default();
+                    blocks.push(LlmContentBlock::ToolCall {
+                        call_id,
+                        tool_name,
+                        input_json: part.content.clone(),
+                        item_id: part.tool_item_id.clone(),
+                        signature: part.tool_signature.clone(),
                     });
                 }
                 PartKind::ToolResult => {
                     let text = part.render();
-                    rendered.messages.push(LlmMessage {
-                        role: llm_role_for_message(msg.role),
+                    let call_id = part.tool_call_id.clone().unwrap_or_default();
+                    blocks.push(LlmContentBlock::ToolResult {
+                        call_id,
                         content: text,
-                        kind: "tool_result".to_string(),
-                        image_idx: -1,
-                        tool_call_id: part.tool_call_id.clone(),
                         tool_name: part.tool_name.clone(),
-                        tool_item_id: None,
                     });
                 }
                 _ => {
                     if let Some(attachment) = attachment_from_part(part)
                         && matches!(msg.role, MessageRole::User)
                     {
-                        let image_idx = rendered.attachments.len();
+                        let attachment_idx = rendered.attachments.len();
                         rendered.attachments.push(attachment);
-                        rendered.messages.push(LlmMessage {
-                            role: LlmRole::User,
-                            content: String::new(),
-                            kind: "image".to_string(),
-                            image_idx: image_idx as i64,
-                            tool_call_id: None,
-                            tool_name: None,
-                            tool_item_id: None,
-                        });
+                        blocks.push(LlmContentBlock::Image { attachment_idx });
                         continue;
                     }
 
@@ -739,18 +721,16 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         text = format!("Runtime note:\n{text}");
                     }
 
-                    rendered.messages.push(LlmMessage {
-                        role: llm_role_for_message(msg.role),
-                        content: text,
-                        kind: "text".to_string(),
-                        image_idx: -1,
-                        tool_call_id: None,
-                        tool_name: None,
-                        tool_item_id: None,
-                    });
+                    blocks.push(LlmContentBlock::Text(text));
                 }
             }
         }
+        if blocks.is_empty() {
+            continue;
+        }
+        rendered
+            .messages
+            .push(LlmMessage::new(llm_role_for_message(msg.role), blocks));
     }
 }
 
@@ -775,6 +755,7 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         }
@@ -793,6 +774,7 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         }
@@ -825,7 +807,7 @@ mod tests {
         ];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = &rendered.messages[0].content;
+        let text = block_text(&rendered.messages[0], 0);
 
         assert!(text.contains("=== Turn 1 ===\nUser:\nfirst"));
         assert!(text.contains("Assistant (Lash, continuing this transcript):\nreply one"));
@@ -862,6 +844,14 @@ mod tests {
         assert!(message.user_input_provenance().is_some());
     }
 
+    fn block_text(msg: &LlmMessage, idx: usize) -> &str {
+        match msg.blocks.get(idx) {
+            Some(LlmContentBlock::Text(text)) => text.as_str(),
+            Some(other) => panic!("expected Text block, got {other:?}"),
+            None => panic!("missing block at index {idx}"),
+        }
+    }
+
     #[test]
     fn render_prompt_repl_preserves_message_boundaries() {
         let msgs = vec![
@@ -892,12 +882,11 @@ mod tests {
         ];
 
         let rendered = render_prompt(&msgs);
-        assert_eq!(rendered.messages.len(), 4);
-        assert_eq!(rendered.messages[0].content, "first");
-        assert!(rendered.messages[1].content.contains("reply one"));
-        assert_eq!(rendered.messages[2].content, "x = 1");
-        assert_eq!(rendered.messages[2].kind, "text");
-        assert_eq!(rendered.messages[3].content, "second");
+        assert_eq!(rendered.messages.len(), 3);
+        assert_eq!(block_text(&rendered.messages[0], 0), "first");
+        assert!(block_text(&rendered.messages[1], 0).contains("reply one"));
+        assert_eq!(block_text(&rendered.messages[1], 1), "x = 1");
+        assert_eq!(block_text(&rendered.messages[2], 0), "second");
     }
 
     #[test]
@@ -928,8 +917,9 @@ mod tests {
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -945,8 +935,9 @@ mod tests {
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -954,15 +945,28 @@ mod tests {
         ];
 
         let rendered = render_structured_prompt(&msgs);
-        assert_eq!(rendered.messages.len(), 5);
+        assert_eq!(rendered.messages.len(), 4);
         assert_eq!(rendered.messages[0].role, LlmRole::System);
-        assert_eq!(rendered.messages[0].content, "Runtime note:\nnote");
-        assert_eq!(rendered.messages[1].kind, "text");
-        assert_eq!(rendered.messages[2].kind, "image");
-        assert_eq!(rendered.messages[2].image_idx, 0);
+        assert_eq!(block_text(&rendered.messages[0], 0), "Runtime note:\nnote");
+        // User message has text + image blocks bundled together.
+        assert_eq!(rendered.messages[1].role, LlmRole::User);
+        assert!(matches!(
+            rendered.messages[1].blocks[0],
+            LlmContentBlock::Text(_)
+        ));
+        assert!(matches!(
+            rendered.messages[1].blocks[1],
+            LlmContentBlock::Image { attachment_idx: 0 }
+        ));
         assert_eq!(rendered.attachments.len(), 1);
-        assert_eq!(rendered.messages[3].kind, "tool_call");
-        assert_eq!(rendered.messages[4].kind, "tool_result");
+        assert!(matches!(
+            rendered.messages[2].blocks[0],
+            LlmContentBlock::ToolCall { .. }
+        ));
+        assert!(matches!(
+            rendered.messages[3].blocks[0],
+            LlmContentBlock::ToolResult { .. }
+        ));
     }
 
     #[test]
@@ -979,8 +983,9 @@ mod tests {
                     tool_call_id: Some("ask_1".to_string()),
                     tool_name: Some("ask".to_string()),
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -996,8 +1001,9 @@ mod tests {
                     tool_call_id: Some("ask_1".to_string()),
                     tool_name: Some("ask".to_string()),
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -1006,10 +1012,24 @@ mod tests {
 
         let rendered = render_structured_prompt(&msgs);
         assert_eq!(rendered.messages.len(), 2);
-        assert_eq!(rendered.messages[0].kind, "tool_call");
-        assert_eq!(rendered.messages[1].kind, "tool_result");
-        assert_eq!(rendered.messages[1].tool_call_id.as_deref(), Some("ask_1"));
-        assert!(rendered.messages[1].content.is_empty());
+        match &rendered.messages[0].blocks[0] {
+            LlmContentBlock::ToolCall {
+                call_id, tool_name, ..
+            } => {
+                assert_eq!(call_id, "ask_1");
+                assert_eq!(tool_name, "ask");
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        match &rendered.messages[1].blocks[0] {
+            LlmContentBlock::ToolResult {
+                call_id, content, ..
+            } => {
+                assert_eq!(call_id, "ask_1");
+                assert!(content.is_empty());
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1023,7 +1043,7 @@ mod tests {
         }];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = &rendered.messages[0].content;
+        let text = block_text(&rendered.messages[0], 0);
         assert!(text.contains("[Image attached]"));
         assert_eq!(rendered.attachments.len(), 1);
     }
@@ -1055,7 +1075,7 @@ mod tests {
         ];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = &rendered.messages[0].content;
+        let text = block_text(&rendered.messages[0], 0);
 
         assert!(text.contains("=== Turn 2 ===\nUser:\nsecond"));
         assert!(!text.contains("=== Turn 2 ===\nUser:\nsecond\n\nAssistant (Lash, continuing this transcript):\n[No assistant content recorded]"));
@@ -1082,8 +1102,9 @@ mod tests {
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("exec_command".to_string()),
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -1091,7 +1112,7 @@ mod tests {
         ];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = &rendered.messages[0].content;
+        let text = block_text(&rendered.messages[0], 0);
 
         assert!(text.contains(r#"exec_command({"cmd":"date"})"#));
     }
@@ -1107,7 +1128,7 @@ mod tests {
         }];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = &rendered.messages[0].content;
+        let text = block_text(&rendered.messages[0], 0);
         assert!(!text.contains("Runtime Notes:"));
     }
 
@@ -1125,8 +1146,9 @@ mod tests {
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -1142,8 +1164,9 @@ mod tests {
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -1163,6 +1186,7 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         };
@@ -1185,30 +1209,30 @@ mod tests {
         let deserialized: Vec<Message> =
             serde_json::from_str(&serialized).expect("deserialize messages");
         assert_eq!(deserialized[0].parts.len(), 2);
-        assert!(matches!(
-            deserialized[0].parts[0].kind,
-            PartKind::Reasoning
-        ));
+        assert!(matches!(deserialized[0].parts[0].kind, PartKind::Reasoning));
         assert_eq!(
             deserialized[0].parts[0].content,
             "Thinking about how to answer."
         );
 
         // But the rendered LLM prompt must NOT include the reasoning
-        // content in any assistant message — that's the safety property
-        // for the next-turn re-feed path.
+        // content in any assistant TEXT block — reasoning travels as its
+        // own block kind so adapters that don't understand it can drop
+        // without corrupting the visible transcript.
         let rendered = render_structured_prompt(&msgs);
         assert_eq!(rendered.messages.len(), 1);
         assert_eq!(rendered.messages[0].role, LlmRole::Assistant);
-        assert_eq!(rendered.messages[0].content, "Here is the answer.");
-        assert!(
-            !rendered.messages[0]
-                .content
-                .contains("Thinking about how to answer.")
-        );
+        // Without `reasoning_meta`, the reasoning part is dropped entirely,
+        // so the assistant turn contains only the prose block.
+        assert_eq!(rendered.messages[0].blocks.len(), 1);
+        assert!(matches!(
+            &rendered.messages[0].blocks[0],
+            LlmContentBlock::Text(text) if text == "Here is the answer."
+        ));
 
-        // Even when the assistant message consists solely of reasoning,
-        // no assistant turn should be sent to the model.
+        // When the assistant message consists solely of a display-only
+        // reasoning part (no encrypted payload), no message is sent at
+        // all.
         let reasoning_only = vec![Message {
             id: "m2".to_string(),
             role: MessageRole::Assistant,
@@ -1233,8 +1257,9 @@ mod tests {
                 tool_call_id: Some("tc1".to_string()),
                 tool_name: Some("read_file".to_string()),
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -1259,6 +1284,7 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: Some(ReasoningMeta {
                 id: "rs_xyz".to_string(),
@@ -1278,8 +1304,7 @@ mod tests {
             origin: None,
         }];
         let serialized = serde_json::to_string(&msgs).expect("serialize");
-        let deserialized: Vec<Message> =
-            serde_json::from_str(&serialized).expect("deserialize");
+        let deserialized: Vec<Message> = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(deserialized[0].parts.len(), 1);
         let part = &deserialized[0].parts[0];
         assert!(matches!(part.kind, PartKind::Reasoning));
@@ -1324,9 +1349,8 @@ mod tests {
             "display-only reasoning must not reach the prompt"
         );
 
-        // With encrypted content, a single `kind=="reasoning"` message
-        // is emitted so the Codex adapter can re-emit it. The content
-        // is a JSON ReasoningMeta payload, not human-readable text.
+        // With encrypted content, a single Reasoning block is emitted
+        // that adapters can re-emit via their native reasoning channel.
         let replayable = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::Assistant,
@@ -1336,12 +1360,26 @@ mod tests {
         }];
         let rendered = render_structured_prompt(&replayable);
         assert_eq!(rendered.messages.len(), 1);
-        assert_eq!(rendered.messages[0].kind, "reasoning");
-        assert!(rendered.messages[0].content.contains("CIPHER=="));
+        match &rendered.messages[0].blocks[0] {
+            LlmContentBlock::Reasoning {
+                encrypted_content,
+                signature,
+                item_id,
+                summary,
+                ..
+            } => {
+                assert_eq!(encrypted_content.as_deref(), Some("CIPHER=="));
+                assert_eq!(signature.as_deref(), Some("CIPHER=="));
+                assert_eq!(item_id.as_deref(), Some("rs_xyz"));
+                assert_eq!(summary, &vec!["Thinking.".to_string()]);
+            }
+            other => panic!("expected Reasoning block, got {other:?}"),
+        }
         // Sanity: transcript rendering never includes reasoning text.
         let transcript = render_transcript_prompt(&replayable);
-        assert!(!transcript.messages[0].content.contains("Thinking."));
-        assert!(!transcript.messages[0].content.contains("CIPHER=="));
+        let transcript_text = block_text(&transcript.messages[0], 0);
+        assert!(!transcript_text.contains("Thinking."));
+        assert!(!transcript_text.contains("CIPHER=="));
     }
 
     #[test]

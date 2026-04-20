@@ -1,11 +1,12 @@
-use crate::ast::{BinaryOp, CallExpr, Expr, Program, Stmt, TypeExpr, UnaryOp};
+use crate::ast::{BinaryOp, CallExpr, Expr, ParallelBranches, Program, Stmt, TypeExpr, UnaryOp};
+use crate::lexer::Span;
 use compact_str::CompactString;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::ops::Index;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -361,7 +362,7 @@ pub trait ToolHost: Sync {
         Err(ToolHostError::new("async tool handles are unavailable"))
     }
 
-    fn observe(&self, _value: &Value) -> Result<(), ToolHostError> {
+    fn print(&self, _value: &Value) -> Result<(), ToolHostError> {
         Ok(())
     }
 }
@@ -396,6 +397,47 @@ pub enum RuntimeError {
     TypeError { message: String },
     #[error("{message}")]
     ValueError { message: String },
+}
+
+#[derive(Debug, Error, PartialEq)]
+#[error("{error}")]
+pub struct RuntimeFailure {
+    pub error: RuntimeError,
+    pub span: Option<Span>,
+}
+
+#[derive(Default)]
+pub struct ExecutionScratch {
+    stack: Vec<Value>,
+    iter_stack: Vec<IterState>,
+}
+
+impl ExecutionScratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+pub fn compile_source(source: &str) -> Result<CompiledProgram, crate::parser::ParseError> {
+    crate::parse(source).map(|program| compile_program(&program))
+}
+
+pub fn prewarm() {
+    for name in [
+        "ok",
+        "value",
+        "error",
+        "__handle__",
+        "handle",
+        LASH_TYPE_KEY,
+        "type",
+        "properties",
+        "required",
+        "items",
+        "enum",
+    ] {
+        intern_symbol(name);
+    }
 }
 
 pub fn execute_program<H: ToolHost>(
@@ -446,6 +488,67 @@ pub fn execute_compiled<H: ToolHost>(
     result
 }
 
+pub fn execute_compiled_with_scratch<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    scratch: &mut ExecutionScratch,
+) -> Result<ExecutionOutcome, RuntimeError> {
+    let mut vm = Vm::new_with_scratch(
+        &program.chunk,
+        SlotState::from_globals(
+            std::mem::take(&mut state.globals),
+            &program.chunk.slot_names,
+        ),
+        host,
+        false,
+        scratch,
+    );
+    let result = vm.run();
+    state.globals = vm.recycle_into_globals(scratch);
+    result
+}
+
+pub fn execute_compiled_traced<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+) -> Result<ExecutionOutcome, RuntimeFailure> {
+    let mut vm = Vm::new(
+        &program.chunk,
+        SlotState::from_globals(
+            std::mem::take(&mut state.globals),
+            &program.chunk.slot_names,
+        ),
+        host,
+        false,
+    );
+    let result = vm.run_traced();
+    state.globals = vm.into_globals();
+    result
+}
+
+pub fn execute_compiled_traced_with_scratch<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    scratch: &mut ExecutionScratch,
+) -> Result<ExecutionOutcome, RuntimeFailure> {
+    let mut vm = Vm::new_with_scratch(
+        &program.chunk,
+        SlotState::from_globals(
+            std::mem::take(&mut state.globals),
+            &program.chunk.slot_names,
+        ),
+        host,
+        false,
+        scratch,
+    );
+    let result = vm.run_traced();
+    state.globals = vm.recycle_into_globals(scratch);
+    result
+}
+
 pub fn profile_compiled<H: ToolHost>(
     program: &CompiledProgram,
     state: &mut State,
@@ -464,6 +567,30 @@ pub fn profile_compiled<H: ToolHost>(
     let result = vm.run();
     let mut profile = vm.take_profile();
     state.globals = vm.into_globals();
+    profile.compile_stats = program.compile_stats;
+    result.map(|outcome| (outcome, profile))
+}
+
+pub fn profile_compiled_with_scratch<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    scratch: &mut ExecutionScratch,
+) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
+    let mut vm = Vm::new_with_scratch(
+        &program.chunk,
+        SlotState::from_globals(
+            std::mem::take(&mut state.globals),
+            &program.chunk.slot_names,
+        ),
+        host,
+        false,
+        scratch,
+    );
+    vm.enable_profile();
+    let result = vm.run();
+    let mut profile = vm.take_profile();
+    state.globals = vm.recycle_into_globals(scratch);
     profile.compile_stats = program.compile_stats;
     result.map(|outcome| (outcome, profile))
 }
@@ -543,18 +670,31 @@ impl ProfileStat {
 #[derive(Clone)]
 struct Chunk {
     code: Vec<Instruction>,
+    spans: Vec<Option<Span>>,
     constants: Vec<Value>,
     names: Vec<Name>,
     slot_names: Vec<String>,
     key_lists: Vec<Box<[usize]>>,
     parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
+    named_parallel_call_sets: Vec<Box<[NamedParallelCallBranch]>>,
+    pure_parallel_sets: Vec<Box<[PureExpr]>>,
+    pure_named_parallel_sets: Vec<Box<[(usize, PureExpr)]>>,
     branch_sets: Vec<Box<[Chunk]>>,
+    named_branch_sets: Vec<Box<[NamedBranchChunk]>>,
 }
 
 #[derive(Clone)]
 struct Name {
     symbol: Symbol,
     text: Arc<str>,
+}
+
+fn transient_name(name: &str) -> Name {
+    let symbol = intern_symbol(name);
+    Name {
+        symbol,
+        text: symbol_name(symbol),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -564,8 +704,10 @@ enum Instruction {
     StoreName(usize),
     BuildList(usize),
     BuildRecord(usize),
+    LoadField { slot: usize, field: usize },
     Field(usize),
     Index,
+    ResultUnwrap,
     Unary(UnaryOp),
     Binary(BinaryOp),
     ToBool,
@@ -573,22 +715,35 @@ enum Instruction {
     JumpIfFalse(usize),
     JumpIfTrue(usize),
     CallTool { name: usize, keys: usize },
+    CallToolUnwrap { name: usize, keys: usize },
     StartCallTool { name: usize, keys: usize },
     AwaitHandle,
+    AwaitHandleUnwrap,
     CancelHandle,
     CallBuiltin { builtin: Builtin, argc: usize },
+    Len,
+    Join,
+    Validate,
+    Push,
+    Range { argc: usize },
+    FormatLiteral { template: usize, argc: usize },
     AddAssign(usize),
     AppendAssign(usize),
-    Observe,
-    Finish,
+    Print,
+    Submit,
     Pop,
     BeginIter(usize),
     IterNext { jump_to: usize },
     EndIter,
     ParallelCalls(usize),
     ParallelCallsValue(usize),
+    ParallelNamedCallsValue(usize),
+    PureParallelValue(usize),
+    PureParallelNamedValue(usize),
     Parallel(usize),
     ParallelValue(usize),
+    ParallelNamed(usize),
+    ParallelNamedValue(usize),
     ResolveTypeRef(usize),
     WrapTypeLiteral,
 }
@@ -611,6 +766,9 @@ enum Builtin {
     ToFloat,
     JsonParse,
     Format,
+    Validate,
+    Range,
+    Push,
     Unknown(usize),
 }
 
@@ -622,31 +780,47 @@ impl Instruction {
             Instruction::StoreName(_) => InstructionProfileTag::StoreName,
             Instruction::BuildList(_) => InstructionProfileTag::BuildList,
             Instruction::BuildRecord(_) => InstructionProfileTag::BuildRecord,
-            Instruction::Field(_) => InstructionProfileTag::Field,
+            Instruction::LoadField { .. } | Instruction::Field(_) => InstructionProfileTag::Field,
             Instruction::Index => InstructionProfileTag::Index,
+            Instruction::ResultUnwrap => InstructionProfileTag::ResultUnwrap,
             Instruction::Unary(_) => InstructionProfileTag::Unary,
             Instruction::Binary(_) => InstructionProfileTag::Binary,
             Instruction::ToBool => InstructionProfileTag::ToBool,
             Instruction::Jump(_) => InstructionProfileTag::Jump,
             Instruction::JumpIfFalse(_) => InstructionProfileTag::JumpIfFalse,
             Instruction::JumpIfTrue(_) => InstructionProfileTag::JumpIfTrue,
-            Instruction::CallTool { .. } => InstructionProfileTag::CallTool,
+            Instruction::CallTool { .. } | Instruction::CallToolUnwrap { .. } => {
+                InstructionProfileTag::CallTool
+            }
             Instruction::StartCallTool { .. } => InstructionProfileTag::StartCallTool,
-            Instruction::AwaitHandle => InstructionProfileTag::AwaitHandle,
+            Instruction::AwaitHandle | Instruction::AwaitHandleUnwrap => {
+                InstructionProfileTag::AwaitHandle
+            }
             Instruction::CancelHandle => InstructionProfileTag::CancelHandle,
-            Instruction::CallBuiltin { .. } => InstructionProfileTag::CallBuiltin,
+            Instruction::CallBuiltin { .. }
+            | Instruction::Len
+            | Instruction::Join
+            | Instruction::Validate
+            | Instruction::Push
+            | Instruction::Range { .. }
+            | Instruction::FormatLiteral { .. } => InstructionProfileTag::CallBuiltin,
             Instruction::AddAssign(_) => InstructionProfileTag::AddAssign,
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
-            Instruction::Observe => InstructionProfileTag::Observe,
-            Instruction::Finish => InstructionProfileTag::Finish,
+            Instruction::Print => InstructionProfileTag::Print,
+            Instruction::Submit => InstructionProfileTag::Submit,
             Instruction::Pop => InstructionProfileTag::Pop,
             Instruction::BeginIter(_) => InstructionProfileTag::BeginIter,
             Instruction::IterNext { .. } => InstructionProfileTag::IterNext,
             Instruction::EndIter => InstructionProfileTag::EndIter,
             Instruction::ParallelCalls(_) => InstructionProfileTag::Parallel,
             Instruction::ParallelCallsValue(_) => InstructionProfileTag::Parallel,
+            Instruction::ParallelNamedCallsValue(_) => InstructionProfileTag::Parallel,
+            Instruction::PureParallelValue(_) => InstructionProfileTag::Parallel,
+            Instruction::PureParallelNamedValue(_) => InstructionProfileTag::Parallel,
             Instruction::Parallel(_) => InstructionProfileTag::Parallel,
             Instruction::ParallelValue(_) => InstructionProfileTag::Parallel,
+            Instruction::ParallelNamed(_) => InstructionProfileTag::Parallel,
+            Instruction::ParallelNamedValue(_) => InstructionProfileTag::Parallel,
             Instruction::ResolveTypeRef(_) => InstructionProfileTag::ResolveTypeRef,
             Instruction::WrapTypeLiteral => InstructionProfileTag::WrapTypeLiteral,
         }
@@ -672,6 +846,9 @@ impl Builtin {
             Builtin::ToFloat => BuiltinProfileTag::ToFloat,
             Builtin::JsonParse => BuiltinProfileTag::JsonParse,
             Builtin::Format => BuiltinProfileTag::Format,
+            Builtin::Validate => BuiltinProfileTag::Validate,
+            Builtin::Range => BuiltinProfileTag::Range,
+            Builtin::Push => BuiltinProfileTag::Push,
             Builtin::Unknown(_) => BuiltinProfileTag::Unknown,
         }
     }
@@ -687,6 +864,7 @@ enum InstructionProfileTag {
     BuildRecord,
     Field,
     Index,
+    ResultUnwrap,
     Unary,
     Binary,
     ToBool,
@@ -700,8 +878,8 @@ enum InstructionProfileTag {
     CallBuiltin,
     AddAssign,
     AppendAssign,
-    Observe,
-    Finish,
+    Print,
+    Submit,
     Pop,
     BeginIter,
     IterNext,
@@ -732,6 +910,9 @@ enum BuiltinProfileTag {
     ToFloat,
     JsonParse,
     Format,
+    Validate,
+    Range,
+    Push,
     Unknown,
 }
 
@@ -771,6 +952,7 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "build_record",
     "field",
     "index",
+    "result_unwrap",
     "unary",
     "binary",
     "to_bool",
@@ -784,8 +966,8 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "call_builtin",
     "add_assign",
     "append_assign",
-    "observe",
-    "finish",
+    "print",
+    "submit",
     "pop",
     "begin_iter",
     "iter_next",
@@ -812,6 +994,9 @@ const BUILTIN_PROFILE_NAMES: [&str; BUILTIN_PROFILE_COUNT] = [
     "to_float",
     "json_parse",
     "format",
+    "validate",
+    "range",
+    "push",
     "unknown",
 ];
 
@@ -858,14 +1043,20 @@ fn merge_stats(target: &mut Vec<ProfileStat>, source: &[ProfileStat]) {
 
 struct Compiler {
     code: Vec<Instruction>,
+    spans: Vec<Option<Span>>,
     constants: Vec<Value>,
     names: Vec<Name>,
     name_lookup: FxHashMap<Symbol, usize>,
     slots: Rc<RefCell<SlotTable>>,
     key_lists: Vec<Box<[usize]>>,
     parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
+    named_parallel_call_sets: Vec<Box<[NamedParallelCallBranch]>>,
+    pure_parallel_sets: Vec<Box<[PureExpr]>>,
+    pure_named_parallel_sets: Vec<Box<[(usize, PureExpr)]>>,
     branch_sets: Vec<Box<[Chunk]>>,
+    named_branch_sets: Vec<Box<[NamedBranchChunk]>>,
     compile_stats: Rc<RefCell<CompileStats>>,
+    const_slots: Vec<Option<Value>>,
 }
 
 #[derive(Default)]
@@ -882,6 +1073,19 @@ struct ParallelCallBranch {
 }
 
 #[derive(Clone)]
+struct NamedParallelCallBranch {
+    output_name: usize,
+    name: usize,
+    args: PureExpr,
+}
+
+#[derive(Clone)]
+struct NamedBranchChunk {
+    name: usize,
+    chunk: Chunk,
+}
+
+#[derive(Clone)]
 enum PureExpr {
     Const(Value),
     Slot(usize),
@@ -891,6 +1095,7 @@ enum PureExpr {
         builtin: Builtin,
         args: Box<[PureExpr]>,
     },
+    ResultUnwrap(Box<PureExpr>),
     Field {
         target: Box<PureExpr>,
         field: usize,
@@ -918,11 +1123,9 @@ enum PureExpr {
 impl Compiler {
     fn compile_program(program: &Program) -> (Chunk, CompileStats) {
         let stats = Rc::new(RefCell::new(CompileStats::default()));
-        let mut compiler = Self::with_slots_and_stats(
-            Rc::new(RefCell::new(SlotTable::default())),
-            stats.clone(),
-        );
-        compiler.compile_block(&program.statements);
+        let mut compiler =
+            Self::with_slots_and_stats(Rc::new(RefCell::new(SlotTable::default())), stats.clone());
+        compiler.compile_program_block(program);
         let chunk = compiler.finish();
         let compile_stats = *stats.borrow();
         (chunk, compile_stats)
@@ -934,27 +1137,40 @@ impl Compiler {
     ) -> Self {
         Self {
             code: Vec::new(),
+            spans: Vec::new(),
             constants: Vec::new(),
             names: Vec::new(),
             name_lookup: FxHashMap::default(),
             slots,
             key_lists: Vec::new(),
             parallel_call_sets: Vec::new(),
+            named_parallel_call_sets: Vec::new(),
+            pure_parallel_sets: Vec::new(),
+            pure_named_parallel_sets: Vec::new(),
             branch_sets: Vec::new(),
+            named_branch_sets: Vec::new(),
             compile_stats,
+            const_slots: Vec::new(),
         }
     }
 
     fn finish(self) -> Chunk {
         let slot_names = self.slots.borrow().names.clone();
+        let mut spans = self.spans;
+        spans.resize(self.code.len(), None);
         Chunk {
             code: self.code,
+            spans,
             constants: self.constants,
             names: self.names,
             slot_names,
             key_lists: self.key_lists,
             parallel_call_sets: self.parallel_call_sets,
+            named_parallel_call_sets: self.named_parallel_call_sets,
+            pure_parallel_sets: self.pure_parallel_sets,
+            pure_named_parallel_sets: self.pure_named_parallel_sets,
             branch_sets: self.branch_sets,
+            named_branch_sets: self.named_branch_sets,
         }
     }
 
@@ -982,12 +1198,17 @@ impl Compiler {
     fn push_slot(&mut self, name: &str) -> usize {
         let mut slots = self.slots.borrow_mut();
         if let Some(index) = slots.lookup.get(name) {
-            return *index;
+            let index = *index;
+            drop(slots);
+            self.ensure_const_slot(index);
+            return index;
         }
         let index = slots.names.len();
         let owned = name.to_string();
         slots.names.push(owned.clone());
         slots.lookup.insert(owned, index);
+        drop(slots);
+        self.ensure_const_slot(index);
         index
     }
 
@@ -1007,10 +1228,62 @@ impl Compiler {
         index
     }
 
+    fn push_named_branch_set(&mut self, branches: Vec<NamedBranchChunk>) -> usize {
+        let index = self.named_branch_sets.len();
+        self.named_branch_sets.push(branches.into_boxed_slice());
+        index
+    }
+
     fn push_parallel_call_set(&mut self, branches: Vec<ParallelCallBranch>) -> usize {
         let index = self.parallel_call_sets.len();
         self.parallel_call_sets.push(branches.into_boxed_slice());
         index
+    }
+
+    fn push_named_parallel_call_set(&mut self, branches: Vec<NamedParallelCallBranch>) -> usize {
+        let index = self.named_parallel_call_sets.len();
+        self.named_parallel_call_sets
+            .push(branches.into_boxed_slice());
+        index
+    }
+
+    fn push_pure_parallel_set(&mut self, branches: Vec<PureExpr>) -> usize {
+        let index = self.pure_parallel_sets.len();
+        self.pure_parallel_sets.push(branches.into_boxed_slice());
+        index
+    }
+
+    fn push_pure_named_parallel_set(&mut self, branches: Vec<(usize, PureExpr)>) -> usize {
+        let index = self.pure_named_parallel_sets.len();
+        self.pure_named_parallel_sets
+            .push(branches.into_boxed_slice());
+        index
+    }
+
+    fn ensure_const_slot(&mut self, slot: usize) {
+        if self.const_slots.len() <= slot {
+            self.const_slots.resize(slot + 1, None);
+        }
+    }
+
+    fn set_const_slot(&mut self, slot: usize, value: Option<Value>) {
+        self.ensure_const_slot(slot);
+        self.const_slots[slot] = value;
+    }
+
+    fn clear_const_slots(&mut self) {
+        self.const_slots.fill(None);
+    }
+
+    fn const_for_slot(&self, slot: usize) -> Option<Value> {
+        self.const_slots.get(slot).cloned().flatten()
+    }
+
+    fn const_for_name(&self, name: &str) -> Option<Value> {
+        let slots = self.slots.borrow();
+        let slot = *slots.lookup.get(name)?;
+        drop(slots);
+        self.const_for_slot(slot)
     }
 
     fn resolve_builtin(&mut self, name: &str) -> Builtin {
@@ -1031,13 +1304,34 @@ impl Compiler {
             "to_float" => Builtin::ToFloat,
             "json_parse" => Builtin::JsonParse,
             "format" => Builtin::Format,
+            "validate" => Builtin::Validate,
+            "range" => Builtin::Range,
+            "push" => Builtin::Push,
             _ => Builtin::Unknown(self.push_name(name)),
+        }
+    }
+
+    fn compile_program_block(&mut self, program: &Program) {
+        for (index, statement) in program.statements.iter().enumerate() {
+            let span = program.statement_spans.get(index).copied();
+            self.compile_stmt_with_span(statement, span);
         }
     }
 
     fn compile_block(&mut self, statements: &[Stmt]) {
         for statement in statements {
-            self.compile_stmt(statement);
+            self.compile_stmt_with_span(statement, None);
+        }
+    }
+
+    fn compile_stmt_with_span(&mut self, statement: &Stmt, span: Option<Span>) {
+        let start = self.code.len();
+        self.compile_stmt(statement);
+        if self.spans.len() < self.code.len() {
+            self.spans.resize(self.code.len(), None);
+        }
+        for entry in &mut self.spans[start..self.code.len()] {
+            *entry = span;
         }
     }
 
@@ -1045,6 +1339,11 @@ impl Compiler {
         match statement {
             Stmt::Assign { name, expr } => {
                 let slot = self.push_slot(name);
+                let const_value = if contains_type_literal(expr) {
+                    None
+                } else {
+                    self.fold_compile_time_expr(expr)
+                };
                 if let Expr::Binary {
                     left,
                     op: BinaryOp::Add,
@@ -1057,15 +1356,18 @@ impl Compiler {
                     {
                         self.compile_expr(&items[0]);
                         self.code.push(Instruction::AppendAssign(slot));
+                        self.set_const_slot(slot, None);
                         return;
                     }
                     self.compile_expr(right);
                     self.code.push(Instruction::AddAssign(slot));
+                    self.set_const_slot(slot, None);
                     return;
                 }
 
                 self.compile_expr(expr);
                 self.code.push(Instruction::StoreName(slot));
+                self.set_const_slot(slot, const_value);
             }
             Stmt::Expr(expr) => {
                 self.compile_expr(expr);
@@ -1079,9 +1381,9 @@ impl Compiler {
                 self.compile_expr(handle);
                 self.code.push(Instruction::CancelHandle);
             }
-            Stmt::Observe(expr) => {
+            Stmt::Print(expr) => {
                 self.compile_expr(expr);
-                self.code.push(Instruction::Observe);
+                self.code.push(Instruction::Print);
             }
             Stmt::If {
                 condition,
@@ -1099,6 +1401,7 @@ impl Compiler {
                     self.compile_block(else_block);
                     self.patch_jump(jump_to_end, self.code.len());
                 }
+                self.clear_const_slots();
             }
             Stmt::For {
                 binding,
@@ -1118,17 +1421,19 @@ impl Compiler {
                 let loop_end = self.code.len();
                 self.code.push(Instruction::EndIter);
                 self.patch_jump(iter_next, loop_end);
+                self.clear_const_slots();
             }
             Stmt::Parallel { branches } => {
                 self.compile_parallel(branches, false);
+                self.clear_const_slots();
             }
-            Stmt::Finish(expr) => {
+            Stmt::Submit(expr) => {
                 if let Some(expr) = expr {
                     self.compile_expr(expr);
                 } else {
                     self.compile_expr(&Expr::Null);
                 }
-                self.code.push(Instruction::Finish);
+                self.code.push(Instruction::Submit);
             }
         }
     }
@@ -1161,12 +1466,67 @@ impl Compiler {
         Some(compiled)
     }
 
+    fn compile_pure_parallel_exprs(&mut self, branches: &[Stmt]) -> Option<Vec<PureExpr>> {
+        let mut compiled = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let Stmt::Expr(expr) = branch else {
+                return None;
+            };
+            compiled.push(self.compile_pure_expr(expr).ok()?);
+        }
+        Some(compiled)
+    }
+
+    fn compile_named_parallel_calls(
+        &mut self,
+        branches: &[crate::ast::NamedParallelBranch],
+    ) -> Option<Vec<NamedParallelCallBranch>> {
+        let mut compiled = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let Stmt::Expr(Expr::ToolCall(call)) = &branch.stmt else {
+                return None;
+            };
+            if call.args.iter().any(|(_, expr)| !is_pure_expr(expr)) {
+                return None;
+            }
+            let args = PureExpr::Record(
+                call.args
+                    .iter()
+                    .map(|(key, expr)| Ok((self.push_name(key), self.compile_pure_expr(expr)?)))
+                    .collect::<Result<Vec<_>, RuntimeError>>()
+                    .ok()?
+                    .into_boxed_slice(),
+            );
+            compiled.push(NamedParallelCallBranch {
+                output_name: self.push_name(&branch.name),
+                name: self.push_name(&call.name),
+                args,
+            });
+        }
+        Some(compiled)
+    }
+
+    fn compile_pure_named_parallel_exprs(
+        &mut self,
+        branches: &[crate::ast::NamedParallelBranch],
+    ) -> Option<Vec<(usize, PureExpr)>> {
+        let mut compiled = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let Stmt::Expr(expr) = &branch.stmt else {
+                return None;
+            };
+            let expr = self.compile_pure_expr(expr).ok()?;
+            compiled.push((self.push_name(&branch.name), expr));
+        }
+        Some(compiled)
+    }
+
     fn compile_pure_expr(&mut self, expr: &Expr) -> Result<PureExpr, RuntimeError> {
         match expr {
             Expr::Null => Ok(PureExpr::Const(Value::Null)),
             Expr::Bool(value) => Ok(PureExpr::Const(Value::Bool(*value))),
             Expr::Number(value) => Ok(PureExpr::Const(Value::Number(*value))),
-            Expr::String(value) => Ok(PureExpr::Const(Value::String(value.clone().into()))),
+            Expr::String(value) => Ok(PureExpr::Const(Value::String(value.clone()))),
             Expr::Variable(name) => Ok(PureExpr::Slot(self.push_slot(name))),
             Expr::List(items) => Ok(PureExpr::List(
                 items
@@ -1194,6 +1554,9 @@ impl Compiler {
             Expr::Await(_) => Err(RuntimeError::ValueError {
                 message: "`await` is not allowed in pure expressions".to_string(),
             }),
+            Expr::ResultUnwrap(expr) => Ok(PureExpr::ResultUnwrap(Box::new(
+                self.compile_pure_expr(expr)?,
+            ))),
             Expr::BuiltinCall { name, args } => Ok(PureExpr::Builtin {
                 builtin: self.resolve_builtin(name),
                 args: args
@@ -1240,7 +1603,183 @@ impl Compiler {
         }
     }
 
+    fn fold_compile_time_expr(&self, expr: &Expr) -> Option<Value> {
+        match expr {
+            Expr::Null => Some(Value::Null),
+            Expr::Bool(value) => Some(Value::Bool(*value)),
+            Expr::Number(value) => Some(Value::Number(*value)),
+            Expr::String(value) => Some(Value::String(value.clone())),
+            Expr::Variable(name) => self.const_for_name(name),
+            Expr::List(items) => Some(Value::List(
+                items
+                    .iter()
+                    .map(|item| self.fold_compile_time_expr(item))
+                    .collect::<Option<Vec<_>>>()?
+                    .into(),
+            )),
+            Expr::Record(entries) => {
+                let mut record = record_with_capacity(entries.len());
+                for (key, value) in entries {
+                    record.insert(key.to_string(), self.fold_compile_time_expr(value)?);
+                }
+                Some(Value::Record(Arc::new(record)))
+            }
+            Expr::BuiltinCall { name, args } => {
+                let values = args
+                    .iter()
+                    .map(|arg| self.fold_compile_time_expr(arg))
+                    .collect::<Option<Vec<_>>>()?;
+                let builtin = match name.as_str() {
+                    "len" => Builtin::Len,
+                    "empty" => Builtin::Empty,
+                    "keys" => Builtin::Keys,
+                    "values" => Builtin::Values,
+                    "contains" => Builtin::Contains,
+                    "starts_with" => Builtin::StartsWith,
+                    "ends_with" => Builtin::EndsWith,
+                    "split" => Builtin::Split,
+                    "join" => Builtin::Join,
+                    "trim" => Builtin::Trim,
+                    "slice" => Builtin::Slice,
+                    "to_string" => Builtin::ToString,
+                    "to_int" => Builtin::ToInt,
+                    "to_float" => Builtin::ToFloat,
+                    "json_parse" => Builtin::JsonParse,
+                    "format" => Builtin::Format,
+                    "validate" => Builtin::Validate,
+                    "range" => Builtin::Range,
+                    "push" => Builtin::Push,
+                    _ => return None,
+                };
+                execute_builtin(builtin, &[], &values).ok()
+            }
+            Expr::Field { target, field } => {
+                let target = self.fold_compile_time_expr(target)?;
+                read_field(target, &transient_name(field)).ok()
+            }
+            Expr::Index { target, index } => {
+                let target = self.fold_compile_time_expr(target)?;
+                let index = self.fold_compile_time_expr(index)?;
+                read_index(target, index).ok()
+            }
+            Expr::Unary { op, expr } => {
+                let value = self.fold_compile_time_expr(expr)?;
+                match op {
+                    UnaryOp::Negate => Some(Value::Number(-as_number(&value).ok()?)),
+                    UnaryOp::Not => Some(Value::Bool(!is_truthy(&value))),
+                }
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                if is_truthy(&self.fold_compile_time_expr(condition)?) {
+                    self.fold_compile_time_expr(then_expr)
+                } else {
+                    self.fold_compile_time_expr(else_expr)
+                }
+            }
+            Expr::Binary { left, op, right } => match op {
+                BinaryOp::And => {
+                    let left = self.fold_compile_time_expr(left)?;
+                    if !is_truthy(&left) {
+                        Some(Value::Bool(false))
+                    } else {
+                        Some(Value::Bool(is_truthy(&self.fold_compile_time_expr(right)?)))
+                    }
+                }
+                BinaryOp::Or => {
+                    let left = self.fold_compile_time_expr(left)?;
+                    if is_truthy(&left) {
+                        Some(Value::Bool(true))
+                    } else {
+                        Some(Value::Bool(is_truthy(&self.fold_compile_time_expr(right)?)))
+                    }
+                }
+                _ => {
+                    let left = self.fold_compile_time_expr(left)?;
+                    let right = self.fold_compile_time_expr(right)?;
+                    eval_binary_values(left, *op, right).ok()
+                }
+            },
+            Expr::TypeLiteral(ty) => {
+                let schema = fold_type(ty)?;
+                let mut wrapper = record_with_capacity(1);
+                wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
+                Some(Value::Record(Arc::new(wrapper)))
+            }
+            Expr::ToolCall(_)
+            | Expr::StartToolCall(_)
+            | Expr::Parallel { .. }
+            | Expr::Await(_)
+            | Expr::ResultUnwrap(_) => None,
+        }
+    }
+
+    fn emit_builtin_call(&mut self, name: &str, args: &[Expr]) {
+        if name == "format"
+            && let Some((Expr::String(template), value_args)) = args.split_first()
+        {
+            for arg in value_args {
+                self.compile_expr(arg);
+            }
+            let template = self.push_const(Value::String(template.clone()));
+            self.code.push(Instruction::FormatLiteral {
+                template,
+                argc: value_args.len(),
+            });
+            return;
+        }
+
+        match (name, args.len()) {
+            ("len", 1) => {
+                self.compile_expr(&args[0]);
+                self.code.push(Instruction::Len);
+            }
+            ("join", 2) => {
+                self.compile_expr(&args[0]);
+                self.compile_expr(&args[1]);
+                self.code.push(Instruction::Join);
+            }
+            ("validate", 2) => {
+                self.compile_expr(&args[0]);
+                self.compile_expr(&args[1]);
+                self.code.push(Instruction::Validate);
+            }
+            ("push", 2) => {
+                self.compile_expr(&args[0]);
+                self.compile_expr(&args[1]);
+                self.code.push(Instruction::Push);
+            }
+            ("range", 1 | 2) => {
+                for arg in args {
+                    self.compile_expr(arg);
+                }
+                self.code.push(Instruction::Range { argc: args.len() });
+            }
+            _ => {
+                for arg in args {
+                    self.compile_expr(arg);
+                }
+                let builtin = self.resolve_builtin(name);
+                self.code.push(Instruction::CallBuiltin {
+                    builtin,
+                    argc: args.len(),
+                });
+            }
+        }
+    }
+
     fn compile_expr(&mut self, expr: &Expr) {
+        if !contains_type_literal(expr)
+            && let Some(value) = self.fold_compile_time_expr(expr)
+        {
+            let value = self.push_const(value);
+            self.code.push(Instruction::PushConst(value));
+            return;
+        }
+
         match expr {
             Expr::Null => {
                 let value = self.push_const(Value::Null);
@@ -1255,12 +1794,17 @@ impl Compiler {
                 self.code.push(Instruction::PushConst(value));
             }
             Expr::String(value) => {
-                let value = self.push_const(Value::String(value.clone().into()));
+                let value = self.push_const(Value::String(value.clone()));
                 self.code.push(Instruction::PushConst(value));
             }
             Expr::Variable(name) => {
                 let name = self.push_slot(name);
-                self.code.push(Instruction::LoadName(name));
+                if let Some(value) = self.const_for_slot(name) {
+                    let value = self.push_const(value);
+                    self.code.push(Instruction::PushConst(value));
+                } else {
+                    self.code.push(Instruction::LoadName(name));
+                }
             }
             Expr::List(items) => {
                 for item in items {
@@ -1282,17 +1826,27 @@ impl Compiler {
                 self.compile_expr(handle);
                 self.code.push(Instruction::AwaitHandle);
             }
-            Expr::BuiltinCall { name, args } => {
-                for arg in args {
-                    self.compile_expr(arg);
+            Expr::ResultUnwrap(expr) => {
+                if let Expr::ToolCall(call) = expr.as_ref() {
+                    self.compile_call_unwrap_expr(call);
+                } else if let Expr::Await(handle) = expr.as_ref() {
+                    self.compile_expr(handle);
+                    self.code.push(Instruction::AwaitHandleUnwrap);
+                } else {
+                    self.compile_expr(expr);
+                    self.code.push(Instruction::ResultUnwrap);
                 }
-                let builtin = self.resolve_builtin(name);
-                self.code.push(Instruction::CallBuiltin {
-                    builtin,
-                    argc: args.len(),
-                });
+            }
+            Expr::BuiltinCall { name, args } => {
+                self.emit_builtin_call(name, args);
             }
             Expr::Field { target, field } => {
+                if let Expr::Variable(name) = target.as_ref() {
+                    let slot = self.push_slot(name);
+                    let field = self.push_name(field);
+                    self.code.push(Instruction::LoadField { slot, field });
+                    return;
+                }
                 self.compile_expr(target);
                 let field = self.push_name(field);
                 self.code.push(Instruction::Field(field));
@@ -1361,6 +1915,15 @@ impl Compiler {
         self.code.push(Instruction::CallTool { name, keys });
     }
 
+    fn compile_call_unwrap_expr(&mut self, call: &CallExpr) {
+        for (_, expr) in &call.args {
+            self.compile_expr(expr);
+        }
+        let keys = self.push_key_list(call.args.iter().map(|(name, _)| name.as_str()));
+        let name = self.push_name(&call.name);
+        self.code.push(Instruction::CallToolUnwrap { name, keys });
+    }
+
     fn compile_start_call_expr(&mut self, call: &CallExpr) {
         for (_, expr) in &call.args {
             self.compile_expr(expr);
@@ -1370,32 +1933,82 @@ impl Compiler {
         self.code.push(Instruction::StartCallTool { name, keys });
     }
 
-    fn compile_parallel(&mut self, branches: &[Stmt], want_value: bool) {
-        if let Some(branches) = self.compile_parallel_calls(branches) {
-            let branches = self.push_parallel_call_set(branches);
-            self.code.push(if want_value {
-                Instruction::ParallelCallsValue(branches)
-            } else {
-                Instruction::ParallelCalls(branches)
-            });
-            return;
-        }
+    fn compile_parallel(&mut self, branches: &ParallelBranches, want_value: bool) {
+        match branches {
+            ParallelBranches::Positional(branches) => {
+                if let Some(branches) = self.compile_parallel_calls(branches) {
+                    let branches = self.push_parallel_call_set(branches);
+                    self.code.push(if want_value {
+                        Instruction::ParallelCallsValue(branches)
+                    } else {
+                        Instruction::ParallelCalls(branches)
+                    });
+                    return;
+                }
 
-        let branches = branches
-            .iter()
-            .map(|branch| {
-                let mut compiler =
-                    Self::with_slots_and_stats(self.slots.clone(), self.compile_stats.clone());
-                compiler.compile_stmt(branch);
-                compiler.finish()
-            })
-            .collect::<Vec<_>>();
-        let branches = self.push_branch_set(branches);
-        self.code.push(if want_value {
-            Instruction::ParallelValue(branches)
-        } else {
-            Instruction::Parallel(branches)
-        });
+                if want_value && let Some(branches) = self.compile_pure_parallel_exprs(branches) {
+                    let branches = self.push_pure_parallel_set(branches);
+                    self.code.push(Instruction::PureParallelValue(branches));
+                    return;
+                }
+
+                let branches = branches
+                    .iter()
+                    .map(|branch| {
+                        let mut compiler = Self::with_slots_and_stats(
+                            self.slots.clone(),
+                            self.compile_stats.clone(),
+                        );
+                        compiler.compile_stmt(branch);
+                        compiler.finish()
+                    })
+                    .collect::<Vec<_>>();
+                let branches = self.push_branch_set(branches);
+                self.code.push(if want_value {
+                    Instruction::ParallelValue(branches)
+                } else {
+                    Instruction::Parallel(branches)
+                });
+            }
+            ParallelBranches::Named(branches) => {
+                if want_value && let Some(branches) = self.compile_named_parallel_calls(branches) {
+                    let branches = self.push_named_parallel_call_set(branches);
+                    self.code
+                        .push(Instruction::ParallelNamedCallsValue(branches));
+                    return;
+                }
+
+                if want_value
+                    && let Some(branches) = self.compile_pure_named_parallel_exprs(branches)
+                {
+                    let branches = self.push_pure_named_parallel_set(branches);
+                    self.code
+                        .push(Instruction::PureParallelNamedValue(branches));
+                    return;
+                }
+
+                let branches = branches
+                    .iter()
+                    .map(|branch| {
+                        let mut compiler = Self::with_slots_and_stats(
+                            self.slots.clone(),
+                            self.compile_stats.clone(),
+                        );
+                        compiler.compile_stmt(&branch.stmt);
+                        NamedBranchChunk {
+                            name: self.push_name(&branch.name),
+                            chunk: compiler.finish(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let branches = self.push_named_branch_set(branches);
+                self.code.push(if want_value {
+                    Instruction::ParallelNamedValue(branches)
+                } else {
+                    Instruction::ParallelNamed(branches)
+                });
+            }
+        }
     }
 
     fn emit_jump_if_false(&mut self) -> usize {
@@ -1460,8 +2073,7 @@ impl Compiler {
                 for field in fields {
                     self.compile_type_expr(&field.ty);
                 }
-                let prop_keys =
-                    self.push_key_list(fields.iter().map(|f| f.name.as_str()));
+                let prop_keys = self.push_key_list(fields.iter().map(|f| f.name.as_str()));
                 self.code.push(Instruction::BuildRecord(prop_keys));
 
                 let required: Vec<&str> = fields
@@ -1587,12 +2199,39 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         }
     }
 
+    fn new_with_scratch(
+        chunk: &'a Chunk,
+        slots: SlotState,
+        host: &'a H,
+        in_parallel_branch: bool,
+        scratch: &mut ExecutionScratch,
+    ) -> Self {
+        Self {
+            chunk,
+            ip: 0,
+            stack: std::mem::take(&mut scratch.stack),
+            last_value: None,
+            slots,
+            host,
+            in_parallel_branch,
+            assigned: in_parallel_branch.then(|| vec![false; chunk.slot_names.len()]),
+            iter_stack: std::mem::take(&mut scratch.iter_stack),
+            profile: None,
+        }
+    }
+
     fn enable_profile(&mut self) {
         self.profile = Some(ProfileAccumulator::default());
     }
 
     fn run(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
         let result = self.run_inner();
+        self.unwind_iterators();
+        result
+    }
+
+    fn run_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
+        let result = self.run_inner_traced();
         self.unwind_iterators();
         result
     }
@@ -1611,6 +2250,27 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             if let Some(outcome) = result? {
                 return Ok(outcome);
+            }
+        }
+        Ok(ExecutionOutcome::Continued)
+    }
+
+    fn run_inner_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
+        while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
+            let span = self.chunk.spans.get(self.ip).copied().flatten();
+            self.ip += 1;
+            let probe = self
+                .profile
+                .as_ref()
+                .map(|_| (instruction.profile_tag(), Instant::now()));
+            let result = self.execute_instruction(instruction);
+            if let Some((tag, start)) = probe {
+                self.record_instruction_profile(tag, start.elapsed().as_nanos());
+            }
+            match result {
+                Ok(Some(outcome)) => return Ok(outcome),
+                Ok(None) => {}
+                Err(error) => return Err(RuntimeFailure { error, span }),
             }
         }
         Ok(ExecutionOutcome::Continued)
@@ -1639,6 +2299,17 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.record_assignment(name);
                 self.last_value = Some(value);
             }
+            Instruction::LoadField { slot, field } => {
+                let slot_name = &self.chunk.slot_names[slot];
+                let value =
+                    self.slots
+                        .get(slot)
+                        .ok_or_else(|| RuntimeError::UndefinedVariable {
+                            name: slot_name.clone(),
+                        })?;
+                self.stack
+                    .push(read_field_ref(value, &self.chunk.names[field])?);
+            }
             Instruction::BuildList(len) => {
                 let values = self.pop_n(len)?;
                 self.stack.push(Value::List(values.into()));
@@ -1662,6 +2333,10 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let index = self.pop_stack()?;
                 let target = self.pop_stack()?;
                 self.stack.push(read_index(target, index)?);
+            }
+            Instruction::ResultUnwrap => {
+                let value = self.pop_stack()?;
+                self.stack.push(unwrap_tool_result(value)?);
             }
             Instruction::Unary(op) => {
                 let value = self.pop_stack()?;
@@ -1707,6 +2382,22 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 };
                 self.stack.push(result);
             }
+            Instruction::CallToolUnwrap { name, keys } => {
+                let key_indices = &self.chunk.key_lists[keys];
+                let start = self.stack_drain_start(key_indices.len())?;
+                let mut args = record_with_capacity(key_indices.len());
+                for (key, value) in key_indices.iter().zip(self.stack.drain(start..)) {
+                    let name_entry = &self.chunk.names[*key];
+                    args.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
+                }
+                let value = self
+                    .host
+                    .call(self.chunk.names[name].text.as_ref(), &args)
+                    .map_err(|error| RuntimeError::ValueError {
+                        message: format!("`?` unwrapped failed tool result: {error}"),
+                    })?;
+                self.stack.push(value);
+            }
             Instruction::StartCallTool { name, keys } => {
                 let key_indices = &self.chunk.key_lists[keys];
                 let start = self.stack_drain_start(key_indices.len())?;
@@ -1728,6 +2419,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let result = self.await_value(handle);
                 self.stack.push(result);
             }
+            Instruction::AwaitHandleUnwrap => {
+                let handle = self.pop_stack()?;
+                let result = self.await_value_unwrap(handle)?;
+                self.stack.push(result);
+            }
             Instruction::CancelHandle => {
                 let handle = self.pop_stack()?;
                 let value =
@@ -1744,6 +2440,70 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let value = execute_builtin(builtin, &self.chunk.names, values)?;
                 if let Some(start) = start {
                     self.record_builtin_profile(builtin, start.elapsed().as_nanos());
+                }
+                self.stack.truncate(self.stack.len() - argc);
+                self.stack.push(value);
+            }
+            Instruction::Len => {
+                let value = self.pop_stack()?;
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let value = execute_len_builtin(&value)?;
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Len, start.elapsed().as_nanos());
+                }
+                self.stack.push(value);
+            }
+            Instruction::Join => {
+                let sep = self.pop_stack()?;
+                let items = self.pop_stack()?;
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let value = execute_join_builtin(&items, &sep)?;
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Join, start.elapsed().as_nanos());
+                }
+                self.stack.push(value);
+            }
+            Instruction::Validate => {
+                let schema = self.pop_stack()?;
+                let value = self.pop_stack()?;
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let value = execute_validate_builtin(value, &schema)?;
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Validate, start.elapsed().as_nanos());
+                }
+                self.stack.push(value);
+            }
+            Instruction::Push => {
+                let item = self.pop_stack()?;
+                let list = self.pop_stack()?;
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let value = execute_push_builtin(&list, item)?;
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Push, start.elapsed().as_nanos());
+                }
+                self.stack.push(value);
+            }
+            Instruction::Range { argc } => {
+                let start_index = self.stack_drain_start(argc)?;
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let value = execute_range_builtin(&self.stack[start_index..])?;
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Range, start.elapsed().as_nanos());
+                }
+                self.stack.truncate(start_index);
+                self.stack.push(value);
+            }
+            Instruction::FormatLiteral { template, argc } => {
+                let values = self.stack_tail(argc)?;
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let Value::String(template) = &self.chunk.constants[template] else {
+                    return Err(RuntimeError::TypeError {
+                        message: "`format` template must be a string".to_string(),
+                    });
+                };
+                let value = Value::String(apply_format(template, values)?.into());
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Format, start.elapsed().as_nanos());
                 }
                 self.stack.truncate(self.stack.len() - argc);
                 self.stack.push(value);
@@ -1782,16 +2542,16 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
-            Instruction::Observe => {
+            Instruction::Print => {
                 let value = self.pop_stack()?;
                 self.host
-                    .observe(&value)
+                    .print(&value)
                     .map_err(|err| RuntimeError::ValueError {
-                        message: format!("observe failed: {err}"),
+                        message: format!("print failed: {err}"),
                     })?;
                 self.last_value = Some(value);
             }
-            Instruction::Finish => {
+            Instruction::Submit => {
                 if self.in_parallel_branch {
                     return Err(RuntimeError::FinishInsideParallel);
                 }
@@ -1841,12 +2601,36 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.last_value = Some(value.clone());
                 self.stack.push(value);
             }
+            Instruction::ParallelNamedCallsValue(branches) => {
+                let value = self.exec_parallel_named_calls_value(branches)?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
+            }
+            Instruction::PureParallelValue(branches) => {
+                let value = self.exec_pure_parallel_value(branches)?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
+            }
+            Instruction::PureParallelNamedValue(branches) => {
+                let value = self.exec_pure_parallel_named_value(branches)?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
+            }
             Instruction::Parallel(branches) => {
                 self.exec_parallel(branches)?;
                 self.last_value = Some(Value::Null);
             }
             Instruction::ParallelValue(branches) => {
                 let value = self.exec_parallel_value(branches)?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
+            }
+            Instruction::ParallelNamed(branches) => {
+                self.exec_parallel_named(branches)?;
+                self.last_value = Some(Value::Null);
+            }
+            Instruction::ParallelNamedValue(branches) => {
+                let value = self.exec_parallel_named_value(branches)?;
                 self.last_value = Some(value.clone());
                 self.stack.push(value);
             }
@@ -1857,13 +2641,14 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                         name: slot_name.clone(),
                     }
                 })?;
-                let schema = unwrap_type_value(&value)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError::TypeError {
-                        message: format!(
-                            "`{slot_name}` is not a Type value (missing `{LASH_TYPE_KEY}`)"
-                        ),
-                    })?;
+                let schema =
+                    unwrap_type_value(&value)
+                        .cloned()
+                        .ok_or_else(|| RuntimeError::TypeError {
+                            message: format!(
+                                "`{slot_name}` is not a Type value (missing `{LASH_TYPE_KEY}`)"
+                            ),
+                        })?;
                 self.stack.push(schema);
             }
             Instruction::WrapTypeLiteral => {
@@ -1915,6 +2700,127 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             self.merge_branch_result(result, &mut merged_names)?;
         }
         Ok(Value::List(outputs.into()))
+    }
+
+    fn exec_parallel_named(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
+        let branches = &self.chunk.named_branch_sets[branches_index];
+        if branches.is_empty() {
+            return Ok(());
+        }
+
+        let base_slots = self.slots.clone();
+        let results = branches
+            .par_iter()
+            .map(|branch| Self::run_branch(&branch.chunk, base_slots.clone(), self.host, true))
+            .collect::<Vec<_>>();
+
+        let mut merged_names = vec![false; self.chunk.slot_names.len()];
+        for result in results {
+            self.merge_branch_result(result?, &mut merged_names)?;
+        }
+        Ok(())
+    }
+
+    fn exec_parallel_named_value(&mut self, branches_index: usize) -> Result<Value, RuntimeError> {
+        let branches = &self.chunk.named_branch_sets[branches_index];
+        let base_slots = self.slots.clone();
+        let results = branches
+            .par_iter()
+            .map(|branch| {
+                let result = Self::run_branch(&branch.chunk, base_slots.clone(), self.host, true);
+                (branch.name, result)
+            })
+            .collect::<Vec<_>>();
+
+        let mut record = record_with_capacity(results.len());
+        let mut merged_names = vec![false; self.chunk.slot_names.len()];
+        for (name, result) in results {
+            let result = result?;
+            let name_entry = &self.chunk.names[name];
+            record.insert_symbolized(
+                name_entry.symbol,
+                name_entry.text.clone(),
+                result.output.clone(),
+            );
+            self.merge_branch_result(result, &mut merged_names)?;
+        }
+        Ok(Value::Record(Arc::new(record)))
+    }
+
+    fn exec_pure_parallel_value(&self, branches_index: usize) -> Result<Value, RuntimeError> {
+        let branches = &self.chunk.pure_parallel_sets[branches_index];
+        Ok(Value::List(
+            branches
+                .iter()
+                .map(|expr| {
+                    eval_pure_expr(expr, &self.slots, &self.chunk.names, &self.chunk.slot_names)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+        ))
+    }
+
+    fn exec_pure_parallel_named_value(&self, branches_index: usize) -> Result<Value, RuntimeError> {
+        let branches = &self.chunk.pure_named_parallel_sets[branches_index];
+        let mut record = record_with_capacity(branches.len());
+        for (name, expr) in branches.iter() {
+            let name_entry = &self.chunk.names[*name];
+            let value =
+                eval_pure_expr(expr, &self.slots, &self.chunk.names, &self.chunk.slot_names)?;
+            record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
+        }
+        Ok(Value::Record(Arc::new(record)))
+    }
+
+    fn exec_parallel_named_calls_value(
+        &self,
+        branches_index: usize,
+    ) -> Result<Value, RuntimeError> {
+        let branches = &self.chunk.named_parallel_call_sets[branches_index];
+        let mut calls = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let value = eval_pure_expr(
+                &branch.args,
+                &self.slots,
+                &self.chunk.names,
+                &self.chunk.slot_names,
+            )?;
+            let Value::Record(args) = value else {
+                return Err(RuntimeError::TypeError {
+                    message: "parallel call args must compile to a record".to_string(),
+                });
+            };
+            calls.push(PreparedNamedParallelCall {
+                output_name: branch.output_name,
+                name: branch.name,
+                args: Arc::unwrap_or_clone(args),
+            });
+        }
+
+        let results = match calls.len() {
+            0 => Vec::new(),
+            1 => vec![Self::run_prepared_named_call(
+                self.chunk, &calls[0], self.host,
+            )?],
+            2 => {
+                let (left, right) = rayon::join(
+                    || Self::run_prepared_named_call(self.chunk, &calls[0], self.host),
+                    || Self::run_prepared_named_call(self.chunk, &calls[1], self.host),
+                );
+                vec![left?, right?]
+            }
+            _ => calls
+                .par_iter()
+                .map(|call| Self::run_prepared_named_call(self.chunk, call, self.host))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        let mut record = record_with_capacity(results.len());
+        for result in results {
+            let name_entry = &self.chunk.names[result.output_name];
+            record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), result.output);
+        }
+        Ok(Value::Record(Arc::new(record)))
     }
 
     fn exec_parallel_calls(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
@@ -2095,6 +3001,29 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         }
     }
 
+    fn run_prepared_named_call(
+        chunk: &'a Chunk,
+        call: &PreparedNamedParallelCall,
+        host: &'a H,
+    ) -> Result<NamedParallelCallResult, RuntimeError> {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match host.call(chunk.names[call.name].text.as_ref(), &call.args) {
+                Ok(value) => Ok(success(value)),
+                Err(error) => Ok(error_value(error.to_string())),
+            }
+        }));
+        match run {
+            Ok(Ok(value)) => Ok(NamedParallelCallResult {
+                output_name: call.output_name,
+                output: value,
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(RuntimeError::ValueError {
+                message: "parallel branch panicked".to_string(),
+            }),
+        }
+    }
+
     fn merge_branch_result(
         &mut self,
         result: BranchResult,
@@ -2128,10 +3057,45 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     .collect::<Vec<_>>()
                     .into(),
             ),
+            Value::Record(handles) if is_async_handle_record(&handles) => {
+                match self.host.await_handle(&Value::Record(handles)) {
+                    Ok(value) => success(value),
+                    Err(error) => error_value(error.to_string()),
+                }
+            }
+            Value::Record(handles) => {
+                let mut record = record_with_capacity(handles.len());
+                for entry in handles.entries.iter() {
+                    record.insert_symbolized(
+                        entry.symbol,
+                        entry.name.clone(),
+                        self.await_value(entry.value.clone()),
+                    );
+                }
+                Value::Record(Arc::new(record))
+            }
             handle => match self.host.await_handle(&handle) {
                 Ok(value) => success(value),
                 Err(error) => error_value(error.to_string()),
             },
+        }
+    }
+
+    fn await_value_unwrap(&self, handle: Value) -> Result<Value, RuntimeError> {
+        match handle {
+            Value::Record(handles) if is_async_handle_record(&handles) => self
+                .host
+                .await_handle(&Value::Record(handles))
+                .map_err(|error| RuntimeError::ValueError {
+                    message: format!("`?` unwrapped failed tool result: {error}"),
+                }),
+            Value::List(_) | Value::Record(_) => unwrap_tool_result(self.await_value(handle)),
+            handle => self
+                .host
+                .await_handle(&handle)
+                .map_err(|error| RuntimeError::ValueError {
+                    message: format!("`?` unwrapped failed tool result: {error}"),
+                }),
         }
     }
 
@@ -2194,6 +3158,14 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         self.slots.into_globals(&self.chunk.slot_names)
     }
 
+    fn recycle_into_globals(mut self, scratch: &mut ExecutionScratch) -> Record {
+        self.stack.clear();
+        self.iter_stack.clear();
+        scratch.stack = std::mem::take(&mut self.stack);
+        scratch.iter_stack = std::mem::take(&mut self.iter_stack);
+        self.slots.into_globals(&self.chunk.slot_names)
+    }
+
     fn record_instruction_profile(&mut self, tag: InstructionProfileTag, elapsed_ns: u128) {
         let Some(profile) = &mut self.profile else {
             return;
@@ -2230,8 +3202,19 @@ struct ParallelCallResult {
     output: Value,
 }
 
+struct NamedParallelCallResult {
+    output_name: usize,
+    output: Value,
+}
+
 struct PreparedParallelCall {
     slot: usize,
+    name: usize,
+    args: Record,
+}
+
+struct PreparedNamedParallelCall {
+    output_name: usize,
     name: usize,
     args: Record,
 }
@@ -2256,6 +3239,7 @@ fn is_pure_expr(expr: &Expr) -> bool {
         Expr::StartToolCall(_) => false,
         Expr::Parallel { .. } => false,
         Expr::Await(_) => false,
+        Expr::ResultUnwrap(expr) => is_pure_expr(expr),
         Expr::BuiltinCall { args, .. } => args.iter().all(is_pure_expr),
         Expr::Field { target, .. } => is_pure_expr(target),
         Expr::Index { target, index } => is_pure_expr(target) && is_pure_expr(index),
@@ -2267,6 +3251,82 @@ fn is_pure_expr(expr: &Expr) -> bool {
         } => is_pure_expr(condition) && is_pure_expr(then_expr) && is_pure_expr(else_expr),
         Expr::Binary { left, right, .. } => is_pure_expr(left) && is_pure_expr(right),
         Expr::TypeLiteral(ty) => fold_type(ty).is_some(),
+    }
+}
+
+fn contains_type_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::TypeLiteral(_) => true,
+        Expr::List(items) => items.iter().any(contains_type_literal),
+        Expr::Record(entries) => entries
+            .iter()
+            .any(|(_, value)| contains_type_literal(value)),
+        Expr::ToolCall(call) | Expr::StartToolCall(call) => call
+            .args
+            .iter()
+            .any(|(_, value)| contains_type_literal(value)),
+        Expr::Parallel { branches } => match branches {
+            ParallelBranches::Positional(statements) => {
+                statements.iter().any(stmt_contains_type_literal)
+            }
+            ParallelBranches::Named(branches) => branches
+                .iter()
+                .any(|branch| stmt_contains_type_literal(&branch.stmt)),
+        },
+        Expr::Await(expr) | Expr::ResultUnwrap(expr) | Expr::Unary { expr, .. } => {
+            contains_type_literal(expr)
+        }
+        Expr::BuiltinCall { args, .. } => args.iter().any(contains_type_literal),
+        Expr::Field { target, .. } => contains_type_literal(target),
+        Expr::Index { target, index } => {
+            contains_type_literal(target) || contains_type_literal(index)
+        }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            contains_type_literal(condition)
+                || contains_type_literal(then_expr)
+                || contains_type_literal(else_expr)
+        }
+        Expr::Binary { left, right, .. } => {
+            contains_type_literal(left) || contains_type_literal(right)
+        }
+        Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Variable(_) => false,
+    }
+}
+
+fn stmt_contains_type_literal(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Assign { expr, .. } | Stmt::Expr(expr) | Stmt::Cancel(expr) | Stmt::Print(expr) => {
+            contains_type_literal(expr)
+        }
+        Stmt::Call(call) => call
+            .args
+            .iter()
+            .any(|(_, expr)| contains_type_literal(expr)),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            contains_type_literal(condition)
+                || then_block.iter().any(stmt_contains_type_literal)
+                || else_block.iter().any(stmt_contains_type_literal)
+        }
+        Stmt::For { iterable, body, .. } => {
+            contains_type_literal(iterable) || body.iter().any(stmt_contains_type_literal)
+        }
+        Stmt::Parallel { branches } => match branches {
+            ParallelBranches::Positional(statements) => {
+                statements.iter().any(stmt_contains_type_literal)
+            }
+            ParallelBranches::Named(branches) => branches
+                .iter()
+                .any(|branch| stmt_contains_type_literal(&branch.stmt)),
+        },
+        Stmt::Submit(expr) => expr.as_ref().is_some_and(contains_type_literal),
     }
 }
 
@@ -2285,10 +3345,7 @@ fn fold_type(ty: &TypeExpr) -> Option<Value> {
         TypeExpr::Enum(values) => {
             let mut rec = record_with_capacity(2);
             rec.insert("type".into(), Value::String("string".into()));
-            let items: Vec<Value> = values
-                .iter()
-                .map(|v| Value::String(v.clone().into()))
-                .collect();
+            let items: Vec<Value> = values.iter().map(|v| Value::String(v.clone())).collect();
             rec.insert("enum".into(), Value::List(items.into()));
             Some(Value::Record(Arc::new(rec)))
         }
@@ -2302,12 +3359,12 @@ fn fold_type(ty: &TypeExpr) -> Option<Value> {
         TypeExpr::Object(fields) => {
             let mut properties = record_with_capacity(fields.len());
             for field in fields {
-                properties.insert(field.name.clone(), fold_type(&field.ty)?);
+                properties.insert(field.name.to_string(), fold_type(&field.ty)?);
             }
             let required: Vec<Value> = fields
                 .iter()
                 .filter(|f| !f.optional)
-                .map(|f| Value::String(f.name.clone().into()))
+                .map(|f| Value::String(f.name.clone()))
                 .collect();
             let mut rec = record_with_capacity(4);
             rec.insert("type".into(), Value::String("object".into()));
@@ -2406,6 +3463,10 @@ fn eval_pure_expr(
                 .collect::<Result<Vec<_>, _>>()?;
             execute_builtin(*builtin, names, &values)
         }
+        PureExpr::ResultUnwrap(expr) => {
+            let value = eval_pure_expr(expr, slots, names, slot_names)?;
+            unwrap_tool_result(value)
+        }
         PureExpr::Field { target, field } => {
             let value = eval_pure_expr(target, slots, names, slot_names)?;
             read_field(value, &names[*field])
@@ -2469,15 +3530,7 @@ fn execute_builtin(
     match builtin {
         Builtin::Len => {
             expect_arg_count("len", values, 1)?;
-            match &values[0] {
-                Value::String(value) => Ok(Value::Number(value.chars().count() as f64)),
-                Value::List(values) => Ok(Value::Number(values.len() as f64)),
-                Value::Record(record) => Ok(Value::Number(record.len() as f64)),
-                Value::Null => Ok(Value::Number(0.0)),
-                _ => Err(RuntimeError::TypeError {
-                    message: "`len` requires a string, list, record, or null".to_string(),
-                }),
-            }
+            execute_len_builtin(&values[0])
         }
         Builtin::Empty => {
             expect_arg_count("empty", values, 1)?;
@@ -2563,20 +3616,7 @@ fn execute_builtin(
         }
         Builtin::Join => {
             expect_arg_count("join", values, 2)?;
-            let Value::List(items) = &values[0] else {
-                return Err(RuntimeError::TypeError {
-                    message: "`join` requires a list as the first argument".to_string(),
-                });
-            };
-            let sep = coerce_string(&values[1])?;
-            let mut joined = String::new();
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    joined.push_str(sep.as_ref());
-                }
-                joined.push_str(coerce_string(item)?.as_ref());
-            }
-            Ok(Value::String(joined.into()))
+            execute_join_builtin(&values[0], &values[1])
         }
         Builtin::Trim => {
             expect_arg_count("trim", values, 1)?;
@@ -2640,10 +3680,274 @@ fn execute_builtin(
             };
             Ok(Value::String(apply_format(template, &values[1..])?.into()))
         }
+        Builtin::Validate => {
+            expect_arg_count("validate", values, 2)?;
+            execute_validate_builtin(values[0].clone(), &values[1])
+        }
+        Builtin::Range => execute_range_builtin(values),
+        Builtin::Push => {
+            expect_arg_count("push", values, 2)?;
+            execute_push_builtin(&values[0], values[1].clone())
+        }
         Builtin::Unknown(index) => Err(RuntimeError::UnknownBuiltin {
             name: names[index].text.to_string(),
         }),
     }
+}
+
+fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
+    match value {
+        Value::String(value) => Ok(Value::Number(value.chars().count() as f64)),
+        Value::List(values) => Ok(Value::Number(values.len() as f64)),
+        Value::Record(record) => Ok(Value::Number(record.len() as f64)),
+        Value::Null => Ok(Value::Number(0.0)),
+        _ => Err(RuntimeError::TypeError {
+            message: "`len` requires a string, list, record, or null".to_string(),
+        }),
+    }
+}
+
+fn execute_join_builtin(items: &Value, sep: &Value) -> Result<Value, RuntimeError> {
+    let Value::List(items) = items else {
+        return Err(RuntimeError::TypeError {
+            message: "`join` requires a list as the first argument".to_string(),
+        });
+    };
+    let sep = coerce_string(sep)?;
+    let mut joined = String::new();
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            joined.push_str(sep.as_ref());
+        }
+        joined.push_str(coerce_string(item)?.as_ref());
+    }
+    Ok(Value::String(joined.into()))
+}
+
+fn execute_validate_builtin(value: Value, schema: &Value) -> Result<Value, RuntimeError> {
+    let schema = unwrap_type_value(schema).ok_or_else(|| RuntimeError::TypeError {
+        message: "`validate` requires a Type literal as the second argument".to_string(),
+    })?;
+    validate_value_against_schema(&value, schema).map_err(|message| RuntimeError::ValueError {
+        message: format!("validation failed: {message}"),
+    })?;
+    Ok(value)
+}
+
+fn execute_range_builtin(values: &[Value]) -> Result<Value, RuntimeError> {
+    let (start, end) = match values {
+        [end] => (0, as_range_bound(end)?),
+        [start, end] => (as_range_bound(start)?, as_range_bound(end)?),
+        _ => {
+            return Err(RuntimeError::TypeError {
+                message: format!("`range` takes 1 or 2 arg(s), got {}", values.len()),
+            });
+        }
+    };
+    build_range(start, end)
+}
+
+fn execute_push_builtin(list: &Value, item: Value) -> Result<Value, RuntimeError> {
+    let Value::List(items) = list else {
+        return Err(RuntimeError::TypeError {
+            message: "`push` requires a list as the first argument".to_string(),
+        });
+    };
+    let mut values = Vec::with_capacity(items.len() + 1);
+    values.extend(items.iter().cloned());
+    values.push(item);
+    Ok(Value::List(values.into()))
+}
+
+fn as_range_bound(value: &Value) -> Result<i64, RuntimeError> {
+    let Value::Number(number) = value else {
+        return Err(RuntimeError::TypeError {
+            message: format!(
+                "`range` bounds must be finite integers, got {}",
+                value_type_name(value)
+            ),
+        });
+    };
+    if !number.is_finite()
+        || number.fract() != 0.0
+        || *number < i64::MIN as f64
+        || *number > i64::MAX as f64
+    {
+        return Err(RuntimeError::TypeError {
+            message: "`range` bounds must be finite integers".to_string(),
+        });
+    }
+    Ok(*number as i64)
+}
+
+fn build_range(start: i64, end: i64) -> Result<Value, RuntimeError> {
+    const MAX_RANGE_ITEMS: i64 = 1_000_000;
+    if start >= end {
+        return Ok(Value::List(Vec::new().into()));
+    }
+    let len = end as i128 - start as i128;
+    if len > MAX_RANGE_ITEMS as i128 {
+        return Err(RuntimeError::ValueError {
+            message: format!("`range` would create more than {MAX_RANGE_ITEMS} items"),
+        });
+    }
+    Ok(Value::List(
+        (start..end)
+            .map(|value| Value::Number(value as f64))
+            .collect::<Vec<_>>()
+            .into(),
+    ))
+}
+
+fn validate_value_against_schema(value: &Value, schema: &Value) -> Result<(), String> {
+    let mut path = "$".to_string();
+    validate_schema_node(value, schema, &mut path)
+}
+
+fn validate_schema_node(value: &Value, schema: &Value, path: &mut String) -> Result<(), String> {
+    let Some(schema_obj) = schema.as_record() else {
+        return Ok(());
+    };
+
+    if let Some(Value::String(expected)) = schema_obj.get("type")
+        && !matches_schema_type(value, expected)
+    {
+        return Err(format!(
+            "{path}: expected {expected}, got {}",
+            schema_value_type_name(value)
+        ));
+    }
+
+    if let Some(Value::List(allowed)) = schema_obj.get("enum")
+        && !allowed.iter().any(|candidate| candidate == value)
+    {
+        let allowed = allowed
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!("{path}: expected one of [{allowed}], got {value}"));
+    }
+
+    if let Some(Value::Record(properties)) = schema_obj.get("properties")
+        && let Value::Record(record) = value
+    {
+        if let Some(Value::List(required)) = schema_obj.get("required") {
+            for field in required.iter().filter_map(|field| match field {
+                Value::String(name) => Some(name.as_str()),
+                _ => None,
+            }) {
+                if record.get(field).is_none() {
+                    return Err(format!("{path}: missing required field `{field}`"));
+                }
+            }
+        }
+
+        for entry in properties.entries.iter() {
+            if let Some(field_value) = record.get_symbol(entry.symbol) {
+                let base_len = path.len();
+                path.push('.');
+                path.push_str(entry.name.as_ref());
+                validate_schema_node(field_value, &entry.value, path)?;
+                path.truncate(base_len);
+            }
+        }
+    }
+
+    if let Some(items_schema) = schema_obj.get("items")
+        && let Value::List(items) = value
+    {
+        for (index, item) in items.iter().enumerate() {
+            let base_len = path.len();
+            write!(path, "[{index}]").expect("string writes should not fail");
+            validate_schema_node(item, items_schema, path)?;
+            path.truncate(base_len);
+        }
+    }
+
+    Ok(())
+}
+
+fn matches_schema_type(value: &Value, expected: &str) -> bool {
+    match expected {
+        "string" => matches!(value, Value::String(_)),
+        "number" => matches!(value, Value::Number(number) if number.is_finite()),
+        "integer" => {
+            matches!(value, Value::Number(number) if number.is_finite() && number.fract() == 0.0)
+        }
+        "boolean" => matches!(value, Value::Bool(_)),
+        "array" => matches!(value, Value::List(_)),
+        "object" => matches!(value, Value::Record(_)),
+        "null" => matches!(value, Value::Null),
+        _ => true,
+    }
+}
+
+fn schema_value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::List(_) => "array",
+        Value::Record(_) => "object",
+    }
+}
+
+fn read_field_ref(value: &Value, field: &Name) -> Result<Value, RuntimeError> {
+    match value {
+        Value::Record(record) => Ok(record
+            .get_symbol(field.symbol)
+            .cloned()
+            .unwrap_or(Value::Null)),
+        Value::Null => Ok(Value::Null),
+        _ => Err(RuntimeError::TypeError {
+            message: format!(
+                "can't read `.{}` from {}",
+                field.text,
+                value_type_name(value)
+            ),
+        }),
+    }
+}
+
+fn unwrap_tool_result(value: Value) -> Result<Value, RuntimeError> {
+    let Value::Record(record) = value else {
+        return Err(RuntimeError::TypeError {
+            message: format!(
+                "`?` expected a tool result wrapper, got {}",
+                value_type_name(&value)
+            ),
+        });
+    };
+
+    match record.get("ok") {
+        Some(Value::Bool(true)) => {
+            record
+                .get("value")
+                .cloned()
+                .ok_or_else(|| RuntimeError::TypeError {
+                    message: "`?` found a successful tool result wrapper missing `value`"
+                        .to_string(),
+                })
+        }
+        Some(Value::Bool(false)) => {
+            let message = record
+                .get("error")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "unknown error".to_string());
+            Err(RuntimeError::ValueError {
+                message: format!("`?` unwrapped failed tool result: {message}"),
+            })
+        }
+        _ => Err(RuntimeError::TypeError {
+            message: "`?` expected a tool result wrapper with boolean `ok`".to_string(),
+        }),
+    }
+}
+
+fn is_async_handle_record(record: &Record) -> bool {
+    record.get("__handle__").is_some() || record.get("handle").is_some()
 }
 
 fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {

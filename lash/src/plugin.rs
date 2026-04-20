@@ -53,19 +53,25 @@ pub type AssistantResponseHook = Arc<
 pub type CommandHandler =
     Arc<dyn Fn(CommandInvocation) -> PluginFuture<CommandOutcome> + Send + Sync>;
 
+/// Session-scoped plugin that initializes, restores, and extends mode
+/// state across a session's lifecycle. External mode crates implement
+/// this via context wrappers ([`ModeSessionContext`],
+/// [`ModeRuntimeContext`]) so they don't need direct access to
+/// `Session`/`LashRuntime` internals — the context narrows what a
+/// plugin can poke at to the capabilities any execution mode
+/// reasonably needs.
 #[async_trait::async_trait]
 pub trait ModeSessionPlugin: Send + Sync {
     async fn initialize_session(
         &self,
-        _session: &mut crate::Session,
-        _session_id: &str,
+        _ctx: ModeSessionContext<'_>,
     ) -> Result<(), crate::SessionError> {
         Ok(())
     }
 
     async fn restore_session(
         &self,
-        _session: &mut crate::Session,
+        _ctx: ModeSessionContext<'_>,
         _state: &PersistedSessionState,
     ) -> Result<(), crate::SessionError> {
         Ok(())
@@ -73,7 +79,7 @@ pub trait ModeSessionPlugin: Send + Sync {
 
     async fn append_session_nodes(
         &self,
-        _session: &mut crate::Session,
+        _ctx: ModeSessionContext<'_>,
         _nodes: &[SessionAppendNode],
     ) -> Result<(), crate::SessionError> {
         Ok(())
@@ -81,14 +87,100 @@ pub trait ModeSessionPlugin: Send + Sync {
 
     fn configure_runtime_from_request(
         &self,
-        _runtime: &mut crate::runtime::LashRuntime,
+        _ctx: ModeRuntimeContext<'_>,
         _request: &SessionCreateRequest,
     ) {
     }
 }
 
+/// Narrow wrapper around `Session` that mode plugins use to
+/// initialize, restore, and extend their per-session state.
+///
+/// Exposes only the capabilities every mode reasonably needs
+/// (starting the lashlang execution backend, configuring output
+/// projection, restoring execution state, applying globals patches).
+/// Prevents mode plugins from reaching into unrelated `Session`
+/// internals.
+pub struct ModeSessionContext<'a> {
+    session: &'a mut crate::Session,
+    session_id: &'a str,
+}
+
+impl<'a> ModeSessionContext<'a> {
+    pub(crate) fn new(session: &'a mut crate::Session, session_id: &'a str) -> Self {
+        Self {
+            session,
+            session_id,
+        }
+    }
+
+    /// ID of the session being initialized/restored. Equivalent to the
+    /// `session_id` previously passed as a separate argument.
+    pub fn session_id(&self) -> &str {
+        self.session_id
+    }
+
+    /// Start the embedded lashlang execution backend for this session
+    /// (no-op if already running). Typically called in
+    /// `initialize_session` by modes that dispatch work via lashlang.
+    pub async fn start_lashlang_runtime(&mut self) -> Result<(), crate::SessionError> {
+        self.session.start_lashlang_runtime(self.session_id).await
+    }
+
+    /// Configure how tool-call / print output is truncated before it
+    /// flows back into the model. Mode plugins supply this from their
+    /// own config.
+    pub fn set_execution_output_projection(
+        &mut self,
+        config: crate::ToolResultProjectionPluginConfig,
+    ) {
+        self.session.set_execution_output_projection(config);
+    }
+
+    /// Restore the lashlang execution backend's globals from a
+    /// persisted snapshot.
+    pub async fn restore_execution_state(
+        &mut self,
+        data: &[u8],
+    ) -> Result<(), crate::SessionError> {
+        self.session.restore_execution_state(data).await
+    }
+
+    /// Apply an RLM globals patch (assignments + unsets) from either
+    /// the session graph or an incoming append-nodes request.
+    pub async fn apply_rlm_globals_patch(
+        &mut self,
+        patch: &crate::RlmGlobalsPatchPluginBody,
+    ) -> Result<(), crate::SessionError> {
+        self.session.apply_rlm_globals_patch(patch).await
+    }
+}
+
+/// Narrow wrapper around `LashRuntime` that mode plugins use when
+/// configuring the runtime from a fresh `SessionCreateRequest`.
+///
+/// Exposes only the runtime-level capabilities modes need to set
+/// (termination contract, etc.) so plugins don't reach into unrelated
+/// runtime internals.
+pub struct ModeRuntimeContext<'a> {
+    runtime: &'a mut crate::runtime::LashRuntime,
+}
+
+impl<'a> ModeRuntimeContext<'a> {
+    pub(crate) fn new(runtime: &'a mut crate::runtime::LashRuntime) -> Self {
+        Self { runtime }
+    }
+
+    /// Set how the session's embedded lashlang runtime terminates:
+    /// `ProseWithoutFence` for chat-style sessions, or `Finish` with
+    /// an optional output schema for typed-RLM sessions.
+    pub fn set_termination_mode(&mut self, termination: crate::RlmTermination) {
+        self.runtime.set_repl_termination(termination);
+    }
+}
+
 #[async_trait::async_trait]
-pub(crate) trait ModeNativeToolsPlugin: Send + Sync {
+pub trait ModeNativeToolsPlugin: Send + Sync {
     fn definitions(&self) -> Vec<ToolDefinition>;
 
     async fn execute(
@@ -98,6 +190,24 @@ pub(crate) trait ModeNativeToolsPlugin: Send + Sync {
         args: &serde_json::Value,
         progress: Option<&crate::ProgressSender>,
     ) -> Option<ToolResult>;
+}
+
+/// Singleton plugin slot that owns the `ProtocolDriverHandle` and
+/// associated preamble (prompt text, tool surface, sync/async flag)
+/// for a given execution mode. Mode-specific crates
+/// (`lash-mode-standard`, `lash-mode-rlm`) register one implementation
+/// each; the runtime picks the one whose `mode_id` matches the session
+/// policy's execution mode, falling back to `build_mode_preamble`
+/// when no plugin claims the slot.
+pub trait ModeProtocolDriverPlugin: Send + Sync {
+    /// Execution-mode identifier this driver implements (e.g.
+    /// `"standard"`, `"rlm"`). Matched against
+    /// `ExecutionMode::plugin_id()` at preamble-build time.
+    fn mode_id(&self) -> &'static str;
+
+    /// Build the `ModePreamble` (driver handle + prompt text + tool
+    /// surface metadata) for a turn in this mode.
+    fn build_preamble(&self, input: crate::ModeBuildInput) -> crate::ModePreamble;
 }
 
 /// Reason the history pipeline is being invoked.
@@ -543,7 +653,7 @@ impl Default for ModeExtras {
 pub struct StandardCreateExtras {}
 
 /// RLM-mode session config. Carries the choice of how the model
-/// terminates the session (prose vs `finish`-with-optional-schema).
+/// terminates the session (prose vs `submit`-with-optional-schema).
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct RlmCreateExtras {
     #[serde(default)]
@@ -776,6 +886,21 @@ pub trait SessionManager: Send + Sync {
     ) -> Result<SessionTurnHandle, PluginError>;
     async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
+    /// Push a user-visible message into the target session's turn-input
+    /// injection bridge so it surfaces at the next iteration boundary of
+    /// the current turn (or at the start of the next turn if the target
+    /// is idle). Used for cross-session "poke" flows like
+    /// `send_message`, where an inbox note should land at the next
+    /// available step rather than waiting for a brand-new task.
+    async fn inject_turn_input(
+        &self,
+        _session_id: &str,
+        _message: PluginMessage,
+    ) -> Result<(), PluginError> {
+        Err(PluginError::Session(
+            "turn input injection is unavailable in this session".to_string(),
+        ))
+    }
     async fn spawn_hidden_task(
         &self,
         _session_id: &str,
@@ -819,6 +944,17 @@ pub trait SessionManager: Send + Sync {
         ))
     }
     async fn complete_background_task(
+        &self,
+        _session_id: &str,
+        _task_id: &str,
+        _run_state: crate::ManagedRunState,
+    ) {
+    }
+    /// Transition a still-live background task between the non-terminal
+    /// `Running` and `Idle` run states. Used by subagent hosts to
+    /// reflect whether the subagent is actively working or waiting for
+    /// a follow-up task.
+    async fn transition_background_task_live_state(
         &self,
         _session_id: &str,
         _task_id: &str,
@@ -1128,6 +1264,13 @@ pub struct AssistantStreamHookContext {
 pub struct AssistantStreamTransform {
     pub chunk: String,
     pub events: Vec<PluginSurfaceEvent>,
+    /// When `true`, the runtime cancels the in-flight LLM call the
+    /// moment this hook returns and finalizes the turn using whatever
+    /// text has been streamed so far. Any plugin may set this — the
+    /// first to raise it wins. Used by mode plugins to enforce
+    /// one-block-per-turn contracts (e.g. the RLM stream mask aborts
+    /// as soon as the first lashlang fence closes).
+    pub abort_stream: bool,
 }
 
 #[derive(Clone)]
@@ -1568,16 +1711,11 @@ mod tool_result_projection_builtin;
 mod monitor;
 #[path = "plugin_builtin/observational_memory.rs"]
 mod observational_memory;
-#[path = "plugin_builtin/rlm_mode.rs"]
-mod rlm_mode;
 #[path = "plugin_builtin/rolling_history.rs"]
 mod rolling_history;
-#[path = "plugin_builtin/standard_mode.rs"]
-mod standard_mode;
 
 pub use monitor::MonitorPluginFactory as BuiltinMonitorPluginFactory;
 pub use observational_memory::ObservationalMemoryPluginFactory;
-pub use rlm_mode::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
 pub use rolling_history::RollingHistoryPluginFactory;
 
 pub use runtime_impl::{
@@ -1597,11 +1735,15 @@ pub(crate) use tool_result_projection_builtin::{
 };
 
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
-    vec![
-        Arc::new(monitor::MonitorPluginFactory),
-        Arc::new(standard_mode::StandardModePluginFactory),
-        Arc::new(rlm_mode::BuiltinRlmModePluginFactory::default()),
-    ]
+    // Mode plugins (`lash-mode-standard`, `lash-mode-rlm`) must be
+    // registered by the embedder before calling `PluginHost::build_session`.
+    // lash's own test suite uses an in-tree fake (`test_support::test_mode_factories()`)
+    // to avoid a dev-dep cycle through the mode crates.
+    #[allow(unused_mut)]
+    let mut factories: Vec<Arc<dyn PluginFactory>> = vec![Arc::new(monitor::MonitorPluginFactory)];
+    #[cfg(test)]
+    factories.extend(crate::test_support::test_mode_factories());
+    factories
 }
 
 #[cfg(feature = "sqlite-store")]

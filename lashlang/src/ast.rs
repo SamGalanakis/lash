@@ -1,34 +1,52 @@
+use crate::lexer::Span;
+use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
+
+pub type AstString = CompactString;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Program {
     pub statements: Vec<Stmt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statement_spans: Vec<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Stmt {
     Assign {
-        name: String,
+        name: AstString,
         expr: Expr,
     },
     Expr(Expr),
     Call(CallExpr),
     Cancel(Expr),
-    Observe(Expr),
+    Print(Expr),
     If {
         condition: Expr,
         then_block: Vec<Stmt>,
         else_block: Vec<Stmt>,
     },
     For {
-        binding: String,
+        binding: AstString,
         iterable: Expr,
         body: Vec<Stmt>,
     },
     Parallel {
-        branches: Vec<Stmt>,
+        branches: ParallelBranches,
     },
-    Finish(Option<Expr>),
+    Submit(Option<Expr>),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ParallelBranches {
+    Positional(Vec<Stmt>),
+    Named(Vec<NamedParallelBranch>),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NamedParallelBranch {
+    pub name: AstString,
+    pub stmt: Stmt,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,23 +54,24 @@ pub enum Expr {
     Null,
     Bool(bool),
     Number(f64),
-    String(String),
-    Variable(String),
+    String(AstString),
+    Variable(AstString),
     List(Vec<Expr>),
-    Record(Vec<(String, Expr)>),
+    Record(Vec<(AstString, Expr)>),
     ToolCall(CallExpr),
     StartToolCall(CallExpr),
     Parallel {
-        branches: Vec<Stmt>,
+        branches: ParallelBranches,
     },
     Await(Box<Expr>),
+    ResultUnwrap(Box<Expr>),
     BuiltinCall {
-        name: String,
+        name: AstString,
         args: Vec<Expr>,
     },
     Field {
         target: Box<Expr>,
-        field: String,
+        field: AstString,
     },
     Index {
         target: Box<Expr>,
@@ -83,23 +102,23 @@ pub enum TypeExpr {
     Float,
     Bool,
     Dict,
-    Enum(Vec<String>),
+    Enum(Vec<AstString>),
     List(Box<TypeExpr>),
     Object(Vec<TypeField>),
-    Ref(String),
+    Ref(AstString),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TypeField {
-    pub name: String,
+    pub name: AstString,
     pub ty: TypeExpr,
     pub optional: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CallExpr {
-    pub name: String,
-    pub args: Vec<(String, Expr)>,
+    pub name: AstString,
+    pub args: Vec<(AstString, Expr)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -126,8 +126,9 @@ impl SubagentToolsProvider {
     ) -> Result<Value, String> {
         let task_name = required_string(args, "task_name")?;
         let task = required_string(args, "task")?;
-        let capability = Capability::from_str(&required_string(args, "capability")?)
-            .ok_or_else(|| "invalid capability: expected `low`, `medium`, or `high`".to_string())?;
+        let capability = required_string(args, "capability")?
+            .parse::<Capability>()
+            .map_err(|_| "invalid capability: expected `low`, `medium`, or `high`".to_string())?;
         let fork_turns = parse_fork_turns(args.get("fork_turns"))?;
         let output_schema = parse_output_schema(args.get("output"))?;
         let create_request = self
@@ -140,6 +141,7 @@ impl SubagentToolsProvider {
             image_blobs: std::collections::HashMap::new(),
             user_input: None,
             mode: None,
+            rlm_termination_override: None,
         };
         let response = self
             .host
@@ -181,6 +183,18 @@ impl SubagentToolsProvider {
         context: &ToolExecutionContext,
     ) -> Result<Value, String> {
         let task = required_string(args, "task")?;
+        let output_schema = parse_output_schema(args.get("output"))?;
+        // Always set an override for follow-ups so the per-turn
+        // termination contract matches what the prompt tells the
+        // subagent. When `output` is omitted, the follow-up explicitly
+        // drops any inherited schema by running with
+        // `ProseWithoutFence`.
+        let rlm_termination_override = Some(match output_schema.clone() {
+            Some(schema) => RlmTermination::Finish {
+                schema: Some(schema),
+            },
+            None => RlmTermination::ProseWithoutFence,
+        });
         let response = self
             .host
             .followup_task(
@@ -189,11 +203,16 @@ impl SubagentToolsProvider {
                     target: required_string(args, "target")?,
                     turn_input: TurnInput {
                         items: vec![InputItem::Text {
-                            text: render_task_prompt(&task, None),
+                            text: render_task_prompt_with_kind(
+                                &task,
+                                output_schema.as_ref(),
+                                TaskPromptKind::Followup,
+                            ),
                         }],
                         image_blobs: std::collections::HashMap::new(),
                         user_input: None,
                         mode: None,
+                        rlm_termination_override,
                     },
                     task,
                     interrupt: optional_bool(args, "interrupt").unwrap_or(false),
@@ -507,13 +526,37 @@ fn type_descriptor_to_json_schema(descriptor: &str) -> Result<Value, String> {
 }
 
 fn render_task_prompt(task: &str, output_schema: Option<&Value>) -> String {
+    render_task_prompt_with_kind(task, output_schema, TaskPromptKind::Initial)
+}
+
+#[derive(Clone, Copy)]
+enum TaskPromptKind {
+    Initial,
+    Followup,
+}
+
+fn render_task_prompt_with_kind(
+    task: &str,
+    output_schema: Option<&Value>,
+    kind: TaskPromptKind,
+) -> String {
     let mut sections = vec![task.to_string()];
     if let Some(schema) = output_schema {
         let schema_pretty =
             serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
+        let replaces_note = match kind {
+            TaskPromptKind::Initial => "",
+            TaskPromptKind::Followup => {
+                "\n\nThis replaces any output schema from earlier tasks in this session."
+            }
+        };
         sections.push(format!(
-            "## Required output\n\nWhen done, end the task by calling `finish <expr>` from inside a fenced ```lashlang block. The value MUST match this JSON Schema exactly:\n\n```json\n{schema_pretty}\n```"
+            "## Required output\n\nWhen done, end the task by calling `submit <expr>` from inside a fenced ```lashlang block. The value MUST match this JSON Schema exactly:\n\n```json\n{schema_pretty}\n```{replaces_note}"
         ));
+    } else if matches!(kind, TaskPromptKind::Followup) {
+        sections.push(
+            "## Required output\n\nNo structured output schema is required for this follow-up task. `submit <expr>` may return any value (a string, a record, etc.); it will not be schema-validated. This overrides any output schema from earlier tasks in this session.".to_string(),
+        );
     }
     sections.join("\n\n")
 }

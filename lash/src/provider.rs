@@ -17,6 +17,8 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ProviderKind {
+    #[serde(rename = "anthropic")]
+    Anthropic,
     #[serde(rename = "codex")]
     Codex,
     #[serde(rename = "google_oauth")]
@@ -26,7 +28,8 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 3] = [
+    pub const ALL: [ProviderKind; 4] = [
+        ProviderKind::Anthropic,
         ProviderKind::Codex,
         ProviderKind::GoogleOAuth,
         ProviderKind::OpenAiGeneric,
@@ -34,6 +37,7 @@ impl ProviderKind {
 
     pub fn id(self) -> &'static str {
         match self {
+            ProviderKind::Anthropic => "anthropic",
             ProviderKind::Codex => "codex",
             ProviderKind::GoogleOAuth => "google_oauth",
             ProviderKind::OpenAiGeneric => "openai-compatible",
@@ -42,6 +46,7 @@ impl ProviderKind {
 
     pub fn cli_label(self) -> &'static str {
         match self {
+            ProviderKind::Anthropic => "Anthropic API (Claude)",
             ProviderKind::Codex => "OpenAI Codex OAuth",
             ProviderKind::GoogleOAuth => "Google OAuth (Gemini)",
             ProviderKind::OpenAiGeneric => "OpenAI-compatible (API key)",
@@ -50,6 +55,7 @@ impl ProviderKind {
 
     pub fn setup_name(self) -> &'static str {
         match self {
+            ProviderKind::Anthropic => "Anthropic API",
             ProviderKind::Codex => "Codex",
             ProviderKind::GoogleOAuth => "Google OAuth",
             ProviderKind::OpenAiGeneric => "OpenAI-compatible",
@@ -58,6 +64,7 @@ impl ProviderKind {
 
     pub fn setup_description(self) -> &'static str {
         match self {
+            ProviderKind::Anthropic => "Claude via Anthropic API key",
             ProviderKind::Codex => "ChatGPT Plus/Pro/Team",
             ProviderKind::GoogleOAuth => "Gemini via Google account",
             ProviderKind::OpenAiGeneric => "Any OpenAI-compatible API endpoint",
@@ -65,7 +72,10 @@ impl ProviderKind {
     }
 
     pub fn default_base_url(self) -> Option<&'static str> {
-        None
+        match self {
+            ProviderKind::Anthropic => Some("https://api.anthropic.com"),
+            _ => None,
+        }
     }
 }
 
@@ -230,6 +240,13 @@ pub enum Provider {
         #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
         options: ProviderOptions,
     },
+    Anthropic {
+        api_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
+        options: ProviderOptions,
+    },
 }
 
 impl Provider {
@@ -238,6 +255,7 @@ impl Provider {
             Provider::OpenAiGeneric { .. } => ProviderKind::OpenAiGeneric,
             Provider::Codex { .. } => ProviderKind::Codex,
             Provider::GoogleOAuth { .. } => ProviderKind::GoogleOAuth,
+            Provider::Anthropic { .. } => ProviderKind::Anthropic,
         }
     }
 
@@ -294,7 +312,8 @@ impl Provider {
         match self {
             Provider::OpenAiGeneric { options, .. }
             | Provider::Codex { options, .. }
-            | Provider::GoogleOAuth { options, .. } => options,
+            | Provider::GoogleOAuth { options, .. }
+            | Provider::Anthropic { options, .. } => options,
         }
     }
 
@@ -302,7 +321,8 @@ impl Provider {
         match self {
             Provider::OpenAiGeneric { options, .. }
             | Provider::Codex { options, .. }
-            | Provider::GoogleOAuth { options, .. } => options,
+            | Provider::GoogleOAuth { options, .. }
+            | Provider::Anthropic { options, .. } => options,
         }
     }
 
@@ -400,7 +420,7 @@ impl Provider {
                     return Ok(true);
                 }
             }
-            Provider::OpenAiGeneric { .. } => {}
+            Provider::OpenAiGeneric { .. } | Provider::Anthropic { .. } => {}
         }
         Ok(false)
     }

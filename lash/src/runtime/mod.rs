@@ -26,9 +26,7 @@ use crate::session_model::{
     fresh_message_id, make_error_event, plugin_message_to_message, reassign_part_ids,
     transport_stream_events,
 };
-use crate::tool_dispatch::{
-    ToolDispatchContext, dispatch_tool_call_with_execution_context,
-};
+use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call_with_execution_context};
 use crate::{
     CheckpointKind, ExecutionMode, ExternalInvokeError, PersistedTurnState,
     PersistentRuntimeServices, PromptHookContext, RuntimeServices, SandboxMessage, Session,
@@ -92,6 +90,13 @@ pub struct TurnInput {
     pub user_input: Option<crate::UserInputProvenance>,
     #[serde(default)]
     pub mode: Option<RunMode>,
+    /// Per-turn override for the session's RLM termination contract.
+    /// When `Some`, this turn validates `submit` against the supplied
+    /// schema (or, for `ProseWithoutFence`, drops validation entirely)
+    /// without mutating the session-scoped default. Used by
+    /// `followup_task` to retype a subagent for a single turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rlm_termination_override: Option<crate::RlmTermination>,
 }
 
 #[derive(Clone, Debug)]
@@ -581,6 +586,12 @@ struct StandardStreamState<'a> {
     streamed_output: &'a mut StandardStreamFallback,
     debug: &'a mut LlmStreamDebugState,
     iteration: usize,
+    /// Set to `true` by `forward_standard_stream_event` when a plugin
+    /// stream hook has raised `AssistantStreamTransform.abort_stream`.
+    /// The LLM runner checks this after each stream event and
+    /// short-circuits the select loop, synthesizing a response from the
+    /// already-streamed parts.
+    abort_requested: &'a mut bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -679,28 +690,32 @@ impl StandardStreamFallback {
         call_id: String,
         tool_name: String,
         input_json: String,
-        id: Option<String>,
+        item_id: Option<String>,
+        signature: Option<String>,
     ) {
         self.parts.push(LlmOutputPart::ToolCall {
             call_id,
             tool_name,
             input_json,
-            id,
+            item_id,
+            signature,
         });
     }
 
     fn push_reasoning(
         &mut self,
         text: String,
-        id: String,
+        item_id: Option<String>,
         summary: Vec<String>,
         encrypted_content: Option<String>,
     ) {
         self.parts.push(LlmOutputPart::Reasoning {
             text,
-            id,
-            summary,
+            signature: None,
+            redacted: false,
+            item_id,
             encrypted_content,
+            summary,
         });
     }
 
@@ -1007,7 +1022,7 @@ pub struct AssembledTurn {
     #[serde(default)]
     pub errors: Vec<TurnIssue>,
     /// When the session was started in typed RLM termination mode AND
-    /// the lashlang program ended with `finish <expr>`, this is the
+    /// the lashlang program ended with `submit <expr>`, this is the
     /// captured (and schema-validated, if a schema was supplied) value.
     /// `None` for chat-style sessions and for typed sessions that
     /// timed out without finishing.
@@ -1455,7 +1470,13 @@ impl LashRuntime {
                 .map_err(|err| SessionError::Protocol(err.to_string()))?;
         }
         let mode_session = Arc::clone(session.plugins().mode_session());
-        mode_session.restore_session(&mut session, &state).await?;
+        let session_id = state.session_id.clone();
+        mode_session
+            .restore_session(
+                crate::plugin::ModeSessionContext::new(&mut session, &session_id),
+                &state,
+            )
+            .await?;
         clear_persisted_runtime_caches(&mut state);
         session
             .plugins()
@@ -1813,8 +1834,12 @@ impl LashRuntime {
         let node_ids = append_session_nodes_to_state(&mut self.state, &request.nodes);
         if let Some(session) = self.session.as_mut() {
             let mode_session = Arc::clone(session.plugins().mode_session());
+            let session_id = self.state.session_id.clone();
             mode_session
-                .append_session_nodes(session, &request.nodes)
+                .append_session_nodes(
+                    crate::plugin::ModeSessionContext::new(session, &session_id),
+                    &request.nodes,
+                )
                 .await?;
         }
         if let Some(store) = self
@@ -2104,8 +2129,9 @@ impl LashRuntime {
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 }],
                 user_input: None,
                 origin: None,
@@ -2128,8 +2154,9 @@ impl LashRuntime {
                         tool_call_id: None,
                         tool_name: None,
                         tool_item_id: None,
+                        tool_signature: None,
                         prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                        reasoning_meta: None,
                     });
                 }
                 NormalizedItem::Image(bytes) => {
@@ -2148,8 +2175,9 @@ impl LashRuntime {
                         tool_call_id: None,
                         tool_name: None,
                         tool_item_id: None,
+                        tool_signature: None,
                         prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                        reasoning_meta: None,
                     });
                 }
             }
@@ -2163,8 +2191,9 @@ impl LashRuntime {
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             });
         }
         reassign_part_ids(&user_id, &mut user_parts);
@@ -2227,8 +2256,14 @@ impl LashRuntime {
 
         self.state.last_prompt_usage = None;
 
-        self.stream_prepared_turn(messages, previous_prompt_usage, events, cancel)
-            .await
+        self.stream_prepared_turn(
+            messages,
+            previous_prompt_usage,
+            input.rlm_termination_override.clone(),
+            events,
+            cancel,
+        )
+        .await
     }
 
     /// Run a single turn and return only the assembled terminal result.
@@ -2245,6 +2280,7 @@ impl LashRuntime {
         &mut self,
         messages: crate::MessageSequence,
         _previous_prompt_usage: Option<PromptUsage>,
+        rlm_termination_override: Option<crate::RlmTermination>,
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
@@ -2415,7 +2451,9 @@ impl LashRuntime {
             llm_factory: Arc::clone(&self.llm_factory),
             session_manager: manager,
             prompt_bridge,
-            rlm_termination: self.rlm_termination.clone(),
+            rlm_termination: rlm_termination_override
+                .clone()
+                .unwrap_or_else(|| self.rlm_termination.clone()),
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let run_offset = self.state.iteration;

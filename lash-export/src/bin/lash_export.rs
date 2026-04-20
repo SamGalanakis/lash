@@ -47,8 +47,8 @@ fn run() -> Result<()> {
         SessionSelector::Id(cli.session.as_str())
     };
 
-    let rendered = export(selector, format, cli.out.as_deref())
-        .with_context(|| "rendering session")?;
+    let rendered =
+        export(selector, format, cli.out.as_deref()).with_context(|| "rendering session")?;
 
     if cli.out.is_none() {
         print!("{rendered}");

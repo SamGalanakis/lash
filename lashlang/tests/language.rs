@@ -69,7 +69,7 @@ impl ToolHost for TestHost {
         }
     }
 
-    fn observe(&self, value: &Value) -> Result<(), ToolHostError> {
+    fn print(&self, value: &Value) -> Result<(), ToolHostError> {
         self.observations
             .lock()
             .expect("observation mutex")
@@ -81,7 +81,7 @@ impl ToolHost for TestHost {
 fn finished(outcome: ExecutionOutcome) -> Value {
     match outcome {
         ExecutionOutcome::Finished(value) => value,
-        ExecutionOutcome::Continued => panic!("expected `finish`"),
+        ExecutionOutcome::Continued => panic!("expected `submit`"),
     }
 }
 
@@ -103,7 +103,7 @@ fn parser_handles_precedence_and_parallel() {
           left = call glob { pattern: "src/*.rs" }
           right = call read_file { path: "src/lib.rs" }
         }
-        finish total
+        submit total
         "#,
     )
     .expect("program should parse");
@@ -117,8 +117,8 @@ fn parser_accepts_double_slash_comments() {
         r#"
         // setup
         total = 1 + 2
-        // finish
-        finish total
+        // submit
+        submit total
         "#,
     )
     .expect("program should parse");
@@ -148,7 +148,7 @@ fn parser_accepts_inline_trailing_comments_in_blocks() {
         } else { // fallback
           value = 2
         }
-        finish value // done
+        submit value // done
         "#,
     )
     .expect("program should parse");
@@ -167,7 +167,7 @@ fn parser_accepts_else_if_chains() {
         } else {
           answer = 3
         }
-        finish answer
+        submit answer
         "#,
     )
     .expect("program should parse");
@@ -183,7 +183,7 @@ fn parser_allows_parallel_in_expression_position() {
           left = call glob { pattern: "src/*.rs" }
           right = call read_file { path: "src/lib.rs" }
         }
-        finish results
+        submit results
         "#,
     )
     .expect("program should parse");
@@ -196,7 +196,7 @@ fn parser_allows_bare_expression_statements() {
     let program = parse(
         r#"
         "branch_a"
-        finish "done"
+        submit "done"
         "#,
     )
     .expect("program should parse");
@@ -210,9 +210,9 @@ fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
     let program = parse(
         r#"
         if true {
-          finish
+          submit
         }
-        finish
+        submit
         "#,
     )
     .expect("program should parse");
@@ -221,8 +221,8 @@ fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
         program.statements.as_slice(),
         [
             lashlang::Stmt::If { then_block, .. },
-            lashlang::Stmt::Finish(None)
-        ] if matches!(then_block.as_slice(), [lashlang::Stmt::Finish(None)])
+            lashlang::Stmt::Submit(None)
+        ] if matches!(then_block.as_slice(), [lashlang::Stmt::Submit(None)])
     ));
 }
 
@@ -237,7 +237,7 @@ fn executes_programs_with_double_slash_comments() {
         // Create some values first
         total = 6 / 2
         // Return the result
-        finish total
+        submit total
         "#,
             &mut state,
             &host,
@@ -253,7 +253,7 @@ fn bare_finish_returns_null() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = finished(execute("finish", &mut state, &host).expect("execution should succeed"));
+    let value = finished(execute("submit", &mut state, &host).expect("execution should succeed"));
 
     assert_eq!(value, Value::Null);
 }
@@ -271,7 +271,7 @@ fn executes_inline_trailing_comments_inside_blocks() {
         } else {
           total = 0
         }
-        finish total // final answer
+        submit total // final answer
         "#,
             &mut state,
             &host,
@@ -291,7 +291,7 @@ fn double_slash_inside_strings_is_not_a_comment() {
         execute(
             r#"
         url = "https://example.com/a//b"
-        finish url
+        submit url
         "#,
             &mut state,
             &host,
@@ -310,7 +310,7 @@ fn parser_accepts_ternary_in_call_arguments() {
     let program = parse(
         r#"
         result = format("{}", true ? "yes" : "no")
-        finish result
+        submit result
         "#,
     )
     .expect("program should parse");
@@ -328,7 +328,7 @@ fn executes_arithmetic_strings_and_finish() {
             r#"
         total = 1 + 2 * 3
         msg = format("total={}", total)
-        finish msg
+        submit msg
         "#,
             &mut state,
             &host,
@@ -360,7 +360,7 @@ fn executes_if_for_and_list_concat() {
         } else {
           result = "bad"
         }
-        finish result
+        submit result
         "#,
             &mut state,
             &host,
@@ -381,7 +381,7 @@ fn ternary_selects_the_correct_branch() {
             r#"
         truthy = true ? "left" : "right"
         falsy = false ? "left" : "right"
-        finish format("{}:{}", truthy, falsy)
+        submit format("{}:{}", truthy, falsy)
         "#,
             &mut state,
             &host,
@@ -401,7 +401,7 @@ fn ternary_is_right_associative() {
         execute(
             r#"
         result = false ? 1 : true ? 2 : 3
-        finish result
+        submit result
         "#,
             &mut state,
             &host,
@@ -421,7 +421,7 @@ fn ternary_has_lower_precedence_than_boolean_ops() {
         execute(
             r#"
         result = false or true ? "yes" : "no"
-        finish result
+        submit result
         "#,
             &mut state,
             &host,
@@ -442,7 +442,7 @@ fn ternary_short_circuits_unselected_branch() {
             r#"
         yes = true ? "ok" : missing_name
         no = false ? missing_name : "ok"
-        finish format("{}:{}", yes, no)
+        submit format("{}:{}", yes, no)
         "#,
             &mut state,
             &host,
@@ -463,7 +463,7 @@ fn unary_bang_aliases_not() {
             r#"
         a = !false
         b = !true
-        finish [a, b]
+        submit [a, b]
         "#,
             &mut state,
             &host,
@@ -488,7 +488,7 @@ fn symbolic_boolean_aliases_match_word_operators() {
         a = true && false
         b = false || true
         c = !false && (false || true)
-        finish [a, b, c]
+        submit [a, b, c]
         "#,
             &mut state,
             &host,
@@ -514,7 +514,7 @@ fn conditions_and_ternary_use_bounded_truthiness() {
         b = "" ? "yes" : "no"
         c = !0
         d = ![]
-        finish [a, b, c, d]
+        submit [a, b, c, d]
         "#,
             &mut state,
             &host,
@@ -545,7 +545,7 @@ fn string_concatenation_stringifies_non_string_side() {
         execute(
             r#"
         found = call read_file { path: "src/lib.rs" }
-        finish "status=" + found.ok + " value=" + found.value
+        submit "status=" + found.ok + " value=" + found.value
         "#,
             &mut state,
             &host,
@@ -572,7 +572,7 @@ fn arithmetic_and_string_builtins_coerce_scalars() {
         joined = join(["a", 2, true], "-")
         split_num = split(101, 0)
         prefix = starts_with(123, 12)
-        finish {
+        submit {
           total: total,
           scaled: scaled,
           joined: joined,
@@ -614,7 +614,7 @@ fn to_string_stringifies_records() {
     let value = finished(
         execute(
             r#"
-        finish to_string({ ok: true, count: 2 })
+        submit to_string({ ok: true, count: 2 })
         "#,
             &mut state,
             &host,
@@ -637,9 +637,9 @@ fn observe_captures_intermediate_values_without_ending_execution() {
         execute(
             r#"
         item = { ok: true, count: 2 }
-        observe item
-        observe "step done"
-        finish "final"
+        print item
+        print "step done"
+        submit "final"
         "#,
             &mut state,
             &host,
@@ -670,7 +670,7 @@ fn execution_can_continue_without_finish() {
     let outcome = execute(
         r#"
         counter = 1
-        observe counter
+        print counter
         "#,
         &mut state,
         &host,
@@ -698,7 +698,7 @@ fn ternary_fixes_tool_result_formatting_pattern() {
           found.ok ? "ok" : format("failed: {}", found.error),
           missing.ok ? "ok" : format("failed: {}", missing.error)
         )
-        finish summary
+        submit summary
         "#,
             &mut state,
             &host,
@@ -721,7 +721,7 @@ fn format_supports_indexed_reordering() {
     let value = finished(
         execute(
             r#"
-        finish format("b={1} a={0}", "x", "y")
+        submit format("b={1} a={0}", "x", "y")
         "#,
             &mut state,
             &host,
@@ -740,7 +740,7 @@ fn format_without_placeholders_returns_literal_string() {
     let value = finished(
         execute(
             r#"
-        finish format("plain")
+        submit format("plain")
         "#,
             &mut state,
             &host,
@@ -759,7 +759,7 @@ fn format_supports_escaped_braces() {
     let value = finished(
         execute(
             r#"
-        finish format("{{{}}}", 1)
+        submit format("{{{}}}", 1)
         "#,
             &mut state,
             &host,
@@ -774,7 +774,7 @@ fn format_supports_escaped_braces() {
 fn format_rejects_mixed_placeholder_styles_end_to_end() {
     let error = runtime_error(
         r#"
-        finish format("{} {1}", "x", "y")
+        submit format("{} {1}", "x", "y")
         "#,
     );
 
@@ -790,7 +790,7 @@ fn format_rejects_mixed_placeholder_styles_end_to_end() {
 fn format_rejects_unused_args_end_to_end() {
     let error = runtime_error(
         r#"
-        finish format("plain", 1)
+        submit format("plain", 1)
         "#,
     );
 
@@ -806,7 +806,7 @@ fn format_rejects_unused_args_end_to_end() {
 fn format_rejects_unmatched_braces_end_to_end() {
     let open_error = runtime_error(
         r#"
-        finish format("{")
+        submit format("{")
         "#,
     );
     assert_eq!(
@@ -818,7 +818,7 @@ fn format_rejects_unmatched_braces_end_to_end() {
 
     let close_error = runtime_error(
         r#"
-        finish format("}")
+        submit format("}")
         "#,
     );
     assert_eq!(
@@ -839,7 +839,7 @@ fn tool_calls_return_result_records() {
             r#"
         found = call read_file { path: "src/lib.rs" }
         missing = call read_file { path: "src/missing.rs" }
-        finish { found: found, missing: missing }
+        submit { found: found, missing: missing }
         "#,
             &mut state,
             &host,
@@ -872,7 +872,7 @@ fn parallel_executes_concurrently_and_merges_distinct_bindings() {
           left = call sleep_echo { value: "a" }
           right = call sleep_echo { value: "b" }
         }
-        finish { left: left, right: right }
+        submit { left: left, right: right }
         "#,
             &mut state,
             &host,
@@ -906,7 +906,7 @@ fn parallel_expression_returns_branch_results_in_order() {
           left = call sleep_echo { value: "a" }
           right = call sleep_echo { value: "b" }
         }
-        finish { results: results, left: left, right: right }
+        submit { results: results, left: left, right: right }
         "#,
             &mut state,
             &host,
@@ -941,6 +941,40 @@ fn parallel_expression_returns_branch_results_in_order() {
 }
 
 #[test]
+fn named_parallel_expression_returns_record_results() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        results = parallel {
+          first: call sleep_echo { value: "a" }
+          second: call sleep_echo { value: "b" }
+          computed: 40 + 2
+        }
+        submit {
+          first: results.first?,
+          second: results.second?,
+          computed: results.computed
+        }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(record["first"], Value::String("a".to_string().into()));
+    assert_eq!(record["second"], Value::String("b".to_string().into()));
+    assert_eq!(record["computed"], Value::Number(42.0));
+    assert!(host.max_active.load(Ordering::SeqCst) >= 2);
+}
+
+#[test]
 fn parallel_expression_accepts_bare_expression_branches() {
     let host = TestHost::default();
     let mut state = State::new();
@@ -953,7 +987,7 @@ fn parallel_expression_accepts_bare_expression_branches() {
           40 + 2
           len([1,2,3])
         }
-        finish results
+        submit results
         "#,
             &mut state,
             &host,
@@ -983,7 +1017,7 @@ fn slice_null_bounds_default_to_start_or_end() {
         execute(
             r#"
         values = [10, 20, 30, 40, 50]
-        finish {
+        submit {
           list_tail: slice(values, 3, null),
           list_head: slice(values, null, 2),
           string_tail: slice("abcdef", 4, null),
@@ -1027,7 +1061,7 @@ fn negative_indices_and_record_contains_are_supported() {
             r#"
         values = [10, 20, 30]
         text = "abc"
-        finish {
+        submit {
           tail: values[-1],
           before_tail: values[-2],
           oob: values[-4],
@@ -1069,7 +1103,7 @@ fn else_if_chains_execute_without_extra_braces() {
         } else {
           label = "small"
         }
-        finish label
+        submit label
         "#,
             &mut state,
             &host,
@@ -1089,7 +1123,7 @@ fn slice_supports_negative_bounds() {
         execute(
             r#"
         values = [10, 20, 30, 40, 50]
-        finish {
+        submit {
           list_tail: slice(values, -2, null),
           list_without_last: slice(values, null, -1),
           list_middle: slice(values, -4, -1),
@@ -1149,6 +1183,60 @@ fn slice_supports_negative_bounds() {
 }
 
 #[test]
+fn range_and_push_cover_common_collection_building() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        indexes = range(0, 3)
+        extended = push(indexes, 3)
+        submit {
+          indexes: indexes,
+          extended: extended,
+          from_zero: range(3),
+          negative: range(-2, 1),
+          empty: range(5, 2)
+        }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(
+        record["indexes"],
+        Value::List(vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)].into())
+    );
+    assert_eq!(
+        record["extended"],
+        Value::List(
+            vec![
+                Value::Number(0.0),
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0),
+            ]
+            .into()
+        )
+    );
+    assert_eq!(
+        record["from_zero"],
+        Value::List(vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)].into())
+    );
+    assert_eq!(
+        record["negative"],
+        Value::List(vec![Value::Number(-2.0), Value::Number(-1.0), Value::Number(0.0)].into())
+    );
+    assert_eq!(record["empty"], Value::List(Vec::new().into()));
+}
+
+#[test]
 fn string_comparisons_are_lexicographic() {
     let host = TestHost::default();
     let mut state = State::new();
@@ -1156,7 +1244,7 @@ fn string_comparisons_are_lexicographic() {
     let value = finished(
         execute(
             r#"
-        finish {
+        submit {
           lt: "abc" < "def",
           gt: "xyz" > "abc",
           le: "abc" <= "abc",
@@ -1186,7 +1274,7 @@ fn stringification_preserves_integer_format_inside_containers() {
     let value = finished(
         execute(
             r#"
-        finish {
+        submit {
           list_text: to_string([1, 2]),
           record_text: to_string({ a: 1, b: 2.5 })
         }
@@ -1221,7 +1309,7 @@ fn parallel_rejects_conflicting_assignments() {
           result = call sleep_echo { value: "a" }
           result = call sleep_echo { value: "b" }
         }
-        finish result
+        submit result
         "#,
         &mut state,
         &host,
@@ -1243,7 +1331,7 @@ fn snapshot_round_trip_preserves_repl_like_state() {
         execute(
             r#"
         counter = 1
-        finish counter
+        submit counter
         "#,
             &mut state,
             &host,
@@ -1260,7 +1348,7 @@ fn snapshot_round_trip_preserves_repl_like_state() {
         execute(
             r#"
         counter = counter + 1
-        finish counter
+        submit counter
         "#,
             &mut restored,
             &host,
@@ -1280,7 +1368,7 @@ fn json_and_record_helpers_work() {
         execute(
             r#"
         obj = json_parse("{\"path\":\"src/lib.rs\",\"line\":7}")
-        finish format("{}:{}", obj.path, obj.line)
+        submit format("{}:{}", obj.path, obj.line)
         "#,
             &mut state,
             &host,
@@ -1299,9 +1387,9 @@ fn finish_inside_parallel_is_rejected() {
     let error = execute(
         r#"
         parallel {
-          finish "nope"
+          submit "nope"
         }
-        finish "done"
+        submit "done"
         "#,
         &mut state,
         &host,
@@ -1355,14 +1443,13 @@ fn end_to_end_type_value_is_json_schema_shaped() {
           },
           isbn: str?
         }
-        finish Books
+        submit Books
         "#,
     )
     .expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
-    let outcome =
-        lashlang::execute_program(&program, &mut state, &host).expect("should run");
+    let outcome = lashlang::execute_program(&program, &mut state, &host).expect("should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1395,7 +1482,7 @@ fn type_is_usable_as_a_tool_call_argument() {
         r#"
         Shape = Type { name: str, labels: list[enum["a","b"]] }
         call spawn_agent { task: "find X", output: Shape }
-        finish null
+        submit null
         "#,
     )
     .expect("should parse");
@@ -1417,12 +1504,63 @@ fn type_is_usable_as_a_tool_call_argument() {
 }
 
 #[test]
-fn undefined_ref_in_type_produces_runtime_error() {
-    let program = parse("finish Type { inner: Missing }").expect("should parse");
+fn validate_reuses_type_literals_for_intermediate_checks() {
     let host = TestHost::default();
     let mut state = State::new();
-    let err = lashlang::execute_program(&program, &mut state, &host)
-        .expect_err("Missing is undefined");
+    let value = finished(
+        execute(
+            r#"
+            raw = {
+              name: "lashlang",
+              version: "0.2.61",
+              labels: ["agent", "runtime"]
+            }
+            package = validate(raw, Type {
+              name: str,
+              version: str,
+              labels: list[str]
+            })
+            submit package
+            "#,
+            &mut state,
+            &host,
+        )
+        .expect("validate should succeed"),
+    );
+    let package = value.as_record().expect("package record");
+    assert_eq!(
+        package["name"],
+        Value::String("lashlang".to_string().into())
+    );
+
+    let mut state = State::new();
+    let err = execute(
+        r#"
+        submit validate(
+          { name: "lashlang", labels: ["agent", 42] },
+          Type { name: str, labels: list[str] }
+        )
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect_err("validate should fail");
+    let ExecuteError::Runtime(RuntimeError::ValueError { message }) = err else {
+        panic!("expected validation runtime error");
+    };
+    assert!(
+        message.contains("$.labels[1]: expected string, got number"),
+        "{message}"
+    );
+}
+
+#[test]
+fn undefined_ref_in_type_produces_runtime_error() {
+    let program = parse("submit Type { inner: Missing }").expect("should parse");
+    let host = TestHost::default();
+    let mut state = State::new();
+    let err =
+        lashlang::execute_program(&program, &mut state, &host).expect_err("Missing is undefined");
     assert!(matches!(err, RuntimeError::UndefinedVariable { .. }));
 }
 
@@ -1431,24 +1569,22 @@ fn snapshot_round_trip_preserves_type_values() {
     let program = parse(
         r#"
         Books = Type { title: str, count: int }
-        finish Books
+        submit Books
         "#,
     )
     .expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
-    let outcome =
-        lashlang::execute_program(&program, &mut state, &host).expect("should run");
+    let outcome = lashlang::execute_program(&program, &mut state, &host).expect("should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
     let snapshot = state.snapshot();
     let serialized = serde_json::to_string(&snapshot).expect("serialize");
-    let restored: lashlang::Snapshot =
-        serde_json::from_str(&serialized).expect("deserialize");
+    let restored: lashlang::Snapshot = serde_json::from_str(&serialized).expect("deserialize");
     let restored_state = State::from_snapshot(restored);
     // Re-execute a program that references Books — the ref should still resolve.
-    let program2 = parse("finish Books").expect("parse");
+    let program2 = parse("submit Books").expect("parse");
     let mut state2 = restored_state;
     let outcome2 = lashlang::execute_program(&program2, &mut state2, &host).expect("run");
     let ExecutionOutcome::Finished(v2) = outcome2 else {

@@ -10,4 +10,3 @@ fff-zlob = ["lash/fff-zlob"]
 
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full"] }
-serde_json = "1"

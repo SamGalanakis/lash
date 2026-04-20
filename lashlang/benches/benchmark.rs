@@ -89,6 +89,8 @@ items = [
   { label: "beta", weight: 2, active: false },
   { label: "gamma", weight: 3, active: true }
 ]
+indexes = range(0, len(items))
+all_indexes = push(indexes, len(items))
 total = 0
 labels = []
 for item in items {
@@ -97,20 +99,23 @@ for item in items {
     labels = labels + [format("{0}:{1}", item.label, item.weight)]
   }
 }
-parallel {
-  lookup = call echo { value: join(labels, ",") }
-  stats = call echo { value: { total: total, count: len(items), seen: len(history) } }
+fanout = parallel {
+  lookup: call echo { value: join(labels, ",") }
+  stats: call echo { value: { total: total, count: len(items), seen: len(history), index_count: len(all_indexes) } }
 }
+lookup_value = fanout.lookup?
+stats_value = validate(fanout.stats?, Type { total: int, count: int, seen: int, index_count: int })
 summary = format(
-  "user={0};attempt={1};active={2};total={3};count={4};seen={5}",
+  "user={0};attempt={1};active={2};total={3};count={4};seen={5};indexes={6}",
   ctx.user,
   ctx.attempt,
-  lookup.value,
-  stats.value.total,
-  stats.value.count,
-  stats.value.seen
+  lookup_value,
+  stats_value.total,
+  stats_value.count,
+  stats_value.seen,
+  stats_value.index_count
 )
-finish summary
+submit summary
 "#
 }
 

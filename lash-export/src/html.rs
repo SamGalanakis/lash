@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
 use lash::ToolCallRecord;
+use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
 
 use crate::LoadedSession;
 
@@ -121,9 +121,7 @@ fn render_part(
     tool_index: &HashMap<&str, &ToolCallRecord>,
 ) {
     if matches!(part.prune_state, PruneState::Cleared) {
-        out.push_str(
-            "      <div class=\"part part--pruned\">[tool result cleared]</div>\n",
-        );
+        out.push_str("      <div class=\"part part--pruned\">[tool result cleared]</div>\n");
         return;
     }
     if let PruneState::Deleted { breadcrumb, .. } = &part.prune_state {
@@ -177,12 +175,11 @@ fn render_pre_block(out: &mut String, class: &str, content: &str) {
 
 fn render_image(out: &mut String, part: &Part) {
     if let Some(attachment) = &part.attachment {
-        let alt = part
-            .content
-            .trim()
-            .is_empty()
-            .then_some("attached image")
-            .unwrap_or(part.content.as_str());
+        let alt = if part.content.trim().is_empty() {
+            "attached image"
+        } else {
+            part.content.as_str()
+        };
         let _ = writeln!(
             out,
             "      <div class=\"part part--image\"><img src=\"{}\" alt=\"{}\"></div>",
@@ -194,11 +191,7 @@ fn render_image(out: &mut String, part: &Part) {
     }
 }
 
-fn render_tool_call(
-    out: &mut String,
-    part: &Part,
-    tool_index: &HashMap<&str, &ToolCallRecord>,
-) {
+fn render_tool_call(out: &mut String, part: &Part, tool_index: &HashMap<&str, &ToolCallRecord>) {
     let tool_name = part.tool_name.as_deref().unwrap_or("tool");
     let record = part
         .tool_call_id

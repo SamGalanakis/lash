@@ -67,8 +67,14 @@ pub fn build_turn(input: SansIoTurnInput) -> PreparedTurnMachine {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::mode::{ModeBuildInput, build_mode_preamble};
+    use crate::mode::{ModeConfig, ModePreamble};
+    use crate::sansio::{
+        CompletedToolCall, DriverAction, DriverContextView, ProtocolDriverHandle, WaitingExecState,
+        WaitingLlmState,
+    };
     use crate::{
         ExecutionMode, PromptContribution, ToolDefinition, ToolExecutionMode, ToolParam,
         default_prompt_template,
@@ -89,14 +95,58 @@ mod tests {
         }
     }
 
+    /// Minimal no-op driver so the turn-machine test can build a
+    /// `ModePreamble` without pulling in a mode crate (which would
+    /// create a cyclic dependency on `lash` from `lash-sansio`).
+    struct NoopDriver;
+
+    impl ProtocolDriverHandle for NoopDriver {
+        fn prepare_iteration(&self, _ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+            Vec::new()
+        }
+
+        fn handle_llm_success(
+            &self,
+            _ctx: DriverContextView<'_>,
+            _waiting: WaitingLlmState,
+            _llm_response: crate::llm::types::LlmResponse,
+            _text_streamed: bool,
+        ) -> Vec<DriverAction> {
+            Vec::new()
+        }
+
+        fn handle_tool_results(
+            &self,
+            _ctx: DriverContextView<'_>,
+            _completed: Vec<CompletedToolCall>,
+        ) -> Vec<DriverAction> {
+            Vec::new()
+        }
+
+        fn handle_exec_result(
+            &self,
+            _ctx: DriverContextView<'_>,
+            _waiting: WaitingExecState,
+            _result: Result<crate::ExecResponse, String>,
+        ) -> Vec<DriverAction> {
+            Vec::new()
+        }
+    }
+
     #[test]
     fn build_turn_creates_machine_with_rendered_system_prompt() {
         let tool_surface = ToolSurface::from_tools(vec![tool("read_file")]);
-        let mode_preamble = build_mode_preamble(ModeBuildInput {
-            mode: ExecutionMode::Standard,
-            tool_surface: tool_surface.clone(),
-            extra_prompt_contributions: Vec::new(),
-        });
+        let mode_preamble = ModePreamble {
+            config: ModeConfig {
+                protocol: Arc::new(NoopDriver),
+                sync_execution_surface: false,
+            },
+            tool_specs: Arc::new(tool_surface.model_tool_specs()),
+            tool_names: tool_surface.tool_names(),
+            omitted_tool_count: 0,
+            execution_prompt: "test prompt".to_string(),
+            prompt_contributions: Vec::new(),
+        };
         let prepared = build_turn(SansIoTurnInput {
             session_id: "session".to_string(),
             run_session_id: Some("run".to_string()),

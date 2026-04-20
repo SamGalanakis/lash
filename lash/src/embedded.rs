@@ -1,11 +1,13 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 
 use lashlang::{
-    ExecuteError, ExecutionOutcome, ParseError as FlowParseError, Record as FlowRecord,
-    Snapshot as FlowSnapshot, State as FlowState, ToolHost, ToolHostError, Value as FlowValue,
+    CompiledProgram, ExecutionOutcome, ExecutionScratch, ParseError as FlowParseError,
+    Record as FlowRecord, Snapshot as FlowSnapshot, State as FlowState, ToolHost, ToolHostError,
+    Value as FlowValue,
 };
 use serde_json::Value;
 
@@ -21,7 +23,7 @@ pub enum LashlangRequest {
     Exec {
         id: String,
         code: String,
-        /// When true, a `finish <expr>` from inside the lashlang
+        /// When true, a `submit <expr>` from inside the lashlang
         /// program is captured (instead of being treated as an error
         /// like the chat-style contract). The captured value flows
         /// back through `LashlangResponse::ExecResult::terminal_finish`.
@@ -59,24 +61,24 @@ pub enum LashlangResponse {
     ToolCall {
         id: String,
         name: String,
-        args: String,
-        result_tx: std_mpsc::Sender<String>,
+        args: Value,
+        result_tx: std_mpsc::Sender<LashlangToolReply>,
     },
     StartToolCall {
         id: String,
         name: String,
-        args: String,
-        result_tx: std_mpsc::Sender<String>,
+        args: Value,
+        result_tx: std_mpsc::Sender<LashlangToolReply>,
     },
     AwaitToolHandle {
         id: String,
-        handle: String,
-        result_tx: std_mpsc::Sender<String>,
+        handle: Value,
+        result_tx: std_mpsc::Sender<LashlangToolReply>,
     },
     CancelToolHandle {
         id: String,
-        handle: String,
-        result_tx: std_mpsc::Sender<String>,
+        handle: Value,
+        result_tx: std_mpsc::Sender<LashlangToolReply>,
     },
     ExecResult {
         id: String,
@@ -85,7 +87,7 @@ pub enum LashlangResponse {
         error: Option<String>,
         /// `Some(value)` only when the surrounding session was started
         /// with `accept_finish: true` AND the lashlang program ended
-        /// with `finish <expr>`. The value is JSON-encoded.
+        /// with `submit <expr>`. The value is JSON-encoded.
         terminal_finish: Option<Value>,
     },
     SnapshotResult {
@@ -106,6 +108,28 @@ pub enum LashlangResponse {
     CheckCompleteResult {
         is_complete: bool,
     },
+}
+
+#[derive(Clone, Debug)]
+pub struct LashlangToolReply {
+    pub success: bool,
+    pub result: Value,
+}
+
+impl LashlangToolReply {
+    pub(crate) fn success(result: Value) -> Self {
+        Self {
+            success: true,
+            result,
+        }
+    }
+
+    pub(crate) fn error(result: Value) -> Self {
+        Self {
+            success: false,
+            result,
+        }
+    }
 }
 
 pub struct LashlangRuntime {
@@ -184,14 +208,55 @@ impl RuntimeConfig {
 struct RuntimeState {
     config: RuntimeConfig,
     rlm: FlowState,
+    program_cache: ProgramCache,
+    scratch: ExecutionScratch,
 }
 
 impl RuntimeState {
     fn new() -> Self {
+        lashlang::prewarm();
         Self {
             config: RuntimeConfig::default(),
             rlm: FlowState::new(),
+            program_cache: ProgramCache::default(),
+            scratch: ExecutionScratch::new(),
         }
+    }
+}
+
+const PROGRAM_CACHE_CAPACITY: usize = 64;
+
+#[derive(Default)]
+struct ProgramCache {
+    entries: VecDeque<CachedProgram>,
+}
+
+struct CachedProgram {
+    source: String,
+    compiled: Arc<CompiledProgram>,
+}
+
+impl ProgramCache {
+    fn get_or_compile(&mut self, source: &str) -> Result<Arc<CompiledProgram>, FlowParseError> {
+        if let Some(index) = self.entries.iter().position(|entry| entry.source == source) {
+            let entry = self
+                .entries
+                .remove(index)
+                .expect("cache index came from existing entry");
+            let compiled = entry.compiled.clone();
+            self.entries.push_back(entry);
+            return Ok(compiled);
+        }
+
+        let compiled = Arc::new(lashlang::compile_source(source)?);
+        if self.entries.len() == PROGRAM_CACHE_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(CachedProgram {
+            source: source.to_string(),
+            compiled: compiled.clone(),
+        });
+        Ok(compiled)
     }
 }
 
@@ -295,6 +360,18 @@ fn execute_code(
     accept_finish: bool,
     response_tx: &std_mpsc::Sender<LashlangResponse>,
 ) -> ExecOutcome {
+    let compiled = match state.program_cache.get_or_compile(code) {
+        Ok(compiled) => compiled,
+        Err(err) => {
+            return ExecOutcome {
+                output: String::new(),
+                observations: Vec::new(),
+                error: Some(format_parse_error(code, &err)),
+                terminal_finish: None,
+            };
+        }
+    };
+
     let observations = Mutex::new(Vec::new());
     let host = HostBridge {
         response_tx,
@@ -304,7 +381,12 @@ fn execute_code(
     };
 
     let _ = accept_finish; // schema validation lives upstream in mode.rs
-    match lashlang::execute(code, &mut state.rlm, &host) {
+    match lashlang::execute_compiled_traced_with_scratch(
+        &compiled,
+        &mut state.rlm,
+        &host,
+        &mut state.scratch,
+    ) {
         Ok(ExecutionOutcome::Finished(value)) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
@@ -317,16 +399,14 @@ fn execute_code(
             error: None,
             terminal_finish: None,
         },
-        Err(ExecuteError::Parse(err)) => ExecOutcome {
+        Err(failure) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
-            error: Some(format_parse_error(code, &err)),
-            terminal_finish: None,
-        },
-        Err(ExecuteError::Runtime(err)) => ExecOutcome {
-            output: String::new(),
-            observations: observations.into_inner().unwrap_or_default(),
-            error: Some(err.to_string()),
+            error: Some(lashlang::format_runtime_diagnostic(
+                code,
+                &failure.error,
+                failure.span,
+            )),
             terminal_finish: None,
         },
     }
@@ -372,7 +452,7 @@ impl ToolHost for HostBridge<'_> {
         wait_tool_result(result_rx)
     }
 
-    fn observe(&self, value: &FlowValue) -> Result<(), ToolHostError> {
+    fn print(&self, value: &FlowValue) -> Result<(), ToolHostError> {
         let text = truncate_observation_text(&format_output_value(value), self.observe_projection);
         self.observations
             .lock()
@@ -386,13 +466,13 @@ fn send_tool_call(
     response_tx: &std_mpsc::Sender<LashlangResponse>,
     name: &str,
     payload: Value,
-) -> Result<std_mpsc::Receiver<String>, ToolHostError> {
+) -> Result<std_mpsc::Receiver<LashlangToolReply>, ToolHostError> {
     let (result_tx, result_rx) = std_mpsc::channel();
     response_tx
         .send(LashlangResponse::ToolCall {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
-            args: payload.to_string(),
+            args: payload,
             result_tx,
         })
         .map_err(|_| ToolHostError::new(format!("failed to dispatch tool `{name}`")))?;
@@ -403,13 +483,13 @@ fn send_start_tool_call(
     response_tx: &std_mpsc::Sender<LashlangResponse>,
     name: &str,
     payload: Value,
-) -> Result<std_mpsc::Receiver<String>, ToolHostError> {
+) -> Result<std_mpsc::Receiver<LashlangToolReply>, ToolHostError> {
     let (result_tx, result_rx) = std_mpsc::channel();
     response_tx
         .send(LashlangResponse::StartToolCall {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
-            args: payload.to_string(),
+            args: payload,
             result_tx,
         })
         .map_err(|_| ToolHostError::new(format!("failed to start tool `{name}`")))?;
@@ -419,12 +499,12 @@ fn send_start_tool_call(
 fn send_await_tool_handle(
     response_tx: &std_mpsc::Sender<LashlangResponse>,
     handle: Value,
-) -> Result<std_mpsc::Receiver<String>, ToolHostError> {
+) -> Result<std_mpsc::Receiver<LashlangToolReply>, ToolHostError> {
     let (result_tx, result_rx) = std_mpsc::channel();
     response_tx
         .send(LashlangResponse::AwaitToolHandle {
             id: uuid::Uuid::new_v4().to_string(),
-            handle: handle.to_string(),
+            handle,
             result_tx,
         })
         .map_err(|_| ToolHostError::new("failed to await async tool handle"))?;
@@ -434,43 +514,32 @@ fn send_await_tool_handle(
 fn send_cancel_tool_handle(
     response_tx: &std_mpsc::Sender<LashlangResponse>,
     handle: Value,
-) -> Result<std_mpsc::Receiver<String>, ToolHostError> {
+) -> Result<std_mpsc::Receiver<LashlangToolReply>, ToolHostError> {
     let (result_tx, result_rx) = std_mpsc::channel();
     response_tx
         .send(LashlangResponse::CancelToolHandle {
             id: uuid::Uuid::new_v4().to_string(),
-            handle: handle.to_string(),
+            handle,
             result_tx,
         })
         .map_err(|_| ToolHostError::new("failed to cancel async tool handle"))?;
     Ok(result_rx)
 }
 
-fn wait_tool_result(result_rx: std_mpsc::Receiver<String>) -> Result<FlowValue, ToolHostError> {
-    let result_json = result_rx
+fn wait_tool_result(
+    result_rx: std_mpsc::Receiver<LashlangToolReply>,
+) -> Result<FlowValue, ToolHostError> {
+    let reply = result_rx
         .recv()
         .map_err(|_| ToolHostError::new("tool result channel closed"))?;
-    parse_tool_reply(&result_json)
+    decode_tool_reply(reply)
 }
 
-fn parse_tool_reply(result_json: &str) -> Result<FlowValue, ToolHostError> {
-    let parsed: Value = serde_json::from_str(result_json)
-        .map_err(|err| ToolHostError::new(format!("invalid tool reply: {err}")))?;
-    let success = parsed
-        .get("success")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| ToolHostError::new("tool reply missing `success`"))?;
-    let raw_result = parsed
-        .get("result")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolHostError::new("tool reply missing `result`"))?;
-
-    let decoded = serde_json::from_str::<Value>(raw_result)
-        .unwrap_or_else(|_| Value::String(raw_result.to_string()));
-    if success {
-        Ok(json_to_flow_value(decoded))
+fn decode_tool_reply(reply: LashlangToolReply) -> Result<FlowValue, ToolHostError> {
+    if reply.success {
+        Ok(json_to_flow_value(reply.result))
     } else {
-        Err(ToolHostError::new(tool_error_message(decoded)))
+        Err(ToolHostError::new(tool_error_message(reply.result)))
     }
 }
 
@@ -651,13 +720,7 @@ mod tests {
             };
             assert_eq!(name, expected_tool_name);
             result_tx
-                .send(
-                    json!({
-                        "success": true,
-                        "result": tool_result.to_string(),
-                    })
-                    .to_string(),
-                )
+                .send(LashlangToolReply::success(tool_result))
                 .expect("tool result should be delivered");
         });
 
@@ -668,13 +731,9 @@ mod tests {
 
     #[test]
     fn tool_reply_success_round_trips_json() {
-        let reply = json!({
-            "success": true,
-            "result": json!({"id": 7, "name": "lash"}).to_string(),
-        })
-        .to_string();
+        let reply = LashlangToolReply::success(json!({"id": 7, "name": "lash"}));
 
-        let value = parse_tool_reply(&reply).expect("reply should parse");
+        let value = decode_tool_reply(reply).expect("reply should parse");
         let FlowValue::Record(record) = value else {
             panic!("expected record");
         };
@@ -684,13 +743,9 @@ mod tests {
 
     #[test]
     fn tool_reply_error_uses_payload_text() {
-        let reply = json!({
-            "success": false,
-            "result": json!("missing path").to_string(),
-        })
-        .to_string();
+        let reply = LashlangToolReply::error(json!("missing path"));
 
-        let err = parse_tool_reply(&reply).expect_err("reply should fail");
+        let err = decode_tool_reply(reply).expect_err("reply should fail");
         assert_eq!(err.to_string(), "missing path");
     }
 
@@ -703,10 +758,28 @@ mod tests {
     #[test]
     fn completion_check_distinguishes_incomplete_inputs() {
         assert!(!is_code_complete("if true {"));
-        assert!(!is_code_complete("finish \"unterminated"));
-        assert!(is_code_complete("finish"));
-        assert!(is_code_complete("finish 1"));
+        assert!(!is_code_complete("submit \"unterminated"));
+        assert!(is_code_complete("submit"));
+        assert!(is_code_complete("submit 1"));
         assert!(is_code_complete("oops ]"));
+    }
+
+    #[test]
+    fn program_cache_reuses_exact_source() {
+        let mut cache = ProgramCache::default();
+        let first = cache
+            .get_or_compile("submit 1")
+            .expect("program should compile");
+        let second = cache
+            .get_or_compile("submit 1")
+            .expect("program should compile");
+        let other = cache
+            .get_or_compile("submit 2")
+            .expect("program should compile");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert!(cache.get_or_compile("submit @").is_err());
     }
 
     #[test]
@@ -737,16 +810,16 @@ mod tests {
     }
 
     #[test]
-    fn execute_code_runtime_errors_are_concise() {
+    fn execute_code_runtime_errors_include_source_context() {
         let mut state = RuntimeState::new();
         let (tx, _rx) = std_mpsc::channel();
 
-        let result = execute_code(&mut state, "value = 1 finish value.name", false, &tx);
+        let result = execute_code(&mut state, "value = 1\nsubmit value.name", false, &tx);
 
-        assert_eq!(
-            result.error,
-            Some("can't read `.name` from number".to_string())
-        );
+        let error = result.error.expect("runtime error");
+        assert!(error.contains("can't read `.name` from number"), "{error}");
+        assert!(error.contains("--> line 2, column 1"), "{error}");
+        assert!(error.contains("submit value.name"), "{error}");
     }
 
     #[test]
@@ -757,7 +830,7 @@ mod tests {
         let result = execute_code(
             &mut state,
             r#"
-            observe { ok: true, count: 2 }
+            print { ok: true, count: 2 }
             "#,
             false,
             &tx,
@@ -779,7 +852,7 @@ mod tests {
         let result = execute_code(
             &mut state,
             r#"
-            observe null
+            print null
             "#,
             false,
             &tx,
@@ -794,7 +867,7 @@ mod tests {
         let result = execute_code_with_tool_reply(
             r#"
             listing = call glob { pattern: "*.rs" }
-            observe {
+            print {
               count: len(listing.value.items),
               first: listing.value.items[0].path
             }
@@ -823,14 +896,14 @@ mod tests {
 
     #[test]
     fn finish_returns_terminal_value_regardless_of_mode() {
-        // `finish <expr>` always terminates the program and delivers the
+        // `submit <expr>` always terminates the program and delivers the
         // value via `terminal_finish`. Upstream (`lash-sansio/src/mode.rs`)
         // renders it as the turn's final assistant message and validates
         // against a typed schema when one is declared.
         for accept_finish in [false, true] {
             let mut state = RuntimeState::new();
             let (tx, _rx) = std_mpsc::channel();
-            let result = execute_code(&mut state, "finish \"all done\"", accept_finish, &tx);
+            let result = execute_code(&mut state, "submit \"all done\"", accept_finish, &tx);
             assert_eq!(result.error, None);
             assert_eq!(result.terminal_finish, Some(serde_json::json!("all done")));
             assert!(result.observations.is_empty());
@@ -844,7 +917,7 @@ mod tests {
 
         let result = execute_code(
             &mut state,
-            r#"finish { answer: "yes", confidence: 0.9 }"#,
+            r#"submit { answer: "yes", confidence: 0.9 }"#,
             true,
             &tx,
         );
@@ -860,7 +933,7 @@ mod tests {
         let mut state = RuntimeState::new();
         let (tx, _rx) = std_mpsc::channel();
 
-        let result = execute_code(&mut state, r#"finish "all done""#, true, &tx);
+        let result = execute_code(&mut state, r#"submit "all done""#, true, &tx);
         assert_eq!(result.error, None);
         assert_eq!(result.terminal_finish, Some(serde_json::json!("all done")));
     }

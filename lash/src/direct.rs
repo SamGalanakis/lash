@@ -1,8 +1,8 @@
 use crate::llm::factory::adapter_for;
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{
-    LlmAttachment, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputSpec, LlmRequest,
-    LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice,
+    LlmAttachment, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputSpec,
+    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice,
 };
 use crate::provider::{Provider, save_provider};
 
@@ -199,33 +199,23 @@ pub(crate) fn build_llm_request(
             DirectRole::User => LlmRole::User,
             DirectRole::Assistant => LlmRole::Assistant,
         };
+        let mut blocks: Vec<LlmContentBlock> = Vec::new();
         for part in message.parts {
             match part {
                 DirectPart::Text(text) => {
                     if !text.is_empty() {
-                        llm_messages.push(LlmMessage {
-                            role: role.clone(),
-                            content: text,
-                            kind: "text".to_string(),
-                            image_idx: -1,
-                            tool_call_id: None,
-                            tool_name: None,
-                            tool_item_id: None,
-                        });
+                        blocks.push(LlmContentBlock::Text(text));
                     }
                 }
                 DirectPart::Image(idx) => {
-                    llm_messages.push(LlmMessage {
-                        role: role.clone(),
-                        content: String::new(),
-                        kind: "image".to_string(),
-                        image_idx: idx as i64,
-                        tool_call_id: None,
-                        tool_name: None,
-                        tool_item_id: None,
+                    blocks.push(LlmContentBlock::Image {
+                        attachment_idx: idx,
                     });
                 }
             }
+        }
+        if !blocks.is_empty() {
+            llm_messages.push(LlmMessage::new(role, blocks));
         }
     }
 
@@ -274,7 +264,10 @@ mod tests {
 
         assert_eq!(llm_request.messages.len(), 1);
         assert_eq!(llm_request.messages[0].role, LlmRole::User);
-        assert_eq!(llm_request.messages[0].content, "hello");
+        assert!(matches!(
+            &llm_request.messages[0].blocks[0],
+            LlmContentBlock::Text(text) if text == "hello"
+        ));
         assert!(matches!(
             llm_request.output_spec,
             Some(LlmOutputSpec::JsonObject)
@@ -313,10 +306,16 @@ mod tests {
 
         let llm_request = build_llm_request(&provider, request, "gpt-5".into());
 
+        fn text(msg: &LlmMessage) -> &str {
+            match &msg.blocks[0] {
+                LlmContentBlock::Text(text) => text.as_str(),
+                _ => panic!("expected Text block"),
+            }
+        }
         assert_eq!(llm_request.messages.len(), 3);
         assert_eq!(llm_request.messages[0].role, LlmRole::System);
-        assert_eq!(llm_request.messages[0].content, "extra");
-        assert_eq!(llm_request.messages[1].content, "q");
-        assert_eq!(llm_request.messages[2].content, "a");
+        assert_eq!(text(&llm_request.messages[0]), "extra");
+        assert_eq!(text(&llm_request.messages[1]), "q");
+        assert_eq!(text(&llm_request.messages[2]), "a");
     }
 }

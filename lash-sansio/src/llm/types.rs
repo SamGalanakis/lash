@@ -19,31 +19,43 @@ pub enum LlmOutputPart {
     Text {
         text: String,
     },
-    /// Model "thinking" / reasoning summary item from providers that expose a
-    /// chain-of-thought channel (currently the Codex Responses API).
+    /// Model "thinking" / reasoning output from providers that expose a
+    /// chain-of-thought channel (Anthropic `thinking`, Codex Responses API
+    /// `reasoning`).
     ///
-    /// `text` is the human-readable summary (joined from `summary[*].text`) —
-    /// display path (fix 1.3a) renders this field. `id` / `summary` /
-    /// `encrypted_content` carry the raw Codex reasoning item so we can
-    /// re-emit it on the next turn (fix 1.3b) to avoid the model redoing its
-    /// internal reasoning work. `encrypted_content` is `None` when the
-    /// provider didn't return it (e.g. display-only reasoning from streaming
-    /// summaries before the final item arrives, or non-Codex providers).
+    /// * `text` — human-readable summary for display.
+    /// * `signature` — Anthropic thinking signature (base64). Required for
+    ///   replaying a `thinking` block so Anthropic accepts the next turn.
+    /// * `redacted` — Anthropic `redacted_thinking` marker; when set,
+    ///   `signature` carries the opaque `data` payload.
+    /// * `item_id` — Codex reasoning item id (`rs_...`). Pairs with the
+    ///   sibling `ToolCall.item_id` so re-emission links them.
+    /// * `encrypted_content` — Codex opaque chain-of-thought blob. Required
+    ///   for re-feed (display-only reasoning has `None` and must be
+    ///   dropped by adapters rather than re-sent).
+    /// * `summary` — Codex `summary[*].text` list, preserved verbatim.
     Reasoning {
         text: String,
-        id: String,
-        summary: Vec<String>,
+        signature: Option<String>,
+        redacted: bool,
+        item_id: Option<String>,
         encrypted_content: Option<String>,
+        summary: Vec<String>,
     },
     ToolCall {
         call_id: String,
         tool_name: String,
         input_json: String,
-        /// Provider-specific item identifier (e.g. Codex Responses API
-        /// `fc_...` id). Used to pair a function_call with its sibling
-        /// reasoning item across turns. `None` for providers that don't
-        /// surface an item-id distinct from `call_id`.
-        id: Option<String>,
+        /// Provider-specific item identifier (Codex Responses API `fc_...`
+        /// id, Anthropic `toolu_...`). Used to pair a tool call with its
+        /// sibling reasoning item across turns.
+        item_id: Option<String>,
+        /// Opaque provider-side signature to round-trip alongside this
+        /// tool call. Gemini stores `thoughtSignature` here (required by
+        /// Gemini 3 when thinking mode is active). OpenRouter stores a
+        /// serialized `reasoning_details` entry so the next turn can be
+        /// re-posted with the encrypted CoT intact.
+        signature: Option<String>,
     },
 }
 
@@ -54,123 +66,82 @@ pub enum LlmRole {
     System,
 }
 
+/// A structured content block inside an `LlmMessage`. Mirrors pi-mono's
+/// per-provider block types and maps cleanly onto each wire format so the
+/// adapters can emit the right shape without re-coalescing flat messages.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LlmContentBlock {
+    Text(String),
+    /// Index into the enclosing `LlmRequest.attachments` vector. User-role
+    /// messages may embed images; adapters drop them for providers that
+    /// don't accept vision input.
+    Image {
+        attachment_idx: usize,
+    },
+    /// Assistant tool call. `item_id` carries provider-specific pairing ids
+    /// (Codex `fc_...`, Anthropic `toolu_...`).
+    ToolCall {
+        call_id: String,
+        tool_name: String,
+        input_json: String,
+        item_id: Option<String>,
+        /// Matches [`LlmContentBlock::ToolCall::signature`]. See field
+        /// docs there for the per-provider meaning.
+        signature: Option<String>,
+    },
+    /// User tool-result block. Anthropic allows multiple per user turn;
+    /// adapters that want one-per-message split as needed.
+    ToolResult {
+        call_id: String,
+        content: String,
+        /// Name of the tool that produced this result. Gemini's
+        /// `functionResponse` requires this on replay; other providers
+        /// ignore it.
+        tool_name: Option<String>,
+    },
+    /// Chain-of-thought / reasoning block. See [`LlmOutputPart::Reasoning`]
+    /// for field semantics. Adapters that don't support reasoning replay
+    /// drop these blocks silently.
+    Reasoning {
+        text: String,
+        signature: Option<String>,
+        redacted: bool,
+        item_id: Option<String>,
+        encrypted_content: Option<String>,
+        summary: Vec<String>,
+    },
+}
+
+/// A single role turn in the LLM conversation. `blocks` holds structured
+/// content that maps 1:1 onto provider wire types. The old flat
+/// `content: String` + `kind` discriminator has been retired in favor of
+/// this block model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LlmMessage {
     pub role: LlmRole,
-    pub content: String,
-    pub kind: String,
-    pub image_idx: i64,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
-    /// Provider-specific item identifier for `tool_call` messages.
-    /// Codex Responses API uses this (`fc_...`) to pair function_calls with
-    /// their sibling reasoning items; other providers typically leave this
-    /// `None`.
-    pub tool_item_id: Option<String>,
+    pub blocks: Vec<LlmContentBlock>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LlmToolCall {
-    pub call_id: String,
-    pub tool_name: String,
-    pub input_json: String,
-    /// See [`LlmOutputPart::ToolCall::id`] — provider-specific item-id,
-    /// preserved across turns so adapters that need it (Codex) can re-emit
-    /// it on the request body.
-    pub id: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LlmReplayChunk {
-    Message(LlmMessage),
-    AssistantToolCalls {
-        text: Option<String>,
-        tool_calls: Vec<LlmToolCall>,
-    },
-    ToolResults {
-        results: Vec<LlmMessage>,
-    },
-}
-
-pub fn coalesce_replay_messages(messages: &[LlmMessage]) -> Vec<LlmReplayChunk> {
-    let mut out = Vec::new();
-    let mut idx = 0;
-    while idx < messages.len() {
-        let msg = &messages[idx];
-
-        if matches!(msg.role, LlmRole::Assistant) && msg.kind == "text" {
-            let mut end = idx + 1;
-            let mut tool_calls = Vec::new();
-            while end < messages.len() {
-                let next = &messages[end];
-                if matches!(next.role, LlmRole::Assistant) && next.kind == "tool_call" {
-                    tool_calls.push(LlmToolCall {
-                        call_id: next.tool_call_id.clone().unwrap_or_default(),
-                        tool_name: next.tool_name.clone().unwrap_or_default(),
-                        input_json: next.content.clone(),
-                        id: next.tool_item_id.clone(),
-                    });
-                    end += 1;
-                } else {
-                    break;
-                }
-            }
-            if !tool_calls.is_empty() {
-                out.push(LlmReplayChunk::AssistantToolCalls {
-                    text: Some(msg.content.clone()),
-                    tool_calls,
-                });
-                idx = end;
-                continue;
-            }
-        }
-
-        if matches!(msg.role, LlmRole::Assistant) && msg.kind == "tool_call" {
-            let mut end = idx;
-            let mut tool_calls = Vec::new();
-            while end < messages.len() {
-                let next = &messages[end];
-                if matches!(next.role, LlmRole::Assistant) && next.kind == "tool_call" {
-                    tool_calls.push(LlmToolCall {
-                        call_id: next.tool_call_id.clone().unwrap_or_default(),
-                        tool_name: next.tool_name.clone().unwrap_or_default(),
-                        input_json: next.content.clone(),
-                        id: next.tool_item_id.clone(),
-                    });
-                    end += 1;
-                } else {
-                    break;
-                }
-            }
-            out.push(LlmReplayChunk::AssistantToolCalls {
-                text: None,
-                tool_calls,
-            });
-            idx = end;
-            continue;
-        }
-
-        if msg.kind == "tool_result" {
-            let mut end = idx;
-            let mut results = Vec::new();
-            while end < messages.len() {
-                let next = &messages[end];
-                if next.kind == "tool_result" {
-                    results.push(next.clone());
-                    end += 1;
-                } else {
-                    break;
-                }
-            }
-            out.push(LlmReplayChunk::ToolResults { results });
-            idx = end;
-            continue;
-        }
-
-        out.push(LlmReplayChunk::Message(msg.clone()));
-        idx += 1;
+impl LlmMessage {
+    pub fn new(role: LlmRole, blocks: Vec<LlmContentBlock>) -> Self {
+        Self { role, blocks }
     }
-    out
+
+    /// Convenience constructor for a single-text-block message.
+    pub fn text(role: LlmRole, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            blocks: vec![LlmContentBlock::Text(text.into())],
+        }
+    }
+
+    /// True if every block is a `Text` whose content is whitespace-only.
+    pub fn is_blank(&self) -> bool {
+        self.blocks.iter().all(|b| match b {
+            LlmContentBlock::Text(t) => t.trim().is_empty(),
+            _ => false,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

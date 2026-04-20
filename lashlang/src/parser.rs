@@ -1,4 +1,7 @@
-use crate::ast::{BinaryOp, CallExpr, Expr, Program, Stmt, TypeExpr, TypeField, UnaryOp};
+use crate::ast::{
+    AstString, BinaryOp, CallExpr, Expr, NamedParallelBranch, ParallelBranches, Program, Stmt,
+    TypeExpr, TypeField, UnaryOp,
+};
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
 
@@ -37,11 +40,20 @@ struct Parser {
 
 impl Parser {
     fn parse_program(&mut self) -> Result<Program, ParseError> {
-        let mut statements = Vec::new();
+        let statement_capacity = (self.tokens.len() / 20).max(1);
+        let mut statements = Vec::with_capacity(statement_capacity);
+        let mut statement_spans = Vec::with_capacity(statement_capacity);
         while !self.at_eof() {
-            statements.push(self.parse_stmt()?);
+            let start = self.peek().span.start;
+            let stmt = self.parse_stmt()?;
+            let end = self.tokens[self.index.saturating_sub(1)].span.end;
+            statements.push(stmt);
+            statement_spans.push(Span { start, end });
         }
-        Ok(Program { statements })
+        Ok(Program {
+            statements,
+            statement_spans,
+        })
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -49,9 +61,9 @@ impl Parser {
             TokenKind::If => self.parse_if(),
             TokenKind::For => self.parse_for(),
             TokenKind::Parallel => self.parse_parallel(),
-            TokenKind::Finish => self.parse_finish(),
+            TokenKind::Submit => self.parse_submit(),
             TokenKind::Cancel => self.parse_cancel(),
-            TokenKind::Observe => self.parse_observe(),
+            TokenKind::Print => self.parse_print(),
             TokenKind::Call => Ok(Stmt::Call(self.parse_call_expr()?)),
             TokenKind::Ident(_) if self.peek_assign() => self.parse_assign(),
             _ => Ok(Stmt::Expr(self.parse_expr()?)),
@@ -105,23 +117,56 @@ impl Parser {
         Ok(Stmt::Parallel { branches })
     }
 
-    fn parse_parallel_branches(&mut self) -> Result<Vec<Stmt>, ParseError> {
-        self.parse_block()
+    fn parse_parallel_branches(&mut self) -> Result<ParallelBranches, ParseError> {
+        self.expect_exact(TokenKind::LBrace, "`{`")?;
+        if matches!(self.peek_kind(), TokenKind::RBrace) {
+            self.bump();
+            return Ok(ParallelBranches::Positional(Vec::new()));
+        }
+
+        let named = self.peek_named_parallel_branch();
+        if named {
+            let mut branches = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                let name_span = self.peek().span;
+                let name = self.expect_ident()?;
+                if !seen.insert(name.clone()) {
+                    return Err(ParseError::Expected {
+                        expected: "unique branch name",
+                        found: format!("duplicate branch `{name}`"),
+                        span: name_span,
+                    });
+                }
+                self.expect_exact(TokenKind::Colon, "`:`")?;
+                let stmt = self.parse_stmt()?;
+                branches.push(NamedParallelBranch { name, stmt });
+            }
+            self.expect_exact(TokenKind::RBrace, "`}`")?;
+            return Ok(ParallelBranches::Named(branches));
+        }
+
+        let mut statements = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            statements.push(self.parse_stmt()?);
+        }
+        self.expect_exact(TokenKind::RBrace, "`}`")?;
+        Ok(ParallelBranches::Positional(statements))
     }
 
-    fn parse_finish(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_submit(&mut self) -> Result<Stmt, ParseError> {
         self.bump();
         let expr = if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             None
         } else {
             Some(self.parse_expr()?)
         };
-        Ok(Stmt::Finish(expr))
+        Ok(Stmt::Submit(expr))
     }
 
-    fn parse_observe(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_print(&mut self) -> Result<Stmt, ParseError> {
         self.bump();
-        Ok(Stmt::Observe(self.parse_expr()?))
+        Ok(Stmt::Print(self.parse_expr()?))
     }
 
     fn parse_cancel(&mut self) -> Result<Stmt, ParseError> {
@@ -301,6 +346,10 @@ impl Parser {
                         index: Box::new(index),
                     };
                 }
+                TokenKind::Question if !self.question_starts_ternary() => {
+                    self.bump();
+                    expr = Expr::ResultUnwrap(Box::new(expr));
+                }
                 _ => break,
             }
         }
@@ -401,7 +450,7 @@ impl Parser {
         Ok(Expr::Record(entries))
     }
 
-    fn parse_record_entries(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {
+    fn parse_record_entries(&mut self) -> Result<Vec<(AstString, Expr)>, ParseError> {
         let mut entries = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace) {
             let key = self.expect_ident()?;
@@ -513,7 +562,7 @@ impl Parser {
         }
     }
 
-    fn expect_string_literal(&mut self) -> Result<String, ParseError> {
+    fn expect_string_literal(&mut self) -> Result<AstString, ParseError> {
         let token = self.bump().clone();
         match token.kind {
             TokenKind::String(value) => Ok(value),
@@ -525,7 +574,7 @@ impl Parser {
         }
     }
 
-    fn expect_ident(&mut self) -> Result<String, ParseError> {
+    fn expect_ident(&mut self) -> Result<AstString, ParseError> {
         let token = self.bump();
         match &token.kind {
             TokenKind::Ident(name) => Ok(name.clone()),
@@ -570,6 +619,63 @@ impl Parser {
                 .is_some_and(|token| matches!(token.kind, TokenKind::Equal))
     }
 
+    fn peek_named_parallel_branch(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::Ident(_))
+            && self
+                .tokens
+                .get(self.index + 1)
+                .is_some_and(|token| matches!(token.kind, TokenKind::Colon))
+    }
+
+    fn question_starts_ternary(&self) -> bool {
+        debug_assert!(matches!(self.peek_kind(), TokenKind::Question));
+        let Some(next) = self.tokens.get(self.index + 1) else {
+            return false;
+        };
+        if !token_can_start_expr(&next.kind) {
+            return false;
+        }
+
+        let mut parens = 0usize;
+        let mut brackets = 0usize;
+        let mut braces = 0usize;
+        for token in self.tokens.iter().skip(self.index + 1) {
+            match &token.kind {
+                TokenKind::Colon if parens == 0 && brackets == 0 && braces == 0 => return true,
+                TokenKind::Equal if parens == 0 && brackets == 0 && braces == 0 => return false,
+                TokenKind::Comma | TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                    if parens == 0 && brackets == 0 && braces == 0 =>
+                {
+                    return false;
+                }
+                TokenKind::Eof => return false,
+                TokenKind::LParen => parens += 1,
+                TokenKind::RParen => {
+                    if parens == 0 {
+                        return false;
+                    }
+                    parens -= 1;
+                }
+                TokenKind::LBracket => brackets += 1,
+                TokenKind::RBracket => {
+                    if brackets == 0 {
+                        return false;
+                    }
+                    brackets -= 1;
+                }
+                TokenKind::LBrace => braces += 1,
+                TokenKind::RBrace => {
+                    if braces == 0 {
+                        return false;
+                    }
+                    braces -= 1;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn at_eof(&self) -> bool {
         matches!(self.peek_kind(), TokenKind::Eof)
     }
@@ -592,6 +698,28 @@ impl Parser {
     fn prev_span(&self) -> Span {
         self.tokens[self.index.saturating_sub(1)].span
     }
+}
+
+fn token_can_start_expr(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Null
+            | TokenKind::True
+            | TokenKind::False
+            | TokenKind::Number(_)
+            | TokenKind::String(_)
+            | TokenKind::Ident(_)
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::Call
+            | TokenKind::Start
+            | TokenKind::Parallel
+            | TokenKind::Await
+            | TokenKind::Minus
+            | TokenKind::Bang
+            | TokenKind::Not
+    )
 }
 
 fn render_kind(kind: &TokenKind) -> String {
@@ -632,8 +760,8 @@ fn render_kind(kind: &TokenKind) -> String {
         TokenKind::Start => "`start`".to_string(),
         TokenKind::Await => "`await`".to_string(),
         TokenKind::Cancel => "`cancel`".to_string(),
-        TokenKind::Finish => "`finish`".to_string(),
-        TokenKind::Observe => "`observe`".to_string(),
+        TokenKind::Submit => "`submit`".to_string(),
+        TokenKind::Print => "`print`".to_string(),
         TokenKind::Call => "`call`".to_string(),
         TokenKind::And => "`and`".to_string(),
         TokenKind::Or => "`or`".to_string(),
@@ -668,8 +796,8 @@ mod tests {
               left = call alpha {}
               right = helper()
             }
-            observe rec
-            finish field
+            print rec
+            submit field
             "#,
         )
         .expect("program should parse");
@@ -684,7 +812,7 @@ mod tests {
             xs = []
             rec = {}
             out = now()
-            finish out
+            submit out
             "#,
         )
         .expect("program should parse");
@@ -697,7 +825,7 @@ mod tests {
         let program = parse(
             r#"
             value = false or true ? 1 : 2 ? 3 : 4
-            finish value
+            submit value
             "#,
         )
         .expect("program should parse");
@@ -725,11 +853,70 @@ mod tests {
     }
 
     #[test]
+    fn parses_result_unwrap_without_breaking_ternary() {
+        let program = parse(
+            r#"
+            a = r?
+            b = (call echo { value: 1 })?
+            c = items[0]?
+            d = r? + 1
+            e = cond ? yes : no
+            f = r?[0]
+            submit e
+            "#,
+        )
+        .expect("program should parse");
+
+        assert!(matches!(
+            &program.statements[0],
+            Stmt::Assign {
+                expr: Expr::ResultUnwrap(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &program.statements[1],
+            Stmt::Assign {
+                expr: Expr::ResultUnwrap(inner),
+                ..
+            } if matches!(inner.as_ref(), Expr::ToolCall(_))
+        ));
+        assert!(matches!(
+            &program.statements[2],
+            Stmt::Assign {
+                expr: Expr::ResultUnwrap(inner),
+                ..
+            } if matches!(inner.as_ref(), Expr::Index { .. })
+        ));
+        assert!(matches!(
+            &program.statements[3],
+            Stmt::Assign {
+                expr: Expr::Binary { left, .. },
+                ..
+            } if matches!(left.as_ref(), Expr::ResultUnwrap(_))
+        ));
+        assert!(matches!(
+            &program.statements[4],
+            Stmt::Assign {
+                expr: Expr::Conditional { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &program.statements[5],
+            Stmt::Assign {
+                expr: Expr::Index { target, .. },
+                ..
+            } if matches!(target.as_ref(), Expr::ResultUnwrap(_))
+        ));
+    }
+
+    #[test]
     fn parses_symbolic_boolean_operator_aliases() {
         let program = parse(
             r#"
             value = true && false || true
-            finish value
+            submit value
             "#,
         )
         .expect("program should parse");
@@ -747,13 +934,63 @@ mod tests {
               40 + 2
               len([1,2,3])
             }
-            finish results
+            submit results
             "#,
         )
         .expect("program should parse");
 
         assert_eq!(program.statements.len(), 3);
         assert!(matches!(program.statements[0], Stmt::Expr(Expr::String(_))));
+    }
+
+    #[test]
+    fn parses_named_parallel_branches() {
+        let program = parse(
+            r#"
+            results = parallel {
+              cargo: call exec_command { cmd: "cargo test" }
+              fmt: "ok"
+            }
+            submit results
+            "#,
+        )
+        .expect("program should parse");
+
+        let Stmt::Assign {
+            expr: Expr::Parallel { branches },
+            ..
+        } = &program.statements[0]
+        else {
+            panic!("expected parallel expression assignment");
+        };
+        let ParallelBranches::Named(branches) = branches else {
+            panic!("expected named parallel branches");
+        };
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].name, "cargo");
+        assert!(matches!(branches[0].stmt, Stmt::Call(_)));
+        assert_eq!(branches[1].name, "fmt");
+        assert!(matches!(branches[1].stmt, Stmt::Expr(Expr::String(_))));
+    }
+
+    #[test]
+    fn named_parallel_rejects_duplicate_branch_names() {
+        let err = parse(
+            r#"
+            results = parallel {
+              same: 1
+              same: 2
+            }
+            "#,
+        )
+        .expect_err("duplicate branch names should fail");
+        assert!(matches!(
+            err,
+            ParseError::Expected {
+                expected: "unique branch name",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -767,7 +1004,7 @@ mod tests {
             } else {
               answer = 3
             }
-            finish answer
+            submit answer
             "#,
         )
         .expect("program should parse");
@@ -783,9 +1020,9 @@ mod tests {
         let program = parse(
             r#"
             if true {
-              finish
+              submit
             }
-            finish
+            submit
             "#,
         )
         .expect("program should parse");
@@ -794,8 +1031,8 @@ mod tests {
             program.statements.as_slice(),
             [
                 Stmt::If { then_block, .. },
-                Stmt::Finish(None)
-            ] if matches!(then_block.as_slice(), [Stmt::Finish(None)])
+                Stmt::Submit(None)
+            ] if matches!(then_block.as_slice(), [Stmt::Submit(None)])
         ));
     }
 
@@ -806,7 +1043,7 @@ mod tests {
             handle = start call wait_agent { timeout_ms: 1000 }
             result = await handle
             cancel handle
-            finish result
+            submit result
             "#,
         )
         .expect("program should parse");
@@ -893,14 +1130,8 @@ mod tests {
             }
         ));
 
-        let err = parse("finish true ? 1").expect_err("parse should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected {
-                expected: "`:`",
-                ..
-            }
-        ));
+        let err = parse("submit true ? 1 :").expect_err("parse should fail");
+        assert!(matches!(err, ParseError::Unexpected { .. }));
     }
 
     #[test]
@@ -932,7 +1163,7 @@ mod tests {
               isbn: str?,
               reference: Books
             }
-            finish Books
+            submit Books
             "#,
         )
         .expect("program should parse");
@@ -962,7 +1193,7 @@ mod tests {
         // A bare `Type` identifier should still bind as a variable reference
         // when not followed by `{` — avoids breaking pre-existing programs
         // that may already use the name.
-        let program = parse("Type = 1\nx = Type\nfinish x").expect("should parse");
+        let program = parse("Type = 1\nx = Type\nsubmit x").expect("should parse");
         assert_eq!(program.statements.len(), 3);
         let Stmt::Assign { expr, .. } = &program.statements[1] else {
             panic!("expected assign");
@@ -1001,18 +1232,18 @@ mod tests {
 
     #[test]
     fn list_and_record_literals_accept_trailing_commas() {
-        parse("x = [1, 2, 3,]\nfinish x").expect("list trailing comma");
-        parse("x = { a: 1, b: 2, }\nfinish x").expect("record trailing comma");
+        parse("x = [1, 2, 3,]\nsubmit x").expect("list trailing comma");
+        parse("x = { a: 1, b: 2, }\nsubmit x").expect("record trailing comma");
         // Empty literals still work.
-        parse("x = []\nfinish x").expect("empty list");
-        parse("x = {}\nfinish x").expect("empty record");
+        parse("x = []\nsubmit x").expect("empty list");
+        parse("x = {}\nsubmit x").expect("empty record");
     }
 
     #[test]
     fn render_kind_covers_every_variant() {
         let samples = vec![
-            TokenKind::Ident("x".to_string()),
-            TokenKind::String("s".to_string()),
+            TokenKind::Ident("x".into()),
+            TokenKind::String("s".into()),
             TokenKind::Number(1.0),
             TokenKind::LBrace,
             TokenKind::RBrace,
@@ -1047,8 +1278,8 @@ mod tests {
             TokenKind::Start,
             TokenKind::Await,
             TokenKind::Cancel,
-            TokenKind::Finish,
-            TokenKind::Observe,
+            TokenKind::Submit,
+            TokenKind::Print,
             TokenKind::Call,
             TokenKind::And,
             TokenKind::Or,

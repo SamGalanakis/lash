@@ -17,6 +17,7 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         }],
@@ -707,7 +708,11 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
         response.as_deref(),
         Some("1. Start implementing now\n\nNote: safe slice first")
     );
-    assert!(app.blocks.iter().all(|block| !matches!(block, DisplayBlock::UserInput(_))));
+    assert!(
+        app.blocks
+            .iter()
+            .all(|block| !matches!(block, DisplayBlock::UserInput(_)))
+    );
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc-plan-exit".into()),
@@ -886,11 +891,7 @@ fn interrupted_projection_appends_only_uncommitted_tail() {
     // If the streamed text contains everything in the committed messages
     // PLUS a trailing chunk the model was mid-stream on when the abort
     // landed, only that trailing chunk should be appended as a new block.
-    let messages = vec![text_message(
-        "m0",
-        MessageRole::Assistant,
-        "first prose",
-    )];
+    let messages = vec![text_message("m0", MessageRole::Assistant, "first prose")];
     let blocks = project_interrupted_blocks(
         &messages,
         &[],

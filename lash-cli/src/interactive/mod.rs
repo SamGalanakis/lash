@@ -301,6 +301,7 @@ async fn process_pending_monitor_wakes(
         image_blobs: Default::default(),
         user_input: None,
         mode: Some(RunMode::Normal),
+        rlm_termination_override: None,
     };
     send_user_message(
         prepared_turn,
@@ -1052,15 +1053,20 @@ pub(crate) async fn run_app(
             AppEvent::Terminal(TermEvent::Paste(text)) => {
                 app.dirty = true;
 
-                if app.has_prompt() && app.is_prompt_text_entry() {
-                    if let Some(recorder) = ui_trace.as_mut() {
-                        recorder.record_prompt_insert_text(text.clone());
+                if app.has_prompt() {
+                    if app.is_prompt_text_entry() {
+                        if let Some(recorder) = ui_trace.as_mut() {
+                            recorder.record_prompt_insert_text(text.clone());
+                        }
+                        let _ = apply_terminal_action(
+                            &mut app,
+                            &terminal,
+                            UiAction::PromptInsertText(text),
+                        );
                     }
-                    let _ = apply_terminal_action(
-                        &mut app,
-                        &terminal,
-                        UiAction::PromptInsertText(text),
-                    );
+                    // Prompt modal is focused: swallow pastes that don't
+                    // belong in its text field instead of leaking them
+                    // into the composer.
                     continue;
                 }
 

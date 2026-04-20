@@ -1,5 +1,5 @@
 //! Tests that pin down every behavioural claim made in the RLM execution
-//! section of the system prompt (`lash-sansio/src/mode.rs::RLM_EXECUTION_SECTION`).
+//! section of the system prompt (`lash-mode-rlm/src/driver.rs::RLM_EXECUTION_SECTION`).
 //!
 //! Each test here is wired to a specific bullet or example so the prompt and
 //! the runtime can never drift again without a test failing. If you change
@@ -7,7 +7,7 @@
 //! is now a lie.
 
 use lashlang::{
-    ExecutionOutcome, Record, State, ToolHost, ToolHostError, Value, execute,
+    ExecuteError, ExecutionOutcome, Record, State, ToolHost, ToolHostError, Value, execute,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -149,7 +149,7 @@ impl ToolHost for MockHost {
         Ok(Value::Null)
     }
 
-    fn observe(&self, value: &Value) -> Result<(), ToolHostError> {
+    fn print(&self, value: &Value) -> Result<(), ToolHostError> {
         self.record_observation(value.clone());
         Ok(())
     }
@@ -177,20 +177,20 @@ fn run_continued(host: &MockHost, source: &str) -> (ExecutionOutcome, State) {
 #[test]
 fn prompt_claim_value_literals_parse_and_evaluate() {
     let host = MockHost::default();
-    assert_eq!(run(&host, "finish null"), Value::Null);
-    assert_eq!(run(&host, "finish true"), Value::Bool(true));
-    assert_eq!(run(&host, "finish 42"), Value::Number(42.0));
+    assert_eq!(run(&host, "submit null"), Value::Null);
+    assert_eq!(run(&host, "submit true"), Value::Bool(true));
+    assert_eq!(run(&host, "submit 42"), Value::Number(42.0));
     assert_eq!(
-        run(&host, r#"finish "hi""#),
+        run(&host, r#"submit "hi""#),
         Value::String("hi".to_string().into())
     );
     // list literal
-    let Value::List(items) = run(&host, "finish [1, 2, 3]") else {
+    let Value::List(items) = run(&host, "submit [1, 2, 3]") else {
         panic!("expected list");
     };
     assert_eq!(items.len(), 3);
     // record literal
-    let Value::Record(rec) = run(&host, "finish { a: 1, b: 2 }") else {
+    let Value::Record(rec) = run(&host, "submit { a: 1, b: 2 }") else {
         panic!("expected record");
     };
     assert_eq!(rec["a"], Value::Number(1.0));
@@ -208,7 +208,7 @@ fn prompt_claim_value_literals_parse_and_evaluate() {
 fn prompt_claim_assignment_persists_within_program() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, "x = 7\ny = x + 3\nfinish y"),
+        run(&host, "x = 7\ny = x + 3\nsubmit y"),
         Value::Number(10.0)
     );
 }
@@ -222,7 +222,7 @@ fn prompt_claim_assignment_persists_within_program() {
 #[test]
 fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
     let host = MockHost::default().with_file("a.txt", "hello world");
-    let Value::Record(r) = run(&host, r#"finish call read_file { path: "a.txt" }"#) else {
+    let Value::Record(r) = run(&host, r#"submit call read_file { path: "a.txt" }"#) else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(true));
@@ -232,7 +232,7 @@ fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
 #[test]
 fn prompt_claim_tool_call_failure_is_wrapped_with_ok_false_and_error() {
     let host = MockHost::default();
-    let Value::Record(r) = run(&host, "finish call boom {}") else {
+    let Value::Record(r) = run(&host, "submit call boom {}") else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(false));
@@ -242,16 +242,44 @@ fn prompt_claim_tool_call_failure_is_wrapped_with_ok_false_and_error() {
 #[test]
 fn prompt_claim_value_field_reaches_the_underlying_tool_output() {
     // The bug that motivated this section: models used `.output` / `.path`
-    // directly on the wrapper and got null. Prompt now says to reach
-    // through `.value` — this test asserts that works.
+    // directly on the wrapper and got null. Manual `.value` access still
+    // works when code intentionally keeps the raw wrapper.
     let host = MockHost::default().with_file("a.txt", "file text");
     assert_eq!(
         run(
             &host,
             r#"r = call read_file { path: "a.txt" }
-finish r.value"#,
+submit r.value"#,
         ),
         Value::String("file text".to_string().into())
+    );
+}
+
+#[test]
+fn prompt_claim_question_unwraps_successful_tool_results() {
+    let host = MockHost::default().with_file("a.txt", "file text");
+    assert_eq!(
+        run(
+            &host,
+            r#"text = (call read_file { path: "a.txt" })?
+submit text"#,
+        ),
+        Value::String("file text".to_string().into())
+    );
+}
+
+#[test]
+fn prompt_claim_question_aborts_failed_tool_results_with_error() {
+    let host = MockHost::default();
+    let mut state = State::new();
+    let err = execute("submit (call boom {})?", &mut state, &host)
+        .expect_err("failed result unwrap should abort");
+    let ExecuteError::Runtime(err) = err else {
+        panic!("expected runtime error");
+    };
+    assert!(
+        err.to_string().contains("explicit failure for tests"),
+        "unexpected error: {err}"
     );
 }
 
@@ -267,12 +295,15 @@ fn prompt_claim_start_returns_unwrapped_handle() {
     let Value::Record(handle) = run(
         &host,
         r#"h = start call read_file { path: "a.txt" }
-finish h"#,
+submit h"#,
     ) else {
         panic!("expected handle record");
     };
     // Handle is NOT a tool-result wrapper.
-    assert!(handle.get("ok").is_none(), "start should not wrap in {{ok,value}}");
+    assert!(
+        handle.get("ok").is_none(),
+        "start should not wrap in {{ok,value}}"
+    );
     assert!(matches!(handle.get("handle"), Some(Value::String(_))));
 }
 
@@ -282,12 +313,25 @@ fn prompt_claim_await_handle_wraps_result_with_ok_value() {
     let Value::Record(r) = run(
         &host,
         r#"h = start call read_file { path: "a.txt" }
-finish await h"#,
+submit await h"#,
     ) else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(true));
     assert_eq!(r["value"], Value::String("body".to_string().into()));
+}
+
+#[test]
+fn prompt_claim_question_unwraps_awaited_handle_results() {
+    let host = MockHost::default().with_file("a.txt", "body");
+    assert_eq!(
+        run(
+            &host,
+            r#"h = start call read_file { path: "a.txt" }
+submit (await h)?"#,
+        ),
+        Value::String("body".to_string().into())
+    );
 }
 
 #[test]
@@ -301,7 +345,7 @@ fn prompt_claim_await_list_returns_wrappers_in_order() {
   start call read_file { path: "a.txt" },
   start call read_file { path: "b.txt" },
 ]
-finish results"#,
+submit results"#,
     ) else {
         panic!("expected list");
     };
@@ -312,6 +356,31 @@ finish results"#,
     assert_eq!(a["value"], Value::String("A".to_string().into()));
     assert_eq!(b["ok"], Value::Bool(true));
     assert_eq!(b["value"], Value::String("B".to_string().into()));
+}
+
+#[test]
+fn prompt_claim_await_record_returns_wrappers_by_name() {
+    let host = MockHost::default()
+        .with_file("a.txt", "A")
+        .with_file("b.txt", "B");
+    let Value::Record(items) = run(
+        &host,
+        r#"results = await {
+  a: start call read_file { path: "a.txt" },
+  b: start call read_file { path: "b.txt" },
+}
+submit results"#,
+    ) else {
+        panic!("expected record");
+    };
+    assert_eq!(
+        items["a"].as_record().unwrap()["value"],
+        Value::String("A".into())
+    );
+    assert_eq!(
+        items["b"].as_record().unwrap()["value"],
+        Value::String("B".into())
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -325,7 +394,7 @@ fn prompt_claim_cancel_handle_runs_without_error() {
         &host,
         r#"h = start call read_file { path: "a.txt" }
 cancel h
-finish "done""#,
+submit "done""#,
     );
 }
 
@@ -347,7 +416,7 @@ fn prompt_claim_parallel_expression_returns_branch_list_in_order() {
   a = call read_file { path: "a.txt" }
   b = call read_file { path: "b.txt" }
 }
-finish results"#,
+submit results"#,
     ) else {
         panic!("expected list");
     };
@@ -358,12 +427,34 @@ finish results"#,
 }
 
 #[test]
+fn prompt_claim_named_parallel_expression_returns_record() {
+    let host = MockHost::default()
+        .with_file("a.txt", "A")
+        .with_file("b.txt", "B");
+    let Value::Record(items) = run(
+        &host,
+        r#"results = parallel {
+  a: call read_file { path: "a.txt" }
+  b: call read_file { path: "b.txt" }
+}
+submit results"#,
+    ) else {
+        panic!("expected record");
+    };
+    assert_eq!(
+        items["a"].as_record().unwrap()["value"],
+        Value::String("A".into())
+    );
+    assert_eq!(
+        items["b"].as_record().unwrap()["value"],
+        Value::String("B".into())
+    );
+}
+
+#[test]
 fn prompt_claim_bare_expressions_are_valid_parallel_branches() {
     let host = MockHost::default();
-    let Value::List(items) = run(
-        &host,
-        "finish parallel {\n  1 + 1\n  \"lit\"\n}",
-    ) else {
+    let Value::List(items) = run(&host, "submit parallel {\n  1 + 1\n  \"lit\"\n}") else {
         panic!("expected list");
     };
     assert_eq!(items.len(), 2);
@@ -372,16 +463,16 @@ fn prompt_claim_bare_expressions_are_valid_parallel_branches() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Prompt claim: "`observe expr` inspects a value mid-turn."
+// Prompt claim: "`print expr` inspects a value mid-turn."
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn prompt_claim_observe_feeds_value_to_host() {
+fn prompt_claim_print_feeds_value_to_host() {
     let host = MockHost::default();
     let (outcome, _state) = run_continued(
         &host,
         r#"v = { total: 42 }
-observe v"#,
+print v"#,
     );
     assert!(matches!(outcome, ExecutionOutcome::Continued));
     let observations = host.observations();
@@ -391,22 +482,22 @@ observe v"#,
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Prompt claim: "`finish <expr>` ends the turn with the given value..."
+// Prompt claim: "`submit <expr>` ends the turn with the given value..."
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn prompt_claim_finish_terminates_program_with_value() {
+fn prompt_claim_submit_terminates_program_with_value() {
     let host = MockHost::default();
     let mut state = State::new();
-    let outcome = execute("x = 3\nfinish x * 2", &mut state, &host).expect("runs");
+    let outcome = execute("x = 3\nsubmit x * 2", &mut state, &host).expect("runs");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(6.0)));
 }
 
 #[test]
-fn prompt_claim_bare_finish_terminates_with_null() {
+fn prompt_claim_bare_submit_terminates_with_null() {
     let host = MockHost::default();
     let mut state = State::new();
-    let outcome = execute("finish", &mut state, &host).expect("runs");
+    let outcome = execute("submit", &mut state, &host).expect("runs");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Null));
 }
 
@@ -426,16 +517,16 @@ fn prompt_claim_if_for_and_ternary_work() {
 for n in [1, 2, 3] {
   total = total + n
 }
-finish total"#,
+submit total"#,
         ),
         Value::Number(6.0)
     );
     assert_eq!(
-        run(&host, r#"finish true ? "a" : "b""#),
+        run(&host, r#"submit true ? "a" : "b""#),
         Value::String("a".to_string().into())
     );
     assert_eq!(
-        run(&host, "if 1 < 2 { finish 7 } else { finish 9 }"),
+        run(&host, "if 1 < 2 { submit 7 } else { submit 9 }"),
         Value::Number(7.0)
     );
 }
@@ -443,10 +534,10 @@ finish total"#,
 #[test]
 fn prompt_claim_both_negation_forms_work() {
     let host = MockHost::default();
-    assert_eq!(run(&host, "finish !true"), Value::Bool(false));
-    assert_eq!(run(&host, "finish not true"), Value::Bool(false));
-    assert_eq!(run(&host, "finish !false"), Value::Bool(true));
-    assert_eq!(run(&host, "finish not false"), Value::Bool(true));
+    assert_eq!(run(&host, "submit !true"), Value::Bool(false));
+    assert_eq!(run(&host, "submit not true"), Value::Bool(false));
+    assert_eq!(run(&host, "submit !false"), Value::Bool(true));
+    assert_eq!(run(&host, "submit not false"), Value::Bool(true));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -456,19 +547,19 @@ fn prompt_claim_both_negation_forms_work() {
 #[test]
 fn prompt_claim_builtin_len_returns_length() {
     let host = MockHost::default();
-    assert_eq!(run(&host, r#"finish len("hi")"#), Value::Number(2.0));
-    assert_eq!(run(&host, "finish len([1,2,3])"), Value::Number(3.0));
-    assert_eq!(run(&host, "finish len({a: 1, b: 2})"), Value::Number(2.0));
-    assert_eq!(run(&host, "finish len(null)"), Value::Number(0.0));
+    assert_eq!(run(&host, r#"submit len("hi")"#), Value::Number(2.0));
+    assert_eq!(run(&host, "submit len([1,2,3])"), Value::Number(3.0));
+    assert_eq!(run(&host, "submit len({a: 1, b: 2})"), Value::Number(2.0));
+    assert_eq!(run(&host, "submit len(null)"), Value::Number(0.0));
 }
 
 #[test]
 fn prompt_claim_builtin_empty_checks_zero_length() {
     let host = MockHost::default();
-    assert_eq!(run(&host, r#"finish empty("")"#), Value::Bool(true));
-    assert_eq!(run(&host, r#"finish empty("x")"#), Value::Bool(false));
-    assert_eq!(run(&host, "finish empty([])"), Value::Bool(true));
-    assert_eq!(run(&host, "finish empty([1])"), Value::Bool(false));
+    assert_eq!(run(&host, r#"submit empty("")"#), Value::Bool(true));
+    assert_eq!(run(&host, r#"submit empty("x")"#), Value::Bool(false));
+    assert_eq!(run(&host, "submit empty([])"), Value::Bool(true));
+    assert_eq!(run(&host, "submit empty([1])"), Value::Bool(false));
 }
 
 #[test]
@@ -476,20 +567,20 @@ fn prompt_claim_builtin_slice_supports_null_bounds_and_negative_bounds() {
     let host = MockHost::default();
     // null = from start / to end
     assert_eq!(
-        run(&host, r#"finish slice("abcdef", null, 3)"#),
+        run(&host, r#"submit slice("abcdef", null, 3)"#),
         Value::String("abc".to_string().into())
     );
     assert_eq!(
-        run(&host, r#"finish slice("abcdef", 3, null)"#),
+        run(&host, r#"submit slice("abcdef", 3, null)"#),
         Value::String("def".to_string().into())
     );
     // negative bound counts from the end
     assert_eq!(
-        run(&host, r#"finish slice("abcdef", 0, -2)"#),
+        run(&host, r#"submit slice("abcdef", 0, -2)"#),
         Value::String("abcd".to_string().into())
     );
     // works on lists too
-    let Value::List(items) = run(&host, "finish slice([1,2,3,4], 1, 3)") else {
+    let Value::List(items) = run(&host, "submit slice([1,2,3,4], 1, 3)") else {
         panic!("list");
     };
     assert_eq!(items.len(), 2);
@@ -497,16 +588,57 @@ fn prompt_claim_builtin_slice_supports_null_bounds_and_negative_bounds() {
 }
 
 #[test]
+fn prompt_claim_builtin_range_and_push_build_lists() {
+    let host = MockHost::default();
+    assert_eq!(
+        run(&host, "submit range(3)"),
+        Value::List(vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)].into())
+    );
+    assert_eq!(
+        run(&host, "submit range(-2, 1)"),
+        Value::List(vec![Value::Number(-2.0), Value::Number(-1.0), Value::Number(0.0)].into())
+    );
+    assert_eq!(
+        run(&host, "submit range(3, 3)"),
+        Value::List(Vec::new().into())
+    );
+
+    let value = run(
+        &host,
+        r#"
+        base = ["a"]
+        extended = push(base, "b")
+        submit { base: base, extended: extended }
+        "#,
+    );
+    let record = value.as_record().expect("record");
+    assert_eq!(
+        record["base"],
+        Value::List(vec![Value::String("a".to_string().into())].into())
+    );
+    assert_eq!(
+        record["extended"],
+        Value::List(
+            vec![
+                Value::String("a".to_string().into()),
+                Value::String("b".to_string().into())
+            ]
+            .into()
+        )
+    );
+}
+
+#[test]
 fn prompt_claim_builtin_split_and_join() {
     let host = MockHost::default();
-    let Value::List(parts) = run(&host, r#"finish split("a,b,c", ",")"#) else {
+    let Value::List(parts) = run(&host, r#"submit split("a,b,c", ",")"#) else {
         panic!("list");
     };
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0], Value::String("a".to_string().into()));
 
     assert_eq!(
-        run(&host, r#"finish join(["a", "b", "c"], "-")"#),
+        run(&host, r#"submit join(["a", "b", "c"], "-")"#),
         Value::String("a-b-c".to_string().into())
     );
 }
@@ -515,7 +647,7 @@ fn prompt_claim_builtin_split_and_join() {
 fn prompt_claim_builtin_trim_strips_whitespace() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, r#"finish trim("  hi  ")"#),
+        run(&host, r#"submit trim("  hi  ")"#),
         Value::String("hi".to_string().into())
     );
 }
@@ -524,19 +656,19 @@ fn prompt_claim_builtin_trim_strips_whitespace() {
 fn prompt_claim_builtin_starts_ends_contains() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, r#"finish starts_with("foobar", "foo")"#),
+        run(&host, r#"submit starts_with("foobar", "foo")"#),
         Value::Bool(true)
     );
     assert_eq!(
-        run(&host, r#"finish ends_with("foobar", "bar")"#),
+        run(&host, r#"submit ends_with("foobar", "bar")"#),
         Value::Bool(true)
     );
     assert_eq!(
-        run(&host, r#"finish contains("foobar", "oob")"#),
+        run(&host, r#"submit contains("foobar", "oob")"#),
         Value::Bool(true)
     );
     assert_eq!(
-        run(&host, r#"finish contains([1,2,3], 2)"#),
+        run(&host, r#"submit contains([1,2,3], 2)"#),
         Value::Bool(true)
     );
 }
@@ -544,7 +676,7 @@ fn prompt_claim_builtin_starts_ends_contains() {
 #[test]
 fn prompt_claim_builtin_keys_and_values() {
     let host = MockHost::default();
-    let Value::List(keys) = run(&host, "finish keys({a: 1, b: 2})") else {
+    let Value::List(keys) = run(&host, "submit keys({a: 1, b: 2})") else {
         panic!("list");
     };
     assert_eq!(keys.len(), 2);
@@ -552,7 +684,7 @@ fn prompt_claim_builtin_keys_and_values() {
     assert_eq!(keys[0], Value::String("a".to_string().into()));
     assert_eq!(keys[1], Value::String("b".to_string().into()));
 
-    let Value::List(vals) = run(&host, "finish values({a: 1, b: 2})") else {
+    let Value::List(vals) = run(&host, "submit values({a: 1, b: 2})") else {
         panic!("list");
     };
     assert_eq!(vals.len(), 2);
@@ -564,20 +696,17 @@ fn prompt_claim_builtin_keys_and_values() {
 fn prompt_claim_builtin_to_string_to_int_to_float() {
     let host = MockHost::default();
     assert_eq!(
-        run(&host, "finish to_string(42)"),
+        run(&host, "submit to_string(42)"),
         Value::String("42".to_string().into())
     );
-    assert_eq!(run(&host, r#"finish to_int("7")"#), Value::Number(7.0));
-    assert_eq!(
-        run(&host, r#"finish to_float("3.5")"#),
-        Value::Number(3.5)
-    );
+    assert_eq!(run(&host, r#"submit to_int("7")"#), Value::Number(7.0));
+    assert_eq!(run(&host, r#"submit to_float("3.5")"#), Value::Number(3.5));
 }
 
 #[test]
 fn prompt_claim_builtin_json_parse_parses_strings_to_values() {
     let host = MockHost::default();
-    let Value::Record(r) = run(&host, r#"finish json_parse("{\"a\": 1}")"#) else {
+    let Value::Record(r) = run(&host, r#"submit json_parse("{\"a\": 1}")"#) else {
         panic!("record");
     };
     assert_eq!(r["a"], Value::Number(1.0));
@@ -588,25 +717,55 @@ fn prompt_claim_builtin_format_positional_placeholders() {
     let host = MockHost::default();
     // Auto-numbered `{}` placeholders.
     assert_eq!(
-        run(&host, r#"finish format("hi {} you are {}", "sam", 3)"#),
+        run(&host, r#"submit format("hi {} you are {}", "sam", 3)"#),
         Value::String("hi sam you are 3".to_string().into())
     );
     // Explicit indices `{0}`, `{1}`.
     assert_eq!(
-        run(&host, r#"finish format("{1} {0}", "world", "hello")"#),
+        run(&host, r#"submit format("{1} {0}", "world", "hello")"#),
         Value::String("hello world".to_string().into())
     );
     // Literal braces via doubling.
     assert_eq!(
-        run(&host, r#"finish format("{{ {} }}", "x")"#),
+        run(&host, r#"submit format("{{ {} }}", "x")"#),
         Value::String("{ x }".to_string().into())
+    );
+}
+
+#[test]
+fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
+    let host = MockHost::default();
+    let value = run(
+        &host,
+        r#"
+        raw = { name: "lashlang", labels: ["agent", "runtime"] }
+        submit validate(raw, Type { name: str, labels: list[str] })
+        "#,
+    );
+    let record = value.as_record().expect("validated record");
+    assert_eq!(record["name"], Value::String("lashlang".to_string().into()));
+
+    let mut state = State::new();
+    let err = execute(
+        r#"submit validate({ labels: ["agent", 42] }, Type { labels: list[str] })"#,
+        &mut state,
+        &host,
+    )
+    .expect_err("validate should abort on bad shape");
+    let ExecuteError::Runtime(err) = err else {
+        panic!("expected runtime error");
+    };
+    assert!(
+        err.to_string()
+            .contains("$.labels[1]: expected string, got number"),
+        "unexpected error: {err}"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Simple worked example from the prompt's "Example format" block:
 //   r = call read_file { path: "Cargo.toml" }
-//   finish split(r.value, "\n")[2]
+//   submit split(r.value, "\n")[2]
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -616,29 +775,28 @@ fn prompt_example_format_block_executes_as_shown() {
         run(
             &host,
             r#"r = call read_file { path: "Cargo.toml" }
-finish split(r.value, "\n")[2]"#,
+submit split(r.value, "\n")[2]"#,
         ),
         Value::String("line2".to_string().into())
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Prompt fanout example: every tool-call value is reached through
-// `.value` (both for `call spawn_agent` and for resolved `await`).
+// Prompt fanout example: `?` unwraps normal happy-path tool results.
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn prompt_fanout_example_accesses_spawn_and_wait_results_through_value() {
+fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
     let host = MockHost::default();
     let Value::List(results) = run(
         &host,
-        r#"a = call spawn_agent { task_name: "chunk_1", task: "x", capability: "low" }
-b = call spawn_agent { task_name: "chunk_2", task: "y", capability: "low" }
-events = await [
-  start call wait_agent { targets: [a.value.path] },
-  start call wait_agent { targets: [b.value.path] },
-]
-finish [events[0].value.events[0].result, events[1].value.events[0].result]"#,
+        r#"a = (call spawn_agent { task_name: "chunk_1", task: "x", capability: "low" })?
+b = (call spawn_agent { task_name: "chunk_2", task: "y", capability: "low" })?
+events = await {
+  a: start call wait_agent { targets: [a.path] },
+  b: start call wait_agent { targets: [b.path] },
+}
+submit [events.a?.events[0].result, events.b?.events[0].result]"#,
     ) else {
         panic!("expected list");
     };
@@ -665,30 +823,53 @@ fn prompt_mentions_every_builtin_we_document() {
     // pull the const directly (cross-crate visibility) — instead keep the
     // expected list here. If you add a builtin, update both places.
     const DOCUMENTED: &[&str] = &[
-        "len", "empty", "slice", "split", "join", "trim", "starts_with", "ends_with", "contains",
-        "keys", "values", "to_string", "to_int", "to_float", "json_parse", "format",
+        "len",
+        "empty",
+        "slice",
+        "split",
+        "join",
+        "trim",
+        "starts_with",
+        "ends_with",
+        "contains",
+        "keys",
+        "values",
+        "to_string",
+        "to_int",
+        "to_float",
+        "json_parse",
+        "format",
+        "validate",
+        "range",
+        "push",
     ];
     // Call each builtin with a shape guaranteed to succeed — we don't
     // check results here (covered by the per-builtin tests above), only
     // that the runtime recognises the name.
     let host = MockHost::default();
     let smoke = [
-        (r#"finish len("a")"#, "len"),
-        (r#"finish empty("")"#, "empty"),
-        (r#"finish slice("abc", 0, 1)"#, "slice"),
-        (r#"finish split("a,b", ",")"#, "split"),
-        (r#"finish join(["a","b"], ",")"#, "join"),
-        (r#"finish trim(" a ")"#, "trim"),
-        (r#"finish starts_with("abc", "a")"#, "starts_with"),
-        (r#"finish ends_with("abc", "c")"#, "ends_with"),
-        (r#"finish contains("abc", "b")"#, "contains"),
-        (r#"finish keys({a: 1})"#, "keys"),
-        (r#"finish values({a: 1})"#, "values"),
-        (r#"finish to_string(1)"#, "to_string"),
-        (r#"finish to_int("1")"#, "to_int"),
-        (r#"finish to_float("1.5")"#, "to_float"),
-        (r#"finish json_parse("1")"#, "json_parse"),
-        (r#"finish format("x")"#, "format"),
+        (r#"submit len("a")"#, "len"),
+        (r#"submit empty("")"#, "empty"),
+        (r#"submit slice("abc", 0, 1)"#, "slice"),
+        (r#"submit split("a,b", ",")"#, "split"),
+        (r#"submit join(["a","b"], ",")"#, "join"),
+        (r#"submit trim(" a ")"#, "trim"),
+        (r#"submit starts_with("abc", "a")"#, "starts_with"),
+        (r#"submit ends_with("abc", "c")"#, "ends_with"),
+        (r#"submit contains("abc", "b")"#, "contains"),
+        (r#"submit keys({a: 1})"#, "keys"),
+        (r#"submit values({a: 1})"#, "values"),
+        (r#"submit to_string(1)"#, "to_string"),
+        (r#"submit to_int("1")"#, "to_int"),
+        (r#"submit to_float("1.5")"#, "to_float"),
+        (r#"submit json_parse("1")"#, "json_parse"),
+        (r#"submit format("x")"#, "format"),
+        (
+            r#"submit validate({ value: "x" }, Type { value: str })"#,
+            "validate",
+        ),
+        (r#"submit range(1)"#, "range"),
+        (r#"submit push([], "x")"#, "push"),
     ];
     assert_eq!(smoke.len(), DOCUMENTED.len());
     for (code, name) in smoke {

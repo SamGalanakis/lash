@@ -1,7 +1,8 @@
+use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -15,8 +16,8 @@ pub struct Token {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
-    Ident(String),
-    String(String),
+    Ident(CompactString),
+    String(CompactString),
     Number(f64),
     LBrace,
     RBrace,
@@ -51,8 +52,8 @@ pub enum TokenKind {
     Start,
     Await,
     Cancel,
-    Finish,
-    Observe,
+    Submit,
+    Print,
     Call,
     And,
     Or,
@@ -98,7 +99,7 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn lex_all(&mut self) -> Result<Vec<Token>, LexError> {
-        let mut tokens = Vec::new();
+        let mut tokens = Vec::with_capacity((self.source.len() / 4).max(8));
         while let Some((offset, ch)) = self.peek() {
             if ch.is_whitespace() {
                 self.bump();
@@ -188,10 +189,15 @@ impl<'a> Lexer<'a> {
 
     fn string(&mut self) -> Result<Token, LexError> {
         let (start, _) = self.bump().expect("string requires quote");
-        let mut value = String::new();
+        let content_start = start + 1;
+        let mut value: Option<String> = None;
         while let Some((offset, ch)) = self.bump() {
             match ch {
                 '"' => {
+                    let value = match value {
+                        Some(value) => CompactString::from(value),
+                        None => CompactString::from(&self.source[content_start..offset]),
+                    };
                     return Ok(Token {
                         kind: TokenKind::String(value),
                         span: Span {
@@ -201,6 +207,8 @@ impl<'a> Lexer<'a> {
                     });
                 }
                 '\\' => {
+                    let value =
+                        value.get_or_insert_with(|| self.source[content_start..offset].to_string());
                     let Some((_, escaped)) = self.bump() else {
                         return Err(LexError::UnterminatedString { offset: start });
                     };
@@ -214,7 +222,11 @@ impl<'a> Lexer<'a> {
                     };
                     value.push(translated);
                 }
-                other => value.push(other),
+                other => {
+                    if let Some(value) = &mut value {
+                        value.push(other);
+                    }
+                }
             }
         }
         Err(LexError::UnterminatedString { offset: start })
@@ -254,8 +266,8 @@ impl<'a> Lexer<'a> {
             "start" => TokenKind::Start,
             "await" => TokenKind::Await,
             "cancel" => TokenKind::Cancel,
-            "finish" => TokenKind::Finish,
-            "observe" => TokenKind::Observe,
+            "submit" => TokenKind::Submit,
+            "print" => TokenKind::Print,
             "call" => TokenKind::Call,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
@@ -263,7 +275,7 @@ impl<'a> Lexer<'a> {
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "null" => TokenKind::Null,
-            _ => TokenKind::Ident(text.to_string()),
+            _ => TokenKind::Ident(text.into()),
         };
         Token {
             kind,
@@ -349,7 +361,7 @@ mod tests {
         let tokens = lex(r#"
             # comment
             // comment
-            if else for in parallel finish observe call and or not true false null
+            if else for in parallel submit print call and or not true false null
             name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : ? . ! = == != && || < <= > >= + - * / %
             "#)
         .expect("lexing should succeed");
@@ -363,8 +375,8 @@ mod tests {
                 TokenKind::For,
                 TokenKind::In,
                 TokenKind::Parallel,
-                TokenKind::Finish,
-                TokenKind::Observe,
+                TokenKind::Submit,
+                TokenKind::Print,
                 TokenKind::Call,
                 TokenKind::And,
                 TokenKind::Or,
@@ -372,10 +384,10 @@ mod tests {
                 TokenKind::True,
                 TokenKind::False,
                 TokenKind::Null,
-                TokenKind::Ident("name".to_string()),
-                TokenKind::Ident("_x".to_string()),
-                TokenKind::Ident("a1".to_string()),
-                TokenKind::String("hi\n\t\"\\\rq".to_string()),
+                TokenKind::Ident("name".into()),
+                TokenKind::Ident("_x".into()),
+                TokenKind::Ident("a1".into()),
+                TokenKind::String("hi\n\t\"\\\rq".into()),
                 TokenKind::Number(12.0),
                 TokenKind::Number(3.5),
                 TokenKind::LBrace,
@@ -419,7 +431,7 @@ mod tests {
         let tokens = lex(r#"
             value = 6 / 2
             // trailing comment
-            finish value
+            submit value
             "#)
         .expect("lexing should succeed");
 
@@ -427,13 +439,13 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                TokenKind::Ident("value".to_string()),
+                TokenKind::Ident("value".into()),
                 TokenKind::Equal,
                 TokenKind::Number(6.0),
                 TokenKind::Slash,
                 TokenKind::Number(2.0),
-                TokenKind::Finish,
-                TokenKind::Ident("value".to_string()),
+                TokenKind::Submit,
+                TokenKind::Ident("value".into()),
                 TokenKind::Eof,
             ]
         );

@@ -1056,11 +1056,7 @@ fn render_block_into(
 /// Render the captured `lashlang` source for an RLM turn, with a dim `╎`
 /// gutter to mark it as "what the model ran" (distinct from the `│`
 /// shell gutter and `┊` reasoning gutter).
-fn render_lashlang_code_block(
-    code: &str,
-    lines: &mut Vec<Line<'static>>,
-    _viewport_width: usize,
-) {
+fn render_lashlang_code_block(code: &str, lines: &mut Vec<Line<'static>>, _viewport_width: usize) {
     let header_style = theme::code_chrome();
     let gutter_style = theme::code_chrome();
     let body_style = theme::system_output();

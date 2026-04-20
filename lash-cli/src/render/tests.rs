@@ -313,6 +313,7 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
         }],
@@ -1002,7 +1003,7 @@ fn snippet_preview_wraps_long_markdown_bullets_to_viewport_width() {
 #[test]
 fn lashlang_code_block_is_hidden_below_full_expand() {
     let blocks = vec![DisplayBlock::LashlangCode(
-        "r = call read_file { path: \"a\" }\nfinish r.value".to_string(),
+        "r = call read_file { path: \"a\" }\nsubmit r.value".to_string(),
     )];
     for level in [0u8, 1] {
         let rendered = render_block(&blocks, 0, level, 80, 24);
@@ -1015,7 +1016,7 @@ fn lashlang_code_block_is_hidden_below_full_expand() {
 
 #[test]
 fn lashlang_code_block_renders_header_and_body_at_full_expand() {
-    let code = "r = call read_file { path: \"a\" }\nfinish r.value";
+    let code = "r = call read_file { path: \"a\" }\nsubmit r.value";
     let blocks = vec![DisplayBlock::LashlangCode(code.to_string())];
     let rendered = render_block(&blocks, 0, 2, 80, 24);
     let text: Vec<String> = rendered
@@ -1038,7 +1039,7 @@ fn lashlang_code_block_renders_header_and_body_at_full_expand() {
         "missing first code line in {text:?}",
     );
     assert!(
-        text.iter().any(|line| line.starts_with("╎ finish r.value")),
-        "missing finish line in {text:?}",
+        text.iter().any(|line| line.starts_with("╎ submit r.value")),
+        "missing submit line in {text:?}",
     );
 }

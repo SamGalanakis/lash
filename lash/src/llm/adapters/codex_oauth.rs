@@ -9,9 +9,11 @@ use crate::llm::timeouts::{
     LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
 };
 use crate::llm::transport::{LlmTransport, LlmTransportError};
+#[cfg(test)]
+use crate::llm::types::LlmMessage;
 use crate::llm::types::{
-    LlmMessage, LlmOutputPart, LlmOutputSpec, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
+    LlmStreamEvent, LlmUsage, ModelSelection,
 };
 use crate::provider::Provider;
 
@@ -218,9 +220,11 @@ impl CodexStreamState {
         let index = self.parts.len();
         self.parts.push(LlmOutputPart::Reasoning {
             text: String::new(),
-            id: String::new(),
-            summary: Vec::new(),
+            signature: None,
+            redacted: false,
+            item_id: None,
             encrypted_content: None,
+            summary: Vec::new(),
         });
         self.current_reasoning_part = Some(index);
     }
@@ -255,6 +259,48 @@ impl CodexStreamState {
             let trimmed = text.trim_end();
             if trimmed.len() != text.len() {
                 *text = trimmed.to_string();
+            }
+        }
+    }
+
+    /// Populate the most recent reasoning part with the authoritative
+    /// payload from `response.output_item.done`: the Codex `rs_...` id,
+    /// the `summary[*].text` entries, and the `encrypted_content` blob
+    /// that must be replayed on the next turn.
+    fn finalize_reasoning_item(&mut self, item: &Value) {
+        // Find the nearest Reasoning part without an id yet; server emits
+        // items in order so the latest slot is the right one to populate.
+        let Some((_, part)) = self
+            .parts
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, p)| matches!(p, LlmOutputPart::Reasoning { .. }))
+        else {
+            return;
+        };
+        let LlmOutputPart::Reasoning {
+            item_id,
+            encrypted_content,
+            summary,
+            ..
+        } = part
+        else {
+            return;
+        };
+        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+            *item_id = Some(id.to_string());
+        }
+        if let Some(blob) = item.get("encrypted_content").and_then(|v| v.as_str()) {
+            *encrypted_content = Some(blob.to_string());
+        }
+        if let Some(arr) = item.get("summary").and_then(|v| v.as_array()) {
+            let texts: Vec<String> = arr
+                .iter()
+                .filter_map(|entry| entry.get("text").and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            if !texts.is_empty() {
+                *summary = texts;
             }
         }
     }
@@ -319,11 +365,12 @@ impl CodexStreamState {
             call_id: tool_call.call_id,
             tool_name: tool_call.tool_name,
             input_json: tool_call.input_json,
-            id: if tool_call.item_id.is_empty() {
+            item_id: if tool_call.item_id.is_empty() {
                 None
             } else {
                 Some(tool_call.item_id)
             },
+            signature: None,
         };
         if !self.parts.iter().any(|existing| existing == &part) {
             self.parts.push(part.clone());
@@ -432,6 +479,63 @@ impl CodexOAuthAdapter {
             || body_text.contains("\"type\": \"usage_limit_reached\"")
     }
 
+    /// Translate a Codex error body into a user-friendly one-line message.
+    /// Mirrors pi-mono's `openai-codex-responses.ts:880-904`: for a
+    /// `usage_limit_reached`/`rate_limit_exceeded` code (or any 429),
+    /// parse the `plan_type` and `resets_at` epoch and render
+    /// `"You have hit your ChatGPT usage limit (plus plan). Try again in
+    /// ~12 min."`. Returns `None` when the body isn't parseable or the
+    /// status doesn't match the pattern, so the caller falls back to the
+    /// raw status.
+    fn codex_error_summary(status: u16, body_text: &str) -> Option<String> {
+        let parsed: Value = serde_json::from_str(body_text).ok()?;
+        let err = parsed.get("error")?;
+        let code = err
+            .get("code")
+            .and_then(|v| v.as_str())
+            .or_else(|| err.get("type").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let code_matches = {
+            let lc = code.to_ascii_lowercase();
+            lc.contains("usage_limit_reached")
+                || lc.contains("usage_not_included")
+                || lc.contains("rate_limit_exceeded")
+        };
+        if !code_matches && status != 429 {
+            // Prefer the raw `error.message` if the server gave us one —
+            // useful for refusals, invalid-request errors, etc.
+            let msg = err.get("message").and_then(|v| v.as_str())?;
+            return Some(format!("Codex request failed with {status}: {msg}"));
+        }
+
+        let plan = err
+            .get("plan_type")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|p| format!(" ({} plan)", p.to_ascii_lowercase()))
+            .unwrap_or_default();
+        let resets_at_secs = err.get("resets_at").and_then(|v| v.as_i64());
+        let mins = resets_at_secs.and_then(|ts| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs() as i64;
+            let delta_secs = ts - now;
+            if delta_secs <= 0 {
+                Some(0)
+            } else {
+                Some(((delta_secs + 30) / 60).max(0))
+            }
+        });
+        let when = match mins {
+            Some(m) => format!(" Try again in ~{m} min."),
+            None => String::new(),
+        };
+        Some(format!(
+            "You have hit your ChatGPT usage limit{plan}.{when}"
+        ))
+    }
+
     /// Exponential backoff for retry attempt `attempt`.
     /// attempt=0 -> 1000ms, attempt=1 -> 2000ms, attempt=2 -> 4000ms (mirrors pi's
     /// `BASE_DELAY_MS * 2 ** attempt`).
@@ -456,173 +560,309 @@ impl CodexOAuthAdapter {
         }
     }
 
-    fn content_part_for_message(req: &LlmRequest, msg: &LlmMessage) -> Value {
-        match msg.kind.as_str() {
-            "image" if matches!(msg.role, LlmRole::User) => {
-                let idx = msg.image_idx.max(0) as usize;
-                if let Some(att) = req.attachments.get(idx) {
-                    Self::input_image_part(att)
-                } else {
-                    json!({"type": "input_text", "text": "[Image attached]"})
-                }
-            }
-            _ => {
-                if matches!(msg.role, LlmRole::Assistant) {
-                    json!({"type": "output_text", "text": msg.content})
-                } else {
-                    json!({"type": "input_text", "text": msg.content})
-                }
-            }
-        }
-    }
-
     fn build_input(req: &LlmRequest) -> (String, Vec<Value>) {
         let mut input = Vec::new();
-        let mut instructions = Vec::new();
-        let chunks = coalesce_replay_messages(&req.messages);
-        let mut i = 0;
-        while i < chunks.len() {
-            match &chunks[i] {
-                LlmReplayChunk::Message(msg) => {
-                    let msg = msg.clone();
-                    if matches!(msg.role, LlmRole::System) && msg.kind != "tool_result" {
-                        if !msg.content.is_empty() {
-                            instructions.push(msg.content);
-                        }
-                    } else if msg.kind == "tool_result" {
-                        input.push(json!({
-                            "type": "function_call_output",
-                            "call_id": msg.tool_call_id.unwrap_or_default(),
-                            "output": msg.content,
-                        }));
-                    } else {
-                        // Merge consecutive user messages into a single multipart
-                        // content array so text + images land in one API message.
-                        let role_str = Self::role_name(&msg.role);
-                        let part = Self::content_part_for_message(req, &msg);
-                        if role_str == "user"
-                            && let Some(prev) = input.last_mut()
-                            && prev.get("role").and_then(|r| r.as_str()) == Some("user")
-                            && prev.get("content").is_some_and(|c| c.is_array())
-                        {
-                            prev["content"].as_array_mut().unwrap().push(part);
-                            i += 1;
-                            continue;
-                        }
-                        input.push(json!({
-                            "role": role_str,
-                            "content": [part],
-                        }));
+        let mut instructions: Vec<String> = Vec::new();
+
+        for msg in &req.messages {
+            // System-role messages are hoisted into the Codex Responses
+            // `instructions` top-level field rather than appearing in the
+            // input array.
+            if matches!(msg.role, LlmRole::System) {
+                for block in &msg.blocks {
+                    if let LlmContentBlock::Text(text) = block
+                        && !text.is_empty()
+                    {
+                        instructions.push(text.clone());
                     }
                 }
-                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    if let Some(text) = text.clone().filter(|text| !text.is_empty()) {
-                        input.push(json!({
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": text}],
+                continue;
+            }
+
+            // Per-message input items are emitted in block order. Text and
+            // image blocks accumulate into a single role-typed content
+            // message that gets flushed before the next tool/reasoning
+            // item so the wire ordering matches pi's shape.
+            let role_str = Self::role_name(&msg.role);
+            let mut pending_content: Vec<Value> = Vec::new();
+
+            // Pre-compute which blocks have already been folded into an
+            // earlier ToolResult's `output` so we don't double-emit them.
+            let mut consumed_after_tool_result: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+            for (idx, block) in msg.blocks.iter().enumerate() {
+                let LlmContentBlock::ToolResult { .. } = block else {
+                    continue;
+                };
+                for (j, sibling) in msg.blocks.iter().enumerate().skip(idx + 1) {
+                    match sibling {
+                        LlmContentBlock::Image { .. } => {
+                            consumed_after_tool_result.insert(j);
+                        }
+                        LlmContentBlock::Text(t) if t.starts_with("[Tool image:") => {
+                            consumed_after_tool_result.insert(j);
+                        }
+                        _ => break,
+                    }
+                }
+            }
+
+            for (block_idx, block) in msg.blocks.iter().enumerate() {
+                if consumed_after_tool_result.contains(&block_idx) {
+                    continue;
+                }
+                match block {
+                    LlmContentBlock::Text(text) => {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let part_type = match msg.role {
+                            LlmRole::Assistant => "output_text",
+                            _ => "input_text",
+                        };
+                        pending_content.push(json!({
+                            "type": part_type,
+                            "text": text,
                         }));
                     }
-                    input.extend(tool_calls.iter().cloned().map(|call| {
-                        let crate::llm::types::LlmToolCall {
-                            call_id,
-                            tool_name,
-                            input_json,
-                            id,
-                        } = call;
+                    LlmContentBlock::Image { attachment_idx } => {
+                        let Some(att) = req.attachments.get(*attachment_idx) else {
+                            continue;
+                        };
+                        if matches!(msg.role, LlmRole::User) {
+                            pending_content.push(Self::input_image_part(att));
+                        }
+                    }
+                    LlmContentBlock::Reasoning {
+                        text,
+                        encrypted_content,
+                        signature,
+                        item_id,
+                        summary,
+                        redacted: _,
+                    } => {
+                        Self::flush_pending_content(
+                            &mut pending_content,
+                            &mut input,
+                            role_str,
+                            matches!(msg.role, LlmRole::User),
+                        );
+                        let payload = encrypted_content.as_deref().or(signature.as_deref());
+                        // Only replay reasoning items that actually carry a
+                        // Codex-style encrypted blob. Display-only summaries
+                        // (no blob) must not be fed back — the server will
+                        // either ignore them or reject the turn.
+                        let Some(blob) = payload else {
+                            continue;
+                        };
+                        let summary_items: Vec<Value> = if summary.is_empty() {
+                            if text.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![json!({"type": "summary_text", "text": text})]
+                            }
+                        } else {
+                            summary
+                                .iter()
+                                .map(|entry| json!({"type": "summary_text", "text": entry}))
+                                .collect()
+                        };
+                        let mut item = json!({
+                            "type": "reasoning",
+                            "summary": summary_items,
+                            "encrypted_content": blob,
+                        });
+                        if let Some(id) = item_id
+                            && !id.is_empty()
+                        {
+                            item["id"] = json!(id);
+                        }
+                        input.push(item);
+                    }
+                    LlmContentBlock::ToolCall {
+                        call_id,
+                        tool_name,
+                        input_json,
+                        item_id,
+                        signature: _,
+                    } => {
+                        Self::flush_pending_content(
+                            &mut pending_content,
+                            &mut input,
+                            role_str,
+                            matches!(msg.role, LlmRole::User),
+                        );
                         let mut item = json!({
                             "type": "function_call",
                             "call_id": call_id,
                             "name": tool_name,
                             "arguments": input_json,
                         });
-                        // Codex uses `id` (e.g. `fc_...`) to pair function_call
-                        // items with their sibling reasoning items across turns.
-                        // Omit when absent so we don't send a bogus id.
-                        if let Some(item_id) = id {
-                            item["id"] = json!(item_id);
+                        // Codex uses `id` (e.g. `fc_...`) to pair
+                        // function_call items with their sibling reasoning
+                        // items across turns. Omit when absent so we don't
+                        // send a bogus id.
+                        if let Some(id) = item_id {
+                            item["id"] = json!(id);
                         }
-                        item
-                    }));
-                }
-                LlmReplayChunk::ToolResults { results } => {
-                    input.extend(results.iter().cloned().map(|msg| {
-                        json!({
-                            "type": "function_call_output",
-                            "call_id": msg.tool_call_id.unwrap_or_default(),
-                            "output": msg.content,
-                        })
-                    }));
-
-                    // Tool result images are emitted by the sansio renderer as
-                    // user-role image messages that immediately follow the
-                    // tool_result messages (each preceded by a
-                    // "[Tool image: ...]" text placeholder sharing the same
-                    // user Message). To match pi's shape, fold those images
-                    // into the preceding function_call_output's `output` as a
-                    // structured content array of {input_text, input_image}
-                    // parts, instead of leaving them as a separate trailing
-                    // user message that silently drops the image.
-                    let mut j = i + 1;
-                    while j < chunks.len() {
-                        let LlmReplayChunk::Message(next) = &chunks[j] else {
-                            break;
-                        };
-                        if !matches!(next.role, LlmRole::User) {
-                            break;
-                        }
-                        if next.kind == "text" && next.content.starts_with("[Tool image:") {
-                            // Skip the placeholder text that precedes the
-                            // actual image; the image itself carries the
-                            // content.
-                            j += 1;
-                            continue;
-                        }
-                        if next.kind != "image" {
-                            break;
-                        }
-                        let idx = next.image_idx.max(0) as usize;
-                        let Some(att) = req.attachments.get(idx) else {
-                            break;
-                        };
-                        let Some(last) = input.last_mut() else {
-                            break;
-                        };
-                        if last.get("type").and_then(|v| v.as_str())
-                            != Some("function_call_output")
+                        input.push(item);
+                    }
+                    LlmContentBlock::ToolResult {
+                        call_id, content, ..
+                    } => {
+                        Self::flush_pending_content(
+                            &mut pending_content,
+                            &mut input,
+                            role_str,
+                            matches!(msg.role, LlmRole::User),
+                        );
+                        // Look ahead in THIS message for sibling image
+                        // blocks (plus optional placeholder text) so the
+                        // image rides in the tool_result's `output` array.
+                        // Matches pi's tool-result-with-image shape.
+                        let mut image_parts: Vec<Value> = Vec::new();
+                        for sibling in msg
+                            .blocks
+                            .iter()
+                            .skip_while(|b| {
+                                !matches!(
+                                    b,
+                                    LlmContentBlock::ToolResult { call_id: id, .. }
+                                        if id == call_id
+                                )
+                            })
+                            .skip(1)
                         {
-                            break;
+                            match sibling {
+                                LlmContentBlock::Image { attachment_idx } => {
+                                    if let Some(att) = req.attachments.get(*attachment_idx) {
+                                        image_parts.push(Self::input_image_part(att));
+                                    }
+                                }
+                                LlmContentBlock::Text(t) if t.starts_with("[Tool image:") => {
+                                    // placeholder — consume silently
+                                }
+                                _ => break,
+                            }
                         }
-                        // Promote `output` from a bare string to a structured
-                        // content array on first image.
-                        if !last["output"].is_array() {
-                            let existing_text = last["output"]
-                                .as_str()
-                                .map(|s| s.to_string())
-                                .unwrap_or_default();
+
+                        if image_parts.is_empty() {
+                            input.push(json!({
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": content,
+                            }));
+                        } else {
                             let mut parts: Vec<Value> = Vec::new();
-                            if !existing_text.is_empty() {
+                            if !content.is_empty() {
                                 parts.push(json!({
                                     "type": "input_text",
-                                    "text": existing_text,
+                                    "text": content,
                                 }));
                             }
-                            last["output"] = Value::Array(parts);
+                            parts.extend(image_parts);
+                            input.push(json!({
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": parts,
+                            }));
                         }
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-                        let data_url = format!("data:{};base64,{}", att.mime, b64);
-                        last["output"].as_array_mut().unwrap().push(json!({
-                            "type": "input_image",
-                            "image_url": data_url,
-                        }));
-                        j += 1;
                     }
-                    i = j;
-                    continue;
                 }
             }
-            i += 1;
+            Self::flush_pending_content(
+                &mut pending_content,
+                &mut input,
+                role_str,
+                matches!(msg.role, LlmRole::User),
+            );
+
+            // Fold any user-role Image blocks that shared a message with
+            // tool_result blocks into the preceding function_call_output's
+            // `output` as a structured {input_text, input_image} array —
+            // matches pi's "tool_result images" shape.
+            if matches!(msg.role, LlmRole::User) {
+                Self::fold_tool_result_images(&mut input);
+            }
         }
         (instructions.join("\n\n"), input)
+    }
+
+    fn flush_pending_content(
+        pending: &mut Vec<Value>,
+        input: &mut Vec<Value>,
+        role_str: &'static str,
+        is_user: bool,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        let content = std::mem::take(pending);
+        if is_user
+            && let Some(prev) = input.last_mut()
+            && prev.get("role").and_then(|r| r.as_str()) == Some("user")
+            && prev.get("content").is_some_and(|c| c.is_array())
+        {
+            prev["content"].as_array_mut().unwrap().extend(content);
+        } else {
+            input.push(json!({
+                "role": role_str,
+                "content": content,
+            }));
+        }
+    }
+
+    /// Walk backwards from the last input item: if the final entry is a
+    /// user `content` message whose parts are all `input_image`, and the
+    /// entry before it is a `function_call_output`, promote the image
+    /// parts into the `output` of that function_call_output so the Codex
+    /// server sees the image as the tool's result rather than as a
+    /// standalone user turn.
+    fn fold_tool_result_images(input: &mut Vec<Value>) {
+        if input.len() < 2 {
+            return;
+        }
+        let last_idx = input.len() - 1;
+        let is_user_image_msg = input[last_idx].get("role").and_then(|v| v.as_str())
+            == Some("user")
+            && input[last_idx]
+                .get("content")
+                .and_then(|c| c.as_array())
+                .is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .all(|p| p.get("type").and_then(|t| t.as_str()) == Some("input_image"))
+                });
+        if !is_user_image_msg {
+            return;
+        }
+        let prev_is_call_output = input[last_idx - 1].get("type").and_then(|v| v.as_str())
+            == Some("function_call_output");
+        if !prev_is_call_output {
+            return;
+        }
+        let last = input.remove(last_idx);
+        let image_parts = last
+            .get("content")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let prev = input.last_mut().expect("function_call_output present");
+        if !prev["output"].is_array() {
+            let existing_text = prev["output"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let mut parts: Vec<Value> = Vec::new();
+            if !existing_text.is_empty() {
+                parts.push(json!({
+                    "type": "input_text",
+                    "text": existing_text,
+                }));
+            }
+            prev["output"] = Value::Array(parts);
+        }
+        prev["output"].as_array_mut().unwrap().extend(image_parts);
     }
 
     fn build_tools(req: &LlmRequest) -> Vec<Value> {
@@ -984,7 +1224,10 @@ impl CodexOAuthAdapter {
                                 let _ = state.finish_tool_call(item);
                             }
                         }
-                        Some("reasoning") => state.finish_reasoning_part(),
+                        Some("reasoning") => {
+                            state.finish_reasoning_part();
+                            state.finalize_reasoning_item(item);
+                        }
                         _ => {}
                     }
                 }
@@ -1096,10 +1339,8 @@ impl CodexOAuthAdapter {
                                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                             tool_name: name.to_string(),
                             input_json,
-                            id: item
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
+                            item_id: item.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                            signature: None,
                         });
                     }
                     _ => {}
@@ -1282,15 +1523,19 @@ impl LlmTransport for CodexOAuthAdapter {
                         continue;
                     }
 
-                    return Err(LlmTransportError {
-                        message: format!(
+                    let friendly = Self::codex_error_summary(status.as_u16(), &text);
+                    let message = friendly.unwrap_or_else(|| {
+                        format!(
                             "Codex request failed with {}{}",
                             status.as_u16(),
                             content_type
                                 .as_deref()
                                 .map(|ct| format!(" ({ct})"))
                                 .unwrap_or_default()
-                        ),
+                        )
+                    });
+                    return Err(LlmTransportError {
+                        message,
                         retryable: status.as_u16() == 429 || status.as_u16() >= 500,
                         raw: Some(text),
                         code: Some(status.as_u16().to_string()),
@@ -1448,15 +1693,54 @@ mod tests {
     use super::*;
 
     fn message(role: LlmRole, kind: &str, content: &str) -> LlmMessage {
-        LlmMessage {
-            role,
-            content: content.to_string(),
-            kind: kind.to_string(),
-            image_idx: -1,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
+        match kind {
+            "text" => LlmMessage::text(role, content),
+            "tool_result" => LlmMessage::new(
+                role,
+                vec![LlmContentBlock::ToolResult {
+                    call_id: String::new(),
+                    content: content.to_string(),
+                    tool_name: None,
+                }],
+            ),
+            "image" => LlmMessage::new(role, vec![LlmContentBlock::Image { attachment_idx: 0 }]),
+            other => panic!("unknown test message kind: {other}"),
         }
+    }
+
+    /// Assistant turn that combines any pre-text with a tool_call block.
+    fn assistant_tool_call(
+        text: Option<&str>,
+        call_id: &str,
+        tool_name: &str,
+        args: &str,
+        item_id: Option<&str>,
+    ) -> LlmMessage {
+        let mut blocks: Vec<LlmContentBlock> = Vec::new();
+        if let Some(text) = text
+            && !text.is_empty()
+        {
+            blocks.push(LlmContentBlock::Text(text.to_string()));
+        }
+        blocks.push(LlmContentBlock::ToolCall {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            input_json: args.to_string(),
+            item_id: item_id.map(str::to_string),
+            signature: None,
+        });
+        LlmMessage::new(LlmRole::Assistant, blocks)
+    }
+
+    fn user_tool_result(call_id: &str, content: &str) -> LlmMessage {
+        LlmMessage::new(
+            LlmRole::User,
+            vec![LlmContentBlock::ToolResult {
+                call_id: call_id.to_string(),
+                content: content.to_string(),
+                tool_name: None,
+            }],
+        )
     }
 
     #[test]
@@ -1519,7 +1803,8 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
                 call_id: "call_1".to_string(),
                 tool_name: "read_file".to_string(),
                 input_json: "{\"path\":\"README.md\"}".to_string(),
-                id: None,
+                item_id: None,
+                signature: None,
             }]
         );
     }
@@ -1551,7 +1836,8 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                 call_id: "call_1".to_string(),
                 tool_name: "exec_command".to_string(),
                 input_json: "{\"cmd\":\"date -u\"}".to_string(),
-                id: Some("fc_1".to_string()),
+                item_id: Some("fc_1".to_string()),
+                signature: None,
             }]
         );
         assert_eq!(state.usage.input_tokens, 12);
@@ -1676,24 +1962,8 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
             messages: vec![
                 message(LlmRole::System, "text", "sys"),
                 message(LlmRole::User, "text", "question"),
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "{\"path\":\"README.md\"}".to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "ok".to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                },
+                assistant_tool_call(None, "call_1", "read_file", r#"{"path":"README.md"}"#, None),
+                user_tool_result("call_1", "ok"),
                 message(LlmRole::User, "text", "new turn"),
             ],
             attachments: vec![],
@@ -1727,24 +1997,14 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
             messages: vec![
                 message(LlmRole::System, "text", "sys"),
                 message(LlmRole::User, "text", "question"),
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "{\"path\":\"README.md\"}".to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    tool_item_id: Some("fc_abc".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "ok".to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                },
+                assistant_tool_call(
+                    None,
+                    "call_1",
+                    "read_file",
+                    r#"{"path":"README.md"}"#,
+                    Some("fc_abc"),
+                ),
+                user_tool_result("call_1", "ok"),
                 message(LlmRole::User, "text", "next"),
             ],
             attachments: vec![],
@@ -1772,15 +2032,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
             messages: vec![
                 message(LlmRole::System, "text", "sys"),
                 message(LlmRole::User, "text", "question"),
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "{}".to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_x".to_string()),
-                    tool_name: Some("noop".to_string()),
-                    tool_item_id: None,
-                },
+                assistant_tool_call(None, "call_x", "noop", "{}", None),
             ],
             attachments: vec![],
             tools: vec![].into(),
@@ -1823,7 +2075,8 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
                 call_id: "call_1".to_string(),
                 tool_name: "exec_command".to_string(),
                 input_json: "{\"cmd\":\"date\"}".to_string(),
-                id: Some("fc_zzz".to_string()),
+                item_id: Some("fc_zzz".to_string()),
+                signature: None,
             }]
         );
     }
@@ -1833,24 +2086,8 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
             messages: vec![
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "{\"question\":\"Pick one\"}".to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_ask".to_string()),
-                    tool_name: Some("ask".to_string()),
-                    tool_item_id: None,
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: String::new(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_ask".to_string()),
-                    tool_name: Some("ask".to_string()),
-                    tool_item_id: None,
-                },
+                assistant_tool_call(None, "call_ask", "ask", r#"{"question":"Pick one"}"#, None),
+                user_tool_result("call_ask", ""),
                 message(LlmRole::User, "text", "continue"),
             ],
             attachments: vec![],
@@ -1877,24 +2114,8 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
             messages: vec![
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "{\"path\":\"README.md\"}".to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "file contents".to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                },
+                assistant_tool_call(None, "call_1", "read_file", r#"{"path":"README.md"}"#, None),
+                user_tool_result("call_1", "file contents"),
             ],
             attachments: vec![],
             tools: vec![].into(),
@@ -1920,36 +2141,22 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
             messages: vec![
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "{}".to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_img".to_string()),
-                    tool_name: Some("get_circle".to_string()),
-                    tool_item_id: None,
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "A red circle.".to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_img".to_string()),
-                    tool_name: Some("get_circle".to_string()),
-                    tool_item_id: None,
-                },
-                // Placeholder text that the sansio renderer emits before
-                // the actual image message; it should be folded away.
-                message(LlmRole::User, "text", "[Tool image: circle-0]"),
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: String::new(),
-                    kind: "image".to_string(),
-                    image_idx: 0,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                },
+                assistant_tool_call(None, "call_img", "get_circle", "{}", None),
+                // Session layer packs the tool_result, placeholder text,
+                // and image blocks into a single user LlmMessage — the
+                // adapter folds the image into the tool_result's output.
+                LlmMessage::new(
+                    LlmRole::User,
+                    vec![
+                        LlmContentBlock::ToolResult {
+                            call_id: "call_img".to_string(),
+                            content: "A red circle.".to_string(),
+                            tool_name: None,
+                        },
+                        LlmContentBlock::Text("[Tool image: circle-0]".to_string()),
+                        LlmContentBlock::Image { attachment_idx: 0 },
+                    ],
+                ),
                 message(LlmRole::User, "text", "what color is it?"),
             ],
             attachments: vec![crate::llm::types::LlmAttachment {
@@ -1984,10 +2191,7 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         assert_eq!(items[0]["type"], "input_text");
         assert_eq!(items[0]["text"], "A red circle.");
         assert_eq!(items[1]["type"], "input_image");
-        assert_eq!(
-            items[1]["image_url"],
-            "data:image/png;base64,iVBORw=="
-        );
+        assert_eq!(items[1]["image_url"], "data:image/png;base64,iVBORw==");
 
         // Trailing user question should still be present as its own user
         // message, and must not contain the image.
@@ -2145,15 +2349,10 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
     fn user_image_messages_encode_images_as_data_urls() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: String::new(),
-                kind: "image".to_string(),
-                image_idx: 0,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            }],
+            messages: vec![LlmMessage::new(
+                LlmRole::User,
+                vec![LlmContentBlock::Image { attachment_idx: 0 }],
+            )],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),
                 data: vec![0, 1, 2, 3],
@@ -2183,15 +2382,10 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
     fn structured_image_messages_use_input_image_data_urls() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: String::new(),
-                kind: "image".to_string(),
-                image_idx: 0,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            }],
+            messages: vec![LlmMessage::new(
+                LlmRole::User,
+                vec![LlmContentBlock::Image { attachment_idx: 0 }],
+            )],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),
                 data: vec![0, 1, 2, 3],
@@ -2204,7 +2398,8 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
             stream_events: None,
         };
 
-        let part = CodexOAuthAdapter::content_part_for_message(&req, &req.messages[0]);
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+        let part = &input[0]["content"][0];
 
         assert_eq!(part["type"], "input_image");
         assert_eq!(part["image_url"], "data:image/png;base64,AAECAw==");
@@ -2292,11 +2487,13 @@ data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"i
         assert_eq!(
             parts[0],
             LlmOutputPart::Reasoning {
-                    text: "Checking the codebase.".to_string(),
-                    id: String::new(),
-                    summary: Vec::new(),
-                    encrypted_content: None,
-                }
+                text: "Checking the codebase.".to_string(),
+                signature: None,
+                redacted: false,
+                item_id: Some("rs_1".to_string()),
+                encrypted_content: None,
+                summary: vec!["Checking the codebase.".to_string()],
+            }
         );
         assert_eq!(
             parts[1],
@@ -2332,15 +2529,19 @@ data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"i
             vec![
                 LlmOutputPart::Reasoning {
                     text: "First paragraph.".to_string(),
-                    id: String::new(),
-                    summary: Vec::new(),
+                    signature: None,
+                    redacted: false,
+                    item_id: None,
                     encrypted_content: None,
+                    summary: Vec::new(),
                 },
                 LlmOutputPart::Reasoning {
                     text: "Second paragraph.".to_string(),
-                    id: String::new(),
-                    summary: Vec::new(),
+                    signature: None,
+                    redacted: false,
+                    item_id: None,
                     encrypted_content: None,
+                    summary: Vec::new(),
                 }
             ]
         );
@@ -2497,9 +2698,7 @@ data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"i
         assert!(!CodexOAuthAdapter::should_retry(401, "unauthorized", 0));
         assert!(!CodexOAuthAdapter::should_retry(403, "forbidden", 0));
         assert!(!CodexOAuthAdapter::should_retry(404, "not found", 0));
-        assert!(!CodexOAuthAdapter::should_retry(
-            418, "I'm a teapot", 0,
-        ));
+        assert!(!CodexOAuthAdapter::should_retry(418, "I'm a teapot", 0,));
     }
 
     #[test]
@@ -2557,11 +2756,42 @@ data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"i
         assert_eq!(
             parts[0],
             LlmOutputPart::Reasoning {
-                    text: "Looking at it.".to_string(),
-                    id: String::new(),
-                    summary: Vec::new(),
-                    encrypted_content: None,
-                }
+                text: "Looking at it.".to_string(),
+                signature: None,
+                redacted: false,
+                item_id: None,
+                encrypted_content: None,
+                summary: Vec::new(),
+            }
         );
+    }
+
+    #[test]
+    fn codex_error_summary_renders_usage_limit_with_plan_and_reset() {
+        // `resets_at` 2 minutes in the future → rounded up to "~2 min".
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 150;
+        let body = format!(
+            r#"{{"error":{{"code":"usage_limit_reached","plan_type":"Plus","resets_at":{future},"message":"ignored"}}}}"#,
+        );
+        let summary = CodexOAuthAdapter::codex_error_summary(429, &body).expect("summary");
+        assert!(summary.starts_with("You have hit your ChatGPT usage limit (plus plan)."));
+        assert!(summary.contains("Try again in ~"));
+        assert!(summary.contains(" min."));
+    }
+
+    #[test]
+    fn codex_error_summary_falls_back_to_error_message_on_other_errors() {
+        let body = r#"{"error":{"code":"invalid_request_error","message":"Bad thing"}}"#;
+        let summary = CodexOAuthAdapter::codex_error_summary(400, body).expect("summary");
+        assert_eq!(summary, "Codex request failed with 400: Bad thing");
+    }
+
+    #[test]
+    fn codex_error_summary_returns_none_for_unparseable_body() {
+        assert!(CodexOAuthAdapter::codex_error_summary(500, "oops").is_none());
     }
 }

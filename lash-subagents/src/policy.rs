@@ -154,11 +154,12 @@ fn send_message_definition(examples: Vec<String>) -> ToolDefinition {
 fn followup_task_definition(examples: Vec<String>) -> ToolDefinition {
     ToolDefinition {
         name: "followup_task".into(),
-        description: "Give an existing non-root agent another task. If `interrupt` is true and the target is busy, its current turn is cancelled and the new task runs next.".into(),
+        description: "Give an existing non-root agent another task. If `interrupt` is true and the target is busy, its current turn is cancelled and the new task runs next. Optional `output` supplies a per-follow-up output schema (same shape as `spawn_agent.output`) that retypes the subagent for this single follow-up — it overrides any schema baked in at spawn. Omit `output` to run the follow-up as free-form (no schema validation for that turn).".into(),
         params: vec![
             ToolParam::typed("target", "str"),
             ToolParam::typed("task", "str"),
             ToolParam::optional("interrupt", "bool"),
+            ToolParam::optional("output", "dict"),
         ],
         returns: "dict".into(),
         examples,

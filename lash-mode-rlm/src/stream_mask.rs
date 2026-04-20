@@ -1,90 +1,48 @@
-//! RLM stream masking plugin.
+//! RLM stream mask: hooks that suppress the `lashlang` fence body as it
+//! streams in and raise `AssistantStreamTransform.abort_stream` the
+//! moment the fence closes, short-circuiting the LLM call.
 //!
-//! When the outer LLM streams its assistant response in RLM mode, the
-//! prose is useful (model "thinking out loud") but the lashlang code
-//! body inside a fenced ` ```lashlang ` block is noise. This plugin
-//! intercepts the `AssistantStreamHook` pipeline, detects the fence
-//! opener (even when it arrives split across multiple streaming deltas),
-//! and:
-//!
-//! - **Suppresses** the code body (returns empty chunks so no
-//!   `TextDelta` reaches the UI).
-//! - **Emits** a `PluginSurfaceEvent::Custom { name: "rlm_fence_start" }`
-//!   when the fence is detected.
-//!
-//! An `AssistantResponseHook` resets state between LLM responses so
-//! the pending buffer doesn't leak text from one response into the
-//! next.
-//!
-//! Registered by lash-cli's bootstrap only when the session runs in
-//! `ExecutionMode::Rlm`.
+//! Registered from `RlmModePlugin::register` via
+//! [`register_stream_mask`].
 
 use std::sync::{Arc, Mutex};
 
+use lash::PluginSurfaceEvent;
 use lash::plugin::{
-    AssistantStreamHookContext, AssistantStreamTransform, PluginError, PluginFactory,
-    PluginSessionContext, SessionPlugin,
+    AssistantStreamHookContext, AssistantStreamTransform, PluginError, PluginRegistrar,
 };
-use lash::{ExecutionMode, PluginRegistrar, PluginSurfaceEvent};
 
-const PLUGIN_ID: &str = "rlm_stream_mask";
+/// Install the stream-mask / fence-close-abort hooks on the given
+/// registrar. Called by [`crate::plugin::RlmModePlugin::register`] when
+/// the session is active.
+pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+    let state = Arc::new(Mutex::new(FenceDetector::new()));
 
-pub struct RlmStreamMaskPluginFactory;
+    let stream_state = Arc::clone(&state);
+    reg.output()
+        .stream(Arc::new(move |ctx: AssistantStreamHookContext| {
+            let state = Arc::clone(&stream_state);
+            Box::pin(async move {
+                let mut detector = state.lock().expect("fence detector lock");
+                Ok(detector.process_chunk(&ctx.chunk))
+            })
+        }));
 
-impl PluginFactory for RlmStreamMaskPluginFactory {
-    fn id(&self) -> &'static str {
-        PLUGIN_ID
-    }
-
-    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(RlmStreamMaskPlugin {
-            active: matches!(ctx.execution_mode, ExecutionMode::Rlm),
-        }))
-    }
-}
-
-struct RlmStreamMaskPlugin {
-    active: bool,
-}
-
-impl SessionPlugin for RlmStreamMaskPlugin {
-    fn id(&self) -> &'static str {
-        PLUGIN_ID
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        if !self.active {
-            return Ok(());
-        }
-
-        let state = Arc::new(Mutex::new(FenceDetector::new()));
-
-        let stream_state = Arc::clone(&state);
-        reg.output()
-            .stream(Arc::new(move |ctx: AssistantStreamHookContext| {
-                let state = Arc::clone(&stream_state);
-                Box::pin(async move {
-                    let mut detector = state.lock().expect("fence detector lock");
-                    Ok(detector.process_chunk(&ctx.chunk))
+    let response_state = Arc::clone(&state);
+    reg.output().response(Arc::new(
+        move |ctx: lash::plugin::AssistantResponseHookContext| {
+            let state = Arc::clone(&response_state);
+            Box::pin(async move {
+                state.lock().expect("fence detector lock").reset();
+                Ok(lash::plugin::AssistantResponseTransform {
+                    response: ctx.response,
+                    events: Vec::new(),
                 })
-            }));
+            })
+        },
+    ));
 
-        let response_state = Arc::clone(&state);
-        reg.output().response(Arc::new(
-            move |ctx: lash::plugin::AssistantResponseHookContext| {
-                let state = Arc::clone(&response_state);
-                Box::pin(async move {
-                    state.lock().expect("fence detector lock").reset();
-                    Ok(lash::plugin::AssistantResponseTransform {
-                        response: ctx.response,
-                        events: Vec::new(),
-                    })
-                })
-            },
-        ));
-
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Tracks whether the accumulated stream has entered a ` ```lashlang `
@@ -97,6 +55,12 @@ struct FenceDetector {
     pending: String,
     inside_fence: bool,
     emitted_start: bool,
+    /// Accumulated fence body (everything after the opener), used to
+    /// detect a closing ` ``` ` on its own line so we can raise
+    /// `abort_stream` and end the LLM call the moment the model
+    /// finishes its one block.
+    fence_body: String,
+    fence_closed: bool,
 }
 
 impl FenceDetector {
@@ -105,6 +69,8 @@ impl FenceDetector {
             pending: String::new(),
             inside_fence: false,
             emitted_start: false,
+            fence_body: String::new(),
+            fence_closed: false,
         }
     }
 
@@ -112,13 +78,35 @@ impl FenceDetector {
         self.pending.clear();
         self.inside_fence = false;
         self.emitted_start = false;
+        self.fence_body.clear();
+        self.fence_closed = false;
     }
 
     fn process_chunk(&mut self, chunk: &str) -> AssistantStreamTransform {
         if self.inside_fence {
+            if self.fence_closed {
+                // Already raised abort_stream — just keep swallowing.
+                return AssistantStreamTransform {
+                    chunk: String::new(),
+                    events: Vec::new(),
+                    abort_stream: false,
+                };
+            }
+            self.fence_body.push_str(chunk);
+            if has_closing_fence(&self.fence_body) {
+                self.fence_closed = true;
+                // Signal the runtime: stop the LLM stream, we have the
+                // full block.
+                return AssistantStreamTransform {
+                    chunk: String::new(),
+                    events: Vec::new(),
+                    abort_stream: true,
+                };
+            }
             return AssistantStreamTransform {
                 chunk: String::new(),
                 events: Vec::new(),
+                abort_stream: false,
             };
         }
 
@@ -141,6 +129,7 @@ impl FenceDetector {
             return AssistantStreamTransform {
                 chunk: prose_before,
                 events,
+                abort_stream: false,
             };
         }
 
@@ -168,6 +157,7 @@ impl FenceDetector {
             return AssistantStreamTransform {
                 chunk: String::new(),
                 events: Vec::new(),
+                abort_stream: false,
             };
         }
 
@@ -176,8 +166,26 @@ impl FenceDetector {
         AssistantStreamTransform {
             chunk: flushed,
             events: Vec::new(),
+            abort_stream: false,
         }
     }
+}
+
+/// Return `true` when `text` (the accumulated fence body) contains a
+/// closing ` ``` ` on its own line. A fence close is any ` ``` ` that
+/// either starts at byte 0 of the body or is immediately preceded by
+/// `\n`.
+fn has_closing_fence(text: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(rel) = text[cursor..].find("```") {
+        let pos = cursor + rel;
+        let at_line_start = pos == 0 || text.as_bytes().get(pos - 1).copied() == Some(b'\n');
+        if at_line_start {
+            return true;
+        }
+        cursor = pos + 3;
+    }
+    false
 }
 
 fn find_fence_opener(text: &str) -> Option<usize> {
@@ -273,7 +281,7 @@ mod tests {
     #[test]
     fn rlm_alias_triggers_masking() {
         let mut d = FenceDetector::new();
-        let t = d.process_chunk("Check:\n\n```rlm\nobserve x\n```\n");
+        let t = d.process_chunk("Check:\n\n```rlm\nprint x\n```\n");
         assert_eq!(t.chunk, "Check:\n\n");
         assert_eq!(t.events.len(), 1);
     }

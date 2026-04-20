@@ -24,6 +24,7 @@ fn push_history_system_message(history: &mut Vec<Message>, content: String) {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         }],
@@ -500,8 +501,9 @@ mod tests {
     use crate::ui_resume;
 
     use lash::{
-        EmbeddedRuntimeHost, MemoryModelCatalogStore, PersistedSessionState, PluginHost,
-        PluginSpecFactory, RuntimeCoreConfig, RuntimeServices, SessionStateEnvelope, ToolProvider,
+        EmbeddedRuntimeHost, MemoryModelCatalogStore, PersistedSessionState, PluginFactory,
+        PluginHost, PluginSpecFactory, RuntimeCoreConfig, RuntimeServices, SessionStateEnvelope,
+        ToolProvider,
     };
 
     fn persist_session_head(
@@ -567,8 +569,9 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             }],
             user_input: None,
             origin: None,
@@ -600,12 +603,16 @@ mod tests {
         let model_catalog =
             CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
                 .expect("catalog");
-        let plugins = PluginHost::new(vec![Arc::new(PluginSpecFactory::new(
-            "resume_tools",
-            Arc::new(
-                move |_ctx| Ok(lash::PluginSpec::new().with_tool_provider(Arc::clone(&tools))),
-            ),
-        ))])
+        let plugins = PluginHost::new(vec![
+            Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory)
+                as Arc<dyn PluginFactory>,
+            Arc::new(PluginSpecFactory::new(
+                "resume_tools",
+                Arc::new(move |_ctx| {
+                    Ok(lash::PluginSpec::new().with_tool_provider(Arc::clone(&tools)))
+                }),
+            )),
+        ])
         .with_dynamic_tools()
         .build_standard_session("root", None)
         .expect("plugins");
@@ -856,10 +863,12 @@ mod tests {
         let model_catalog =
             CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
                 .expect("catalog");
-        let plugins = PluginHost::new(vec![])
-            .with_dynamic_tools()
-            .build_standard_session("root", None)
-            .expect("plugins");
+        let plugins = PluginHost::new(vec![Arc::new(
+            lash_mode_standard::BuiltinStandardModePluginFactory,
+        )])
+        .with_dynamic_tools()
+        .build_standard_session("root", None)
+        .expect("plugins");
         let dynamic_tools = plugins.dynamic_tools().expect("dynamic tools");
         let mut desired_dynamic = dynamic_tools.export_state();
 

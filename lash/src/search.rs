@@ -6,14 +6,14 @@ const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 100;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SearchMode {
+pub enum SearchMode {
     Hybrid,
     Literal,
     Regex,
 }
 
 impl SearchMode {
-    pub(crate) fn parse(value: Option<&str>) -> Self {
+    pub fn parse(value: Option<&str>) -> Self {
         match value
             .unwrap_or("hybrid")
             .trim()
@@ -28,11 +28,11 @@ impl SearchMode {
 }
 
 #[derive(Clone)]
-pub(crate) struct SearchDoc {
-    pub(crate) fields: HashMap<&'static str, String>,
+pub struct SearchDoc {
+    pub fields: HashMap<&'static str, String>,
 }
 
-pub(crate) fn limit_from_args(args: &serde_json::Value) -> usize {
+pub fn limit_from_args(args: &serde_json::Value) -> usize {
     args.get("limit")
         .and_then(|v| v.as_i64())
         .and_then(|n| usize::try_from(n).ok())
@@ -241,7 +241,7 @@ fn field_hits(
     hits
 }
 
-pub(crate) fn rank_docs(
+pub fn rank_docs(
     docs: &[SearchDoc],
     query: &str,
     mode: SearchMode,

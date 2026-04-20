@@ -11,9 +11,11 @@ use crate::llm::timeouts::{
     LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
 };
 use crate::llm::transport::{LlmTransport, LlmTransportError};
+#[cfg(test)]
+use crate::llm::types::LlmMessage;
 use crate::llm::types::{
-    LlmMessage, LlmOutputPart, LlmOutputSpec, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
-    LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole, LlmUsage,
+    ModelSelection,
 };
 use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
@@ -22,6 +24,13 @@ const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION: &str = "v1internal";
 const GEMINI_FILES_UPLOAD_URL: &str =
     "https://generativelanguage.googleapis.com/upload/v1beta/files";
+
+/// Pi-mono sentinel: Gemini 3 refuses to run when a function_call is
+/// replayed without a thoughtSignature. The server recognises this magic
+/// string and skips signature validation for the item, so lash can round-
+/// trip tool calls captured from non-Gemini models without crashing the
+/// turn. Matches `google-shared.ts:51`.
+const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct UploadedAttachmentCacheKey {
@@ -98,80 +107,118 @@ impl GoogleCloudCodeAdapter {
         attachment_parts: &[Value],
     ) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
-        for chunk in coalesce_replay_messages(&req.messages) {
-            match chunk {
-                LlmReplayChunk::Message(msg) => {
-                    if matches!(msg.role, LlmRole::System) {
-                        continue;
-                    }
-                    // Codex-specific reasoning items (fix 1.3b) ride on
-                    // `LlmMessage` with `kind == "reasoning"`. Gemini
-                    // doesn't consume them, so drop them here instead of
-                    // shipping the raw JSON blob as assistant text.
-                    if msg.kind == "reasoning" {
-                        continue;
-                    }
-                    let role = match msg.role {
-                        LlmRole::Assistant => "model",
-                        LlmRole::User => "user",
-                        LlmRole::System => "user",
-                    };
-                    let part = Self::content_part_for_message_with_attachment_parts(
-                        attachment_parts,
-                        &msg,
-                    );
-                    // Merge consecutive same-role messages into a single parts array
-                    // so text + images land in one API message.
-                    if let Some(prev) = out.last_mut()
-                        && prev.get("role").and_then(|r| r.as_str()) == Some(role)
-                        && prev.get("parts").is_some_and(|p| p.is_array())
-                    {
-                        prev["parts"].as_array_mut().unwrap().push(part);
-                    } else {
-                        out.push(json!({
-                            "role": role,
-                            "parts": [part],
-                        }));
-                    }
-                }
-                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    let mut parts = Vec::new();
-                    if let Some(text) = text.filter(|text| !text.is_empty()) {
+        let is_gemini_3 = req.model.to_ascii_lowercase().contains("gemini-3");
+
+        for msg in &req.messages {
+            if matches!(msg.role, LlmRole::System) {
+                // System content is hoisted into `systemInstruction` on the
+                // Gemini request, not the `contents` list.
+                continue;
+            }
+            let role = match msg.role {
+                LlmRole::Assistant => "model",
+                LlmRole::User | LlmRole::System => "user",
+            };
+
+            let mut parts: Vec<Value> = Vec::new();
+            for block in &msg.blocks {
+                match block {
+                    LlmContentBlock::Text(text) => {
+                        if text.is_empty() {
+                            continue;
+                        }
                         parts.push(json!({ "text": text }));
                     }
-                    parts.extend(tool_calls.into_iter().map(|call| {
-                        json!({
+                    LlmContentBlock::Image { attachment_idx } => {
+                        if matches!(msg.role, LlmRole::User) {
+                            parts.push(Self::attachment_part_for_index(
+                                attachment_parts,
+                                *attachment_idx,
+                            ));
+                        }
+                    }
+                    LlmContentBlock::ToolCall {
+                        call_id,
+                        tool_name,
+                        input_json,
+                        signature,
+                        ..
+                    } => {
+                        let mut part = json!({
                             "functionCall": {
-                                "id": call.call_id,
-                                "name": call.tool_name,
-                                "args": serde_json::from_str::<Value>(&call.input_json)
-                                    .unwrap_or_else(|_| json!({"_raw": call.input_json})),
+                                "id": call_id,
+                                "name": tool_name,
+                                "args": serde_json::from_str::<Value>(input_json)
+                                    .unwrap_or_else(|_| json!({"_raw": input_json})),
                             }
-                        })
-                    }));
-                    out.push(json!({
-                        "role": "model",
-                        "parts": parts,
-                    }));
+                        });
+                        // Gemini 3 rejects turns where a function_call
+                        // from a thinking-enabled run is replayed without
+                        // its original thoughtSignature. When we don't
+                        // have the real signature (cross-model hop, older
+                        // session), drop in the pi sentinel.
+                        let effective = signature
+                            .clone()
+                            .or_else(|| is_gemini_3.then(|| SKIP_THOUGHT_SIGNATURE.to_string()));
+                        if let Some(sig) = effective {
+                            part["thoughtSignature"] = Value::String(sig);
+                        }
+                        parts.push(part);
+                    }
+                    LlmContentBlock::ToolResult {
+                        call_id,
+                        content,
+                        tool_name,
+                    } => {
+                        parts.push(json!({
+                            "functionResponse": {
+                                "id": call_id,
+                                "name": tool_name.clone().unwrap_or_else(|| "tool".to_string()),
+                                "response": { "output": content },
+                            }
+                        }));
+                    }
+                    LlmContentBlock::Reasoning {
+                        text,
+                        signature,
+                        encrypted_content,
+                        ..
+                    } => {
+                        // Gemini replays reasoning as a `thought:true`
+                        // text part carrying the thoughtSignature.
+                        let sig = signature.clone().or_else(|| encrypted_content.clone());
+                        if sig.is_none() && text.trim().is_empty() {
+                            continue;
+                        }
+                        let mut part = json!({
+                            "text": if text.is_empty() { String::from(" ") } else { text.clone() },
+                            "thought": true,
+                        });
+                        if let Some(s) = sig {
+                            part["thoughtSignature"] = Value::String(s);
+                        }
+                        parts.push(part);
+                    }
                 }
-                LlmReplayChunk::ToolResults { results } => {
-                    let parts = results
-                        .into_iter()
-                        .map(|msg| {
-                            json!({
-                                "functionResponse": {
-                                    "id": msg.tool_call_id.clone().unwrap_or_default(),
-                                    "name": msg.tool_name.clone().unwrap_or_else(|| "tool".to_string()),
-                                    "response": { "output": msg.content }
-                                }
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    out.push(json!({
-                        "role": "user",
-                        "parts": parts,
-                    }));
-                }
+            }
+
+            if parts.is_empty() {
+                continue;
+            }
+
+            // Merge with previous same-role turn so text + images + tool
+            // calls land as a single `contents` entry (matches the old
+            // behavior expected by Gemini clients).
+            if let Some(prev) = out.last_mut()
+                && prev.get("role").and_then(|r| r.as_str()) == Some(role)
+                && prev.get("parts").is_some_and(|p| p.is_array())
+            {
+                prev["parts"].as_array_mut().unwrap().extend(parts);
+            } else {
+                out.push(json!({
+                    "role": role,
+                    "parts": parts,
+                }));
             }
         }
         out
@@ -187,19 +234,6 @@ impl GoogleCloudCodeAdapter {
         Self::build_contents_with_attachment_parts(req, &attachment_parts)
     }
 
-    fn content_part_for_message_with_attachment_parts(
-        attachment_parts: &[Value],
-        msg: &LlmMessage,
-    ) -> Value {
-        match msg.kind.as_str() {
-            "image" if matches!(msg.role, LlmRole::User) => {
-                let idx = msg.image_idx.max(0) as usize;
-                Self::attachment_part_for_index(attachment_parts, idx)
-            }
-            _ => json!({ "text": msg.content.clone() }),
-        }
-    }
-
     fn uses_legacy_tool_parameters(model: &str) -> bool {
         model.starts_with("claude-")
     }
@@ -213,19 +247,24 @@ impl GoogleCloudCodeAdapter {
     }
 
     fn system_instruction(req: &LlmRequest) -> Option<Value> {
-        let text = req
-            .messages
-            .iter()
-            .filter(|msg| matches!(msg.role, LlmRole::System) && msg.kind != "tool_result")
-            .map(|msg| msg.content.as_str())
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if text.is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        for msg in &req.messages {
+            if !matches!(msg.role, LlmRole::System) {
+                continue;
+            }
+            for block in &msg.blocks {
+                if let LlmContentBlock::Text(text) = block
+                    && !text.is_empty()
+                {
+                    parts.push(text.clone());
+                }
+            }
+        }
+        if parts.is_empty() {
             None
         } else {
             Some(json!({
-                "parts": [{ "text": text }],
+                "parts": [{ "text": parts.join("\n\n") }],
             }))
         }
     }
@@ -286,6 +325,13 @@ impl GoogleCloudCodeAdapter {
                 continue;
             };
             for part in parts {
+                // Skip reasoning text (Gemini marks it with `thought:true`);
+                // it isn't assistant-visible output and shouldn't accumulate
+                // into `full`. The signature ride-along is captured when
+                // we finalize the response.
+                if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
+                    continue;
+                }
                 if let Some(text) = part.get("text").and_then(|t| t.as_str())
                     && !text.is_empty()
                 {
@@ -323,6 +369,14 @@ impl GoogleCloudCodeAdapter {
                         .get("args")
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| "{}".to_string());
+                    // Capture `thoughtSignature` (if present) alongside
+                    // the functionCall. Gemini 3 will reject the next
+                    // turn if we don't echo it back.
+                    let signature = part
+                        .get("thoughtSignature")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
                     out.push(LlmOutputPart::ToolCall {
                         call_id: function_call
                             .get("id")
@@ -331,7 +385,8 @@ impl GoogleCloudCodeAdapter {
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                         tool_name: name.to_string(),
                         input_json,
-                        id: None,
+                        item_id: None,
+                        signature,
                     });
                 }
             }
@@ -398,12 +453,37 @@ impl GoogleCloudCodeAdapter {
                 continue;
             };
             for item in items {
+                let signature = item
+                    .get("thoughtSignature")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let is_thought = item
+                    .get("thought")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
                 if let Some(text) = item.get("text").and_then(|t| t.as_str())
                     && !text.is_empty()
                 {
-                    parts.push(LlmOutputPart::Text {
-                        text: text.to_string(),
-                    });
+                    if is_thought {
+                        // Gemini flags reasoning text with `thought: true`.
+                        // Route those into Reasoning so downstream code
+                        // doesn't show them as assistant prose. Signature
+                        // lives on the same part.
+                        parts.push(LlmOutputPart::Reasoning {
+                            text: text.to_string(),
+                            signature: signature.clone(),
+                            redacted: false,
+                            item_id: None,
+                            encrypted_content: signature.clone(),
+                            summary: Vec::new(),
+                        });
+                    } else {
+                        parts.push(LlmOutputPart::Text {
+                            text: text.to_string(),
+                        });
+                    }
                 }
                 if let Some(function_call) = item.get("functionCall") {
                     let Some(name) = function_call.get("name").and_then(|v| v.as_str()) else {
@@ -421,7 +501,8 @@ impl GoogleCloudCodeAdapter {
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                         tool_name: name.to_string(),
                         input_json,
-                        id: None,
+                        item_id: None,
+                        signature: signature.clone(),
                     });
                 }
             }
@@ -1068,15 +1149,53 @@ mod tests {
     use super::*;
 
     fn message(role: LlmRole, kind: &str, content: &str) -> LlmMessage {
-        LlmMessage {
-            role,
-            content: content.to_string(),
-            kind: kind.to_string(),
-            image_idx: -1,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
+        match kind {
+            "text" => LlmMessage::text(role, content),
+            "tool_result" => LlmMessage::new(
+                role,
+                vec![LlmContentBlock::ToolResult {
+                    call_id: String::new(),
+                    content: content.to_string(),
+                    tool_name: None,
+                }],
+            ),
+            "image" => LlmMessage::new(role, vec![LlmContentBlock::Image { attachment_idx: 0 }]),
+            other => panic!("unknown test message kind: {other}"),
         }
+    }
+
+    fn assistant_tool_call(
+        text: Option<&str>,
+        call_id: &str,
+        tool_name: &str,
+        args: &str,
+        item_id: Option<&str>,
+    ) -> LlmMessage {
+        let mut blocks: Vec<LlmContentBlock> = Vec::new();
+        if let Some(text) = text
+            && !text.is_empty()
+        {
+            blocks.push(LlmContentBlock::Text(text.to_string()));
+        }
+        blocks.push(LlmContentBlock::ToolCall {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            input_json: args.to_string(),
+            item_id: item_id.map(str::to_string),
+            signature: None,
+        });
+        LlmMessage::new(LlmRole::Assistant, blocks)
+    }
+
+    fn user_tool_result(call_id: &str, tool_name: &str, content: &str) -> LlmMessage {
+        LlmMessage::new(
+            LlmRole::User,
+            vec![LlmContentBlock::ToolResult {
+                call_id: call_id.to_string(),
+                content: content.to_string(),
+                tool_name: Some(tool_name.to_string()),
+            }],
+        )
     }
 
     #[test]
@@ -1086,24 +1205,8 @@ mod tests {
             messages: vec![
                 message(LlmRole::System, "text", "sys"),
                 message(LlmRole::User, "text", "question"),
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "{\"path\":\"README.md\"}".to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "ok".to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                },
+                assistant_tool_call(None, "call_1", "read_file", r#"{"path":"README.md"}"#, None),
+                user_tool_result("call_1", "read_file", "ok"),
             ],
             attachments: vec![],
             tools: vec![].into(),
@@ -1222,15 +1325,10 @@ mod tests {
             messages: vec![
                 message(LlmRole::System, "text", "sys"),
                 message(LlmRole::User, "text", "look"),
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: String::new(),
-                    kind: "image".to_string(),
-                    image_idx: 0,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                },
+                LlmMessage::new(
+                    LlmRole::User,
+                    vec![LlmContentBlock::Image { attachment_idx: 0 }],
+                ),
             ],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),
@@ -1267,15 +1365,10 @@ mod tests {
     fn build_contents_can_use_uploaded_file_data_for_replay_images() {
         let req = LlmRequest {
             model: "gemini".to_string(),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: String::new(),
-                kind: "image".to_string(),
-                image_idx: 0,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-            }],
+            messages: vec![LlmMessage::new(
+                LlmRole::User,
+                vec![LlmContentBlock::Image { attachment_idx: 0 }],
+            )],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),
                 data: vec![1, 2, 3],
@@ -1503,16 +1596,17 @@ mod tests {
             model: "gemini-3.1-pro-preview".to_string(),
             messages: vec![
                 message(LlmRole::User, "text", "hi"),
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: r#"{"id":"rs_1","summary":["x"],"encrypted_content":"Y"}"#
-                        .to_string(),
-                    kind: "reasoning".to_string(),
-                    image_idx: -1,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                },
+                LlmMessage::new(
+                    LlmRole::Assistant,
+                    vec![LlmContentBlock::Reasoning {
+                        text: "thought".to_string(),
+                        signature: None,
+                        redacted: false,
+                        item_id: Some("rs_1".to_string()),
+                        encrypted_content: Some("Y".to_string()),
+                        summary: vec!["x".to_string()],
+                    }],
+                ),
             ],
             attachments: vec![],
             tools: vec![].into(),
@@ -1523,13 +1617,145 @@ mod tests {
             stream_events: None,
         };
         let contents = GoogleCloudCodeAdapter::build_contents(&req);
-        assert_eq!(contents.len(), 1);
-        assert_eq!(contents[0]["role"], "user");
-        // No message carries the encrypted blob.
-        for content in &contents {
-            let serialized = content.to_string();
-            assert!(!serialized.contains("encrypted_content"));
-            assert!(!serialized.contains("rs_1"));
+        // The reasoning block is now emitted as a thought:true text part,
+        // so we see two turns: the user hi + the assistant reasoning echo.
+        assert!(contents.iter().any(|c| {
+            c["parts"].as_array().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|p| p.get("thought").and_then(|v| v.as_bool()) == Some(true))
+            })
+        }));
+    }
+
+    // ─── Gemini thoughtSignature round-trip ───
+
+    #[test]
+    fn build_contents_echoes_thought_signature_on_function_call() {
+        let req = LlmRequest {
+            model: "gemini-3-pro-preview".to_string(),
+            messages: vec![
+                message(LlmRole::User, "text", "hi"),
+                LlmMessage::new(
+                    LlmRole::Assistant,
+                    vec![LlmContentBlock::ToolCall {
+                        call_id: "call_1".to_string(),
+                        tool_name: "read".to_string(),
+                        input_json: "{}".to_string(),
+                        item_id: None,
+                        signature: Some("SIG==".to_string()),
+                    }],
+                ),
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+        let contents = GoogleCloudCodeAdapter::build_contents(&req);
+        let model_turn = contents
+            .iter()
+            .find(|c| c["role"] == "model")
+            .expect("model turn");
+        let fc_part = &model_turn["parts"][0];
+        assert_eq!(fc_part["functionCall"]["name"], "read");
+        assert_eq!(fc_part["thoughtSignature"], "SIG==");
+    }
+
+    #[test]
+    fn build_contents_uses_skip_sentinel_on_gemini3_when_missing_signature() {
+        let req = LlmRequest {
+            model: "gemini-3-pro-preview".to_string(),
+            messages: vec![
+                message(LlmRole::User, "text", "hi"),
+                LlmMessage::new(
+                    LlmRole::Assistant,
+                    vec![LlmContentBlock::ToolCall {
+                        call_id: "call_1".to_string(),
+                        tool_name: "read".to_string(),
+                        input_json: "{}".to_string(),
+                        item_id: None,
+                        signature: None,
+                    }],
+                ),
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+        let contents = GoogleCloudCodeAdapter::build_contents(&req);
+        let model_turn = contents
+            .iter()
+            .find(|c| c["role"] == "model")
+            .expect("model turn");
+        assert_eq!(
+            model_turn["parts"][0]["thoughtSignature"],
+            "skip_thought_signature_validator"
+        );
+    }
+
+    #[test]
+    fn build_contents_omits_signature_on_pre_gemini3() {
+        let req = LlmRequest {
+            model: "gemini-2.5-pro".to_string(),
+            messages: vec![
+                message(LlmRole::User, "text", "hi"),
+                LlmMessage::new(
+                    LlmRole::Assistant,
+                    vec![LlmContentBlock::ToolCall {
+                        call_id: "call_1".to_string(),
+                        tool_name: "read".to_string(),
+                        input_json: "{}".to_string(),
+                        item_id: None,
+                        signature: None,
+                    }],
+                ),
+            ],
+            attachments: vec![],
+            tools: vec![].into(),
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+        let contents = GoogleCloudCodeAdapter::build_contents(&req);
+        let model_turn = contents
+            .iter()
+            .find(|c| c["role"] == "model")
+            .expect("model turn");
+        assert!(model_turn["parts"][0].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn stream_captures_thought_signature_on_function_call() {
+        let mut full = String::new();
+        let mut deltas = Vec::new();
+        let mut usage = LlmUsage::default();
+        let mut tool_parts = Vec::new();
+
+        GoogleCloudCodeAdapter::process_sse_event(
+            r#"{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{}},"thoughtSignature":"SIG=="}]}}]}}"#,
+            &mut full,
+            &mut deltas,
+            &mut usage,
+            Some(&mut tool_parts),
+        )
+        .unwrap();
+
+        assert_eq!(tool_parts.len(), 1);
+        match &tool_parts[0] {
+            LlmOutputPart::ToolCall { signature, .. } => {
+                assert_eq!(signature.as_deref(), Some("SIG=="));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
         }
     }
 }

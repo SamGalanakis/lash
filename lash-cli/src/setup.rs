@@ -45,6 +45,7 @@ enum SetupStep {
 enum CredentialMode {
     GoogleOAuth,
     OpenAiGenericKey,
+    AnthropicKey,
 }
 
 struct SetupApp {
@@ -282,6 +283,25 @@ async fn run_setup_inner(
                 KeyCode::Enter => {
                     let value = input.trim().to_string();
                     match mode {
+                        CredentialMode::AnthropicKey => {
+                            if value.is_empty() {
+                                *error = Some("API key cannot be empty.".into());
+                                continue;
+                            }
+                            provider = Some(Provider::Anthropic {
+                                api_key: value,
+                                base_url: None,
+                                options: lash::provider::ProviderOptions::default(),
+                            });
+                            app.step = if tavily_key.is_some() {
+                                SetupStep::Done
+                            } else {
+                                SetupStep::InputTavily {
+                                    input: String::new(),
+                                    cursor: 0,
+                                }
+                            };
+                        }
                         CredentialMode::OpenAiGenericKey => {
                             app.step = SetupStep::InputBaseUrl {
                                 api_key: value,
@@ -488,6 +508,18 @@ async fn start_provider_flow(
                 mode: CredentialMode::OpenAiGenericKey,
             };
         }
+        ProviderKind::Anthropic => {
+            let existing_key = existing_anthropic_key(existing);
+            app.step = SetupStep::InputCredential {
+                input: existing_key.clone(),
+                cursor: existing_key.len(),
+                error: None,
+                verifier: None,
+                auth_url: None,
+                browser_error: None,
+                mode: CredentialMode::AnthropicKey,
+            };
+        }
     }
 }
 
@@ -597,6 +629,14 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                     vec!["Paste an API key, or press Tab to skip if your endpoint does not require one.".to_string()],
                     "API key",
                     vec![("enter", "next"), ("tab", "skip"), ("esc", "back"), ("ctrl+c", "quit")],
+                ),
+                CredentialMode::AnthropicKey => (
+                    "Anthropic API",
+                    vec![
+                        "Paste an Anthropic API key (starts with sk-ant-api...).".to_string(),
+                    ],
+                    "API key",
+                    vec![("enter", "submit"), ("esc", "back"), ("ctrl+c", "quit")],
                 ),
             };
             draw_input_panel(
@@ -1038,6 +1078,16 @@ fn existing_openai_key(existing: Option<&LashConfig>) -> String {
         .and_then(|cfg| cfg.provider(ProviderKind::OpenAiGeneric))
         .and_then(|provider| match provider {
             Provider::OpenAiGeneric { api_key, .. } => Some(api_key.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn existing_anthropic_key(existing: Option<&LashConfig>) -> String {
+    existing
+        .and_then(|cfg| cfg.provider(ProviderKind::Anthropic))
+        .and_then(|provider| match provider {
+            Provider::Anthropic { api_key, .. } => Some(api_key.clone()),
             _ => None,
         })
         .unwrap_or_default()

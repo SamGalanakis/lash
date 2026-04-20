@@ -64,7 +64,12 @@ fn plugin_factories_for_surface(
         plugin_factories.push(Arc::new(lash::BuiltinUiActivityPluginFactory));
     }
     plugin_factories.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
-    plugin_factories.push(Arc::new(crate::rlm_stream_mask::RlmStreamMaskPluginFactory));
+    plugin_factories.push(Arc::new(
+        lash_mode_standard::BuiltinStandardModePluginFactory,
+    ));
+    plugin_factories.push(Arc::new(
+        lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
+    ));
     plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy,
         subagent_tool_config,

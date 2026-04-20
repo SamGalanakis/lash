@@ -237,15 +237,10 @@ impl<'a> DriverContextView<'a> {
         if !self.config.system_prompt.trim().is_empty() {
             messages.insert(
                 0,
-                crate::llm::types::LlmMessage {
-                    role: crate::llm::types::LlmRole::System,
-                    content: self.config.system_prompt.clone(),
-                    kind: "text".to_string(),
-                    image_idx: -1,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                },
+                crate::llm::types::LlmMessage::text(
+                    crate::llm::types::LlmRole::System,
+                    self.config.system_prompt.clone(),
+                ),
             );
         }
 
@@ -341,7 +336,7 @@ pub enum RlmTermination {
     /// Prose with no fenced lashlang block terminates the turn.
     #[default]
     ProseWithoutFence,
-    /// The session terminates only when the code calls `finish <expr>`.
+    /// The session terminates only when the code calls `submit <expr>`.
     Finish { schema: Option<serde_json::Value> },
 }
 
@@ -680,8 +675,9 @@ impl TurnMachine {
                         tool_call_id: None,
                         tool_name: None,
                         tool_item_id: None,
+                        tool_signature: None,
                         prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                        reasoning_meta: None,
                     }]
                 } else {
                     message.parts.clone()
@@ -702,8 +698,9 @@ impl TurnMachine {
                         tool_call_id: None,
                         tool_name: None,
                         tool_item_id: None,
+                        tool_signature: None,
                         prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                        reasoning_meta: None,
                     }));
                 }
                 reassign_part_ids(&message_id, &mut parts);
@@ -883,27 +880,32 @@ impl TurnMachine {
                 LlmOutputPart::Text { .. } => None,
                 LlmOutputPart::Reasoning {
                     text,
-                    id,
+                    item_id,
                     summary,
                     encrypted_content,
+                    signature,
+                    redacted,
                 } => Some(serde_json::json!({
                     "type": "reasoning",
-                    "id": id,
+                    "id": item_id,
                     "summary": summary,
                     "text": text,
-                    "has_encrypted": encrypted_content.is_some(),
+                    "has_encrypted": encrypted_content.is_some() || signature.is_some(),
+                    "redacted": redacted,
                 })),
                 LlmOutputPart::ToolCall {
                     call_id,
                     tool_name,
                     input_json,
-                    id,
+                    item_id,
+                    signature,
                 } => Some(serde_json::json!({
                     "type": "tool_call",
                     "call_id": call_id,
                     "tool_name": tool_name,
                     "input_json": input_json,
-                    "id": id,
+                    "id": item_id,
+                    "has_signature": signature.is_some(),
                 })),
             })
             .collect::<Vec<_>>();

@@ -424,7 +424,7 @@ fn observation_truncation_hint(text: &str, config: &ToolResultProjectionPluginCo
     };
     let total_lines = text.lines().count();
     format!(
-        "The observe output was capped at {} {} and {} lines max; original size was {} {} across {} lines. Use a narrower `observe` expression to inspect specific fields or slices instead of dumping the whole value at once.",
+        "The print output was capped at {} {} and {} lines max; original size was {} {} across {} lines. Use a narrower `print` expression to inspect specific fields or slices instead of dumping the whole value at once.",
         config.limit, limit_unit, config.max_lines, total_units, limit_unit, total_lines
     )
 }
@@ -869,7 +869,7 @@ mod tests {
         };
         let projected = truncate_observation_text("line one\nline two\nline three", &config);
         assert!(projected.contains("truncated"));
-        assert!(projected.contains("observe output was capped at 12 bytes and 2 lines max"));
-        assert!(projected.contains("Use a narrower `observe` expression"));
+        assert!(projected.contains("print output was capped at 12 bytes and 2 lines max"));
+        assert!(projected.contains("Use a narrower `print` expression"));
     }
 }

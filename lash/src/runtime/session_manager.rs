@@ -733,7 +733,10 @@ impl SessionManager for RuntimeSessionManager {
             .as_ref()
             .map(|session| Arc::clone(session.plugins().mode_session()));
         if let Some(mode_session) = mode_session {
-            mode_session.configure_runtime_from_request(&mut runtime, &request);
+            mode_session.configure_runtime_from_request(
+                crate::plugin::ModeRuntimeContext::new(&mut runtime),
+                &request,
+            );
         }
         if let Some(session) = runtime.session.as_mut() {
             session.set_context_surface(
@@ -1025,6 +1028,46 @@ impl SessionManager for RuntimeSessionManager {
         executor
             .mark_terminal(&self.background_scope_key(session_id), task_id, run_state)
             .await;
+    }
+
+    async fn transition_background_task_live_state(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        run_state: crate::ManagedRunState,
+    ) {
+        let Some(executor) = &self.current_host.session_task_executor else {
+            return;
+        };
+        executor
+            .mark_live_state(&self.background_scope_key(session_id), task_id, run_state)
+            .await;
+    }
+
+    async fn inject_turn_input(
+        &self,
+        session_id: &str,
+        message: crate::PluginMessage,
+    ) -> Result<(), crate::PluginError> {
+        let runtime_arc = {
+            let registry = self.registry.lock().await;
+            registry.get(session_id).cloned()
+        };
+        let Some(runtime_arc) = runtime_arc else {
+            return Err(crate::PluginError::Session(format!(
+                "unknown or inactive session `{session_id}` for turn input injection"
+            )));
+        };
+        let runtime = runtime_arc.lock().await;
+        let Some(session) = runtime.session.as_ref() else {
+            return Err(crate::PluginError::Session(format!(
+                "session `{session_id}` has no live turn-input bridge"
+            )));
+        };
+        session
+            .turn_input_injection_bridge()
+            .enqueue(vec![crate::InjectedTurnInput { message }])
+            .map_err(crate::PluginError::Session)
     }
 
     async fn list_background_tasks(

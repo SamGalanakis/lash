@@ -38,10 +38,22 @@ impl ManagedTaskKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedRunState {
+    /// Actively working on a task right now.
     Running,
+    /// Long-lived task is alive but has nothing to do right now. Used for
+    /// subagent sessions that finished their last task and are waiting
+    /// for a follow-up via `followup_task` or `send_message`. A new
+    /// follow-up transitions the task back to `Running`.
+    Idle,
     Completed,
     Failed,
     Cancelled,
+}
+
+impl ManagedRunState {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
 }
 
 /// Metadata required to register a background task with the executor.
@@ -151,6 +163,12 @@ pub trait SessionTaskExecutor: Send + Sync {
     /// No-op if the task is unknown or already terminal.
     async fn mark_terminal(&self, session_id: &str, task_id: &str, run_state: ManagedRunState);
 
+    /// Transition a still-live task between the non-terminal `Running`
+    /// and `Idle` states. Used by subagents to reflect whether the
+    /// session is actively working on a task or waiting for a
+    /// follow-up. No-op if the task is unknown or already terminal.
+    async fn mark_live_state(&self, session_id: &str, task_id: &str, run_state: ManagedRunState);
+
     /// Cancel a tokio-backed task by id. No-op for externally-owned entries;
     /// callers should also mark those terminal via `mark_terminal`.
     async fn cancel_managed(&self, session_id: &str, task_id: &str) -> Result<(), PluginError>;
@@ -232,7 +250,7 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
         let tasks = managed.entry(session_id.to_string()).or_default();
         if tasks
             .get(&spec.id)
-            .is_some_and(|record| matches!(record.status.run_state, ManagedRunState::Running))
+            .is_some_and(|record| !record.status.run_state.is_terminal())
         {
             return Err(PluginError::Session(format!(
                 "managed session task `{}` is already running",
@@ -253,7 +271,7 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
                 .await
                 .get_mut(&session_key)
                 .and_then(|tasks| tasks.get_mut(&task_id))
-                && matches!(record.status.run_state, ManagedRunState::Running)
+                && !record.status.run_state.is_terminal()
             {
                 record.status.run_state = terminal;
                 record.handle = None;
@@ -286,7 +304,7 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
         let tasks = managed.entry(session_id.to_string()).or_default();
         if tasks
             .get(&spec.id)
-            .is_some_and(|record| matches!(record.status.run_state, ManagedRunState::Running))
+            .is_some_and(|record| !record.status.run_state.is_terminal())
         {
             return Err(PluginError::Session(format!(
                 "background task `{}` is already registered",
@@ -310,17 +328,31 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
     }
 
     async fn mark_terminal(&self, session_id: &str, task_id: &str, run_state: ManagedRunState) {
-        if matches!(run_state, ManagedRunState::Running) {
+        if !run_state.is_terminal() {
             return;
         }
         let mut managed = self.managed.lock().await;
         if let Some(record) = managed
             .get_mut(session_id)
             .and_then(|tasks| tasks.get_mut(task_id))
-            && matches!(record.status.run_state, ManagedRunState::Running)
+            && !record.status.run_state.is_terminal()
         {
             record.status.run_state = run_state;
             record.handle = None;
+        }
+    }
+
+    async fn mark_live_state(&self, session_id: &str, task_id: &str, run_state: ManagedRunState) {
+        if !matches!(run_state, ManagedRunState::Running | ManagedRunState::Idle) {
+            return;
+        }
+        let mut managed = self.managed.lock().await;
+        if let Some(record) = managed
+            .get_mut(session_id)
+            .and_then(|tasks| tasks.get_mut(task_id))
+            && !record.status.run_state.is_terminal()
+        {
+            record.status.run_state = run_state;
         }
     }
 
@@ -335,7 +367,7 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
             };
             let taken_handle = record.handle.take();
             let taken_cancel = record.cancel.take();
-            if matches!(record.status.run_state, ManagedRunState::Running) {
+            if !record.status.run_state.is_terminal() {
                 record.status.run_state = ManagedRunState::Cancelled;
             }
             (taken_handle, taken_cancel)
@@ -546,6 +578,47 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].kind, ManagedTaskKind::Monitor);
         assert_eq!(tasks[0].run_state, ManagedRunState::Completed);
+    }
+
+    #[tokio::test]
+    async fn mark_live_state_flips_running_and_idle_but_preserves_terminal() {
+        let executor = TokioSessionTaskExecutor::default();
+        executor
+            .register_external("s1", spec("sub", ManagedTaskKind::Subagent), None)
+            .await
+            .expect("register");
+        assert_eq!(
+            executor.get_managed("s1", "sub").await.unwrap().run_state,
+            ManagedRunState::Running
+        );
+
+        executor
+            .mark_live_state("s1", "sub", ManagedRunState::Idle)
+            .await;
+        assert_eq!(
+            executor.get_managed("s1", "sub").await.unwrap().run_state,
+            ManagedRunState::Idle
+        );
+
+        executor
+            .mark_live_state("s1", "sub", ManagedRunState::Running)
+            .await;
+        assert_eq!(
+            executor.get_managed("s1", "sub").await.unwrap().run_state,
+            ManagedRunState::Running
+        );
+
+        // Terminal transitions win over live-state flips.
+        executor
+            .mark_terminal("s1", "sub", ManagedRunState::Completed)
+            .await;
+        executor
+            .mark_live_state("s1", "sub", ManagedRunState::Running)
+            .await;
+        assert_eq!(
+            executor.get_managed("s1", "sub").await.unwrap().run_state,
+            ManagedRunState::Completed
+        );
     }
 
     #[tokio::test]

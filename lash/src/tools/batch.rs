@@ -1,6 +1,6 @@
 use crate::{ToolDefinition, ToolExecutionMode, ToolParam};
 
-pub(crate) fn batch_tool_definition() -> ToolDefinition {
+pub fn batch_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "batch".to_string(),
         description: "Execute multiple independent tool calls concurrently. Calls start in parallel; ordering is not guaranteed.".to_string(),

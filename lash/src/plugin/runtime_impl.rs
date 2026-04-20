@@ -175,8 +175,9 @@ mod tests {
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 },
                 Part {
                     id: String::new(),
@@ -193,8 +194,9 @@ mod tests {
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 },
                 Part {
                     id: String::new(),
@@ -204,8 +206,9 @@ mod tests {
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
+                    tool_signature: None,
                     prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                    reasoning_meta: None,
                 },
             ],
             images: Vec::new(),
@@ -236,8 +239,9 @@ fn normalize_message_ids(messages: &mut [Message]) {
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             });
         }
         if !matches!(message.role, MessageRole::User) {
@@ -272,6 +276,7 @@ pub struct PluginRegistrar {
     history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
     mode_session: Option<RegisteredExclusiveHook<Arc<dyn ModeSessionPlugin>>>,
     mode_native_tools: Option<RegisteredExclusiveHook<Arc<dyn ModeNativeToolsPlugin>>>,
+    mode_protocol_driver: Option<RegisteredExclusiveHook<Arc<dyn ModeProtocolDriverPlugin>>>,
     registering_plugin_id: Option<String>,
 }
 
@@ -429,20 +434,28 @@ impl HistoryRegistrations<'_> {
     }
 }
 
-pub(crate) struct ModeRegistrations<'a> {
+pub struct ModeRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 
 impl ModeRegistrations<'_> {
-    pub(crate) fn session(self, provider: Arc<dyn ModeSessionPlugin>) -> Result<(), PluginError> {
+    pub fn session(self, provider: Arc<dyn ModeSessionPlugin>) -> Result<(), PluginError> {
         self.reg.add_mode_session(provider)
     }
 
-    pub(crate) fn native_tools(
-        self,
-        provider: Arc<dyn ModeNativeToolsPlugin>,
-    ) -> Result<(), PluginError> {
+    pub fn native_tools(self, provider: Arc<dyn ModeNativeToolsPlugin>) -> Result<(), PluginError> {
         self.reg.add_mode_native_tools(provider)
+    }
+
+    /// Claim the session-wide singleton protocol-driver slot. The
+    /// plugin provides a `ProtocolDriverHandle` via `build_preamble`
+    /// and identifies itself with a `mode_id` that the session's
+    /// `ExecutionMode` must match for the driver to be selected.
+    pub fn protocol_driver(
+        self,
+        provider: Arc<dyn ModeProtocolDriverPlugin>,
+    ) -> Result<(), PluginError> {
+        self.reg.add_mode_protocol_driver(provider)
     }
 }
 
@@ -471,6 +484,7 @@ impl PluginRegistrar {
             history_rewriters: Vec::new(),
             mode_session: None,
             mode_native_tools: None,
+            mode_protocol_driver: None,
             registering_plugin_id: None,
         }
     }
@@ -523,7 +537,7 @@ impl PluginRegistrar {
         HistoryRegistrations { reg: self }
     }
 
-    pub(crate) fn mode(&mut self) -> ModeRegistrations<'_> {
+    pub fn mode(&mut self) -> ModeRegistrations<'_> {
         ModeRegistrations { reg: self }
     }
 
@@ -705,6 +719,19 @@ impl PluginRegistrar {
             provider,
         )
     }
+
+    fn add_mode_protocol_driver(
+        &mut self,
+        provider: Arc<dyn ModeProtocolDriverPlugin>,
+    ) -> Result<(), PluginError> {
+        register_singleton_hook(
+            &mut self.mode_protocol_driver,
+            &self.registering_plugin_id,
+            "mode protocol driver capability",
+            "mode_protocol_driver",
+            provider,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -842,6 +869,7 @@ impl PluginHost {
                 ))
             })?
             .hook;
+        let mode_protocol_driver = reg.mode_protocol_driver.take().map(|entry| entry.hook);
         for def in mode_native_tools.definitions() {
             if !reg.tool_names.insert(def.name.clone()) {
                 return Err(PluginError::Registration(format!(
@@ -922,6 +950,7 @@ impl PluginHost {
             },
             mode_session,
             mode_native_tools,
+            mode_protocol_driver,
         });
         self.register_session(&session_id, &session)?;
         let ready = SessionReadyContext {
@@ -1049,6 +1078,7 @@ pub struct PluginSession {
     history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
     mode_session: Arc<dyn ModeSessionPlugin>,
     mode_native_tools: Arc<dyn ModeNativeToolsPlugin>,
+    mode_protocol_driver: Option<Arc<dyn ModeProtocolDriverPlugin>>,
 }
 
 impl PluginSession {
@@ -1078,6 +1108,13 @@ impl PluginSession {
 
     pub(crate) fn mode_native_tools(&self) -> &Arc<dyn ModeNativeToolsPlugin> {
         &self.mode_native_tools
+    }
+
+    /// Plugin-registered protocol driver for this session, if any plugin
+    /// claimed the singleton slot. When `None`, callers fall back to
+    /// `lash_sansio::build_mode_preamble` (hardcoded Standard/RLM).
+    pub fn mode_protocol_driver(&self) -> Option<Arc<dyn ModeProtocolDriverPlugin>> {
+        self.mode_protocol_driver.clone()
     }
 
     pub fn tool_surface(&self, session_id: &str, mode: ExecutionMode) -> crate::ToolSurface {

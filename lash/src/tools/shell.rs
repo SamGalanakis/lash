@@ -135,10 +135,19 @@ impl ShellRuntime {
 
     fn command_for_spawn(&self, command: &str, shell_path: &str) -> String {
         let shell_name = Self::shell_name(shell_path);
-        if !command.contains('|') || !shell_supports_pipefail(shell_name) {
-            return command.to_string();
-        }
-        format!("set -o pipefail\n{command}")
+        // Disable terminal echo so bytes delivered via `write_stdin`
+        // don't appear in the captured output stream. The PTY allocates
+        // with `ECHO` on by default (matching interactive terminals),
+        // but agents drive these sessions programmatically and the echo
+        // is pure noise. `stty -echo || true` keeps the prefix
+        // harmless on environments where `stty` isn't available.
+        let echo_off = "stty -echo 2>/dev/null || true\n";
+        let pipefail_prefix = if command.contains('|') && shell_supports_pipefail(shell_name) {
+            "set -o pipefail\n"
+        } else {
+            ""
+        };
+        format!("{echo_off}{pipefail_prefix}{command}")
     }
 
     fn shell_args(
@@ -434,10 +443,10 @@ impl ShellRuntime {
     }
 
     fn remove_process(&self, id: &str) {
-        if let Some(proc) = self.processes.lock().unwrap().remove(id) {
-            if let Some(mut spill) = proc.spill.lock().unwrap().take() {
-                let _ = spill.file.flush();
-            }
+        if let Some(proc) = self.processes.lock().unwrap().remove(id)
+            && let Some(mut spill) = proc.spill.lock().unwrap().take()
+        {
+            let _ = spill.file.flush();
         }
     }
 

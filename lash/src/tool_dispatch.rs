@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub(crate) struct ToolDispatchContext {
+pub struct ToolDispatchContext {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
     pub surface: ToolSurface,
@@ -31,14 +31,14 @@ pub(crate) struct ToolDispatchOutcome {
 }
 
 #[derive(Clone)]
-pub(crate) struct ParallelToolCallSpec {
+pub struct ParallelToolCallSpec {
     pub index: usize,
     pub tool_name: String,
     pub args: serde_json::Value,
 }
 
 #[derive(Clone)]
-pub(crate) struct ParallelToolCallOutcome {
+pub struct ParallelToolCallOutcome {
     pub index: usize,
     pub record: ToolCallRecord,
     pub images: Vec<ToolImage>,
@@ -247,7 +247,7 @@ pub(crate) fn resolve_tool_execution_mode(
 /// (`apply_patch`, `exec_command`, ...) is mixed into the same batch. The
 /// alternative (Option B — serialise the whole batch when any call is
 /// serial) would throw away that parallelism unnecessarily.
-pub(crate) async fn dispatch_parallel_tool_calls(
+pub async fn dispatch_parallel_tool_calls(
     context: Arc<ToolDispatchContext>,
     specs: Vec<ParallelToolCallSpec>,
     progress: Option<&ProgressSender>,

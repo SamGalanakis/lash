@@ -26,7 +26,9 @@ impl ExportFormat {
         match value.to_ascii_lowercase().as_str() {
             "html" => Ok(Self::Html),
             "json" => Ok(Self::Json),
-            other => Err(anyhow!("unknown export format `{other}` (expected html|json)")),
+            other => Err(anyhow!(
+                "unknown export format `{other}` (expected html|json)"
+            )),
         }
     }
 }

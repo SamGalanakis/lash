@@ -529,16 +529,17 @@ impl EditorState {
 
     pub fn insert_pasted_text(&mut self, text: &str) {
         self.record_undo(UndoAction::Bulk);
-        let char_count = text.chars().count();
+        let sanitized = sanitize_pasted_text(text);
+        let char_count = sanitized.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             let placeholder = self.next_large_paste_placeholder(char_count);
             self.pending_large_pastes.push(LargePaste {
                 placeholder: placeholder.clone(),
-                content: text.to_string(),
+                content: sanitized,
             });
             self.insert_text(&placeholder);
         } else {
-            self.insert_text(text);
+            self.insert_text(&sanitized);
         }
     }
 
@@ -1070,6 +1071,17 @@ impl EditorState {
     }
 }
 
+/// Strip C0 control bytes (0x00–0x1F) and DEL (0x7F) from pasted text,
+/// preserving `\n` and `\t`. Terminals sometimes deliver raw escape
+/// sequences (arrow keys, function keys) wrapped in bracketed-paste
+/// markers when autorepeat or tmux buffering outruns the decoder —
+/// inserting those bytes verbatim shows as `^[[C` etc. in the composer.
+fn sanitize_pasted_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+        .collect()
+}
+
 fn complete_path(partial: &str) -> Vec<(String, String)> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -1144,6 +1156,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sanitize_pasted_text_strips_control_bytes_but_keeps_newlines_and_tabs() {
+        // Raw right-arrow escape sequence (ESC [ C) smuggled via bracketed
+        // paste must not survive insertion.
+        assert_eq!(sanitize_pasted_text("\x1b[C"), "[C");
+        // Preserve newlines and tabs — they belong in a paste.
+        assert_eq!(sanitize_pasted_text("a\nb\tc"), "a\nb\tc");
+        // DEL and other C0 bytes go away.
+        assert_eq!(sanitize_pasted_text("x\x7fy\x01z"), "xyz");
+    }
+
+    #[test]
+    fn insert_pasted_text_drops_escape_sequences() {
+        let mut editor = EditorState::default();
+        editor.insert_pasted_text("\x1b[Chello");
+        assert_eq!(editor.input, "[Chello");
+    }
+
+    #[test]
     fn undo_rewinds_word_typing_and_redo_replays_it() {
         let mut editor = EditorState::default();
         for c in "hello".chars() {
@@ -1204,9 +1234,10 @@ mod tests {
 
     #[test]
     fn move_cursor_word_right_skips_whitespace_and_word_groups() {
-        let mut editor = EditorState::default();
-        editor.input = "alpha beta_gamma-delta  omega".into();
-        editor.cursor_pos = 0;
+        let mut editor = EditorState {
+            input: "alpha beta_gamma-delta  omega".into(),
+            ..Default::default()
+        };
 
         editor.move_cursor_word_right();
         assert_eq!(editor.cursor_pos, "alpha".len());
@@ -1263,13 +1294,16 @@ mod tests {
 
     #[test]
     fn backspace_removes_selected_marker_placeholder() {
-        let mut editor = EditorState::default();
-        editor.input = "before [Image #2] after".to_string();
+        let input = "before [Image #2] after".to_string();
+        let mut editor = EditorState {
+            cursor_pos: input.len(),
+            input,
+            ..Default::default()
+        };
         editor.pending_images.push(PendingImage {
             id: 2,
             png_bytes: vec![1, 2, 3],
         });
-        editor.cursor_pos = editor.input.len();
         editor.start_selection(8);
         editor.update_selection(12);
         editor.finish_selection();

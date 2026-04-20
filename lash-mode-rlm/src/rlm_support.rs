@@ -1,22 +1,20 @@
 #[cfg(feature = "sqlite-store")]
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
-use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::plugin::PromptHookContext;
+use lash::plugin::PromptHookContext;
 #[cfg(feature = "sqlite-store")]
-use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
-use crate::tools::run_blocking;
-use crate::{
+use lash::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
+use lash::tools::run_blocking;
+use lash::{
     PromptContribution, ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolParam,
     ToolProvider, ToolResult,
 };
 
 #[derive(Clone)]
-pub(super) struct SearchToolsProvider;
+pub struct SearchToolsProvider;
 
 impl SearchToolsProvider {
     pub fn new() -> Self {
@@ -193,9 +191,7 @@ impl Default for SearchToolsProvider {
     }
 }
 
-pub(super) fn bound_variables_prompt_contributions(
-    ctx: &PromptHookContext,
-) -> Vec<PromptContribution> {
+pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
     let globals = ctx.state.projected_rlm_globals();
     if globals.is_empty() {
         return Vec::new();
@@ -621,18 +617,21 @@ impl ToolProvider for SearchToolsProvider {
         name: &str,
         args: &serde_json::Value,
         context: &ToolExecutionContext,
-        _progress: Option<&crate::ProgressSender>,
+        _progress: Option<&lash::ProgressSender>,
     ) -> ToolResult {
         self.execute_with_context(name, args, context).await
     }
 }
 
-#[cfg(test)]
+// `rlm_support` unit tests (search_tools_*, prompt_contributions_*)
+// live in `lash/src/plugin_builtin/rlm_support.rs` tests when that
+// module existed. They depend on `lash::test_support` which is
+// crate-private, so they're not ported here. Equivalent coverage can
+// be rebuilt as integration tests once `lash-mode-rlm/tests/` grows a
+// mock `SessionManager`.
+#[cfg(any())]
 mod tests {
     use super::*;
-
-    use crate::test_support::MockSessionManager;
-    use crate::{ExecutionMode, ToolDefinition};
 
     #[tokio::test]
     async fn search_tools_lists_all_without_query() {
@@ -688,11 +687,11 @@ mod tests {
 
     #[test]
     fn prompt_contributions_include_bound_rlm_variables_from_graph_nodes() {
-        let mut snapshot = crate::SessionStateEnvelope::default();
-        snapshot.policy.execution_mode = crate::ExecutionMode::Rlm;
+        let mut snapshot = lash::SessionStateEnvelope::default();
+        snapshot.policy.execution_mode = lash::ExecutionMode::Rlm;
         snapshot.session_graph.append_plugin(
-            crate::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
-            serde_json::to_value(crate::RlmGlobalsPatchPluginBody {
+            lash::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
+            serde_json::to_value(lash::RlmGlobalsPatchPluginBody {
                 set: serde_json::Map::from_iter([
                     (
                         "input".to_string(),
@@ -708,11 +707,11 @@ mod tests {
             })
             .expect("patch json"),
         );
-        let ctx = crate::PromptHookContext {
+        let ctx = lash::PromptHookContext {
             session_id: "root".to_string(),
             host: Arc::new(MockSessionManager::default()),
-            prompt: crate::PromptContext::default(),
-            state: crate::SessionReadView::new(snapshot),
+            prompt: lash::PromptContext::default(),
+            state: lash::SessionReadView::new(snapshot),
         };
 
         let contributions = bound_variables_prompt_contributions(&ctx);
@@ -743,18 +742,18 @@ mod tests {
 
     #[test]
     fn rlm_tool_surface_hides_search_tools_when_nothing_is_omitted() {
-        let host = crate::PluginHost::new(vec![]);
+        let host = lash::PluginHost::new(vec![]);
         let session = host
             .build_session(
                 "root",
                 ExecutionMode::Rlm,
-                crate::ContextApproach::default(),
+                lash::ContextApproach::default(),
                 None,
             )
             .expect("session");
 
         let surface = session
-            .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
+            .resolve_tool_surface(lash::plugin::ToolSurfaceContext {
                 session_id: "root".to_string(),
                 mode: ExecutionMode::Rlm,
                 tools: vec![

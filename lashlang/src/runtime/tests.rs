@@ -20,7 +20,7 @@ fn exec(source: &str) -> Result<Value, RuntimeError> {
     let mut state = State::new();
     match execute_program(&program, &mut state, &Host)? {
         ExecutionOutcome::Finished(value) => Ok(value),
-        ExecutionOutcome::Continued => panic!("expected `finish` in test program"),
+        ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
     }
 }
 
@@ -52,14 +52,129 @@ fn value_helpers_and_display_cover_all_variants() {
 }
 
 #[test]
+fn compiler_folds_constant_list_and_record_literals() {
+    let program = crate::parse(
+        r#"
+        items = [{ label: "a", weight: 1 }, { label: "b", weight: 2 }]
+        submit items
+        "#,
+    )
+    .expect("program should parse");
+    let compiled = compile_program(&program);
+
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::PushConst(_)))
+    );
+    assert!(
+        !compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::BuildRecord(_)))
+    );
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &Host).expect("program should run");
+    let ExecutionOutcome::Finished(Value::List(items)) = outcome else {
+        panic!("expected folded list result");
+    };
+    assert_eq!(items.len(), 2);
+}
+
+#[test]
+fn compiler_propagates_safe_straight_line_constants() {
+    let program = crate::parse(
+        r#"
+        items = [1, 2, 3]
+        indexes = range(0, len(items))
+        extended = push(indexes, len(items))
+        submit extended
+        "#,
+    )
+    .expect("program should parse");
+    let compiled = compile_program(&program);
+
+    assert!(
+        !compiled.chunk.code.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::CallBuiltin {
+                builtin: Builtin::Len | Builtin::Range | Builtin::Push,
+                ..
+            }
+        )),
+        "straight-line constant builtins should fold out of the runtime instruction stream"
+    );
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &Host).expect("program should run");
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::Finished(Value::List(
+            vec![
+                Value::Number(0.0),
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0),
+            ]
+            .into()
+        ))
+    );
+}
+
+#[test]
+fn constant_propagation_does_not_cross_control_flow_boundaries() {
+    let value = exec(
+        r#"
+        x = 1
+        if false {
+          x = 2
+        }
+        y = x + 1
+        submit y
+        "#,
+    )
+    .expect("program should succeed");
+
+    assert_eq!(value, Value::Number(2.0));
+}
+
+#[test]
+fn reusable_execution_scratch_preserves_results_across_runs() {
+    let program = crate::parse(
+        r#"
+        items = [1, 2, 3]
+        total = 0
+        for item in items {
+          total = total + item
+        }
+        submit total
+        "#,
+    )
+    .expect("program should parse");
+    let compiled = compile_program(&program);
+    let mut scratch = ExecutionScratch::new();
+
+    for _ in 0..3 {
+        let mut state = State::new();
+        let outcome = execute_compiled_with_scratch(&compiled, &mut state, &Host, &mut scratch)
+            .expect("program should run");
+        assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(6.0)));
+    }
+}
+
+#[test]
 fn continuation_and_undefined_variable_are_reported() {
-    let outcome = exec_outcome("x = 1").expect("missing finish should continue");
+    let outcome = exec_outcome("x = 1").expect("missing submit should continue");
     assert_eq!(outcome, ExecutionOutcome::Continued);
 
-    let value = exec("finish").expect("bare finish should succeed");
+    let value = exec("submit").expect("bare submit should succeed");
     assert_eq!(value, Value::Null);
 
-    let err = exec("finish x").expect_err("undefined variable should fail");
+    let err = exec("submit x").expect_err("undefined variable should fail");
     assert_eq!(
         err,
         RuntimeError::UndefinedVariable {
@@ -71,31 +186,105 @@ fn continuation_and_undefined_variable_are_reported() {
 #[test]
 fn condition_and_iteration_errors_are_reported() {
     let value =
-        exec("if 1 { finish 1 } else { finish 2 }").expect("numeric truthiness should be accepted");
+        exec("if 1 { submit 1 } else { submit 2 }").expect("numeric truthiness should be accepted");
     assert_eq!(value, Value::Number(1.0));
 
     let value =
-        exec("if \"\" { finish 1 } else { finish 2 }").expect("empty string should be falsy");
+        exec("if \"\" { submit 1 } else { submit 2 }").expect("empty string should be falsy");
     assert_eq!(value, Value::Number(2.0));
 
-    let err = exec("for x in 1 { finish x }").expect_err("non-list iteration should fail");
+    let err = exec("for x in 1 { submit x }").expect_err("non-list iteration should fail");
     assert_eq!(err, RuntimeError::NonListIteration);
 }
 
 #[test]
 fn stmt_call_and_tool_results_cover_success_and_error() {
-    exec("call echo { value: 1 } finish 1").expect("statement call should succeed");
-    let missing = exec("bad = call missing {} finish bad").expect("missing tool should be wrapped");
+    exec("call echo { value: 1 } submit 1").expect("statement call should succeed");
+    let missing = exec("bad = call missing {} submit bad").expect("missing tool should be wrapped");
     assert_eq!(
         missing.as_record().expect("result should be a record")["ok"],
         Value::Bool(false)
     );
 
-    let value = exec("ok = call echo { value: 7 } bad = call err {} finish { ok: ok, bad: bad }")
+    let value = exec("ok = call echo { value: 7 } bad = call err {} submit { ok: ok, bad: bad }")
         .expect("tool call program should succeed");
     let record = value.as_record().expect("expected record");
     assert_eq!(record["ok"].as_record().unwrap()["ok"], Value::Bool(true));
     assert_eq!(record["bad"].as_record().unwrap()["ok"], Value::Bool(false));
+}
+
+#[test]
+fn result_unwrap_extracts_success_and_preserves_manual_handling() {
+    let value = exec("submit (call echo { value: 7 })?").expect("unwrap should succeed");
+    assert_eq!(value, Value::Number(7.0));
+
+    let value = exec(
+        r#"
+        result = call err {}
+        submit result.ok ? result.error : "unexpected"
+        "#,
+    )
+    .expect("manual wrapper handling should still work");
+    assert_eq!(value, Value::String("unexpected".into()));
+}
+
+#[test]
+fn direct_tool_call_unwrap_skips_observable_wrapper() {
+    let program = crate::parse("submit (call echo { value: 7 })?").expect("program should parse");
+    let compiled = compile_program(&program);
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::CallToolUnwrap { .. }))
+    );
+    assert!(
+        !compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ResultUnwrap))
+    );
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &Host).expect("program should run");
+    assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));
+
+    let err = exec("submit (call err {})?").expect_err("failed unwrap should abort");
+    assert_eq!(
+        err,
+        RuntimeError::ValueError {
+            message: "`?` unwrapped failed tool result: boom".to_string(),
+        }
+    );
+}
+
+#[test]
+fn result_unwrap_reports_failed_and_malformed_wrappers() {
+    let err = exec("submit (call err {})?").expect_err("failed tool unwrap should abort");
+    assert_eq!(
+        err,
+        RuntimeError::ValueError {
+            message: "`?` unwrapped failed tool result: boom".to_string(),
+        }
+    );
+
+    let err = exec("submit 1?").expect_err("non-wrapper should fail");
+    assert_eq!(
+        err,
+        RuntimeError::TypeError {
+            message: "`?` expected a tool result wrapper, got number".to_string(),
+        }
+    );
+
+    let err = exec("submit { ok: true }?").expect_err("missing value should fail");
+    assert_eq!(
+        err,
+        RuntimeError::TypeError {
+            message: "`?` found a successful tool result wrapper missing `value`".to_string(),
+        }
+    );
 }
 
 #[test]
@@ -106,7 +295,7 @@ fn field_index_unary_and_boolean_paths_are_covered() {
         xs = ["a", "b"]
         ok = false and missing
         alt = true or missing
-        finish [rec.nested.name, xs[1], "abc"[2], -1, not false, !false, ok, alt]
+        submit [rec.nested.name, xs[1], "abc"[2], -1, not false, !false, ok, alt]
         "#,
     )
     .expect("program should succeed");
@@ -128,110 +317,110 @@ fn field_index_unary_and_boolean_paths_are_covered() {
         )
     );
 
-    let value = exec("finish true and false").expect("and path should succeed");
+    let value = exec("submit true and false").expect("and path should succeed");
     assert_eq!(value, Value::Bool(false));
 
-    let value = exec("finish false or true").expect("or path should succeed");
+    let value = exec("submit false or true").expect("or path should succeed");
     assert_eq!(value, Value::Bool(true));
 }
 
 #[test]
 fn field_index_and_type_errors_are_covered() {
-    let err = exec("n = 1 finish n.name").expect_err("field access should fail");
+    let err = exec("n = 1 submit n.name").expect_err("field access should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("rec = {} finish rec.name").expect("missing field should yield null");
+    let value = exec("rec = {} submit rec.name").expect("missing field should yield null");
     assert_eq!(value, Value::Null);
 
-    let err = exec("finish 1[0]").expect_err("bad index target should fail");
+    let err = exec("submit 1[0]").expect_err("bad index target should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("finish [1][2]").expect("list oob should yield null");
+    let value = exec("submit [1][2]").expect("list oob should yield null");
     assert_eq!(value, Value::Null);
 
-    let value = exec("finish \"a\"[2]").expect("string oob should yield null");
+    let value = exec("submit \"a\"[2]").expect("string oob should yield null");
     assert_eq!(value, Value::Null);
 
-    let err = exec("finish [1][1.5]").expect_err("fractional index should fail");
+    let err = exec("submit [1][1.5]").expect_err("fractional index should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("finish [1][-1]").expect("negative index should resolve from the end");
+    let value = exec("submit [1][-1]").expect("negative index should resolve from the end");
     assert_eq!(value, Value::Number(1.0));
 
-    let value = exec("finish not 1").expect("not should use truthiness");
+    let value = exec("submit not 1").expect("not should use truthiness");
     assert_eq!(value, Value::Bool(false));
 
-    let value = exec("finish not 0").expect("zero should be falsy");
+    let value = exec("submit not 0").expect("zero should be falsy");
     assert_eq!(value, Value::Bool(true));
 
     let value =
-        exec("rec = { ok: false } finish len(rec.value.items)").expect("null chain should work");
+        exec("rec = { ok: false } submit len(rec.value.items)").expect("null chain should work");
     assert_eq!(value, Value::Number(0.0));
 }
 
 #[test]
 fn arithmetic_and_compare_errors_are_covered() {
     assert_eq!(
-        exec("finish 7 - 2").expect("subtract should succeed"),
+        exec("submit 7 - 2").expect("subtract should succeed"),
         Value::Number(5.0)
     );
     assert_eq!(
-        exec("finish 3 * 4").expect("multiply should succeed"),
+        exec("submit 3 * 4").expect("multiply should succeed"),
         Value::Number(12.0)
     );
     assert_eq!(
-        exec("finish 8 / 2").expect("divide should succeed"),
+        exec("submit 8 / 2").expect("divide should succeed"),
         Value::Number(4.0)
     );
     assert_eq!(
-        exec("finish 8 % 3").expect("modulo should succeed"),
+        exec("submit 8 % 3").expect("modulo should succeed"),
         Value::Number(2.0)
     );
     assert_eq!(
-        exec("finish 1 != 2").expect("not equal should succeed"),
+        exec("submit 1 != 2").expect("not equal should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("finish 1 <= 2").expect("less-equal should succeed"),
+        exec("submit 1 <= 2").expect("less-equal should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("finish 2 > 1").expect("greater should succeed"),
+        exec("submit 2 > 1").expect("greater should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("finish 2 >= 1").expect("greater-equal should succeed"),
+        exec("submit 2 >= 1").expect("greater-equal should succeed"),
         Value::Bool(true)
     );
 
-    let value = exec("finish [1,2] + [3]").expect("list concat should succeed");
+    let value = exec("submit [1,2] + [3]").expect("list concat should succeed");
     assert_eq!(
         value,
         Value::List(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)].into())
     );
 
-    let value = exec("finish \"a\" + \"b\"").expect("string add should succeed");
+    let value = exec("submit \"a\" + \"b\"").expect("string add should succeed");
     assert_eq!(value, Value::String("ab".to_string().into()));
 
-    let value = exec("finish \"a\" + 1").expect("string coercion should succeed");
+    let value = exec("submit \"a\" + 1").expect("string coercion should succeed");
     assert_eq!(value, Value::String("a1".to_string().into()));
 
-    let value = exec("finish 1 + \"b\"").expect("string coercion should succeed");
+    let value = exec("submit 1 + \"b\"").expect("string coercion should succeed");
     assert_eq!(value, Value::String("1b".to_string().into()));
 
-    let value = exec("finish 1 + true").expect("bool should coerce for addition");
+    let value = exec("submit 1 + true").expect("bool should coerce for addition");
     assert_eq!(value, Value::Number(2.0));
 
-    let value = exec("finish null + 2").expect("null should coerce for addition");
+    let value = exec("submit null + 2").expect("null should coerce for addition");
     assert_eq!(value, Value::Number(2.0));
 
-    let value = exec("finish \"2\" * 3").expect("numeric strings should coerce");
+    let value = exec("submit \"2\" * 3").expect("numeric strings should coerce");
     assert_eq!(value, Value::Number(6.0));
 
-    let value = exec("finish \"2\" < 10").expect("numeric strings should compare");
+    let value = exec("submit \"2\" < 10").expect("numeric strings should compare");
     assert_eq!(value, Value::Bool(true));
 
-    let err = exec("finish {} + 1").expect_err("records should still fail arithmetic");
+    let err = exec("submit {} + 1").expect_err("records should still fail arithmetic");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 }
 
@@ -240,7 +429,8 @@ fn builtin_success_matrix_is_covered() {
     let value = exec(
         r#"
         rec = { a: 1, b: 2 }
-        finish {
+        base = [1, 2]
+        submit {
           len_s: len("ab"),
           len_l: len([1,2,3]),
           len_r: len(rec),
@@ -279,7 +469,25 @@ fn builtin_success_matrix_is_covered() {
           to_f_n: to_float(1),
           to_f_s: to_float("2.5"),
           to_f_nl: to_float(null),
-          fmt: format("x={},y={}", 1, true)
+          fmt: format("x={},y={}", 1, true),
+          range_end: range(3),
+          range_pair: range(-2, 2),
+          range_empty: range(2, 2),
+          pushed: push(base, 3),
+          base_after_push: base,
+          valid: validate(
+            {
+              name: "pkg",
+              version: "1.0.0",
+              deps: [{ name: "dep", optional: true }],
+              extra: "preserved"
+            },
+            Type {
+              name: str,
+              version: str,
+              deps: list[Type { name: str, optional: bool? }]
+            }
+          )
         }
         "#,
     )
@@ -334,36 +542,78 @@ fn builtin_success_matrix_is_covered() {
         record["fmt"],
         Value::String("x=1,y=true".to_string().into())
     );
+    assert_eq!(
+        record["range_end"],
+        Value::List(vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)].into())
+    );
+    assert_eq!(
+        record["range_pair"],
+        Value::List(
+            vec![
+                Value::Number(-2.0),
+                Value::Number(-1.0),
+                Value::Number(0.0),
+                Value::Number(1.0)
+            ]
+            .into()
+        )
+    );
+    assert_eq!(record["range_empty"], Value::List(Vec::new().into()));
+    assert_eq!(
+        record["pushed"],
+        Value::List(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)].into())
+    );
+    assert_eq!(
+        record["base_after_push"],
+        Value::List(vec![Value::Number(1.0), Value::Number(2.0)].into())
+    );
+    let valid = record["valid"].as_record().expect("validated record");
+    assert_eq!(valid["name"], Value::String("pkg".to_string().into()));
+    assert_eq!(
+        valid["extra"],
+        Value::String("preserved".to_string().into())
+    );
 }
 
 #[test]
 fn builtin_error_matrix_is_covered() {
     let cases = [
-        ("finish len(true)", "len"),
-        ("finish empty(true)", "empty"),
-        ("finish keys([])", "keys"),
-        ("finish values([])", "values"),
-        ("finish contains(1, 2)", "contains"),
-        ("finish starts_with({}, \"a\")", "starts_with"),
-        ("finish ends_with({}, \"a\")", "ends_with"),
-        ("finish split({}, \",\")", "split"),
-        ("finish join(1, \",\")", "join"),
-        ("finish trim({})", "trim"),
-        ("finish slice(1, 0, 1)", "slice"),
-        ("finish to_int({})", "to_int"),
-        ("finish to_int(\"x\")", "to_int"),
-        ("finish to_float({})", "to_float"),
-        ("finish to_float(\"x\")", "to_float"),
-        ("finish json_parse(\"{\")", "json_parse"),
-        ("finish format()", "format"),
-        ("finish format({})", "format"),
-        ("finish format(\"{1}\", \"x\")", "format"),
-        ("finish format(\"{}\", \"x\", \"y\")", "format"),
-        ("finish format(\"{} {1}\", \"x\", \"y\")", "format"),
-        ("finish format(\"{x}\")", "format"),
-        ("finish format(\"{\")", "format"),
-        ("finish format(\"}\")", "format"),
-        ("finish no_such_builtin()", "no_such_builtin"),
+        ("submit len(true)", "len"),
+        ("submit empty(true)", "empty"),
+        ("submit keys([])", "keys"),
+        ("submit values([])", "values"),
+        ("submit contains(1, 2)", "contains"),
+        ("submit starts_with({}, \"a\")", "starts_with"),
+        ("submit ends_with({}, \"a\")", "ends_with"),
+        ("submit split({}, \",\")", "split"),
+        ("submit join(1, \",\")", "join"),
+        ("submit trim({})", "trim"),
+        ("submit slice(1, 0, 1)", "slice"),
+        ("submit to_int({})", "to_int"),
+        ("submit to_int(\"x\")", "to_int"),
+        ("submit to_float({})", "to_float"),
+        ("submit to_float(\"x\")", "to_float"),
+        ("submit json_parse(\"{\")", "json_parse"),
+        ("submit format()", "format"),
+        ("submit format({})", "format"),
+        ("submit format(\"{1}\", \"x\")", "format"),
+        ("submit format(\"{}\", \"x\", \"y\")", "format"),
+        ("submit format(\"{} {1}\", \"x\", \"y\")", "format"),
+        ("submit format(\"{x}\")", "format"),
+        ("submit format(\"{\")", "format"),
+        ("submit format(\"}\")", "format"),
+        (
+            "submit validate({ name: \"pkg\" }, { type: \"object\" })",
+            "validate",
+        ),
+        ("submit range()", "range"),
+        ("submit range(1, 2, 3)", "range"),
+        ("submit range(\"3\")", "range"),
+        ("submit range(1.5)", "range"),
+        ("submit range(0, 1000001)", "range"),
+        ("submit push(1, 2)", "push"),
+        ("submit push([1])", "push"),
+        ("submit no_such_builtin()", "no_such_builtin"),
     ];
 
     for (source, _) in cases {
@@ -376,8 +626,49 @@ fn builtin_error_matrix_is_covered() {
         ));
     }
 
-    let err = exec("finish len()").expect_err("arity error should fail");
+    let err = exec("submit len()").expect_err("arity error should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
+}
+
+#[test]
+fn validate_reports_precise_shape_errors() {
+    let cases = [
+        (
+            "submit validate({ name: \"pkg\" }, Type { name: str, version: str })",
+            "validation failed: $: missing required field `version`",
+        ),
+        (
+            r#"submit validate({ packages: [{ name: "pkg", version: 1 }] }, Type { packages: list[Type { name: str, version: str }] })"#,
+            "validation failed: $.packages[0].version: expected string, got number",
+        ),
+        (
+            r#"submit validate({ status: "maybe" }, Type { status: enum["ok", "err"] })"#,
+            "validation failed: $.status: expected one of [ok, err], got maybe",
+        ),
+        (
+            r#"submit validate({ count: 1.5 }, Type { count: int })"#,
+            "validation failed: $.count: expected integer, got number",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let err = exec(source).expect_err("validate should reject bad value");
+        assert_eq!(
+            err,
+            RuntimeError::ValueError {
+                message: expected.to_string()
+            }
+        );
+    }
+
+    let err = exec("submit validate({ name: \"pkg\" }, { type: \"object\" })")
+        .expect_err("raw schema records should be rejected");
+    assert_eq!(
+        err,
+        RuntimeError::TypeError {
+            message: "`validate` requires a Type literal as the second argument".to_string()
+        }
+    );
 }
 
 #[test]
@@ -593,7 +884,7 @@ fn false_if_branch_and_finish_inside_loop_are_covered() {
         } else {
           out = 2
         }
-        finish out
+        submit out
         "#,
     )
     .expect("else branch should succeed");
@@ -602,12 +893,12 @@ fn false_if_branch_and_finish_inside_loop_are_covered() {
     let value = exec(
         r#"
         for x in [1, 2] {
-          finish x
+          submit x
         }
-        finish 0
+        submit 0
         "#,
     )
-    .expect("finish inside loop should bubble out");
+    .expect("submit inside loop should bubble out");
     assert_eq!(value, Value::Number(1.0));
 }
 
@@ -618,7 +909,7 @@ fn parallel_branch_panics_are_reported_as_runtime_errors() {
         parallel {
           crash = call panic {}
         }
-        finish 1
+        submit 1
         "#,
     )
     .expect_err("parallel panic should be reported");
@@ -680,7 +971,7 @@ fn async_tool_handles_can_be_started_awaited_and_cancelled() {
         handle = start call echo { value: "done" }
         result = await handle
         cancel handle
-        finish result
+        submit result
         "#,
     )
     .expect("program should parse");
@@ -701,7 +992,7 @@ fn await_unknown_handle_surfaces_runtime_error() {
     let program = crate::parse(
         r#"
         result = await 1
-        finish result
+        submit result
         "#,
     )
     .expect("program should parse");
@@ -730,7 +1021,7 @@ fn await_list_of_handles_returns_results_in_order() {
           start call echo { value: "third" }
         ]
         results = await handles
-        finish results
+        submit results
         "#,
     )
     .expect("program should parse");
@@ -758,7 +1049,7 @@ fn await_list_preserves_per_item_errors() {
         r#"
         handles = [start call echo { value: "done" }, 1]
         results = await handles
-        finish results
+        submit results
         "#,
     )
     .expect("program should parse");
@@ -783,6 +1074,68 @@ fn await_list_preserves_per_item_errors() {
     assert_eq!(err["error"], Value::String("expected handle record".into()));
 }
 
+#[test]
+fn await_record_of_handles_returns_record_of_wrappers() {
+    let program = crate::parse(
+        r#"
+        handles = {
+          first: start call echo { value: "one" },
+          second: start call echo { value: "two" },
+        }
+        results = await handles
+        submit [results.first?, results.second?]
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    assert_eq!(
+        value,
+        Value::List(vec![Value::String("one".into()), Value::String("two".into())].into())
+    );
+}
+
+#[test]
+fn result_unwrap_extracts_awaited_handles_and_parallel_results() {
+    let program = crate::parse(
+        r#"
+        handle = start call echo { value: "done" }
+        result = (await handle)?
+        submit result
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    assert_eq!(value, Value::String("done".into()));
+
+    let program = crate::parse(
+        r#"
+        results = parallel {
+          call echo { value: "left" }
+          call echo { value: "right" }
+        }
+        submit [(results[0])?, (results[1])?]
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    assert_eq!(
+        value,
+        Value::List(vec![Value::String("left".into()), Value::String("right".into()),].into())
+    );
+}
+
 // ------------------------------------------------------------------
 //  Type literals: syntactic signatures with enum, list, nested, ref,
 //  optional fields. See the top-level README for the full grammar.
@@ -798,11 +1151,11 @@ fn unwrap_schema(value: &Value) -> &Record {
 #[test]
 fn type_scalar_schemas_const_fold_to_json_schema() {
     for (src, expected) in [
-        ("finish Type { v: str }", "string"),
-        ("finish Type { v: int }", "integer"),
-        ("finish Type { v: float }", "number"),
-        ("finish Type { v: bool }", "boolean"),
-        ("finish Type { v: dict }", "object"),
+        ("submit Type { v: str }", "string"),
+        ("submit Type { v: int }", "integer"),
+        ("submit Type { v: float }", "number"),
+        ("submit Type { v: bool }", "boolean"),
+        ("submit Type { v: dict }", "object"),
     ] {
         let value = exec(src).expect("should succeed");
         let schema = unwrap_schema(&value);
@@ -822,7 +1175,7 @@ fn type_scalar_schemas_const_fold_to_json_schema() {
 
 #[test]
 fn type_any_is_empty_schema() {
-    let value = exec("finish Type { v: any }").expect("should succeed");
+    let value = exec("submit Type { v: any }").expect("should succeed");
     let schema = unwrap_schema(&value);
     let props = schema["properties"].as_record().expect("properties");
     let v = props["v"].as_record().expect("field schema");
@@ -831,8 +1184,8 @@ fn type_any_is_empty_schema() {
 
 #[test]
 fn type_enum_produces_string_with_enum_array() {
-    let value = exec(r#"finish Type { status: enum["ok", "err", "pending"] }"#)
-        .expect("should succeed");
+    let value =
+        exec(r#"submit Type { status: enum["ok", "err", "pending"] }"#).expect("should succeed");
     let schema = unwrap_schema(&value);
     let status = schema["properties"].as_record().unwrap()["status"]
         .as_record()
@@ -849,7 +1202,7 @@ fn type_enum_produces_string_with_enum_array() {
 
 #[test]
 fn type_list_schema_wraps_inner_type_as_items() {
-    let value = exec("finish Type { tags: list[str] }").expect("should succeed");
+    let value = exec("submit Type { tags: list[str] }").expect("should succeed");
     let schema = unwrap_schema(&value);
     let tags = schema["properties"].as_record().unwrap()["tags"]
         .as_record()
@@ -861,7 +1214,7 @@ fn type_list_schema_wraps_inner_type_as_items() {
 
 #[test]
 fn type_list_of_enum_preserves_nested_shape() {
-    let value = exec(r#"finish Type { labels: list[enum["a", "b"]] }"#).expect("should succeed");
+    let value = exec(r#"submit Type { labels: list[enum["a", "b"]] }"#).expect("should succeed");
     let schema = unwrap_schema(&value);
     let labels = schema["properties"].as_record().unwrap()["labels"]
         .as_record()
@@ -875,7 +1228,7 @@ fn type_list_of_enum_preserves_nested_shape() {
 fn type_nested_object_is_full_subschema() {
     let value = exec(
         r#"
-        finish Type {
+        submit Type {
           title: str,
           meta: Type {
             pages: int,
@@ -904,7 +1257,7 @@ fn type_nested_object_is_full_subschema() {
 
 #[test]
 fn type_optional_field_drops_from_required() {
-    let value = exec("finish Type { a: str, b: int? }").expect("should succeed");
+    let value = exec("submit Type { a: str, b: int? }").expect("should succeed");
     let schema = unwrap_schema(&value);
     let required = match &schema["required"] {
         Value::List(items) => items,
@@ -922,7 +1275,7 @@ fn type_ref_resolves_previously_defined_type() {
     let src = r#"
         Inner = Type { count: int }
         Outer = Type { name: str, nested: Inner }
-        finish Outer
+        submit Outer
     "#;
     let value = exec(src).expect("should succeed");
     let schema = unwrap_schema(&value);
@@ -943,7 +1296,7 @@ fn type_ref_to_non_type_value_is_type_error() {
         r#"
         Inner = { count: 5 }
         Outer = Type { nested: Inner }
-        finish Outer
+        submit Outer
         "#,
     )
     .expect_err("should fail: Inner is not a Type value");
@@ -955,8 +1308,7 @@ fn type_ref_to_non_type_value_is_type_error() {
 
 #[test]
 fn type_ref_with_undefined_name_is_undefined_variable() {
-    let err = exec("finish Type { nested: MissingType }")
-        .expect_err("unknown ref should fail");
+    let err = exec("submit Type { nested: MissingType }").expect_err("unknown ref should fail");
     assert_eq!(
         err,
         RuntimeError::UndefinedVariable {
@@ -971,13 +1323,16 @@ fn compile_stats_count_const_folded_and_dynamic_literals() {
         Inner = Type { n: int }
         A = Type { x: str }
         B = Type { nested: Inner }
-        finish B
+        submit B
     "#;
     let program = crate::parse(src).expect("should parse");
     let compiled = crate::compile_program(&program);
     let stats = compiled.compile_stats();
     assert_eq!(stats.type_literals_total, 3);
-    assert_eq!(stats.type_literals_const_folded, 2, "Inner and A are constant");
+    assert_eq!(
+        stats.type_literals_const_folded, 2,
+        "Inner and A are constant"
+    );
     assert_eq!(stats.type_literals_dynamic, 1, "B references Inner");
     assert_eq!(stats.type_ref_sites, 1);
 }
@@ -987,18 +1342,17 @@ fn profile_report_surfaces_resolve_type_ref_counts() {
     let src = r#"
         Inner = Type { n: int }
         Outer = Type { nested: Inner }
-        finish Outer
+        limit = (call echo { value: 1 })?
+        numbers = push(range(limit), limit)
+        checked = validate({ nested: { n: numbers[0] } }, Outer)
+        submit checked
     "#;
     let program = crate::parse(src).expect("should parse");
     let compiled = crate::compile_program(&program);
     let mut state = State::new();
-    let (_outcome, report) = crate::profile_compiled(&compiled, &mut state, &Host)
-        .expect("profile should succeed");
-    let names: Vec<_> = report
-        .instruction_stats()
-        .iter()
-        .map(|s| s.name)
-        .collect();
+    let (_outcome, report) =
+        crate::profile_compiled(&compiled, &mut state, &Host).expect("profile should succeed");
+    let names: Vec<_> = report.instruction_stats().iter().map(|s| s.name).collect();
     assert!(
         names.contains(&"resolve_type_ref"),
         "profile should track resolve_type_ref: {names:?}"
@@ -1006,6 +1360,19 @@ fn profile_report_surfaces_resolve_type_ref_counts() {
     assert!(
         names.contains(&"wrap_type_literal"),
         "profile should track wrap_type_literal: {names:?}"
+    );
+    let builtin_names: Vec<_> = report.builtin_stats().iter().map(|s| s.name).collect();
+    assert!(
+        builtin_names.contains(&"validate"),
+        "profile should track validate: {builtin_names:?}"
+    );
+    assert!(
+        builtin_names.contains(&"range"),
+        "profile should track range: {builtin_names:?}"
+    );
+    assert!(
+        builtin_names.contains(&"push"),
+        "profile should track push: {builtin_names:?}"
     );
     assert_eq!(report.compile_stats().type_literals_total, 2);
 }
@@ -1035,7 +1402,7 @@ fn type_literal_inside_tool_call_args_passes_through_as_record() {
         r#"
         Shape = Type { name: str, tags: list[str] }
         call spawn { output: Shape }
-        finish null
+        submit null
         "#,
     )
     .expect("should parse");
@@ -1066,14 +1433,13 @@ fn empty_enum_is_parse_error() {
 fn unknown_type_constructor_becomes_ref_not_error_at_parse() {
     // Unknown identifiers in type position are treated as refs; runtime
     // resolution is what errors out.
-    let program =
-        crate::parse("finish Type { x: Unknown }").expect("should parse as ref");
-    assert!(matches!(program.statements.last(), Some(Stmt::Finish(_))));
+    let program = crate::parse("submit Type { x: Unknown }").expect("should parse as ref");
+    assert!(matches!(program.statements.last(), Some(Stmt::Submit(_))));
 }
 
 #[test]
 fn lash_type_wrapper_survives_round_trip_through_json() {
-    let value = exec("finish Type { n: int }").expect("should succeed");
+    let value = exec("submit Type { n: int }").expect("should succeed");
     // to_json + from_json must preserve the Type-ness.
     let json = crate::runtime::to_json(&value);
     let recovered = crate::runtime::from_json(json);

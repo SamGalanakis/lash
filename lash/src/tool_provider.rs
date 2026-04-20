@@ -1,0 +1,85 @@
+use std::sync::Arc;
+
+use crate::plugin::SessionManager;
+use crate::{ToolDefinition, ToolResult};
+
+/// A message sent from the sandbox to the host during execution.
+#[derive(Clone, Debug)]
+pub struct SandboxMessage {
+    pub text: String,
+    /// "final", "tool_output", or other host-rendered progress events.
+    pub kind: String,
+}
+
+/// Sender for streaming progress messages from tools (e.g. live bash output).
+pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
+
+#[derive(Clone)]
+pub struct ToolExecutionContext {
+    pub session_id: String,
+    pub host: Arc<dyn SessionManager>,
+    pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    pub async_task_id: Option<String>,
+}
+
+impl ToolExecutionContext {
+    pub fn with_async_task(
+        mut self,
+        task_id: impl Into<String>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.async_task_id = Some(task_id.into());
+        self.cancellation_token = Some(cancellation_token);
+        self
+    }
+}
+
+/// Trait for providing tools to the sandbox. Implement this per-project.
+#[async_trait::async_trait]
+pub trait ToolProvider: Send + Sync + 'static {
+    fn definitions(&self) -> Vec<ToolDefinition>;
+    fn dynamic_snapshot(&self) -> Option<crate::dynamic::DynamicStateSnapshot> {
+        None
+    }
+    fn fork_dynamic_with_snapshot(
+        &self,
+        _snapshot: crate::dynamic::DynamicStateSnapshot,
+    ) -> Option<Arc<dyn ToolProvider>> {
+        None
+    }
+    fn dynamic_generation(&self) -> Option<u64> {
+        None
+    }
+    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult;
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        _context: &ToolExecutionContext,
+    ) -> ToolResult {
+        self.execute(name, args).await
+    }
+
+    /// Execute with progress streaming. Default: delegates to execute().
+    async fn execute_streaming(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        _progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.execute(name, args).await
+    }
+
+    /// Execute with progress streaming and session context. Default: delegates to
+    /// `execute_streaming()`.
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        _context: &ToolExecutionContext,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.execute_streaming(name, args, progress).await
+    }
+}

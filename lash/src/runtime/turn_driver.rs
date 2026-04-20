@@ -1,6 +1,16 @@
 use super::*;
 use crate::llm::transport::LlmTransport;
 
+/// Result of running stream hooks over a visible chunk. Carries both
+/// the (possibly rewritten) text and an `abort_requested` flag that the
+/// LLM runner uses to break the stream early when a plugin has decided
+/// the response is complete (e.g. the RLM mask detecting a closed
+/// lashlang fence).
+pub(super) struct StreamChunkOutcome {
+    pub(super) chunk: String,
+    pub(super) abort_requested: bool,
+}
+
 async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: SessionEvent) {
     if !event_tx.is_closed() {
         let _ = event_tx.send(RuntimeStreamEvent::Session(event)).await;
@@ -27,8 +37,7 @@ async fn run_one_tool_call(
     let tool_name = pending_tool.tool_name;
     let args = pending_tool.args;
     let item_id = pending_tool.item_id;
-    let (progress_tx, mut progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
     let progress_event_tx = event_tx.clone();
     let progress_handle = tokio::spawn(async move {
         while let Some(sandbox_msg) = progress_rx.recv().await {
@@ -534,7 +543,7 @@ impl RuntimeTurnDriver {
         &mut self,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         chunk: String,
-    ) -> Result<String, LlmCallError> {
+    ) -> Result<StreamChunkOutcome, LlmCallError> {
         let original = chunk.clone();
         let transforms = self
             .session
@@ -550,15 +559,23 @@ impl RuntimeTurnDriver {
             })?;
         let mut current = String::new();
         let mut first = true;
+        let mut abort_requested = false;
         for emitted in transforms {
             if first {
                 first = false;
             }
             current = emitted.value.chunk.clone();
+            if emitted.value.abort_stream {
+                abort_requested = true;
+            }
             emit_plugin_surface_events_runtime(event_tx, &emitted.plugin_id, emitted.value.events)
                 .await;
         }
-        if first { Ok(original) } else { Ok(current) }
+        let chunk = if first { original } else { current };
+        Ok(StreamChunkOutcome {
+            chunk,
+            abort_requested,
+        })
     }
 
     async fn transform_assistant_response(
@@ -671,12 +688,14 @@ impl RuntimeTurnDriver {
         let mut streamed_usage = LlmUsage::default();
         let mut streamed_output = StandardStreamFallback::default();
         let mut debug = LlmStreamDebugState::new();
+        let mut abort_requested = false;
         let mut stream_state = StandardStreamState {
             text_streamed: &mut text_streamed,
             streamed_usage: &mut streamed_usage,
             streamed_output: &mut streamed_output,
             debug: &mut debug,
             iteration,
+            abort_requested: &mut abort_requested,
         };
         let result = loop {
             tokio::select! {
@@ -696,6 +715,35 @@ impl RuntimeTurnDriver {
                         .await
                     {
                         break Err(err);
+                    }
+                    if *stream_state.abort_requested {
+                        // A plugin stream hook asked us to end the LLM
+                        // call now (e.g. RLM mask saw a closed fence).
+                        // Abort the in-flight request and synthesize a
+                        // response from what's already been streamed.
+                        llm_task.abort();
+                        // Drain any events that landed before the abort took effect.
+                        if let Err(err) = self
+                            .drain_standard_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
+                            .await
+                        {
+                            break Err(err);
+                        }
+                        let mut resp = LlmResponse {
+                            deltas: Vec::new(),
+                            full_text: streamed_output.full_text(),
+                            parts: Vec::new(),
+                            usage: streamed_usage.clone(),
+                            provider_usage: None,
+                            request_body: debug_request.as_ref().map(debug_request_body),
+                            http_summary: None,
+                        };
+                        streamed_output.apply_to_response(&mut resp);
+                        let resp = match self.transform_assistant_response(event_tx, resp).await {
+                            Ok(resp) => resp,
+                            Err(err) => break Err(err),
+                        };
+                        break Ok(resp);
                     }
                 }
                 join = &mut llm_task => {
@@ -1126,9 +1174,13 @@ impl RuntimeTurnDriver {
                 if !delta.is_empty() {
                     *state.text_streamed = true;
                     let raw_delta = self.host.core.llm_log_path.as_ref().map(|_| delta.clone());
-                    let delta = self
+                    let outcome = self
                         .transform_assistant_stream_chunk(event_tx, delta)
                         .await?;
+                    if outcome.abort_requested {
+                        *state.abort_requested = true;
+                    }
+                    let delta = outcome.chunk;
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
@@ -1169,26 +1221,24 @@ impl RuntimeTurnDriver {
                     // Delta-only streaming path (fix 1.3a display). No
                     // encrypted content yet — that arrives with the full
                     // item on `output_item.done` (fix 1.3b).
-                    state.streamed_output.push_reasoning(
-                        delta.clone(),
-                        String::new(),
-                        Vec::new(),
-                        None,
-                    );
-                    send_session_event(
-                        event_tx,
-                        SessionEvent::ReasoningDelta { content: delta },
-                    )
-                    .await;
+                    state
+                        .streamed_output
+                        .push_reasoning(delta.clone(), None, Vec::new(), None);
+                    send_session_event(event_tx, SessionEvent::ReasoningDelta { content: delta })
+                        .await;
                 }
             }
             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
                 if !text.is_empty() {
                     *state.text_streamed = true;
                     let raw_text = self.host.core.llm_log_path.as_ref().map(|_| text.clone());
-                    let text = self
+                    let outcome = self
                         .transform_assistant_stream_chunk(event_tx, text)
                         .await?;
+                    if outcome.abort_requested {
+                        *state.abort_requested = true;
+                    }
+                    let text = outcome.chunk;
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
@@ -1214,7 +1264,8 @@ impl RuntimeTurnDriver {
                 call_id,
                 tool_name,
                 input_json,
-                id,
+                item_id,
+                signature,
             }) => {
                 self.log_llm_stream_event(
                     state.debug,
@@ -1236,13 +1287,15 @@ impl RuntimeTurnDriver {
                 );
                 state
                     .streamed_output
-                    .push_tool_call(call_id, tool_name, input_json, id);
+                    .push_tool_call(call_id, tool_name, input_json, item_id, signature);
             }
             LlmStreamEvent::Part(LlmOutputPart::Reasoning {
                 text,
-                id,
-                summary,
+                signature: _,
+                redacted: _,
+                item_id,
                 encrypted_content,
+                summary,
             }) => {
                 if !text.is_empty() {
                     self.log_llm_stream_event(
@@ -1269,7 +1322,7 @@ impl RuntimeTurnDriver {
                 }
                 state
                     .streamed_output
-                    .push_reasoning(text, id, summary, encrypted_content);
+                    .push_reasoning(text, item_id, summary, encrypted_content);
             }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(
@@ -1333,11 +1386,7 @@ fn debug_request_body(req: &LlmRequest) -> String {
         .map(|message| {
             serde_json::json!({
                 "role": format!("{:?}", message.role).to_ascii_lowercase(),
-                "content": message.content,
-                "kind": message.kind,
-                "image_idx": message.image_idx,
-                "tool_call_id": message.tool_call_id,
-                "tool_name": message.tool_name,
+                "blocks": message.blocks.len(),
             })
         })
         .collect::<Vec<_>>();

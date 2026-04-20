@@ -99,7 +99,7 @@ impl BenchmarkQuestionContext {
         if query.is_empty() {
             return ToolResult::err_fmt("query must not be empty");
         }
-        let limit = limit.max(1).min(50);
+        let limit = limit.clamp(1, 50);
         let query_terms = query
             .split_whitespace()
             .map(|term| term.to_ascii_lowercase())
@@ -141,7 +141,7 @@ impl BenchmarkQuestionContext {
             Ok(regex) => regex,
             Err(err) => return ToolResult::err_fmt(format!("invalid regex: {err}")),
         };
-        let limit = limit.max(1).min(100);
+        let limit = limit.clamp(1, 100);
         let mut matches = Vec::new();
         for index in 0..self.session_count() {
             let Some(session) = self.question.haystack_sessions.get(index) else {

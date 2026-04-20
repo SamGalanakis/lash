@@ -9,11 +9,13 @@ pub mod model_info;
 pub mod model_variant;
 pub mod monitor;
 pub mod oauth;
+mod paths;
 pub mod plugin;
 pub mod provider;
 pub mod runtime;
+pub mod runtime_controls;
 #[cfg(feature = "sqlite-store")]
-mod search;
+pub mod search;
 pub mod session;
 pub mod session_graph;
 pub mod session_model;
@@ -22,61 +24,14 @@ pub mod skill_prompt;
 pub mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
-mod tool_dispatch;
+pub mod tool_dispatch;
+mod tool_provider;
 pub mod tools;
 
 pub use lash_sansio::sansio;
 
-use std::path::PathBuf;
-
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
-
-/// Return the root data directory for lash.
-///
-/// Checks `LASH_HOME` env var first, falling back to `~/.lash/`.
-pub fn lash_home() -> PathBuf {
-    if let Ok(dir) = std::env::var("LASH_HOME") {
-        PathBuf::from(dir)
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".lash")
-    }
-}
-
-/// Return the cache directory for lash.
-///
-/// When `LASH_HOME` is set: `$LASH_HOME/cache`.
-/// Otherwise: `~/.cache/lash/` (via `dirs::cache_dir`).
-pub fn lash_cache_dir() -> PathBuf {
-    if std::env::var("LASH_HOME").is_ok() {
-        lash_home().join("cache")
-    } else {
-        dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from(".cache"))
-            .join("lash")
-    }
-}
-
-/// Return the preferred repo-local directory for lash artifacts.
-pub fn repo_local_lash_dir() -> PathBuf {
-    PathBuf::from(".agents").join("lash")
-}
-
-/// Return the legacy repo-local directory for lash artifacts.
-pub fn legacy_repo_local_lash_dir() -> PathBuf {
-    PathBuf::from(".lash")
-}
-
-/// Return skill search directories in override order from lowest to highest priority.
-pub fn default_skill_dirs() -> Vec<PathBuf> {
-    vec![
-        lash_home().join("skills"),
-        legacy_repo_local_lash_dir().join("skills"),
-        repo_local_lash_dir().join("skills"),
-    ]
-}
 
 // Re-exports
 pub use context_approach::{
@@ -92,19 +47,20 @@ pub use dynamic::{
 };
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
+pub use lash_sansio::llm::types::{LlmOutputPart, LlmResponse};
 pub use lash_sansio::{
     CheckpointKind, Effect, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError,
     Message, MessageOrigin, MessageRole, MessageSequence, ModeBuildInput, ModeConfig, ModePreamble,
     Part, PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt, PreparedTurnMachine,
     PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptPanel, PromptRequest,
     PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, PruneState, RenderedPrompt, Response, RlmDriver, SansIoTurnInput,
-    SessionEvent, StandardDriver, TokenUsage, ToolCallRecord, ToolDefinition, ToolExecutionMode,
-    ToolImage, ToolParam, ToolResult, ToolSurface, ToolSurfaceBuildInput, TurnMachine,
-    TurnMachineConfig,
-    UserInputProvenance, UserInputTransform, build_mode_preamble, build_prompt, build_tool_surface,
-    build_turn, default_execution_mode, default_prompt_template, execution_mode_supported,
-    messages_are_live_resume_safe,
+    PromptTemplateSection, PruneState, RenderedPrompt, Response, SansIoTurnInput, SessionEvent,
+    TokenUsage, ToolCallRecord, ToolDefinition, ToolExecutionMode, ToolImage, ToolParam,
+    ToolResult, ToolSurface, ToolSurfaceBuildInput, TurnMachine, TurnMachineConfig,
+    UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
+    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
+    execution_mode_supported, messages_are_live_resume_safe, normalized_response_parts,
+    reasoning_part, turn_limit_exhausted_message,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
@@ -116,21 +72,23 @@ pub use monitor::{
     MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorEvent, MonitorRunState, MonitorSnapshot,
     MonitorSpec, MonitorStatus, MonitorUpdateBatch, MonitorWakePolicy,
 };
+pub use paths::{
+    default_skill_dirs, lash_cache_dir, lash_home, legacy_repo_local_lash_dir, repo_local_lash_dir,
+};
 pub use plugin::ObservationalMemoryPluginFactory as BuiltinObservationalMemoryPluginFactory;
 pub use plugin::RollingHistoryPluginFactory as BuiltinRollingHistoryPluginFactory;
 pub use plugin::{
     AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
-    BuiltinMonitorPluginFactory, BuiltinRlmModePluginFactory,
-    BuiltinToolResultProjectionPluginFactory, CheckpointHookContext, CommandDef, CommandHandler,
-    CommandInvocation, CommandOutcome, CommandRegistrations, DirectCompletion,
-    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, HistoryError,
-    HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState, ModeExtras,
-    MonitorRegistrations, PersistentRuntimeServices, PluginDirective, PluginError, PluginFactory,
-    PluginHost, PluginOwned, PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook,
-    PluginSession, PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact,
-    PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
-    PromptRequestHookContext, RewriteContext, RewriteTrigger, RlmCreateExtras, RlmModePluginConfig,
+    BuiltinMonitorPluginFactory, BuiltinToolResultProjectionPluginFactory, CheckpointHookContext,
+    CommandDef, CommandHandler, CommandInvocation, CommandOutcome, CommandRegistrations,
+    DirectCompletion, ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind,
+    HistoryError, HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
+    ModeExtras, MonitorRegistrations, PersistentRuntimeServices, PluginDirective, PluginError,
+    PluginFactory, PluginHost, PluginOwned, PluginRegistrar, PluginRuntimeEvent,
+    PluginRuntimeEventHook, PluginSession, PluginSessionContext, PluginSessionSnapshot,
+    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory,
+    PromptHookContext, PromptRequestHookContext, RewriteContext, RewriteTrigger, RlmCreateExtras,
     RlmTermination, RuntimeServices, SessionAppendNode, SessionConfigChangedContext,
     SessionContextSurface, SessionCreateRequest, SessionHandle, SessionManager, SessionParam,
     SessionPlugin, SessionPluginMode, SessionReadView, SessionSnapshot, SessionStartPoint,
@@ -179,84 +137,4 @@ pub use store::{
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{BuiltinBlobProfile, SqliteStore, Store, StoreGcPolicy, StoreOptions};
-
-/// A message sent from the sandbox to the host during execution.
-#[derive(Clone, Debug)]
-pub struct SandboxMessage {
-    pub text: String,
-    /// "final", "tool_output", or other host-rendered progress events.
-    pub kind: String,
-}
-
-/// Sender for streaming progress messages from tools (e.g. live bash output).
-pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
-
-#[derive(Clone)]
-pub struct ToolExecutionContext {
-    pub session_id: String,
-    pub host: std::sync::Arc<dyn crate::plugin::SessionManager>,
-    pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
-    pub async_task_id: Option<String>,
-}
-
-impl ToolExecutionContext {
-    pub fn with_async_task(
-        mut self,
-        task_id: impl Into<String>,
-        cancellation_token: tokio_util::sync::CancellationToken,
-    ) -> Self {
-        self.async_task_id = Some(task_id.into());
-        self.cancellation_token = Some(cancellation_token);
-        self
-    }
-}
-
-/// Trait for providing tools to the sandbox. Implement this per-project.
-#[async_trait::async_trait]
-pub trait ToolProvider: Send + Sync + 'static {
-    fn definitions(&self) -> Vec<ToolDefinition>;
-    fn dynamic_snapshot(&self) -> Option<crate::dynamic::DynamicStateSnapshot> {
-        None
-    }
-    fn fork_dynamic_with_snapshot(
-        &self,
-        _snapshot: crate::dynamic::DynamicStateSnapshot,
-    ) -> Option<std::sync::Arc<dyn ToolProvider>> {
-        None
-    }
-    fn dynamic_generation(&self) -> Option<u64> {
-        None
-    }
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult;
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        _context: &ToolExecutionContext,
-    ) -> ToolResult {
-        self.execute(name, args).await
-    }
-
-    /// Execute with progress streaming. Default: delegates to execute().
-    async fn execute_streaming(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        _progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.execute(name, args).await
-    }
-
-    /// Execute with progress streaming and session context. Default: delegates to
-    /// `execute_streaming()`.
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        _context: &ToolExecutionContext,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.execute_streaming(name, args, progress).await
-    }
-}
+pub use tool_provider::{ProgressSender, SandboxMessage, ToolExecutionContext, ToolProvider};

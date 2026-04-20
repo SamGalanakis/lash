@@ -870,7 +870,7 @@ fn should_compress_blob(
 fn compress_blob(content: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     std::io::Write::write_all(&mut encoder, content).expect("compress blob");
-    encoder.finish().expect("finish blob compression")
+    encoder.finish().expect("submit blob compression")
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -2209,8 +2209,9 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             }],
             user_input: None,
             origin: None,

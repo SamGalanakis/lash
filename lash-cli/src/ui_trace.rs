@@ -640,7 +640,7 @@ mod tests {
         recorder.record_session_event(&SessionEvent::TextDelta {
             content: "world".into(),
         });
-        recorder.finish("hello\nworld").expect("finish trace");
+        recorder.finish("hello\nworld").expect("submit trace");
 
         let trace_json =
             fs::read_to_string(dir.join("capture.json")).expect("read generated trace file");
@@ -673,7 +673,7 @@ mod tests {
         recorder.record_start_turn();
         recorder.maybe_record_render_checkpoint("first frame");
         recorder.maybe_record_render_checkpoint("second frame");
-        recorder.finish("final frame").expect("finish trace");
+        recorder.finish("final frame").expect("submit trace");
 
         let trace_json =
             fs::read_to_string(dir.join("capture.json")).expect("read generated trace file");

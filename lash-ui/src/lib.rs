@@ -925,10 +925,10 @@ impl UiExtension for MonitorUiExtension {
     }
 
     fn handle_session_event(&self, event: &SessionEvent) -> Vec<UiHostEffect> {
-        if matches!(event, SessionEvent::Done | SessionEvent::Error { .. }) {
-            if let Ok(mut state) = self.state.lock() {
-                state.outstanding_wakes.clear();
-            }
+        if matches!(event, SessionEvent::Done | SessionEvent::Error { .. })
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.outstanding_wakes.clear();
         }
         Vec::new()
     }
@@ -1409,13 +1409,11 @@ mod tests {
         let command_specs = extensions.command_specs();
         let command_names = command_specs
             .iter()
-            .into_iter()
             .map(|spec| spec.name.to_string())
             .collect::<BTreeSet<_>>();
         let shortcut_specs = extensions.shortcut_specs();
         let shortcuts = shortcut_specs
             .iter()
-            .into_iter()
             .map(|spec| spec.chord)
             .collect::<BTreeSet<_>>();
 

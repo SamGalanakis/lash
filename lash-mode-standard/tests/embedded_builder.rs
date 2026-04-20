@@ -19,6 +19,7 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         }],
@@ -69,6 +70,9 @@ async fn embedded_runtime_builder_loads_state_from_store() {
 
     let runtime = LashRuntime::builder()
         .with_store(store.clone() as Arc<dyn RuntimeStore>)
+        .with_plugin_factories(vec![Arc::new(
+            lash_mode_standard::BuiltinStandardModePluginFactory::default(),
+        )])
         .build()
         .await
         .expect("runtime");
@@ -106,6 +110,9 @@ async fn embedded_runtime_builder_rejects_store_bound_to_different_session_id() 
     let err = match LashRuntime::builder()
         .with_store(store as Arc<dyn RuntimeStore>)
         .with_session_id("beta")
+        .with_plugin_factories(vec![Arc::new(
+            lash_mode_standard::BuiltinStandardModePluginFactory::default(),
+        )])
         .build()
         .await
     {

@@ -33,6 +33,7 @@ fn user_message(content: &str) -> Message {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         }],
@@ -54,6 +55,7 @@ fn text_message(role: MessageRole, content: impl Into<String>) -> Message {
             tool_call_id: None,
             tool_name: None,
             tool_item_id: None,
+            tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
         }],
@@ -205,7 +207,7 @@ struct ExecDriver;
 impl ProtocolDriverHandle for ExecDriver {
     fn prepare_iteration(&self, _ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartExec {
-            code: "observe 1".to_string(),
+            code: "print 1".to_string(),
             driver_state: driver_state("exec-state".to_string()),
         }]
     }
@@ -266,8 +268,9 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             },
             Part {
                 id: "m0.p1".to_string(),
@@ -277,8 +280,9 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
+                tool_signature: None,
                 prune_state: PruneState::Intact,
-            reasoning_meta: None,
+                reasoning_meta: None,
             },
         ],
         user_input: None,
@@ -289,19 +293,19 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
     let effects = drain_effects(&mut machine);
     let (_, request) = find_llm_call(&effects).expect("llm call");
 
+    use crate::llm::types::LlmContentBlock;
     assert_eq!(request.attachments.len(), 1);
-    assert!(
-        request
-            .messages
+    assert!(request.messages.iter().any(|msg| {
+        msg.blocks
             .iter()
-            .any(|msg| msg.kind == "image" && msg.image_idx == 0)
-    );
-    assert!(
-        request
-            .messages
-            .iter()
-            .any(|msg| msg.kind == "text" && msg.content.contains("explain this"))
-    );
+            .any(|block| matches!(block, LlmContentBlock::Image { attachment_idx: 0 }))
+    }));
+    assert!(request.messages.iter().any(|msg| {
+        msg.blocks.iter().any(|block| match block {
+            LlmContentBlock::Text(text) => text.contains("explain this"),
+            _ => false,
+        })
+    }));
 }
 
 #[test]
@@ -441,7 +445,7 @@ fn exec_driver_state_round_trip() {
 
     let effects = drain_effects(&mut machine);
     let (exec_id, code) = find_exec_call(&effects).expect("exec call");
-    assert_eq!(code, "observe 1");
+    assert_eq!(code, "print 1");
     machine.handle_response(Response::ExecResult {
         id: *exec_id,
         result: Ok(crate::ExecResponse {
