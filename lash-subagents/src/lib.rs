@@ -1,6 +1,10 @@
 mod capability;
 mod host;
+mod local;
 mod policy;
+mod queue;
+mod routing;
+mod types;
 
 pub use capability::{
     Capability, CapabilityContext, CapabilityRegistry, CapabilitySpec, DenyList, TierCapability,

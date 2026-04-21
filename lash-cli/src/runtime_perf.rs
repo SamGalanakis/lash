@@ -14,7 +14,7 @@ use lash::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, L
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
 use lash::*;
 use lash_default_tools::{
-    DefaultToolPluginOptions, DefaultToolSurfaceProfile, EmbeddedRuntimeBuilderExt,
+    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
 use serde::Serialize;
 use stats_alloc::Stats;
@@ -906,17 +906,25 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
 
     let profile = DefaultToolSurfaceProfile::for_runtime(&context_approach, false, false);
     let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimeStore>;
+    let mut factories = tool_plugin_factories(DefaultToolPluginOptions {
+        execution_mode,
+        context_approach: context_approach.clone(),
+        bundles: profile.bundles,
+        tavily_api_key: None,
+        instruction_source: None,
+    });
+    factories.push(Arc::new(
+        lash_mode_standard::BuiltinStandardModePluginFactory,
+    ));
+    factories.push(Arc::new(
+        lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
+    ));
+    let plugin_host = PluginHost::new(factories).with_dynamic_tools();
     let builder = LashRuntime::builder()
         .with_policy(policy.clone())
         .with_store(Arc::clone(&store))
         .with_session_task_executor(Arc::new(TokioSessionTaskExecutor::default()))
-        .with_default_tool_bundles(DefaultToolPluginOptions {
-            execution_mode,
-            context_approach,
-            bundles: profile.bundles,
-            tavily_api_key: None,
-            instruction_source: None,
-        });
+        .with_plugin_host(plugin_host);
     let builder = match scenario {
         RuntimePerfScenario::OpenAiCompatStream => builder.with_llm_factory(|provider| {
             Box::new(OpenAiGenericAdapter::new(provider.llm_timeouts()))

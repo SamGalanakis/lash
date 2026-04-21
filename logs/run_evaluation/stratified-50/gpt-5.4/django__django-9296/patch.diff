@@ -1,0 +1,15 @@
+diff --git a/django/core/paginator.py b/django/core/paginator.py
+index 1f92da5d4fd..d08e449fed3 100644
+--- a/django/core/paginator.py
++++ b/django/core/paginator.py
+@@ -73,6 +73,10 @@ class Paginator:
+             top = self.count
+         return self._get_page(self.object_list[bottom:top], number, self)
+
++    def __iter__(self):
++        for page_number in self.page_range:
++            yield self.page(page_number)
++
+     def _get_page(self, *args, **kwargs):
+         """
+         Return an instance of a single page.

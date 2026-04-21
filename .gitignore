@@ -18,6 +18,9 @@ bench/**/vendor/
 bench/**/runs/
 bench/**/responses/
 bench/**/results/
+# SWE-bench eval outputs dumped into the repo root by the runner.
+/logs/
+/*.stratified-*.json
 __pycache__/
 *.pyc
 .DS_Store

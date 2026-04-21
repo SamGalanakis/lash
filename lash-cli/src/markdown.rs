@@ -543,10 +543,8 @@ impl MdRenderer {
             Event::End(TagEnd::TableHead) => {
                 self.in_table_head = false;
             }
-            Event::Start(Tag::TableRow) => {
-                if !self.in_table_head {
-                    self.table_rows.push(Vec::new());
-                }
+            Event::Start(Tag::TableRow) if !self.in_table_head => {
+                self.table_rows.push(Vec::new());
             }
             Event::End(TagEnd::TableRow) => {}
             Event::Start(Tag::TableCell) => {
@@ -587,12 +585,10 @@ impl MdRenderer {
 
             // ── Paragraph ──
             Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => {
-                if !self.in_table {
-                    self.flush_line();
-                    if !self.in_item {
-                        self.blank_line();
-                    }
+            Event::End(TagEnd::Paragraph) if !self.in_table => {
+                self.flush_line();
+                if !self.in_item {
+                    self.blank_line();
                 }
             }
 

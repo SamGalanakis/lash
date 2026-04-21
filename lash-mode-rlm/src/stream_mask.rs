@@ -184,25 +184,11 @@ impl FenceDetector {
             };
         }
 
-        // Flush everything up to the last newline. The remainder
-        // (current incomplete line) is held as pending because it
-        // could be the start of a fence opener split across chunks.
-        let safe_len = match self.pending.rfind('\n') {
-            Some(pos) => pos + 1,
-            None => {
-                if self.pending.len() <= 16 {
-                    0
-                } else {
-                    // Walk backwards from the target to find a char
-                    // boundary so we don't slice mid-multibyte.
-                    let mut pos = self.pending.len() - 16;
-                    while pos > 0 && !self.pending.is_char_boundary(pos) {
-                        pos -= 1;
-                    }
-                    pos
-                }
-            }
-        };
+        // Flush everything except a suffix that could still become a
+        // split ```lashlang opener. This keeps prose-only final replies
+        // from holding an arbitrary tail while still preserving cases
+        // like "`" -> "``" -> "```lash" -> "lang".
+        let safe_len = self.pending.len() - possible_fence_opener_suffix_len(&self.pending);
 
         if safe_len == 0 {
             return AssistantStreamTransform {
@@ -247,6 +233,35 @@ fn find_fence_opener(text: &str) -> Option<usize> {
     None
 }
 
+fn possible_fence_opener_suffix_len(text: &str) -> usize {
+    text.char_indices()
+        .find_map(|(idx, _)| {
+            let suffix = &text[idx..];
+            suffix_can_be_fence_opener_prefix(suffix).then_some(suffix.len())
+        })
+        .unwrap_or(0)
+}
+
+fn suffix_can_be_fence_opener_prefix(suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return false;
+    }
+    const BACKTICKS: &str = "```";
+    const LANG: &str = "lashlang";
+
+    if BACKTICKS.starts_with(suffix) {
+        return true;
+    }
+    let Some(after_ticks) = suffix.strip_prefix(BACKTICKS) else {
+        return false;
+    };
+    if after_ticks.is_empty() {
+        return true;
+    }
+    let after_padding = after_ticks.trim_start();
+    after_padding.is_empty() || LANG.starts_with(after_padding)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +272,41 @@ mod tests {
         let t = d.process_chunk("Hello, here's my plan.\n\n");
         assert_eq!(t.chunk, "Hello, here's my plan.\n\n");
         assert!(t.events.is_empty());
+    }
+
+    #[test]
+    fn short_prose_without_newline_streams_immediately() {
+        let mut d = FenceDetector::new();
+        let t = d.process_chunk("Hi - what can I help with?");
+        assert_eq!(t.chunk, "Hi - what can I help with?");
+        assert!(d.pending.is_empty());
+        assert!(t.events.is_empty());
+    }
+
+    #[test]
+    fn only_possible_fence_suffix_is_held() {
+        let mut d = FenceDetector::new();
+        let t = d.process_chunk("Plan. ```la");
+        assert_eq!(t.chunk, "Plan. ");
+        assert_eq!(d.pending, "```la");
+
+        let t = d.process_chunk("shlang\n");
+        assert_eq!(t.chunk, "");
+        assert!(d.inside_fence);
+        assert_eq!(t.events.len(), 1);
+    }
+
+    #[test]
+    fn non_lashlang_fence_flushes_after_it_stops_matching() {
+        let mut d = FenceDetector::new();
+        let t = d.process_chunk("Example: ``");
+        assert_eq!(t.chunk, "Example: ");
+        assert_eq!(d.pending, "``");
+
+        let t = d.process_chunk("`python\n");
+        assert_eq!(t.chunk, "```python\n");
+        assert!(!d.inside_fence);
+        assert!(d.pending.is_empty());
     }
 
     #[test]

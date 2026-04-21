@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use crate::{ExecutionMode, PromptContext, PromptContribution, PromptTemplate};
 
 #[derive(Clone, Debug)]
@@ -47,14 +45,13 @@ fn merge_prompt_contributions(contributions: Vec<PromptContribution>) -> Vec<Pro
             .then_with(|| left.content.cmp(&right.content))
     });
 
-    let mut seen = BTreeSet::new();
-    merged.retain(|contribution| {
-        seen.insert((
-            slot_order(contribution.slot),
-            contribution.priority,
-            contribution.title.clone().unwrap_or_default(),
-            contribution.content.clone(),
-        ))
+    // Duplicates are adjacent after the sort, so `dedup_by` on &str
+    // refs drops them without cloning anything.
+    merged.dedup_by(|a, b| {
+        slot_order(a.slot) == slot_order(b.slot)
+            && a.priority == b.priority
+            && a.title.as_deref() == b.title.as_deref()
+            && a.content == b.content
     });
     merged
 }

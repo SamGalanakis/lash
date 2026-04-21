@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::mode::ModePreamble;
 use crate::prompt::{PreparedPrompt, PromptBuildInput, build_prompt};
 use crate::sansio::{RlmTermination, TurnMachine, TurnMachineConfig};
@@ -10,7 +12,7 @@ pub struct SansIoTurnInput {
     pub mode: crate::ExecutionMode,
     pub messages: MessageSequence,
     pub run_offset: usize,
-    pub mode_preamble: ModePreamble,
+    pub mode_preamble: Arc<ModePreamble>,
     pub tool_surface: ToolSurface,
     pub prompt_template: PromptTemplate,
     pub prompt_contributions: Vec<PromptContribution>,
@@ -24,7 +26,7 @@ pub struct PreparedTurnMachine {
     pub machine: TurnMachine,
     pub prepared_prompt: PreparedPrompt,
     pub tool_surface: ToolSurface,
-    pub mode_preamble: ModePreamble,
+    pub mode_preamble: Arc<ModePreamble>,
 }
 
 pub fn build_turn(input: SansIoTurnInput) -> PreparedTurnMachine {
@@ -136,7 +138,7 @@ mod tests {
     #[test]
     fn build_turn_creates_machine_with_rendered_system_prompt() {
         let tool_surface = ToolSurface::from_tools(vec![tool("read_file")]);
-        let mode_preamble = ModePreamble {
+        let mode_preamble = Arc::new(ModePreamble {
             config: ModeConfig {
                 protocol: Arc::new(NoopDriver),
                 sync_execution_surface: false,
@@ -146,7 +148,7 @@ mod tests {
             omitted_tool_count: 0,
             execution_prompt: "test prompt".to_string(),
             prompt_contributions: Vec::new(),
-        };
+        });
         let prepared = build_turn(SansIoTurnInput {
             session_id: "session".to_string(),
             run_session_id: Some("run".to_string()),

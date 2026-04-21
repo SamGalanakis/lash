@@ -1,0 +1,438 @@
+//! Session state envelopes and persistence helpers.
+//!
+//! Extracted from `runtime/mod.rs`. `SessionStateEnvelope` and
+//! `PersistedSessionState` keep their original public paths via `pub use`
+//! in `mod.rs`; the helper functions are `pub(super)` so sibling runtime
+//! modules (`mod.rs`, `session_manager.rs`) can reach them via
+//! `super::*`.
+
+use lash_sansio::PromptUsage;
+
+use crate::session_model::{Message, SessionPolicy, TokenUsage, plugin_message_to_message};
+use crate::{PersistedTurnState, ToolCallRecord};
+
+use super::usage::TokenLedgerEntry;
+
+/// Serializable session read-model exported to hosts and plugins.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SessionStateEnvelope {
+    pub session_id: String,
+    #[serde(default)]
+    pub policy: SessionPolicy,
+    #[serde(default)]
+    pub session_graph: crate::SessionGraph,
+    #[serde(default)]
+    pub iteration: usize,
+    #[serde(default)]
+    pub token_usage: TokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_usage: Option<PromptUsage>,
+}
+
+impl SessionStateEnvelope {
+    pub fn projected_messages(&self) -> &[Message] {
+        self.session_graph.projected_messages()
+    }
+
+    pub fn project_messages(&self) -> Vec<Message> {
+        self.session_graph.project_messages()
+    }
+
+    pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
+        self.session_graph.projected_tool_calls()
+    }
+
+    pub fn project_tool_calls(&self) -> Vec<ToolCallRecord> {
+        self.session_graph.project_tool_calls()
+    }
+
+    pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+        self.session_graph
+            .merge_active_projection(messages, tool_calls);
+    }
+
+    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
+        self.session_graph.replace_tool_call_projection(tool_calls);
+    }
+
+    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+        self.session_graph
+            .append_projection_delta(messages, tool_calls);
+    }
+
+    pub fn read_view(&self) -> crate::SessionReadView {
+        crate::SessionReadView::from_state(self)
+    }
+}
+
+impl Default for SessionStateEnvelope {
+    fn default() -> Self {
+        Self {
+            session_id: "root".to_string(),
+            policy: SessionPolicy::default(),
+            session_graph: crate::SessionGraph::default(),
+            iteration: 0,
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: None,
+        }
+    }
+}
+
+/// Serializable persistence snapshot used by stores, resume, and child session snapshots.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PersistedSessionState {
+    pub session_id: String,
+    #[serde(default)]
+    pub policy: SessionPolicy,
+    #[serde(default)]
+    pub session_graph: crate::SessionGraph,
+    #[serde(default)]
+    pub iteration: usize,
+    #[serde(default)]
+    pub token_usage: TokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_usage: Option<PromptUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_state_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_state_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_state_snapshot: Option<crate::DynamicStateSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_snapshot: Option<Vec<u8>>,
+    /// Cost-accounting ledger. Every LLM call (parent turns, subagent
+    /// children, compaction, observers, background helpers) contributes an
+    /// entry keyed by `(source, model)`. Separate from `token_usage`
+    /// which tracks context-window accounting only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_ledger: Vec<TokenLedgerEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_ref: Option<crate::store::BlobRef>,
+    #[serde(skip)]
+    pub persisted_graph_node_count: usize,
+    #[serde(skip)]
+    pub graph_replace_required: bool,
+}
+
+impl PersistedSessionState {
+    pub fn from_state(state: SessionStateEnvelope) -> Self {
+        Self {
+            session_id: state.session_id,
+            policy: state.policy,
+            session_graph: state.session_graph,
+            iteration: state.iteration,
+            token_usage: state.token_usage,
+            last_prompt_usage: state.last_prompt_usage,
+            dynamic_state_ref: None,
+            dynamic_state_generation: None,
+            dynamic_state_snapshot: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: None,
+            execution_state_snapshot: None,
+            token_ledger: Vec::new(),
+            checkpoint_ref: None,
+            persisted_graph_node_count: 0,
+            graph_replace_required: false,
+        }
+    }
+
+    pub fn export_state(&self) -> SessionStateEnvelope {
+        SessionStateEnvelope {
+            session_id: self.session_id.clone(),
+            policy: self.policy.clone(),
+            session_graph: self.session_graph.clone(),
+            iteration: self.iteration,
+            token_usage: self.token_usage.clone(),
+            last_prompt_usage: self.last_prompt_usage.clone(),
+        }
+    }
+
+    pub fn apply_exported_state(&mut self, state: &SessionStateEnvelope) {
+        self.session_id = state.session_id.clone();
+        self.policy = state.policy.clone();
+        self.session_graph = state.session_graph.clone();
+        self.iteration = state.iteration;
+        self.token_usage = state.token_usage.clone();
+        self.last_prompt_usage = state.last_prompt_usage.clone();
+    }
+
+    pub fn stamp_runtime_state(
+        &mut self,
+        dynamic_state: Option<&crate::DynamicStateSnapshot>,
+        plugin_snapshot: Option<&crate::PluginSessionSnapshot>,
+    ) {
+        self.dynamic_state_snapshot = dynamic_state.cloned();
+        self.dynamic_state_generation = dynamic_state.map(|snapshot| snapshot.base_generation);
+        self.plugin_snapshot = plugin_snapshot.cloned();
+    }
+
+    pub fn usage_report(&self) -> super::usage::SessionUsageReport {
+        super::usage::SessionUsageReport::from_entries(&self.token_ledger)
+    }
+
+    pub fn projected_messages(&self) -> &[Message] {
+        self.session_graph.projected_messages()
+    }
+
+    pub fn project_messages(&self) -> Vec<Message> {
+        self.session_graph.project_messages()
+    }
+
+    pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
+        self.session_graph.projected_tool_calls()
+    }
+
+    pub fn project_tool_calls(&self) -> Vec<ToolCallRecord> {
+        self.session_graph.project_tool_calls()
+    }
+
+    pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+        self.session_graph
+            .merge_active_projection(messages, tool_calls);
+        self.graph_replace_required = false;
+    }
+
+    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
+        self.session_graph.replace_tool_call_projection(tool_calls);
+        self.graph_replace_required = false;
+    }
+
+    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+        self.session_graph
+            .append_projection_delta(messages, tool_calls);
+    }
+
+    pub fn read_view(&self) -> crate::SessionReadView {
+        crate::SessionReadView::from_persisted_state(self)
+    }
+
+    pub fn session_graph(&self) -> &crate::SessionGraph {
+        &self.session_graph
+    }
+
+    pub fn policy(&self) -> &SessionPolicy {
+        &self.policy
+    }
+
+    pub fn turn_state(&self) -> PersistedTurnState {
+        PersistedTurnState {
+            iteration: self.iteration,
+            token_usage: self.token_usage.clone(),
+            last_prompt_usage: self.last_prompt_usage.clone(),
+        }
+    }
+
+    pub fn token_ledger(&self) -> &[TokenLedgerEntry] {
+        &self.token_ledger
+    }
+
+    pub fn apply_persisted_commit_result(
+        &mut self,
+        result: crate::store::PersistedStateCommitResult,
+    ) {
+        self.checkpoint_ref = Some(result.checkpoint_ref);
+        self.dynamic_state_ref = result.manifest.dynamic_state_ref;
+        self.dynamic_state_generation = self
+            .dynamic_state_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.base_generation);
+        self.plugin_snapshot_ref = result.manifest.plugin_snapshot_ref;
+        self.plugin_snapshot_revision = result.manifest.plugin_snapshot_revision;
+        self.persisted_graph_node_count = result.persisted_graph_node_count;
+        self.graph_replace_required = false;
+        self.dynamic_state_snapshot = None;
+        self.plugin_snapshot = None;
+        self.execution_state_snapshot = None;
+    }
+
+    pub fn set_execution_state_snapshot(&mut self, execution_state_snapshot: Option<Vec<u8>>) {
+        self.execution_state_snapshot = execution_state_snapshot;
+    }
+
+    pub fn execution_state_snapshot(&self) -> Option<&[u8]> {
+        self.execution_state_snapshot.as_deref()
+    }
+}
+
+impl Default for PersistedSessionState {
+    fn default() -> Self {
+        Self {
+            session_id: "root".to_string(),
+            policy: SessionPolicy::default(),
+            session_graph: crate::SessionGraph::default(),
+            iteration: 0,
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: None,
+            dynamic_state_ref: None,
+            dynamic_state_generation: None,
+            dynamic_state_snapshot: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: None,
+            execution_state_snapshot: None,
+            token_ledger: Vec::new(),
+            checkpoint_ref: None,
+            persisted_graph_node_count: 0,
+            graph_replace_required: false,
+        }
+    }
+}
+
+pub(super) fn persisted_session_config(policy: &SessionPolicy) -> crate::PersistedSessionConfig {
+    crate::PersistedSessionConfig {
+        provider_id: policy.provider.id().to_string(),
+        configured_model: policy.model.clone(),
+        context_window: policy.max_context_tokens.unwrap_or_default() as u64,
+        execution_mode: policy.execution_mode,
+        context_approach: policy.context_approach.clone(),
+        model_variant: policy.model_variant.clone(),
+    }
+}
+
+pub(super) fn apply_persisted_session_config(
+    policy: &mut SessionPolicy,
+    config: &crate::PersistedSessionConfig,
+) {
+    if !config.configured_model.is_empty() {
+        policy.model = config.configured_model.clone();
+    }
+    if config.context_window > 0 {
+        policy.max_context_tokens = Some(config.context_window as usize);
+    }
+    policy.execution_mode = config.execution_mode;
+    policy.context_approach = config.context_approach.clone();
+    policy.model_variant = config.model_variant.clone();
+}
+
+pub(super) fn apply_session_checkpoint(
+    state: &mut PersistedSessionState,
+    checkpoint: Option<crate::store::HydratedSessionCheckpoint>,
+) {
+    let Some(checkpoint) = checkpoint else {
+        state.dynamic_state_ref = None;
+        state.dynamic_state_generation = None;
+        state.dynamic_state_snapshot = None;
+        state.plugin_snapshot_ref = None;
+        state.plugin_snapshot_revision = None;
+        state.plugin_snapshot = None;
+        state.execution_state_snapshot = None;
+        return;
+    };
+    state.iteration = checkpoint.turn_state.iteration;
+    state.token_usage = checkpoint.turn_state.token_usage;
+    state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
+    state.dynamic_state_ref = checkpoint.dynamic_state_ref.clone();
+    state.dynamic_state_generation = checkpoint
+        .dynamic_state
+        .as_ref()
+        .map(|snapshot| snapshot.base_generation);
+    state.dynamic_state_snapshot = checkpoint.dynamic_state;
+    state.plugin_snapshot_ref = checkpoint.plugin_snapshot_ref.clone();
+    state.plugin_snapshot_revision = checkpoint.plugin_snapshot_revision;
+    state.plugin_snapshot = checkpoint.plugin_snapshot;
+    state.execution_state_snapshot = None;
+}
+
+pub(super) fn apply_session_head(
+    state: &mut PersistedSessionState,
+    head: &crate::store::SessionHead,
+) {
+    state.session_graph = head.graph.clone();
+    state.checkpoint_ref = head.checkpoint_ref.clone();
+    state.token_ledger = head.token_ledger.clone();
+    state.dynamic_state_ref = None;
+    state.dynamic_state_generation = None;
+    state.dynamic_state_snapshot = None;
+    state.plugin_snapshot_ref = None;
+    state.plugin_snapshot_revision = None;
+    state.plugin_snapshot = None;
+    state.execution_state_snapshot = None;
+    state.persisted_graph_node_count = state.session_graph.nodes.len();
+    state.graph_replace_required = false;
+    apply_persisted_session_config(&mut state.policy, &head.config);
+}
+
+pub(super) fn session_head_meta_from_state(
+    state: &PersistedSessionState,
+) -> crate::store::SessionHeadMeta {
+    crate::store::SessionHeadMeta {
+        session_id: state.session_id.clone(),
+        config: persisted_session_config(&state.policy),
+        checkpoint_ref: state.checkpoint_ref.clone(),
+        leaf_node_id: state.session_graph.leaf_node_id.clone(),
+        graph_node_count: state.session_graph.nodes.len(),
+        token_ledger: Vec::new(),
+    }
+}
+
+pub(super) async fn persist_session_graph_and_head(
+    store: &(dyn crate::store::RuntimeStore + '_),
+    state: &mut PersistedSessionState,
+) {
+    let nodes_len = state.session_graph.nodes.len();
+    if state.graph_replace_required || state.persisted_graph_node_count > nodes_len {
+        store.replace_session_graph(&state.session_graph).await;
+    } else if state.persisted_graph_node_count < nodes_len {
+        store
+            .append_session_graph_nodes(
+                &state.session_graph.nodes[state.persisted_graph_node_count..],
+            )
+            .await;
+    }
+    store
+        .save_session_head_meta(session_head_meta_from_state(state))
+        .await;
+    state.persisted_graph_node_count = nodes_len;
+    state.graph_replace_required = false;
+}
+
+pub(super) async fn load_session_checkpoint(
+    store: &(dyn crate::store::RuntimeStore + '_),
+    checkpoint_ref: Option<&crate::store::BlobRef>,
+) -> Option<crate::store::HydratedSessionCheckpoint> {
+    let checkpoint_ref = checkpoint_ref?;
+    crate::store::get_checkpoint(store, checkpoint_ref).await
+}
+
+pub(super) fn clear_persisted_runtime_caches(state: &mut PersistedSessionState) {
+    state.dynamic_state_snapshot = None;
+    state.plugin_snapshot = None;
+    state.execution_state_snapshot = None;
+}
+
+pub(super) fn append_session_nodes_to_state(
+    state: &mut PersistedSessionState,
+    nodes: &[crate::SessionAppendNode],
+) -> Vec<String> {
+    let mut node_ids = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        match node {
+            crate::SessionAppendNode::Message { message } => {
+                let message = plugin_message_to_message(message, None);
+                node_ids.push(state.session_graph.append_message(message));
+            }
+            crate::SessionAppendNode::Plugin { plugin_type, body } => {
+                node_ids.push(
+                    state
+                        .session_graph
+                        .append_plugin(plugin_type.clone(), body.clone()),
+                );
+            }
+        }
+    }
+    normalize_session_graph(state);
+    node_ids
+}
+
+pub(super) fn normalize_session_graph(state: &mut PersistedSessionState) {
+    if state.session_graph.heal_orphaned_leaf() {
+        state.graph_replace_required = true;
+    }
+}

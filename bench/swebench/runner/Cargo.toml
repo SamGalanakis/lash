@@ -11,7 +11,6 @@ path = "src/main.rs"
 [dependencies]
 lash = { path = "../../../lash", default-features = false, features = ["full"] }
 lash-default-tools = { path = "../../../lash-default-tools" }
-lash-export = { path = "../../../lash-export" }
 lash-mode-rlm = { path = "../../../lash-mode-rlm" }
 lash-mode-standard = { path = "../../../lash-mode-standard" }
 lash-subagents = { path = "../../../lash-subagents" }

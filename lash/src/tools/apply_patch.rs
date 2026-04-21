@@ -336,10 +336,8 @@ fn resolve_patch_workdir(workdir: Option<&str>) -> Result<PathBuf, String> {
 fn parse_heredoc_start(line: &str) -> Option<&str> {
     let marker = if let Some(rest) = line.strip_prefix("<<") {
         rest
-    } else if let Some(rest) = line.strip_prefix("apply_patch <<") {
-        rest
     } else {
-        return None;
+        line.strip_prefix("apply_patch <<")?
     };
 
     let marker = marker.trim();

@@ -301,21 +301,7 @@ impl RuntimeTurnDriver {
         };
         self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
         let tool_surface = self.session.tool_surface(&self.session_id, execution_mode);
-        let mode_preamble = self
-            .session
-            .mode_preamble(&self.session_id, execution_mode)
-            .as_ref()
-            .clone();
-        let mut base_prompt_contributions = mode_preamble.prompt_contributions.clone();
-        base_prompt_contributions.extend(self.session.context_prompt_contributions().to_vec());
-        let base_prompt = crate::build_prompt(crate::PromptBuildInput {
-            mode: execution_mode,
-            template: self.host.core.prompt_template.clone(),
-            execution_prompt: mode_preamble.execution_prompt.clone(),
-            tool_names: mode_preamble.tool_names.clone(),
-            omitted_tool_count: mode_preamble.omitted_tool_count,
-            contributions: base_prompt_contributions,
-        });
+        let mode_preamble = self.session.mode_preamble(&self.session_id, execution_mode);
         let prompt_state = SessionStateEnvelope {
             session_id: self.session_id.clone(),
             policy: session_policy.clone(),
@@ -328,7 +314,6 @@ impl RuntimeTurnDriver {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: self.session_id.clone(),
                 host: Arc::clone(&self.session_manager),
-                prompt: base_prompt.context.clone(),
                 state: crate::SessionReadView::from_graph_projection(
                     &prompt_state,
                     self.base_graph.clone(),

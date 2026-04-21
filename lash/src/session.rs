@@ -202,7 +202,7 @@ impl AsyncToolReply {
 pub struct Session {
     session_id: String,
     rlm_runtime: Option<LashlangRuntime>,
-    last_repl_tools_json: Option<String>,
+    last_repl_tools_json: Option<Arc<String>>,
     services: RuntimeServices,
     include_base_tools: bool,
     context_surface_revision: u64,
@@ -446,7 +446,7 @@ impl Session {
         self.shared_tool_catalog(session_id, mode).as_ref().clone()
     }
 
-    fn rlm_tools_json(&self, session_id: &str) -> String {
+    fn rlm_tools_json(&self, session_id: &str) -> Arc<String> {
         let entry = self.tool_surface_cache_entry(session_id, crate::ExecutionMode::Rlm);
         let catalog = entry.catalog();
         tracing::debug!(
@@ -458,7 +458,7 @@ impl Session {
                 .collect::<Vec<_>>(),
             "serializing RLM tool catalog"
         );
-        entry.rlm_tools_json().as_ref().clone()
+        entry.rlm_tools_json()
     }
 
     fn async_tool_handle_value(id: &str, tool_name: &str) -> serde_json::Value {
@@ -1115,12 +1115,18 @@ impl Session {
             tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
             "refreshing RLM tool surface"
         );
-        if self.last_repl_tools_json.as_deref() == Some(tools_json.as_str()) {
+        // Fast-path: same Arc as last time → definitely identical.
+        // Fallback: same contents → also skip. The tool-surface cache
+        // reuses the inner Arc across turns when inputs are stable, so
+        // the fast path fires most often.
+        if let Some(last) = self.last_repl_tools_json.as_ref()
+            && (Arc::ptr_eq(last, &tools_json) || last.as_str() == tools_json.as_str())
+        {
             return Ok(());
         }
         let generation = self.tools().dynamic_generation().unwrap_or(0);
         self.runtime()?.send(LashlangRequest::Reconfigure {
-            tools_json: tools_json.clone(),
+            tools_json: (*tools_json).clone(),
             generation,
             observe_projection: self.rlm_observe_projection_config.clone(),
         })?;
@@ -1139,7 +1145,7 @@ impl Session {
                     if let Some(err) = error {
                         return Err(SessionError::Protocol(format!("reconfigure failed: {err}")));
                     }
-                    self.last_repl_tools_json = Some(tools_json.clone());
+                    self.last_repl_tools_json = Some(tools_json);
                     break;
                 }
                 _ => continue,
@@ -1157,7 +1163,7 @@ impl Session {
             "initializing RLM tool surface"
         );
         self.runtime()?.send(LashlangRequest::Init {
-            tools_json: tools_json.clone(),
+            tools_json: (*tools_json).clone(),
             session_id: session_id.to_string(),
             observe_projection: self.rlm_observe_projection_config.clone(),
         })?;

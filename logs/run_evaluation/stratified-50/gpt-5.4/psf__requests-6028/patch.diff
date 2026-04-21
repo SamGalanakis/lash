@@ -1,0 +1,28 @@
+diff --git a/requests/utils.py b/requests/utils.py
+index 1c2ae4e0..44f2e9cd 100644
+--- a/requests/utils.py
++++ b/requests/utils.py
+@@ -988,14 +988,17 @@ def get_auth_from_url(url):
+
+     :rtype: (str,str)
+     """
+-    parsed = urlparse(url)
+-
+     try:
+-        auth = (unquote(parsed.username), unquote(parsed.password))
+-    except (AttributeError, TypeError):
+-        auth = ('', '')
++        auth = parse_url(url).auth
++    except (AttributeError, TypeError, ValueError):
++        auth = None
+
+-    return auth
++    if not auth:
++        return '', ''
++
++    username, password = (auth.split(':', 1) + [''])[:2]
++
++    return unquote(username), unquote(password)
+
+
+ # Moved outside of function to avoid recompile every call

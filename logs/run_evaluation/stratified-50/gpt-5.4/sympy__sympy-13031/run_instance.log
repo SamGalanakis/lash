@@ -1,0 +1,77 @@
+2026-04-21 02:45:58,708 - INFO - Creating container for sympy__sympy-13031...
+2026-04-21 02:45:58,887 - INFO - Container for sympy__sympy-13031 created: 5d1f2b0e5082eb5e64cb71a568ef63f8af618fbdbca4c1c2bfc7b7032b46e7f9
+2026-04-21 02:45:58,977 - INFO - Container for sympy__sympy-13031 started: 5d1f2b0e5082eb5e64cb71a568ef63f8af618fbdbca4c1c2bfc7b7032b46e7f9
+2026-04-21 02:45:58,977 - INFO - Intermediate patch for sympy__sympy-13031 written to logs/run_evaluation/stratified-50/gpt-5.4/sympy__sympy-13031/patch.diff, now applying to container...
+2026-04-21 02:45:59,038 - INFO - >>>>> Applied Patch:
+Checking patch sympy/matrices/sparse.py...
+Applied patch sympy/matrices/sparse.py cleanly.
+
+2026-04-21 02:45:59,189 - INFO - Git diff before:
+diff --git a/sympy/matrices/sparse.py b/sympy/matrices/sparse.py
+index e6f36cdf3..1392e90d0 100644
+--- a/sympy/matrices/sparse.py
++++ b/sympy/matrices/sparse.py
+@@ -985,8 +985,9 @@ def col_join(self, other):
+         >>> C == A.row_insert(A.rows, Matrix(B))
+         True
+         """
+-        if not self:
+-            return type(self)(other)
++        # A null matrix can always be stacked (see #10770)
++        if self.rows == 0 and self.cols != other.cols:
++            return self._new(0, other.cols, {}).col_join(other)
+         A, B = self, other
+         if not A.cols == B.cols:
+             raise ShapeError()
+@@ -1191,8 +1192,9 @@ def row_join(self, other):
+         >>> C == A.col_insert(A.cols, B)
+         True
+         """
+-        if not self:
+-            return type(self)(other)
++        # A null matrix can always be stacked (see #10770)
++        if self.cols == 0 and self.rows != other.rows:
++            return self._new(other.rows, 0, {}).row_join(other)
+         A, B = self, other
+         if not A.rows == B.rows:
+             raise ShapeError()
+2026-04-21 02:45:59,189 - INFO - Eval script for sympy__sympy-13031 written to logs/run_evaluation/stratified-50/gpt-5.4/sympy__sympy-13031/eval.sh; copying to container...
+2026-04-21 02:46:01,308 - INFO - Test runtime: 2.09 seconds
+2026-04-21 02:46:01,308 - INFO - Test output for sympy__sympy-13031 written to logs/run_evaluation/stratified-50/gpt-5.4/sympy__sympy-13031/test_output.txt
+2026-04-21 02:46:01,335 - INFO - Git diff after:
+diff --git a/sympy/matrices/sparse.py b/sympy/matrices/sparse.py
+index e6f36cdf3..1392e90d0 100644
+--- a/sympy/matrices/sparse.py
++++ b/sympy/matrices/sparse.py
+@@ -985,8 +985,9 @@ def col_join(self, other):
+         >>> C == A.row_insert(A.rows, Matrix(B))
+         True
+         """
+-        if not self:
+-            return type(self)(other)
++        # A null matrix can always be stacked (see #10770)
++        if self.rows == 0 and self.cols != other.cols:
++            return self._new(0, other.cols, {}).col_join(other)
+         A, B = self, other
+         if not A.cols == B.cols:
+             raise ShapeError()
+@@ -1191,8 +1192,9 @@ def row_join(self, other):
+         >>> C == A.col_insert(A.cols, B)
+         True
+         """
+-        if not self:
+-            return type(self)(other)
++        # A null matrix can always be stacked (see #10770)
++        if self.cols == 0 and self.rows != other.rows:
++            return self._new(other.rows, 0, {}).row_join(other)
+         A, B = self, other
+         if not A.rows == B.rows:
+             raise ShapeError()
+2026-04-21 02:46:01,335 - INFO - Grading answer for sympy__sympy-13031...
+2026-04-21 02:46:01,335 - INFO - report: {'sympy__sympy-13031': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_sparse_matrix'], 'failure': []}, 'PASS_TO_PASS': {'success': ['test_transpose', 'test_trace', 'test_CL_RL', 'test_add', 'test_errors', 'test_len', 'test_sparse_zeros_sparse_eye', 'test_copyin', 'test_sparse_solve'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for sympy__sympy-13031: resolved: True
+2026-04-21 02:46:01,336 - INFO - Attempting to stop container sweb.eval.sympy__sympy-13031.stratified-50...
+2026-04-21 02:46:16,498 - INFO - Attempting to remove container sweb.eval.sympy__sympy-13031.stratified-50...
+2026-04-21 02:46:16,510 - INFO - Container sweb.eval.sympy__sympy-13031.stratified-50 removed.
+2026-04-21 02:46:16,510 - INFO - Attempting to remove image swebench/sweb.eval.x86_64.sympy_1776_sympy-13031:latest...
+2026-04-21 02:46:16,541 - INFO - Image swebench/sweb.eval.x86_64.sympy_1776_sympy-13031:latest removed.
