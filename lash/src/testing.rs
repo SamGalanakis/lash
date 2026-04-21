@@ -6,25 +6,86 @@
 
 use std::sync::Mutex;
 
+use crate::llm::transport::LlmTransportError;
+use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{
     PluginError, SessionCreateRequest, SessionHandle, SessionManager, SessionSnapshot,
     SessionTurnHandle,
 };
+use crate::provider::{AgentModelSelection, ProviderHandle, VariantRequestConfig};
 use crate::{
     AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, ExecutionSummary, OutputState,
     PersistedSessionState, Provider, ProviderOptions, SessionPolicy, SessionStateEnvelope,
     TokenUsage, TurnInput, TurnStatus,
 };
 
-/// Build a `SessionPolicy` populated with the canonical mock provider
+/// In-tree test provider used by lash's own tests and shared with
+/// downstream plugin crates through `lash::testing`. It satisfies every
+/// trait method with fixed defaults and refuses to actually execute an
+/// LLM call (returns an error from `complete`). Downstream tests that
+/// need a real provider plug in one of the `lash-provider-*` crates.
+#[derive(Clone, Debug, Default)]
+pub struct StubProvider {
+    pub options: ProviderOptions,
+}
+
+impl StubProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn into_handle(self) -> ProviderHandle {
+        ProviderHandle::new(Box::new(self))
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for StubProvider {
+    fn kind(&self) -> &'static str {
+        "stub"
+    }
+    fn label(&self) -> &'static str {
+        "Stub"
+    }
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+    fn supported_variants(&self, _model: &str) -> &'static [&'static str] {
+        &[]
+    }
+    fn default_model_variant(&self, _model: &str) -> Option<&'static str> {
+        None
+    }
+    fn request_variant_config(&self, _model: &str, _variant: &str) -> Option<VariantRequestConfig> {
+        None
+    }
+    fn default_agent_model(&self, _tier: &str) -> Option<AgentModelSelection> {
+        None
+    }
+    fn options(&self) -> &ProviderOptions {
+        &self.options
+    }
+    fn options_mut(&mut self) -> &mut ProviderOptions {
+        &mut self.options
+    }
+    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        Err(LlmTransportError::new(
+            "StubProvider::complete was called; tests must supply a real provider or mock",
+        ))
+    }
+    fn serialize_config(&self) -> serde_json::Value {
+        serde_json::Value::Object(Default::default())
+    }
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
+}
+
+/// Build a `SessionPolicy` populated with the canonical stub provider
 /// + model used by lash's in-tree tests.
 pub fn mock_session_policy() -> SessionPolicy {
     SessionPolicy {
-        provider: Provider::OpenAiGeneric {
-            api_key: String::new(),
-            base_url: "https://example.invalid/v1".to_string(),
-            options: ProviderOptions::default(),
-        },
+        provider: StubProvider::new().into_handle(),
         model: "mock-model".to_string(),
         execution_mode: ExecutionMode::Standard,
         ..Default::default()

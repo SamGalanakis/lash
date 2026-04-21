@@ -6,10 +6,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::llm::factory::adapter_for;
-use crate::llm::transport::LlmTransport;
 use crate::plugin::PluginError;
-use crate::provider::Provider;
 
 use super::{PathResolver, SanitizerPolicy, SessionStoreFactory, TerminationPolicy};
 
@@ -81,12 +78,6 @@ pub struct ManagedTaskStatus {
 /// has no tokio handle.
 pub type ManagedTaskCancel =
     Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
-
-pub(crate) type LlmFactory = Arc<dyn Fn(&Provider) -> Box<dyn LlmTransport> + Send + Sync>;
-
-pub(super) fn default_llm_factory() -> LlmFactory {
-    Arc::new(|provider| adapter_for(provider))
-}
 
 /// Destination for LLM request/response/stream debug entries. Lash
 /// emits structured JSON entries at several turn-loop checkpoints; the
@@ -473,7 +464,6 @@ pub struct RuntimeCoreConfig {
     pub llm_logger: Option<Arc<dyn LlmCallLogger>>,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
-    pub(crate) llm_factory: LlmFactory,
     pub retry_policy: lash_sansio::RetryPolicy,
     /// Host-owned destination for refreshed OAuth credentials. When
     /// `Some`, lash writes refreshed provider tokens here so they
@@ -492,7 +482,6 @@ impl Default for RuntimeCoreConfig {
             llm_logger: None,
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
-            llm_factory: default_llm_factory(),
             retry_policy: lash_sansio::RetryPolicy::default(),
             credential_store_path: None,
         }
@@ -533,14 +522,6 @@ impl RuntimeCoreConfig {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.termination = termination;
-        self
-    }
-
-    pub fn with_llm_factory<F>(mut self, factory: F) -> Self
-    where
-        F: Fn(&Provider) -> Box<dyn LlmTransport> + Send + Sync + 'static,
-    {
-        self.llm_factory = Arc::new(factory);
         self
     }
 

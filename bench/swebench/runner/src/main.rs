@@ -18,9 +18,9 @@ use lash::provider::LashConfig;
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, ContextApproach,
     EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, Provider, RuntimeCoreConfig, RuntimeStore, SessionEvent,
-    SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
-    TurnInput, TurnInputInjectionBridge, diff_usage_reports,
+    PersistentRuntimeServices, PluginHost, ProviderHandle, RuntimeCoreConfig, RuntimeStore,
+    SessionEvent, SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor,
+    TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
@@ -539,7 +539,7 @@ fn select_instances(mut instances: Vec<SweBenchInstance>, args: &Args) -> Vec<Sw
 async fn run_instance(
     run_dir: &Path,
     workspace_root: &Path,
-    provider: &Provider,
+    provider: &ProviderHandle,
     args: &Args,
     model: &str,
     execution_mode: ExecutionMode,
@@ -940,7 +940,19 @@ fn build_plugin_session(
         .context("build plugin session")
 }
 
-fn resolve_provider(args: &Args) -> Result<(Provider, String, String)> {
+fn register_providers() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        lash_provider_anthropic::AnthropicProviderFactory::register();
+        lash_provider_openai::OpenAiGenericProviderFactory::register();
+        lash_provider_codex::CodexProviderFactory::register();
+        lash_provider_google::GoogleOAuthProviderFactory::register();
+    });
+}
+
+fn resolve_provider(args: &Args) -> Result<(ProviderHandle, String, String)> {
+    register_providers();
     let config_path = std::env::var("LASH_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -949,16 +961,15 @@ fn resolve_provider(args: &Args) -> Result<(Provider, String, String)> {
                 .join(".lash")
         })
         .join("config.json");
-    let config = LashConfig::load(&config_path);
+    let config = LashConfig::load(&config_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "~/.lash/config.json not found or invalid — set up a provider with `lash --provider` or re-login"
+        )
+    })?;
     let provider = config
-        .as_ref()
-        .map(|c| c.active_provider().clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "~/.lash/config.json not found or invalid — set up a provider with `lash --provider` or re-login"
-            )
-        })?;
-    let kind = provider.kind().id().to_string();
+        .build_active_provider()
+        .map_err(|err| anyhow::anyhow!(err))?;
+    let kind = provider.kind().to_string();
     let model = args
         .model
         .clone()

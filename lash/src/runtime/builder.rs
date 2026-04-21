@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::llm::transport::LlmTransport;
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
-use crate::provider::Provider;
 use crate::{
     BackgroundRuntimeHost, EmbeddedRuntimeHost, LashRuntime, PathResolver, PersistedSessionState,
     PersistentRuntimeServices, RuntimeCoreConfig, RuntimeServices, RuntimeStore, SanitizerPolicy,
@@ -131,14 +129,6 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.core = self.core.with_termination(termination);
-        self
-    }
-
-    pub fn with_llm_factory<F>(mut self, factory: F) -> Self
-    where
-        F: Fn(&Provider) -> Box<dyn LlmTransport> + Send + Sync + 'static,
-    {
-        self.core = self.core.with_llm_factory(factory);
         self
     }
 

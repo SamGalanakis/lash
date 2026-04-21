@@ -3,17 +3,29 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::llm::adapters::streaming::drive_sse_response;
-use crate::llm::timeouts::{
-    LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
+use lash::llm::streaming::drive_sse_response;
+use lash::llm::timeouts::{
+    build_http_client, read_response_text, response_start_timeout, send_request,
 };
-use crate::llm::transport::{LlmTransport, LlmTransportError};
-use crate::llm::types::{
+use lash::llm::transport::LlmTransportError;
+use lash::llm::types::{
     LlmContentBlock, LlmEventSender, LlmMessage, LlmOutputPart, LlmOutputSpec, LlmRequest,
-    LlmResponse, LlmRole, LlmStreamEvent, LlmUsage, ModelSelection,
+    LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
 };
-use crate::model_variant::VariantRequestConfig;
-use crate::provider::Provider;
+use lash::provider::{
+    AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
+};
+
+/// Well-known OpenRouter base URL; used at runtime to detect
+/// OpenRouter-specific features (prompt caching, reasoning variants).
+pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+const OPENROUTER_REASONING_VARIANTS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh"];
+
+fn base_url_is_openrouter(base_url: &str) -> bool {
+    base_url.trim_end_matches('/') == OPENROUTER_BASE_URL
+}
 
 // ─── Provider compatibility ───
 
@@ -131,10 +143,16 @@ fn normalize_tool_call_id(id: &str) -> String {
     }
 }
 
-pub struct OpenAiGenericAdapter {
+/// OpenAI-compatible (API key) provider. Works with OpenRouter,
+/// OpenAI, vLLM, and any other OpenAI-compatible backend. Set
+/// `base_url` to point at the target endpoint; auto-detects
+/// provider-specific quirks (max-tokens field, strict-mode support).
+#[derive(Clone, Debug)]
+pub struct OpenAiGenericProvider {
+    pub api_key: String,
+    pub base_url: String,
+    pub options: ProviderOptions,
     client: reqwest::Client,
-    request_timeout: Option<std::time::Duration>,
-    chunk_timeout: std::time::Duration,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -349,30 +367,24 @@ struct OpenAiCompatToolFunction {
     arguments: Option<String>,
 }
 
-impl Default for OpenAiGenericAdapter {
-    fn default() -> Self {
-        Self::new(LlmTimeouts::default())
-    }
-}
-
-impl OpenAiGenericAdapter {
-    pub fn new(timeouts: LlmTimeouts) -> Self {
+impl OpenAiGenericProvider {
+    pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
+            api_key: api_key.into(),
+            base_url: base_url.into(),
+            options: ProviderOptions::default(),
             client: build_http_client(),
-            request_timeout: timeouts.request_timeout,
-            chunk_timeout: timeouts.chunk_timeout,
         }
     }
 
-    /// Use an embedder-provided `reqwest::Client` instead of building a
-    /// fresh one. Shares the TLS stack + connection pool across every
-    /// adapter constructed from the same pool.
-    pub fn with_client(client: std::sync::Arc<reqwest::Client>, timeouts: LlmTimeouts) -> Self {
-        Self {
-            client: (*client).clone(),
-            request_timeout: timeouts.request_timeout,
-            chunk_timeout: timeouts.chunk_timeout,
-        }
+    pub fn with_options(mut self, options: ProviderOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
+        self.client = (*client).clone();
+        self
     }
 
     fn role_name(role: &LlmRole) -> &'static str {
@@ -652,21 +664,10 @@ impl OpenAiGenericAdapter {
 
     fn build_request_body(
         &self,
-        provider: &Provider,
         req: &LlmRequest,
         stream: bool,
     ) -> Result<(Value, String), LlmTransportError> {
-        let (_, base_url) = match provider {
-            Provider::OpenAiGeneric {
-                api_key, base_url, ..
-            } => (api_key.clone(), base_url.clone()),
-            _ => {
-                return Err(LlmTransportError::new(
-                    "OpenAI-compatible adapter received non-OpenAI-compatible provider",
-                ));
-            }
-        };
-
+        let base_url = self.base_url.clone();
         let compat = detect_compat(&base_url);
 
         let mut messages = self.build_messages(req);
@@ -695,7 +696,7 @@ impl OpenAiGenericAdapter {
 
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
-                crate::model_variant::request_config(provider, &req.model, variant)
+                self.request_variant_config(&req.model, variant)
         {
             let clamped = Self::clamp_reasoning_effort_chat(&req.model, &effort);
             if Self::is_openrouter(&base_url) {
@@ -736,9 +737,9 @@ impl OpenAiGenericAdapter {
                     .collect::<Vec<_>>()
             );
             body["tool_choice"] = match req.tool_choice {
-                crate::llm::types::LlmToolChoice::Auto => json!("auto"),
-                crate::llm::types::LlmToolChoice::None => json!("none"),
-                crate::llm::types::LlmToolChoice::Required => json!("required"),
+                LlmToolChoice::Auto => json!("auto"),
+                LlmToolChoice::None => json!("none"),
+                LlmToolChoice::Required => json!("required"),
             };
         } else if Self::has_tool_history(&req.messages) {
             // Anthropic-compatible backends can require an explicit tools field
@@ -1244,30 +1245,78 @@ impl OpenAiGenericAdapter {
 }
 
 #[async_trait]
-impl LlmTransport for OpenAiGenericAdapter {
-    fn default_root_model(&self) -> &'static str {
+impl Provider for OpenAiGenericProvider {
+    fn kind(&self) -> &'static str {
+        "openai-compatible"
+    }
+
+    fn label(&self) -> &'static str {
+        "OpenAI-compatible (API key)"
+    }
+
+    fn default_model(&self) -> &str {
         "anthropic/claude-sonnet-4.6"
     }
 
-    fn default_agent_model(&self, tier: &str) -> Option<ModelSelection> {
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        if !base_url_is_openrouter(&self.base_url) {
+            return &[];
+        }
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("gpt") || lower.contains("claude") || lower.contains("gemini-3") {
+            OPENROUTER_REASONING_VARIANTS
+        } else {
+            &[]
+        }
+    }
+
+    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
+        let variants = self.supported_variants(model);
+        if variants.is_empty() {
+            return None;
+        }
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("gpt") {
+            Some("medium")
+        } else {
+            Some("high")
+        }
+    }
+
+    fn request_variant_config(
+        &self,
+        model: &str,
+        variant: &str,
+    ) -> Option<VariantRequestConfig> {
+        if self.validate_variant(model, variant).is_err() {
+            return None;
+        }
+        if base_url_is_openrouter(&self.base_url) {
+            Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
+        } else {
+            None
+        }
+    }
+
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
         match tier {
-            "low" => Some(ModelSelection {
-                model: "minimax/minimax-m2.5",
+            "low" => Some(AgentModelSelection {
+                model: "minimax/minimax-m2.5".to_string(),
                 variant: None,
             }),
-            "medium" => Some(ModelSelection {
-                model: "z-ai/glm-5",
+            "medium" => Some(AgentModelSelection {
+                model: "z-ai/glm-5".to_string(),
                 variant: None,
             }),
-            "high" => Some(ModelSelection {
-                model: "anthropic/claude-sonnet-4.6",
-                variant: Some("high"),
+            "high" => Some(AgentModelSelection {
+                model: "anthropic/claude-sonnet-4.6".to_string(),
+                variant: Some("high".to_string()),
             }),
             _ => None,
         }
     }
 
-    fn normalize_model(&self, model: &str) -> String {
+    fn resolve_model(&self, model: &str) -> String {
         model.to_string()
     }
 
@@ -1279,28 +1328,23 @@ impl LlmTransport for OpenAiGenericAdapter {
         }
     }
 
-    async fn ensure_ready(&self, _provider: &mut Provider) -> Result<bool, LlmTransportError> {
-        Ok(false)
+    fn options(&self) -> &ProviderOptions {
+        &self.options
+    }
+
+    fn options_mut(&mut self) -> &mut ProviderOptions {
+        &mut self.options
     }
 
     async fn complete(
-        &self,
-        provider: &mut Provider,
+        &mut self,
         req: LlmRequest,
     ) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
-        let (api_key, _) = match provider {
-            Provider::OpenAiGeneric {
-                api_key, base_url, ..
-            } => (api_key.clone(), base_url.clone()),
-            _ => {
-                return Err(LlmTransportError::new(
-                    "OpenAI-compatible adapter received non-OpenAI-compatible provider",
-                ));
-            }
-        };
+        let timeouts = self.options.llm_timeouts();
+        let api_key = self.api_key.clone();
 
-        let (body, base_url) = self.build_request_body(provider, &req, stream_events.is_some())?;
+        let (body, base_url) = self.build_request_body(&req, stream_events.is_some())?;
 
         // Serialize once. reqwest's `.json(&body)` would re-run
         // `serde_json::to_vec` internally, wasting a ~MB+ alloc per
@@ -1323,8 +1367,8 @@ impl LlmTransport for OpenAiGenericAdapter {
             request,
             request_body.clone(),
             response_start_timeout(
-                self.request_timeout,
-                self.chunk_timeout,
+                timeouts.request_timeout,
+                timeouts.chunk_timeout,
                 stream_events.is_some(),
             ),
             "OpenAI-compatible response start timed out",
@@ -1335,7 +1379,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         if !status.is_success() {
             let text = read_response_text(
                 resp,
-                self.request_timeout,
+                timeouts.request_timeout,
                 "OpenAI-compatible response body timed out",
             )
             .await
@@ -1372,7 +1416,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         if !is_sse {
             let text = read_response_text(
                 resp,
-                self.request_timeout,
+                timeouts.request_timeout,
                 "OpenAI-compatible response body timed out",
             )
             .await?;
@@ -1425,7 +1469,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         let mut reasoning_acc = ReasoningAccumulator::default();
         drive_sse_response(
             resp,
-            self.chunk_timeout,
+            timeouts.chunk_timeout,
             "OpenAI-compatible stream chunk timed out",
             |raw| {
                 let prev_usage = usage.clone();
@@ -1485,754 +1529,71 @@ impl LlmTransport for OpenAiGenericAdapter {
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
         })
     }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "api_key".to_string(),
+            serde_json::Value::String(self.api_key.clone()),
+        );
+        map.insert(
+            "base_url".to_string(),
+            serde_json::Value::String(self.base_url.clone()),
+        );
+        if !self.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Deserialize)]
+struct OpenAiProviderConfig {
+    api_key: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    options: ProviderOptions,
+}
 
-    fn req(messages: Vec<LlmMessage>) -> LlmRequest {
-        LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages,
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        }
+/// Factory that registers [`OpenAiGenericProvider`] with lash's global
+/// provider registry. Hosts call [`Self::register`] once at startup.
+pub struct OpenAiGenericProviderFactory;
+
+impl OpenAiGenericProviderFactory {
+    pub fn register() {
+        lash::register_provider_factory(std::sync::Arc::new(Self));
     }
+}
 
-    #[test]
-    fn parses_openai_generic_sse_deltas_and_usage() {
-        let mut full = String::new();
-        let mut deltas = Vec::new();
-        let mut usage = LlmUsage::default();
-
-        OpenAiGenericAdapter::process_sse_event(
-            r#"{"choices":[{"delta":{"content":"Hel"}}]}"#,
-            &mut full,
-            &mut deltas,
-            &mut usage,
-        )
-        .unwrap();
-        OpenAiGenericAdapter::process_sse_event(
-            r#"{"choices":[{"delta":{"content":"lo"}}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}"#,
-            &mut full,
-            &mut deltas,
-            &mut usage,
-        )
-        .unwrap();
-
-        assert_eq!(full, "Hello");
-        assert_eq!(deltas, vec!["Hel".to_string(), "lo".to_string()]);
-        assert_eq!(usage.input_tokens, 10);
-        assert_eq!(usage.output_tokens, 3);
-        assert_eq!(usage.cached_input_tokens, 4);
+impl ProviderFactory for OpenAiGenericProviderFactory {
+    fn kind(&self) -> &'static str {
+        "openai-compatible"
     }
-
-    #[test]
-    fn captures_provider_usage_with_cost_from_stream_event() {
-        let mut full = String::new();
-        let mut deltas = Vec::new();
-        let mut usage = LlmUsage::default();
-        let mut provider_usage = None;
-        let prev_usage = LlmUsage::default();
-
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2},"cost":0.95,"cost_details":{"upstream_inference_cost":19}}}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_retained_deltas_opt(Some(&mut deltas))
-                .with_provider_usage(&mut provider_usage),
-        )
-        .unwrap();
-
-        let provider_usage = provider_usage.expect("provider usage");
-        assert_eq!(provider_usage["cost"], json!(0.95));
-        assert_eq!(
-            provider_usage["cost_details"]["upstream_inference_cost"],
-            json!(19)
-        );
-        assert_eq!(usage.reasoning_tokens, 2);
+    fn cli_label(&self) -> &'static str {
+        "OpenAI-compatible (API key)"
     }
-
-    #[test]
-    fn marks_retryable_provider_unavailable_stream_errors() {
-        let mut full = String::new();
-        let mut deltas = Vec::new();
-        let mut usage = LlmUsage::default();
-        let prev_usage = LlmUsage::default();
-
-        let err = OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"error":{"code":502,"message":"JSON error injected into SSE stream","metadata":{"error_type":"provider_unavailable"}}}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_retained_deltas_opt(Some(&mut deltas)),
-        )
-        .expect_err("stream error");
-
-        assert!(err.retryable);
-        assert_eq!(err.code.as_deref(), Some("502"));
+    fn setup_name(&self) -> &'static str {
+        "OpenAI-compatible"
     }
-
-    #[test]
-    fn streaming_accumulates_tool_calls() {
-        let mut full = String::new();
-        let mut deltas = Vec::new();
-        let mut usage = LlmUsage::default();
-        let mut tool_calls = Vec::new();
-        let prev_usage = LlmUsage::default();
-
-        // First SSE event: tool call start with id and name
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_retained_deltas_opt(Some(&mut deltas))
-                .with_tool_calls(&mut tool_calls),
-        )
-        .unwrap();
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].id, "call_abc");
-        assert_eq!(tool_calls[0].name, "read_file");
-
-        // Second SSE event: argument chunk
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_retained_deltas_opt(Some(&mut deltas))
-                .with_tool_calls(&mut tool_calls),
-        )
-        .unwrap();
-
-        // Third SSE event: argument continuation
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.rs\"}"}}]}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_retained_deltas_opt(Some(&mut deltas))
-                .with_tool_calls(&mut tool_calls),
-        )
-        .unwrap();
-
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].arguments, r#"{"path":"a.rs"}"#);
-        assert!(full.is_empty());
+    fn setup_description(&self) -> &'static str {
+        "Any OpenAI-compatible API endpoint"
     }
-
-    #[test]
-    fn process_sse_event_returns_new_deltas_without_retain_buffer() {
-        use std::sync::{Arc, Mutex};
-
-        let mut full = String::new();
-        let mut usage = LlmUsage::default();
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let tx_events = events.clone();
-        let tx = crate::llm::types::LlmEventSender::new(move |event| {
-            tx_events.lock().unwrap().push(event);
-        });
-        let prev_usage = LlmUsage::default();
-
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"content":"Hello"}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage).with_stream_events(Some(&tx)),
-        )
-        .unwrap();
-
-        assert_eq!(full, "Hello");
-        let events = events.lock().unwrap().clone();
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            crate::llm::types::LlmStreamEvent::Delta(text) => assert_eq!(text, "Hello"),
-            other => panic!("unexpected stream event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_messages_preserve_system_and_user_order() {
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let req = req(vec![
-            LlmMessage::text(LlmRole::System, "sys"),
-            LlmMessage::text(LlmRole::User, "history"),
-        ]);
-
-        let messages = adapter.build_messages(&req);
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["role"], "user");
-        assert_eq!(messages[1]["content"], "history");
-    }
-
-    #[test]
-    fn build_messages_uses_structured_replay_for_standard_mode() {
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let req = req(vec![
-            LlmMessage::text(LlmRole::System, "sys"),
-            LlmMessage::text(LlmRole::User, "question"),
-            LlmMessage::new(
-                LlmRole::Assistant,
-                vec![LlmContentBlock::ToolCall {
-                    call_id: "call_1".to_string(),
-                    tool_name: "read_file".to_string(),
-                    input_json: r#"{"path":"README.md"}"#.to_string(),
-                    item_id: None,
-                    signature: None,
-                }],
-            ),
-            LlmMessage::new(
-                LlmRole::User,
-                vec![LlmContentBlock::ToolResult {
-                    call_id: "call_1".to_string(),
-                    content: "ok".to_string(),
-                    tool_name: Some("read_file".to_string()),
-                }],
-            ),
-        ]);
-
-        let messages = adapter.build_messages(&req);
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[1]["role"], "user");
-        assert_eq!(
-            messages[2]["tool_calls"][0]["function"]["name"],
-            "read_file"
-        );
-        assert_eq!(messages[3]["role"], "tool");
-        assert_eq!(messages[3]["tool_call_id"], "call_1");
-    }
-
-    #[test]
-    fn build_request_body_sets_prompt_cache_key_for_openrouter() {
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let provider = Provider::OpenAiGeneric {
-            api_key: "tok".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            options: crate::provider::ProviderOptions::default(),
-        };
-        let mut req = req(vec![
-            LlmMessage::text(LlmRole::System, "sys"),
-            LlmMessage::text(LlmRole::User, "hi"),
-        ]);
-        req.model = "openai/gpt-5".to_string();
-        req.tool_choice = crate::llm::types::LlmToolChoice::None;
-        req.session_id = Some("sess-123".to_string());
-
-        let (body, _) = adapter
-            .build_request_body(&provider, &req, false)
-            .expect("request body");
-        assert_eq!(body["prompt_cache_key"], "sess-123");
-    }
-
-    #[test]
-    fn build_request_body_keeps_tools_field_for_tool_history_without_current_tools() {
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let provider = Provider::OpenAiGeneric {
-            api_key: "tok".to_string(),
-            base_url: "https://example.com/v1".to_string(),
-            options: crate::provider::ProviderOptions::default(),
-        };
-        let req = req(vec![
-            LlmMessage::text(LlmRole::User, "question"),
-            LlmMessage::new(
-                LlmRole::Assistant,
-                vec![LlmContentBlock::ToolCall {
-                    call_id: "call_1".to_string(),
-                    tool_name: "read_file".to_string(),
-                    input_json: r#"{"path":"README.md"}"#.to_string(),
-                    item_id: None,
-                    signature: None,
-                }],
-            ),
-            LlmMessage::new(
-                LlmRole::User,
-                vec![LlmContentBlock::ToolResult {
-                    call_id: "call_1".to_string(),
-                    content: "done".to_string(),
-                    tool_name: Some("read_file".to_string()),
-                }],
-            ),
-        ]);
-
-        let (body, _) = adapter
-            .build_request_body(&provider, &req, false)
-            .expect("request body");
-
-        assert_eq!(body["tools"], json!([]));
-    }
-
-    #[test]
-    fn build_request_body_omits_prompt_cache_key_for_non_openrouter() {
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let provider = Provider::OpenAiGeneric {
-            api_key: "tok".to_string(),
-            base_url: "https://example.com/v1".to_string(),
-            options: crate::provider::ProviderOptions::default(),
-        };
-        let mut req = req(vec![
-            LlmMessage::text(LlmRole::System, "sys"),
-            LlmMessage::text(LlmRole::User, "hi"),
-        ]);
-        req.model = "model".to_string();
-        req.tool_choice = crate::llm::types::LlmToolChoice::None;
-        req.session_id = Some("sess-123".to_string());
-
-        let (body, _) = adapter
-            .build_request_body(&provider, &req, false)
-            .expect("request body");
-        assert!(body.get("prompt_cache_key").is_none());
-    }
-
-    #[test]
-    fn build_request_body_adds_cache_control_for_openrouter_anthropic_models() {
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let provider = Provider::OpenAiGeneric {
-            api_key: "tok".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            options: crate::provider::ProviderOptions::default(),
-        };
-        let mut req = req(vec![LlmMessage::text(LlmRole::User, "hi")]);
-        req.model = "anthropic/claude-sonnet-4.6".to_string();
-
-        let (body, _) = adapter
-            .build_request_body(&provider, &req, false)
-            .expect("request body");
-
-        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
-        assert_eq!(
-            body["messages"][0]["content"][0]["cache_control"]["type"],
-            "ephemeral"
-        );
-    }
-
-    #[test]
-    fn build_request_body_adds_json_schema_response_format() {
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let provider = Provider::OpenAiGeneric {
-            api_key: "tok".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            options: crate::provider::ProviderOptions::default(),
-        };
-        let mut req = req(vec![
-            LlmMessage::text(LlmRole::System, "sys"),
-            LlmMessage::text(LlmRole::User, "hi"),
-        ]);
-        req.model = "openai/gpt-5".to_string();
-        req.tool_choice = crate::llm::types::LlmToolChoice::None;
-        req.output_spec = Some(crate::llm::types::LlmOutputSpec::JsonSchema(
-            crate::llm::types::LlmJsonSchema {
-                name: "answer".to_string(),
-                schema: json!({"type": "object", "properties": {"ok": {"type": "boolean"}}}),
-                strict: true,
-            },
-        ));
-
-        let (body, _) = adapter
-            .build_request_body(&provider, &req, false)
-            .expect("request body");
-        assert_eq!(body["response_format"]["type"], "json_schema");
-        assert_eq!(body["response_format"]["json_schema"]["name"], "answer");
-        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
-    }
-
-    // ─── Reasoning / thinking stream tests ───
-
-    #[test]
-    fn reasoning_content_delta_produces_reasoning_part_and_stream_event() {
-        use std::sync::{Arc, Mutex};
-
-        let mut full = String::new();
-        let mut usage = LlmUsage::default();
-        let mut reasoning = ReasoningAccumulator::default();
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let tx_events = events.clone();
-        let tx = crate::llm::types::LlmEventSender::new(move |event| {
-            tx_events.lock().unwrap().push(event);
-        });
-        let prev_usage = LlmUsage::default();
-
-        // Reasoning delta, then content delta — simulating a provider
-        // that streams its chain-of-thought before the final answer.
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"reasoning_content":"Thinking about "}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_stream_events(Some(&tx))
-                .with_reasoning(&mut reasoning),
-        )
-        .unwrap();
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"reasoning_content":"the answer."}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_stream_events(Some(&tx))
-                .with_reasoning(&mut reasoning),
-        )
-        .unwrap();
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"content":"Hi."}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_stream_events(Some(&tx))
-                .with_reasoning(&mut reasoning),
-        )
-        .unwrap();
-
-        // Assistant text accumulates separately from reasoning.
-        assert_eq!(full, "Hi.");
-
-        // Reasoning accumulator holds the finalized segment in order.
-        let parts = reasoning.into_parts();
-        assert_eq!(parts, vec!["Thinking about the answer.".to_string()]);
-
-        // Stream events: two ReasoningDelta, then one Delta (order matches
-        // the order of arrival; this is load-bearing for the UI).
-        let events = events.lock().unwrap().clone();
-        assert_eq!(events.len(), 3);
-        match &events[0] {
-            LlmStreamEvent::ReasoningDelta(text) => {
-                assert_eq!(text, "Thinking about ");
-            }
-            other => panic!("expected ReasoningDelta, got {other:?}"),
-        }
-        match &events[1] {
-            LlmStreamEvent::ReasoningDelta(text) => {
-                assert_eq!(text, "the answer.");
-            }
-            other => panic!("expected ReasoningDelta, got {other:?}"),
-        }
-        match &events[2] {
-            LlmStreamEvent::Delta(text) => {
-                assert_eq!(text, "Hi.");
-            }
-            other => panic!("expected Delta, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn reasoning_field_variants_all_parsed() {
-        // Each variant — reasoning_content, reasoning, reasoning_text —
-        // must produce a ReasoningDelta so we accept all three provider
-        // dialects transparently.
-        for (payload, expected) in [
-            (
-                r#"{"choices":[{"delta":{"reasoning_content":"alpha"}}]}"#,
-                "alpha",
-            ),
-            (r#"{"choices":[{"delta":{"reasoning":"beta"}}]}"#, "beta"),
-            (
-                r#"{"choices":[{"delta":{"reasoning_text":"gamma"}}]}"#,
-                "gamma",
-            ),
-        ] {
-            use std::sync::{Arc, Mutex};
-
-            let mut full = String::new();
-            let mut usage = LlmUsage::default();
-            let mut reasoning = ReasoningAccumulator::default();
-            let events = Arc::new(Mutex::new(Vec::new()));
-            let tx_events = events.clone();
-            let tx = crate::llm::types::LlmEventSender::new(move |event| {
-                tx_events.lock().unwrap().push(event);
-            });
-            let prev_usage = LlmUsage::default();
-
-            OpenAiGenericAdapter::process_sse_event_with_tools(
-                payload,
-                SseEventState::new(&mut full, &mut usage, &prev_usage)
-                    .with_stream_events(Some(&tx))
-                    .with_reasoning(&mut reasoning),
-            )
-            .unwrap();
-
-            let events = events.lock().unwrap().clone();
-            assert_eq!(events.len(), 1, "payload: {payload}");
-            match &events[0] {
-                LlmStreamEvent::ReasoningDelta(text) => {
-                    assert_eq!(text, expected, "payload: {payload}");
-                }
-                other => panic!("payload {payload}: expected ReasoningDelta, got {other:?}"),
-            }
-            assert_eq!(reasoning.into_parts(), vec![expected.to_string()]);
-        }
-    }
-
-    #[test]
-    fn delta_without_reasoning_field_produces_no_reasoning_part() {
-        use std::sync::{Arc, Mutex};
-
-        let mut full = String::new();
-        let mut usage = LlmUsage::default();
-        let mut reasoning = ReasoningAccumulator::default();
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let tx_events = events.clone();
-        let tx = crate::llm::types::LlmEventSender::new(move |event| {
-            tx_events.lock().unwrap().push(event);
-        });
-        let prev_usage = LlmUsage::default();
-
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"content":"just text"}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_stream_events(Some(&tx))
-                .with_reasoning(&mut reasoning),
-        )
-        .unwrap();
-
-        // No reasoning events should have fired.
-        let events = events.lock().unwrap().clone();
-        assert!(
-            events
-                .iter()
-                .all(|e| !matches!(e, LlmStreamEvent::ReasoningDelta(_))),
-            "no reasoning deltas expected, got {events:?}"
-        );
-        // Accumulator should drain to an empty list — no spurious empty
-        // reasoning parts.
-        assert!(reasoning.into_parts().is_empty());
-    }
-
-    #[test]
-    fn empty_reasoning_field_is_ignored() {
-        // Some providers send `"reasoning":""` on nearly every delta to
-        // keep the schema stable. We must not treat those as a segment
-        // boundary or a delta.
-        let mut full = String::new();
-        let mut usage = LlmUsage::default();
-        let mut reasoning = ReasoningAccumulator::default();
-        let prev_usage = LlmUsage::default();
-
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"reasoning":""}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage).with_reasoning(&mut reasoning),
-        )
-        .unwrap();
-
-        assert!(reasoning.into_parts().is_empty());
-    }
-
-    #[test]
-    fn reasoning_then_text_then_reasoning_produces_two_segments() {
-        // Pi's adapter starts a new thinking block whenever reasoning
-        // resumes after a non-reasoning event. We match that behaviour:
-        // text between two reasoning bursts breaks them into separate
-        // Reasoning parts (ordered before the text part? No — the
-        // second segment represents post-text "second thoughts" and
-        // stays in emission order).
-        let mut full = String::new();
-        let mut usage = LlmUsage::default();
-        let mut reasoning = ReasoningAccumulator::default();
-        let prev_usage = LlmUsage::default();
-
-        for payload in [
-            r#"{"choices":[{"delta":{"reasoning":"first."}}]}"#,
-            r#"{"choices":[{"delta":{"content":"answer."}}]}"#,
-            r#"{"choices":[{"delta":{"reasoning":"second."}}]}"#,
-        ] {
-            OpenAiGenericAdapter::process_sse_event_with_tools(
-                payload,
-                SseEventState::new(&mut full, &mut usage, &prev_usage)
-                    .with_reasoning(&mut reasoning),
-            )
-            .unwrap();
-        }
-
-        assert_eq!(full, "answer.");
-        assert_eq!(
-            reasoning.into_parts(),
-            vec!["first.".to_string(), "second.".to_string()]
-        );
-    }
-
-    #[test]
-    fn non_stream_response_captures_reasoning_from_message() {
-        let value: Value = serde_json::from_str(
-            r#"{
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "reasoning_content": "pondering",
-                        "content": "answer"
-                    }
-                }]
-            }"#,
-        )
-        .unwrap();
-
-        let parts = OpenAiGenericAdapter::response_parts_from_value(&value);
-        // Reasoning sits before text so replay order mirrors streaming.
-        assert_eq!(
-            parts,
-            vec![
-                LlmOutputPart::Reasoning {
-                    text: "pondering".to_string(),
-                    signature: None,
-                    redacted: false,
-                    item_id: None,
-                    encrypted_content: None,
-                    summary: Vec::new(),
-                },
-                LlmOutputPart::Text {
-                    text: "answer".to_string(),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn non_stream_response_picks_first_non_empty_reasoning_field() {
-        // When a provider mirrors the same content across multiple fields
-        // (chutes.ai behaviour), we must only take it once.
-        let value: Value = serde_json::from_str(
-            r#"{
-                "choices": [{
-                    "message": {
-                        "reasoning_content": "think",
-                        "reasoning": "think",
-                        "content": "done"
-                    }
-                }]
-            }"#,
-        )
-        .unwrap();
-
-        let parts = OpenAiGenericAdapter::response_parts_from_value(&value);
-        let reasoning_parts: Vec<&LlmOutputPart> = parts
-            .iter()
-            .filter(|p| matches!(p, LlmOutputPart::Reasoning { .. }))
-            .collect();
-        assert_eq!(reasoning_parts.len(), 1);
-    }
-
-    // ─── Reasoning-effort clamp ───
-    //
-    // Mirrors pi's `clampReasoning` + `supportsXhigh` from
-    // `packages/ai/src/providers/openai-completions.ts`: `xhigh` is only
-    // valid on GPT-5.2/5.3/5.4 and Opus 4.6/4.7. Everything else
-    // collapses `xhigh` to `high`.
-
-    #[test]
-    fn clamp_reasoning_effort_chat_passes_through_standard_levels() {
-        for effort in ["minimal", "low", "medium", "high"] {
-            assert_eq!(
-                OpenAiGenericAdapter::clamp_reasoning_effort_chat(
-                    "anthropic/claude-sonnet-4.6",
-                    effort
-                ),
-                effort,
-            );
-        }
-    }
-
-    #[test]
-    fn clamp_reasoning_effort_chat_keeps_xhigh_for_supported_models() {
-        for model in [
-            "openai/gpt-5.2",
-            "openai/gpt-5.3",
-            "openai/gpt-5.4",
-            "anthropic/claude-opus-4-6",
-            "anthropic/claude-opus-4.6",
-            "anthropic/claude-opus-4-7",
-            "anthropic/claude-opus-4.7",
-        ] {
-            assert_eq!(
-                OpenAiGenericAdapter::clamp_reasoning_effort_chat(model, "xhigh"),
-                "xhigh",
-                "model {model} should support xhigh",
-            );
-        }
-    }
-
-    #[test]
-    fn clamp_reasoning_effort_chat_collapses_xhigh_for_unsupported_models() {
-        for model in [
-            "openai/gpt-5",
-            "openai/gpt-5.1",
-            "anthropic/claude-sonnet-4.6",
-            "anthropic/claude-opus-4.5",
-            "z-ai/glm-5",
-            "deepseek/deepseek-chat",
-        ] {
-            assert_eq!(
-                OpenAiGenericAdapter::clamp_reasoning_effort_chat(model, "xhigh"),
-                "high",
-                "model {model} should NOT support xhigh",
-            );
-        }
-    }
-
-    #[test]
-    fn clamp_reasoning_effort_chat_is_case_insensitive_and_trims() {
-        assert_eq!(
-            OpenAiGenericAdapter::clamp_reasoning_effort_chat("openai/gpt-5", "  XHIGH "),
-            "high",
-        );
-        assert_eq!(
-            OpenAiGenericAdapter::clamp_reasoning_effort_chat("openai/gpt-5", "HIGH"),
-            "high",
-        );
-    }
-
-    // ─── OpenRouter reasoning_details round-trip ───
-
-    #[test]
-    fn stream_attaches_reasoning_encrypted_to_matching_tool_call() {
-        let mut full = String::new();
-        let mut usage = LlmUsage::default();
-        let mut tool_calls: Vec<StreamingToolCall> = Vec::new();
-        let prev_usage = LlmUsage::default();
-
-        // First: the tool call itself arrives.
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"run","arguments":"{}"}}]}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_tool_calls(&mut tool_calls),
-        )
-        .unwrap();
-        // Then: the reasoning_details entry keyed to the same id.
-        OpenAiGenericAdapter::process_sse_event_with_tools(
-            r#"{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","id":"call_x","data":"CIPHER=="}]}}]}"#,
-            SseEventState::new(&mut full, &mut usage, &prev_usage)
-                .with_tool_calls(&mut tool_calls),
-        )
-        .unwrap();
-
-        assert_eq!(tool_calls.len(), 1);
-        let encoded = tool_calls[0].signature.as_deref().expect("signature");
-        assert!(encoded.contains("CIPHER=="));
-        assert!(encoded.contains("reasoning.encrypted"));
-    }
-
-    #[test]
-    fn build_messages_replays_reasoning_details_on_assistant_turn() {
-        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        let detail = r#"{"type":"reasoning.encrypted","id":"call_x","data":"CIPHER=="}"#;
-        let req = req(vec![
-            LlmMessage::text(LlmRole::User, "hi"),
-            LlmMessage::new(
-                LlmRole::Assistant,
-                vec![LlmContentBlock::ToolCall {
-                    call_id: "call_x".to_string(),
-                    tool_name: "run".to_string(),
-                    input_json: "{}".to_string(),
-                    item_id: None,
-                    signature: Some(detail.to_string()),
-                }],
-            ),
-            LlmMessage::new(
-                LlmRole::User,
-                vec![LlmContentBlock::ToolResult {
-                    call_id: "call_x".to_string(),
-                    content: "ok".to_string(),
-                    tool_name: None,
-                }],
-            ),
-        ]);
-        let messages = adapter.build_messages(&req);
-        let assistant = messages
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .expect("assistant turn");
-        let details = assistant["reasoning_details"]
-            .as_array()
-            .expect("reasoning_details array present");
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0]["type"], "reasoning.encrypted");
-        assert_eq!(details[0]["id"], "call_x");
-        assert_eq!(details[0]["data"], "CIPHER==");
+    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String> {
+        let cfg: OpenAiProviderConfig =
+            serde_json::from_value(config).map_err(|err| err.to_string())?;
+        Ok(Box::new(OpenAiGenericProvider {
+            api_key: cfg.api_key,
+            base_url: cfg.base_url,
+            options: cfg.options,
+            client: build_http_client(),
+        }))
     }
 }

@@ -17,20 +17,16 @@
 //!   disk lifecycle.
 //! * **Webserver multi-tenant:** one `RuntimeEnvironment` per process,
 //!   `residency: ActivePathOnly`, and `park()` / `resume()` per
-//!   request. For HTTP connection pooling, supply a custom
-//!   `with_llm_factory` closure that captures a shared
-//!   `Arc<reqwest::Client>` and constructs adapters via
-//!   `Adapter::with_client(...)` — lash exposes the primitive; the host
-//!   owns the pool.
+//!   request. HTTP connection pooling is a provider concern —
+//!   provider crates accept an optional `Arc<reqwest::Client>` in
+//!   their constructors, so the host can share one pool across every
+//!   materialized provider.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::provider::Provider;
-
 use super::host::{
-    DefaultPathResolver, FileLlmCallLogger, LlmCallLogger, LlmFactory, RuntimeCoreConfig,
-    SessionTaskExecutor, default_llm_factory,
+    DefaultPathResolver, FileLlmCallLogger, LlmCallLogger, RuntimeCoreConfig, SessionTaskExecutor,
 };
 use super::{PathResolver, SanitizerPolicy, TerminationPolicy};
 
@@ -87,7 +83,6 @@ pub struct RuntimeEnvironment {
     pub llm_logger: Option<Arc<dyn LlmCallLogger>>,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
-    pub llm_factory: LlmFactory,
 
     // Retry policy for LLM calls that return `retryable: true` errors.
     // Default matches legacy behaviour (3 retries at 2s / 5s / 10s).
@@ -113,7 +108,6 @@ impl Default for RuntimeEnvironment {
             llm_logger: None,
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
-            llm_factory: default_llm_factory(),
             retry_policy: lash_sansio::RetryPolicy::default(),
             credential_store_path: None,
         }
@@ -136,7 +130,6 @@ impl RuntimeEnvironment {
             llm_logger: self.llm_logger.clone(),
             sanitizer: self.sanitizer.clone(),
             termination: self.termination.clone(),
-            llm_factory: Arc::clone(&self.llm_factory),
             retry_policy: self.retry_policy.clone(),
             credential_store_path: self.credential_store_path.clone(),
         }
@@ -214,14 +207,6 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.env.termination = termination;
-        self
-    }
-
-    pub fn with_llm_factory<F>(mut self, factory: F) -> Self
-    where
-        F: Fn(&Provider) -> Box<dyn crate::llm::transport::LlmTransport> + Send + Sync + 'static,
-    {
-        self.env.llm_factory = Arc::new(factory);
         self
     }
 

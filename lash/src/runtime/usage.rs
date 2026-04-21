@@ -229,7 +229,7 @@ pub(super) fn merge_usage_delta_entries(entries: Vec<TokenLedgerEntry>) -> Vec<T
 }
 
 pub(super) fn normalize_prompt_usage(
-    provider: &Provider,
+    provider: &dyn Provider,
     usage: &TokenUsage,
 ) -> Option<PromptUsage> {
     let input_tokens = usage.input_tokens.max(0) as usize;

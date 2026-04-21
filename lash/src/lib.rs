@@ -6,7 +6,6 @@ pub mod instructions;
 pub mod llm;
 pub mod mcp;
 pub mod model_info;
-pub mod model_variant;
 pub mod monitor;
 pub mod oauth;
 pub mod plugin;
@@ -66,7 +65,6 @@ pub use model_info::{
     CachedModelCatalog, FileModelCatalogStore, MemoryModelCatalogStore, ModelCatalog,
     ModelCatalogSource, ModelCatalogStore, ModelInfo, ModelsDevHttpSource, ResolvedModelSpec,
 };
-pub use model_variant::VariantRequestConfig;
 pub use monitor::{
     MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorEvent, MonitorRunState, MonitorSnapshot,
     MonitorSpec, MonitorStatus, MonitorUpdateBatch, MonitorWakePolicy,
@@ -92,7 +90,11 @@ pub use plugin::{
     ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
     TurnResultSummary, TurnTransformContext, plugin_surface_event_renders_visible_output,
 };
-pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
+pub use provider::{
+    AgentModelSelection, LashConfig, Provider, ProviderFactory, ProviderHandle, ProviderOptions,
+    ProviderRegistry, ProviderSpec, RequestTimeout, VariantRequestConfig, build_provider,
+    global_provider_registry, register_provider_factory,
+};
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
     DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,

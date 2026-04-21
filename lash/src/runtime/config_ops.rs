@@ -5,7 +5,7 @@
 //! no types live here and no public API is changed.
 
 use crate::SessionError;
-use crate::provider::Provider;
+use crate::provider::ProviderHandle;
 
 use super::LashRuntime;
 
@@ -29,7 +29,7 @@ impl LashRuntime {
     }
 
     /// Update provider on the runtime config.
-    pub fn set_provider(&mut self, provider: Provider) {
+    pub fn set_provider(&mut self, provider: ProviderHandle) {
         self.policy.provider = provider;
         self.state.policy.provider = self.policy.provider.clone();
     }
@@ -42,7 +42,7 @@ impl LashRuntime {
 
     pub async fn update_session_config(
         &mut self,
-        provider: Option<Provider>,
+        provider: Option<ProviderHandle>,
         model: Option<String>,
         model_variant: Option<Option<String>>,
         max_context_tokens: Option<usize>,

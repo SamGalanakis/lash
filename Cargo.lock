@@ -233,6 +233,7 @@ dependencies = [
  "lash-mode-standard",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
+ "lash-provider-openai",
  "lash-subagents",
  "regex",
  "serde",
@@ -253,6 +254,7 @@ dependencies = [
  "lash",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
+ "lash-provider-openai",
  "lash-subagents",
  "regex",
  "reqwest",
@@ -278,6 +280,10 @@ dependencies = [
  "lash-mode-standard",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
+ "lash-provider-anthropic",
+ "lash-provider-codex",
+ "lash-provider-google",
+ "lash-provider-openai",
  "lash-subagents",
  "serde",
  "serde_json",
@@ -1913,6 +1919,10 @@ dependencies = [
  "lash-plugin-plan-mode",
  "lash-plugin-prompt-context",
  "lash-plugin-ui-activity",
+ "lash-provider-anthropic",
+ "lash-provider-codex",
+ "lash-provider-google",
+ "lash-provider-openai",
  "lash-subagents",
  "lash-tui",
  "lash-ui",
@@ -2036,6 +2046,74 @@ dependencies = [
  "lash",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "lash-provider-anthropic"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "base64",
+ "lash",
+ "lash-sansio",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "lash-provider-codex"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "base64",
+ "lash",
+ "lash-sansio",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lash-provider-google"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "base64",
+ "lash",
+ "lash-sansio",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lash-provider-openai"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "base64",
+ "lash",
+ "lash-sansio",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

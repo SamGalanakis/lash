@@ -8,14 +8,15 @@ use std::time::Instant;
 
 use anyhow::Context;
 use chrono::Utc;
-use lash::llm::adapters::openrouter::OpenAiGenericAdapter;
-use lash::llm::transport::{LlmTransport, LlmTransportError};
+use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
+use lash::provider::{AgentModelSelection, Provider, ProviderOptions, VariantRequestConfig};
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
 use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
+use lash_provider_openai::OpenAiGenericProvider;
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -259,9 +260,10 @@ pub(crate) struct RuntimePerfReport {
     summary: Vec<RuntimePerfScenarioSummary>,
 }
 
-#[derive(Clone)]
-struct BenchmarkTransport {
+#[derive(Clone, Debug)]
+struct BenchmarkProvider {
     scenario: RuntimePerfScenario,
+    options: ProviderOptions,
 }
 
 struct BenchmarkRuntime {
@@ -399,9 +401,12 @@ impl RuntimeStore for RuntimePerfStore {
     }
 }
 
-impl BenchmarkTransport {
+impl BenchmarkProvider {
     fn new(scenario: RuntimePerfScenario) -> Self {
-        Self { scenario }
+        Self {
+            scenario,
+            options: ProviderOptions::default(),
+        }
     }
 }
 
@@ -502,36 +507,39 @@ impl RuntimeTurnPhaseProbe for RuntimePerfPhaseProbe {
 }
 
 #[async_trait::async_trait]
-impl LlmTransport for BenchmarkTransport {
-    fn default_root_model(&self) -> &'static str {
+impl Provider for BenchmarkProvider {
+    fn kind(&self) -> &'static str {
+        "benchmark"
+    }
+    fn label(&self) -> &'static str {
+        "Benchmark"
+    }
+    fn default_model(&self) -> &str {
         "mock-model"
     }
-
-    fn default_agent_model(&self, _tier: &str) -> Option<lash::llm::types::ModelSelection> {
+    fn supported_variants(&self, _model: &str) -> &'static [&'static str] {
+        &[]
+    }
+    fn default_model_variant(&self, _model: &str) -> Option<&'static str> {
         None
     }
-
+    fn request_variant_config(&self, _model: &str, _variant: &str) -> Option<VariantRequestConfig> {
+        None
+    }
+    fn default_agent_model(&self, _tier: &str) -> Option<AgentModelSelection> {
+        None
+    }
     fn requires_streaming(&self) -> bool {
         true
     }
-
-    fn normalize_model(&self, model: &str) -> String {
-        model.to_string()
+    fn options(&self) -> &ProviderOptions {
+        &self.options
+    }
+    fn options_mut(&mut self) -> &mut ProviderOptions {
+        &mut self.options
     }
 
-    fn context_lookup_model(&self, model: &str) -> String {
-        model.to_string()
-    }
-
-    async fn ensure_ready(&self, _provider: &mut Provider) -> Result<bool, LlmTransportError> {
-        Ok(false)
-    }
-
-    async fn complete(
-        &self,
-        _provider: &mut Provider,
-        req: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError> {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let profile = benchmark_stream_profile(self.scenario);
         let usage = LlmUsage {
             input_tokens: 1_024,
@@ -556,6 +564,12 @@ impl LlmTransport for BenchmarkTransport {
             request_body: None,
             http_summary: None,
         })
+    }
+    fn serialize_config(&self) -> serde_json::Value {
+        serde_json::Value::Object(Default::default())
+    }
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
     }
 }
 
@@ -888,16 +902,19 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
     } else {
         None
     };
+    let base_url = openai_compat_server
+        .as_ref()
+        .map(|server| server.base_url.clone())
+        .unwrap_or_else(|| "https://example.invalid/v1".to_string());
+    let provider: ProviderHandle = match scenario {
+        RuntimePerfScenario::OpenAiCompatStream => ProviderHandle::new(Box::new(
+            OpenAiGenericProvider::new("test-key", base_url.clone()),
+        )),
+        _ => ProviderHandle::new(Box::new(BenchmarkProvider::new(scenario))),
+    };
     let policy = SessionPolicy {
         model: "mock-model".to_string(),
-        provider: Provider::OpenAiGeneric {
-            api_key: "test-key".to_string(),
-            base_url: openai_compat_server
-                .as_ref()
-                .map(|server| server.base_url.clone())
-                .unwrap_or_else(|| "https://example.invalid/v1".to_string()),
-            options: ProviderOptions::default(),
-        },
+        provider,
         max_context_tokens: Some(200_000),
         execution_mode,
         context_approach: context_approach.clone(),
@@ -925,12 +942,6 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         .with_store(Arc::clone(&store))
         .with_session_task_executor(Arc::new(TokioSessionTaskExecutor::default()))
         .with_plugin_host(plugin_host);
-    let builder = match scenario {
-        RuntimePerfScenario::OpenAiCompatStream => builder.with_llm_factory(|provider| {
-            Box::new(OpenAiGenericAdapter::new(provider.llm_timeouts()))
-        }),
-        _ => builder.with_llm_factory(move |_| Box::new(BenchmarkTransport::new(scenario))),
-    };
     let runtime = builder.build().await?;
     Ok(BenchmarkRuntime {
         runtime,

@@ -1,54 +1,88 @@
 use async_trait::async_trait;
 use base64::Engine;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::llm::adapters::streaming::drive_sse_response;
-use crate::llm::timeouts::{
-    LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
+use lash::llm::streaming::drive_sse_response;
+use lash::llm::timeouts::{
+    build_http_client, read_response_text, response_start_timeout, send_request,
 };
-use crate::llm::transport::{LlmTransport, LlmTransportError};
-use crate::llm::types::{
+use lash::llm::transport::LlmTransportError;
+use lash::llm::types::{
     LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse,
-    LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage, ModelSelection,
+    LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
 };
-use crate::model_variant::{VariantRequestConfig, anthropic_supports_adaptive_thinking};
-use crate::provider::Provider;
+use lash::provider::{
+    AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
+};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const FINE_GRAINED_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 
-pub struct AnthropicAdapter {
+const CLAUDE_ADAPTIVE_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
+const CLAUDE_ADAPTIVE_MAX_VARIANTS: &[&str] = &["low", "medium", "high", "max"];
+const CLAUDE_ADAPTIVE_VARIANTS: &[&str] = &["low", "medium", "high"];
+const CLAUDE_BUDGET_VARIANTS: &[&str] = &["none", "low", "medium", "high"];
+
+pub(crate) fn anthropic_supports_adaptive_thinking(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.contains("opus-4-6")
+        || lower.contains("opus-4.6")
+        || lower.contains("opus-4-7")
+        || lower.contains("opus-4.7")
+        || lower.contains("sonnet-4-6")
+        || lower.contains("sonnet-4.6")
+}
+
+pub(crate) fn anthropic_supports_xhigh(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.contains("opus-4-7") || lower.contains("opus-4.7")
+}
+
+pub(crate) fn anthropic_supports_max(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.contains("opus-4-6") || lower.contains("opus-4.6")
+}
+
+/// Anthropic API (Claude) provider. Implements the `Provider` trait
+/// directly — the old `AnthropicProvider` split has collapsed into one
+/// type that owns both config and transport.
+#[derive(Clone, Debug)]
+pub struct AnthropicProvider {
+    pub api_key: String,
+    pub base_url: Option<String>,
+    pub options: ProviderOptions,
     client: reqwest::Client,
-    request_timeout: Option<std::time::Duration>,
-    chunk_timeout: std::time::Duration,
 }
 
-impl Default for AnthropicAdapter {
-    fn default() -> Self {
-        Self::new(LlmTimeouts::default())
-    }
-}
-
-impl AnthropicAdapter {
-    pub fn new(timeouts: LlmTimeouts) -> Self {
+impl AnthropicProvider {
+    pub fn new(api_key: impl Into<String>) -> Self {
         Self {
+            api_key: api_key.into(),
+            base_url: None,
+            options: ProviderOptions::default(),
             client: build_http_client(),
-            request_timeout: timeouts.request_timeout,
-            chunk_timeout: timeouts.chunk_timeout,
         }
     }
 
-    /// Use an embedder-provided `reqwest::Client` instead of building a
-    /// fresh one. Shares the TLS stack + connection pool across every
-    /// adapter constructed from the same pool.
-    pub fn with_client(client: std::sync::Arc<reqwest::Client>, timeouts: LlmTimeouts) -> Self {
-        Self {
-            client: (*client).clone(),
-            request_timeout: timeouts.request_timeout,
-            chunk_timeout: timeouts.chunk_timeout,
-        }
+    pub fn with_base_url(mut self, base_url: Option<String>) -> Self {
+        self.base_url = base_url;
+        self
+    }
+
+    pub fn with_options(mut self, options: ProviderOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Share an embedder-provided `reqwest::Client` instead of building
+    /// a fresh one. Saves ~42 MB of TLS state per provider when the
+    /// host pools connections across sessions.
+    pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
+        self.client = (*client).clone();
+        self
     }
 
     fn role_name(role: &LlmRole) -> &'static str {
@@ -270,20 +304,7 @@ impl AnthropicAdapter {
         }
     }
 
-    fn build_request_body(
-        &self,
-        provider: &Provider,
-        req: &LlmRequest,
-    ) -> Result<Value, LlmTransportError> {
-        let _ = match provider {
-            Provider::Anthropic { api_key, .. } => api_key.clone(),
-            _ => {
-                return Err(LlmTransportError::new(
-                    "Anthropic adapter received non-Anthropic provider",
-                ));
-            }
-        };
-
+    fn build_request_body(&self, req: &LlmRequest) -> Result<Value, LlmTransportError> {
         let (system_text, mut messages) = self.build_messages(req);
         let mut tools = self.build_tools(req);
 
@@ -327,7 +348,7 @@ impl AnthropicAdapter {
         // it whenever thinking is enabled (matches Anthropic API rules).
         let mut thinking_enabled = false;
         if let Some(variant) = req.model_variant.as_deref()
-            && let Some(cfg) = crate::model_variant::request_config(provider, &req.model, variant)
+            && let Some(cfg) = self.request_variant_config(&req.model, variant)
         {
             match cfg {
                 VariantRequestConfig::AnthropicAdaptiveThinking { effort } => {
@@ -459,18 +480,18 @@ pub(crate) fn clamp_effort(model: &str, effort: &str) -> String {
     let normalized = effort.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "xhigh" => {
-            if crate::model_variant::anthropic_supports_xhigh(model) {
+            if anthropic_supports_xhigh(model) {
                 "xhigh".to_string()
-            } else if crate::model_variant::anthropic_supports_max(model) {
+            } else if anthropic_supports_max(model) {
                 "max".to_string()
             } else {
                 "high".to_string()
             }
         }
         "max" => {
-            if crate::model_variant::anthropic_supports_max(model) {
+            if anthropic_supports_max(model) {
                 "max".to_string()
-            } else if crate::model_variant::anthropic_supports_xhigh(model) {
+            } else if anthropic_supports_xhigh(model) {
                 "xhigh".to_string()
             } else {
                 "high".to_string()
@@ -521,7 +542,7 @@ fn parse_event(raw: &str) -> Option<Value> {
     serde_json::from_str::<Value>(raw).ok()
 }
 
-impl AnthropicAdapter {
+impl AnthropicProvider {
     fn process_sse_event(
         raw: &str,
         state: &mut StreamState,
@@ -786,30 +807,99 @@ fn extract_error_detail(raw: &str) -> Option<String> {
 }
 
 #[async_trait]
-impl LlmTransport for AnthropicAdapter {
-    fn default_root_model(&self) -> &'static str {
+impl Provider for AnthropicProvider {
+    fn kind(&self) -> &'static str {
+        "anthropic"
+    }
+
+    fn label(&self) -> &'static str {
+        "Anthropic API (Claude)"
+    }
+
+    fn default_model(&self) -> &str {
         "claude-opus-4-7"
     }
 
-    fn default_agent_model(&self, tier: &str) -> Option<ModelSelection> {
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        let lower = model.to_ascii_lowercase();
+        if anthropic_supports_adaptive_thinking(model) {
+            if anthropic_supports_xhigh(model) {
+                CLAUDE_ADAPTIVE_XHIGH_VARIANTS
+            } else if anthropic_supports_max(model) {
+                CLAUDE_ADAPTIVE_MAX_VARIANTS
+            } else {
+                CLAUDE_ADAPTIVE_VARIANTS
+            }
+        } else if lower.contains("haiku-4")
+            || lower.contains("claude-opus-4")
+            || lower.contains("claude-sonnet-4")
+        {
+            CLAUDE_BUDGET_VARIANTS
+        } else {
+            &[]
+        }
+    }
+
+    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
+        let variants = self.supported_variants(model);
+        if variants.is_empty() {
+            return None;
+        }
+        if variants.contains(&"xhigh") {
+            Some("xhigh")
+        } else if variants.contains(&"max") {
+            Some("max")
+        } else {
+            Some("high")
+        }
+    }
+
+    fn request_variant_config(
+        &self,
+        model: &str,
+        variant: &str,
+    ) -> Option<VariantRequestConfig> {
+        if self.validate_variant(model, variant).is_err() {
+            return None;
+        }
+        if anthropic_supports_adaptive_thinking(model) {
+            if variant == "none" {
+                return None;
+            }
+            Some(VariantRequestConfig::AnthropicAdaptiveThinking {
+                effort: variant.to_string(),
+            })
+        } else {
+            let budget_tokens = match variant {
+                "none" => return None,
+                "low" => 1_024,
+                "medium" => 4_096,
+                "high" => 12_288,
+                _ => return None,
+            };
+            Some(VariantRequestConfig::AnthropicThinkingBudget { budget_tokens })
+        }
+    }
+
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
         match tier {
-            "low" => Some(ModelSelection {
-                model: "claude-haiku-4-6",
+            "low" => Some(AgentModelSelection {
+                model: "claude-haiku-4-6".to_string(),
                 variant: None,
             }),
-            "medium" => Some(ModelSelection {
-                model: "claude-sonnet-4-6",
-                variant: Some("medium"),
+            "medium" => Some(AgentModelSelection {
+                model: "claude-sonnet-4-6".to_string(),
+                variant: Some("medium".to_string()),
             }),
-            "high" => Some(ModelSelection {
-                model: "claude-opus-4-7",
-                variant: Some("high"),
+            "high" => Some(AgentModelSelection {
+                model: "claude-opus-4-7".to_string(),
+                variant: Some("high".to_string()),
             }),
             _ => None,
         }
     }
 
-    fn normalize_model(&self, model: &str) -> String {
+    fn resolve_model(&self, model: &str) -> String {
         model.to_string()
     }
 
@@ -821,33 +911,26 @@ impl LlmTransport for AnthropicAdapter {
         }
     }
 
-    async fn ensure_ready(&self, _provider: &mut Provider) -> Result<bool, LlmTransportError> {
-        Ok(false)
+    fn options(&self) -> &ProviderOptions {
+        &self.options
+    }
+
+    fn options_mut(&mut self) -> &mut ProviderOptions {
+        &mut self.options
     }
 
     async fn complete(
-        &self,
-        provider: &mut Provider,
+        &mut self,
         req: LlmRequest,
     ) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
-        let (api_key, base_url) = match provider {
-            Provider::Anthropic {
-                api_key, base_url, ..
-            } => (
-                api_key.clone(),
-                base_url
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
-            ),
-            _ => {
-                return Err(LlmTransportError::new(
-                    "Anthropic adapter received non-Anthropic provider",
-                ));
-            }
-        };
+        let timeouts = self.options.llm_timeouts();
+        let base_url = self
+            .base_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
-        let body = self.build_request_body(provider, &req)?;
+        let body = self.build_request_body(&req)?;
         let request_body = serde_json::to_string(&body).ok();
 
         // `fine-grained-tool-streaming-2025-05-14` streams partial JSON so we
@@ -862,7 +945,7 @@ impl LlmTransport for AnthropicAdapter {
         let request = self
             .client
             .post(&url)
-            .header("x-api-key", api_key)
+            .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("anthropic-beta", betas.join(","))
             .header("Content-Type", "application/json")
@@ -872,10 +955,7 @@ impl LlmTransport for AnthropicAdapter {
         let resp = send_request(
             request,
             request_body.clone(),
-            // Anthropic is always an SSE stream on this adapter, regardless
-            // of whether a listener is attached. The first-chunk deadline
-            // should reflect that.
-            response_start_timeout(self.request_timeout, self.chunk_timeout, true),
+            response_start_timeout(timeouts.request_timeout, timeouts.chunk_timeout, true),
             "Anthropic response start timed out",
         )
         .await?;
@@ -884,7 +964,7 @@ impl LlmTransport for AnthropicAdapter {
         if !status.is_success() {
             let text = read_response_text(
                 resp,
-                self.request_timeout,
+                timeouts.request_timeout,
                 "Anthropic response body timed out",
             )
             .await
@@ -911,7 +991,7 @@ impl LlmTransport for AnthropicAdapter {
         let mut state = StreamState::default();
         drive_sse_response(
             resp,
-            self.chunk_timeout,
+            timeouts.chunk_timeout,
             "Anthropic stream chunk timed out",
             |raw| Self::process_sse_event(&raw, &mut state, stream_events.as_ref()),
         )
@@ -933,462 +1013,79 @@ impl LlmTransport for AnthropicAdapter {
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
         })
     }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "api_key".to_string(),
+            serde_json::Value::String(self.api_key.clone()),
+        );
+        if let Some(base_url) = &self.base_url {
+            map.insert(
+                "base_url".to_string(),
+                serde_json::Value::String(base_url.clone()),
+            );
+        }
+        if !self.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolSpec};
-    use std::sync::Arc;
+/// Deserialize payload for `ProviderSpec::config` when building an
+/// `AnthropicProvider` from a stored [`lash::LashConfig`].
+#[derive(Deserialize)]
+struct AnthropicProviderConfig {
+    api_key: String,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    options: ProviderOptions,
+}
 
-    fn provider() -> Provider {
-        Provider::Anthropic {
-            api_key: "sk-ant-test".into(),
-            base_url: None,
-            options: crate::provider::ProviderOptions::default(),
-        }
+/// Factory that registers [`AnthropicProvider`] with lash's global
+/// provider registry. Hosts call [`register`] once at startup.
+pub struct AnthropicProviderFactory;
+
+impl AnthropicProviderFactory {
+    /// Convenience: install this factory into lash's global registry.
+    pub fn register() {
+        lash::register_provider_factory(std::sync::Arc::new(Self));
     }
+}
 
-    fn adapter() -> AnthropicAdapter {
-        AnthropicAdapter::new(LlmTimeouts::default())
+impl ProviderFactory for AnthropicProviderFactory {
+    fn kind(&self) -> &'static str {
+        "anthropic"
     }
-
-    fn empty_req() -> LlmRequest {
-        LlmRequest {
-            model: "claude-opus-4-7".into(),
-            messages: vec![],
-            attachments: vec![],
-            tools: Arc::new(vec![]),
-            tool_choice: LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        }
+    fn cli_label(&self) -> &'static str {
+        "Anthropic API (Claude)"
     }
-
-    #[test]
-    fn default_models_match_tiers() {
-        let a = adapter();
-        assert_eq!(a.default_root_model(), "claude-opus-4-7");
-        let low = a.default_agent_model("low").unwrap();
-        assert_eq!(low.model, "claude-haiku-4-6");
-        let med = a.default_agent_model("medium").unwrap();
-        assert_eq!(med.model, "claude-sonnet-4-6");
-        assert_eq!(med.variant, Some("medium"));
-        let high = a.default_agent_model("high").unwrap();
-        assert_eq!(high.model, "claude-opus-4-7");
-        assert_eq!(high.variant, Some("high"));
+    fn setup_name(&self) -> &'static str {
+        "Anthropic API"
     }
-
-    #[test]
-    fn context_lookup_prefixes_anthropic() {
-        let a = adapter();
-        assert_eq!(
-            a.context_lookup_model("claude-opus-4-7"),
-            "anthropic/claude-opus-4-7"
-        );
-        assert_eq!(
-            a.context_lookup_model("anthropic/claude-opus-4-7"),
-            "anthropic/claude-opus-4-7"
-        );
+    fn setup_description(&self) -> &'static str {
+        "Claude via Anthropic API key"
     }
-
-    #[test]
-    fn build_messages_hoists_first_system_prompt() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.messages = vec![
-            LlmMessage::text(LlmRole::System, "system prompt"),
-            LlmMessage::text(LlmRole::User, "hello"),
-        ];
-        let (system, messages) = a.build_messages(&req);
-        assert_eq!(system.as_deref(), Some("system prompt"));
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[0]["content"][0]["type"], "text");
-        assert_eq!(messages[0]["content"][0]["text"], "hello");
+    fn default_base_url(&self) -> Option<&'static str> {
+        Some("https://api.anthropic.com")
     }
-
-    #[test]
-    fn build_messages_merges_consecutive_user_turns() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.messages = vec![
-            LlmMessage::text(LlmRole::User, "first"),
-            LlmMessage::text(LlmRole::User, "second"),
-        ];
-        let (_sys, messages) = a.build_messages(&req);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn build_request_body_omits_temperature_when_thinking_enabled() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.model_variant = Some("high".into());
-        let body = a.build_request_body(&provider(), &req).unwrap();
-        assert!(
-            body.get("temperature").is_none(),
-            "thinking + temperature is incompatible"
-        );
-        assert_eq!(body["thinking"]["type"], "adaptive");
-        assert_eq!(body["thinking"]["display"], "summarized");
-        assert_eq!(body["output_config"]["effort"], "high");
-    }
-
-    #[test]
-    fn build_request_body_passes_xhigh_on_opus_47() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.model_variant = Some("xhigh".into());
-        let body = a.build_request_body(&provider(), &req).unwrap();
-        assert_eq!(body["output_config"]["effort"], "xhigh");
-    }
-
-    #[test]
-    fn build_request_body_clamps_xhigh_on_sonnet_46() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.model = "claude-sonnet-4-6".into();
-        req.model_variant = Some("high".into());
-        let body = a.build_request_body(&provider(), &req).unwrap();
-        assert_eq!(body["output_config"]["effort"], "high");
-    }
-
-    #[test]
-    fn clamp_effort_maps_xhigh_to_max_on_opus_46() {
-        assert_eq!(clamp_effort("claude-opus-4-6", "xhigh"), "max");
-        assert_eq!(clamp_effort("claude-opus-4-6", "max"), "max");
-        assert_eq!(clamp_effort("claude-opus-4-7", "xhigh"), "xhigh");
-        assert_eq!(clamp_effort("claude-opus-4-7", "max"), "xhigh");
-        assert_eq!(clamp_effort("claude-sonnet-4-6", "xhigh"), "high");
-    }
-
-    #[test]
-    fn cache_control_respects_long_retention() {
-        // SAFETY: env mutation is the only way to exercise the branch.
-        unsafe { std::env::set_var("LASH_CACHE_RETENTION", "long") };
-        let value = AnthropicAdapter::cache_control_value();
-        assert_eq!(value["ttl"], "1h");
-        assert_eq!(value["type"], "ephemeral");
-        unsafe { std::env::remove_var("LASH_CACHE_RETENTION") };
-        let short = AnthropicAdapter::cache_control_value();
-        assert!(short.get("ttl").is_none());
-    }
-
-    #[test]
-    fn build_request_body_uses_budget_thinking_for_haiku() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.model = "claude-haiku-4-6".into();
-        req.model_variant = Some("medium".into());
-        let body = a.build_request_body(&provider(), &req).unwrap();
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 4_096);
-    }
-
-    #[test]
-    fn process_sse_event_accumulates_text_delta() {
-        let mut state = StreamState::default();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        let (parts, full, _) = AnthropicAdapter::finalize(state);
-        assert_eq!(full, "Hello");
-        assert_eq!(parts.len(), 1);
-    }
-
-    #[test]
-    fn process_sse_event_captures_thinking_signature() {
-        let mut state = StreamState::default();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc=="}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        let (parts, _, _) = AnthropicAdapter::finalize(state);
-        assert_eq!(parts.len(), 1);
-        match &parts[0] {
-            LlmOutputPart::Reasoning {
-                text,
-                encrypted_content,
-                ..
-            } => {
-                assert_eq!(text, "hmm");
-                assert_eq!(encrypted_content.as_deref(), Some("abc=="));
-            }
-            other => panic!("expected Reasoning, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn process_sse_event_collects_tool_use_input_json() {
-        let mut state = StreamState::default();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"a.rs\"}"}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        let (parts, _, _) = AnthropicAdapter::finalize(state);
-        assert_eq!(parts.len(), 1);
-        match &parts[0] {
-            LlmOutputPart::ToolCall {
-                call_id,
-                tool_name,
-                input_json,
-                ..
-            } => {
-                assert_eq!(call_id, "toolu_1");
-                assert_eq!(tool_name, "read_file");
-                assert_eq!(input_json, r#"{"path":"a.rs"}"#);
-            }
-            other => panic!("expected ToolCall, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn process_sse_event_records_usage_from_message_start() {
-        let mut state = StreamState::default();
-        AnthropicAdapter::process_sse_event(
-            r#"{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":4,"cache_creation_input_tokens":0}}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        assert_eq!(state.usage.input_tokens, 14);
-        assert_eq!(state.usage.cached_input_tokens, 4);
-    }
-
-    #[test]
-    fn apply_cache_control_marks_last_tool_and_user() {
-        let mut sys = Some(json!([{"type":"text","text":"sys"}]));
-        let mut messages = vec![json!({
-            "role": "user",
-            "content": [{"type":"text","text":"hi"}],
-        })];
-        let mut tools = vec![json!({"name": "foo"})];
-        AnthropicAdapter::apply_cache_control(&mut sys, &mut messages, &mut tools);
-        assert_eq!(
-            sys.as_ref().unwrap()[0]["cache_control"]["type"],
-            "ephemeral"
-        );
-        assert_eq!(
-            messages[0]["content"][0]["cache_control"]["type"],
-            "ephemeral"
-        );
-        assert_eq!(tools[0]["cache_control"]["type"], "ephemeral");
-    }
-
-    #[test]
-    fn build_request_body_emits_tool_choice_and_tools() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.tools = Arc::new(vec![LlmToolSpec {
-            name: "foo".into(),
-            description: "x".into(),
-            input_schema: json!({"properties": {}, "required": []}),
-            output_schema: json!({}),
-        }]);
-        let body = a.build_request_body(&provider(), &req).unwrap();
-        assert_eq!(body["tools"][0]["name"], "foo");
-        assert_eq!(body["tool_choice"]["type"], "auto");
-    }
-
-    #[test]
-    fn build_request_body_attaches_image_blocks() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.attachments = vec![LlmAttachment {
-            mime: "image/png".into(),
-            data: b"png-bytes".to_vec(),
-        }];
-        req.messages = vec![LlmMessage::new(
-            LlmRole::User,
-            vec![LlmContentBlock::Image { attachment_idx: 0 }],
-        )];
-        let body = a.build_request_body(&provider(), &req).unwrap();
-        let msg = &body["messages"][0];
-        assert_eq!(msg["role"], "user");
-        assert_eq!(msg["content"][0]["type"], "image");
-        assert_eq!(msg["content"][0]["source"]["type"], "base64");
-        assert_eq!(msg["content"][0]["source"]["media_type"], "image/png");
-    }
-
-    #[test]
-    fn build_messages_replays_assistant_tool_calls_and_results() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.messages = vec![
-            LlmMessage::text(LlmRole::User, "run something"),
-            LlmMessage::new(
-                LlmRole::Assistant,
-                vec![
-                    LlmContentBlock::Text("sure".into()),
-                    LlmContentBlock::ToolCall {
-                        call_id: "toolu_abc".into(),
-                        tool_name: "read_file".into(),
-                        input_json: r#"{"path":"foo.rs"}"#.into(),
-                        item_id: None,
-                        signature: None,
-                    },
-                ],
-            ),
-            LlmMessage::new(
-                LlmRole::User,
-                vec![LlmContentBlock::ToolResult {
-                    call_id: "toolu_abc".into(),
-                    content: "file contents".into(),
-                    tool_name: None,
-                }],
-            ),
-        ];
-        let (_sys, messages) = a.build_messages(&req);
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[1]["role"], "assistant");
-        assert_eq!(messages[1]["content"][0]["type"], "text");
-        assert_eq!(messages[1]["content"][1]["type"], "tool_use");
-        assert_eq!(messages[1]["content"][1]["id"], "toolu_abc");
-        assert_eq!(messages[1]["content"][1]["name"], "read_file");
-        assert_eq!(messages[1]["content"][1]["input"]["path"], "foo.rs");
-        assert_eq!(messages[2]["role"], "user");
-        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
-        assert_eq!(messages[2]["content"][0]["tool_use_id"], "toolu_abc");
-    }
-
-    #[test]
-    fn build_messages_replays_thinking_with_signature() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.messages = vec![
-            LlmMessage::text(LlmRole::User, "hi"),
-            LlmMessage::new(
-                LlmRole::Assistant,
-                vec![
-                    LlmContentBlock::Reasoning {
-                        text: "pondering".into(),
-                        signature: Some("SIG==".into()),
-                        redacted: false,
-                        item_id: None,
-                        encrypted_content: Some("SIG==".into()),
-                        summary: Vec::new(),
-                    },
-                    LlmContentBlock::Text("answer".into()),
-                ],
-            ),
-            LlmMessage::text(LlmRole::User, "next"),
-        ];
-        let (_sys, messages) = a.build_messages(&req);
-        assert_eq!(messages.len(), 3);
-        let assistant = &messages[1];
-        assert_eq!(assistant["role"], "assistant");
-        assert_eq!(assistant["content"][0]["type"], "thinking");
-        assert_eq!(assistant["content"][0]["thinking"], "pondering");
-        assert_eq!(assistant["content"][0]["signature"], "SIG==");
-        assert_eq!(assistant["content"][1]["type"], "text");
-    }
-
-    #[test]
-    fn build_messages_emits_redacted_thinking_block() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.messages = vec![
-            LlmMessage::text(LlmRole::User, "hi"),
-            LlmMessage::new(
-                LlmRole::Assistant,
-                vec![LlmContentBlock::Reasoning {
-                    text: String::new(),
-                    signature: Some("OPAQUE==".into()),
-                    redacted: true,
-                    item_id: None,
-                    encrypted_content: Some("OPAQUE==".into()),
-                    summary: Vec::new(),
-                }],
-            ),
-        ];
-        let (_sys, messages) = a.build_messages(&req);
-        assert_eq!(messages[1]["content"][0]["type"], "redacted_thinking");
-        assert_eq!(messages[1]["content"][0]["data"], "OPAQUE==");
-    }
-
-    #[test]
-    fn build_messages_falls_back_to_text_when_signature_missing() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.messages = vec![
-            LlmMessage::text(LlmRole::User, "hi"),
-            LlmMessage::new(
-                LlmRole::Assistant,
-                vec![LlmContentBlock::Reasoning {
-                    text: "aborted thought".into(),
-                    signature: None,
-                    redacted: false,
-                    item_id: None,
-                    encrypted_content: None,
-                    summary: Vec::new(),
-                }],
-            ),
-        ];
-        let (_sys, messages) = a.build_messages(&req);
-        // No signature → downgrades to plain text block so Anthropic still
-        // accepts the turn.
-        assert_eq!(messages[1]["content"][0]["type"], "text");
-        assert_eq!(messages[1]["content"][0]["text"], "aborted thought");
-    }
-
-    #[test]
-    fn build_messages_skips_empty_user_text() {
-        let a = adapter();
-        let mut req = empty_req();
-        req.messages = vec![
-            LlmMessage::text(LlmRole::User, "   "),
-            LlmMessage::text(LlmRole::User, "hello"),
-        ];
-        let (_sys, messages) = a.build_messages(&req);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["content"][0]["text"], "hello");
+    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String> {
+        let cfg: AnthropicProviderConfig =
+            serde_json::from_value(config).map_err(|err| err.to_string())?;
+        Ok(Box::new(AnthropicProvider {
+            api_key: cfg.api_key,
+            base_url: cfg.base_url,
+            options: cfg.options,
+            client: build_http_client(),
+        }))
     }
 }

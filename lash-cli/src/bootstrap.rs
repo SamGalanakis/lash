@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lash::provider::{LashConfig, Provider};
+use lash::provider::{LashConfig, ProviderHandle};
 use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
@@ -8,6 +8,7 @@ use lash_default_tools::{
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_plugin_ui_activity::UiActivityPluginFactory;
+use lash_provider_openai::OpenAiGenericProvider;
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -161,7 +162,19 @@ fn resolve_rlm_globals_patch(
     Ok(Some(patch))
 }
 
+fn register_providers() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        lash_provider_anthropic::AnthropicProviderFactory::register();
+        lash_provider_openai::OpenAiGenericProviderFactory::register();
+        lash_provider_codex::CodexProviderFactory::register();
+        lash_provider_google::GoogleOAuthProviderFactory::register();
+    });
+}
+
 pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::Result<()> {
+    register_providers();
     // Handle --reset before any TUI/provider setup
     if args.reset {
         use std::io::Write;
@@ -239,44 +252,55 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     }
     let interactive_startup = !args.info && args.print_prompt.is_none();
     let mut startup_system_message: Option<String> = None;
-    let mut lash_config = if args.provider || existing_config.is_none() {
+    let (mut lash_config, active_provider) = if args.provider || existing_config.is_none() {
         if let Some(ref key) = args.api_key {
             // Shortcut: env var or --api-key activates OpenAI-compatible directly.
-            let provider = Provider::OpenAiGeneric {
-                api_key: key.clone(),
-                base_url: args.base_url.clone(),
-                options: lash::provider::ProviderOptions::default(),
-            };
+            let provider = ProviderHandle::new(Box::new(OpenAiGenericProvider::new(
+                key.clone(),
+                args.base_url.clone(),
+            )));
             let mut cfg = existing_config
                 .clone()
-                .unwrap_or_else(|| LashConfig::new(provider.clone()));
-            cfg.upsert_provider(provider.clone());
+                .unwrap_or_else(|| LashConfig::new(&provider));
+            cfg.upsert_provider(&provider);
             let _ = cfg.set_active_provider_kind(provider.kind());
             cfg.set_tavily_api_key(args.tavily_api_key.clone());
-            cfg
+            (cfg, provider)
         } else {
-            setup::run_setup_with_existing(existing_config.as_ref()).await?
+            let cfg = setup::run_setup_with_existing(existing_config.as_ref()).await?;
+            let provider = cfg
+                .build_active_provider()
+                .map_err(|err| anyhow::anyhow!("build active provider: {err}"))?;
+            (cfg, provider)
         }
     } else {
         // SAFETY: else branch means existing_config.is_some() (checked above)
         #[allow(clippy::unnecessary_unwrap)]
-        let mut c = existing_config.unwrap();
-        match c.active_provider_mut().ensure_fresh().await {
-            Ok(true) => c.save(&crate::paths::config_file())?, // persist refreshed tokens
-            Ok(false) => {}
+        let c = existing_config.unwrap();
+        let mut provider = c
+            .build_active_provider()
+            .map_err(|err| anyhow::anyhow!("build active provider: {err}"))?;
+        match provider.ensure_fresh().await {
+            Ok(true) => {
+                let mut c = c;
+                c.upsert_provider(&provider);
+                c.save(&crate::paths::config_file())?;
+                (c, provider)
+            }
+            Ok(false) => (c, provider),
             Err(err) => {
                 if interactive_startup {
-                    let provider_label = c.active_provider().label();
+                    let provider_label = provider.label();
                     startup_system_message = Some(format!(
                         "{} refresh failed: {}. Lash opened in recovery mode. Use /provider or relaunch with --provider to reauthenticate or switch providers.",
                         provider_label, err
                     ));
+                    (c, provider)
                 } else {
                     return Err(err.into());
                 }
             }
         }
-        c
     };
 
     // CLI env/flags override stored config
@@ -297,23 +321,15 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     let requested_model = args
         .model
         .clone()
-        .unwrap_or_else(|| lash_config.active_provider().default_model().to_string());
+        .unwrap_or_else(|| active_provider.default_model().to_string());
     let selection = parse_model_selection(&requested_model).map_err(anyhow::Error::msg)?;
-    validate_model_selection(lash_config.active_provider(), &selection)
-        .map_err(anyhow::Error::msg)?;
-    let resolved_model_spec = resolve_model_selection(
-        lash_config.active_provider(),
-        &selection,
-        model_catalog.as_ref(),
-    )
-    .map_err(anyhow::Error::msg)?;
+    validate_model_selection(&active_provider, &selection).map_err(anyhow::Error::msg)?;
+    let resolved_model_spec =
+        resolve_model_selection(&active_provider, &selection, model_catalog.as_ref())
+            .map_err(anyhow::Error::msg)?;
     let model = selection.model.clone();
-    let model_variant = resolve_model_variant(
-        lash_config.active_provider(),
-        &model,
-        args.variant.as_deref(),
-    )
-    .map_err(anyhow::Error::msg)?;
+    let model_variant = resolve_model_variant(&active_provider, &model, args.variant.as_deref())
+        .map_err(anyhow::Error::msg)?;
     let llm_log_path = if crate::detailed_debug_logging_enabled(args.debug) {
         let dir = crate::paths::lash_home().join("sessions");
         Some(dir.join(format!(
@@ -427,7 +443,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         }));
     let session_policy = SessionPolicy {
         model: model.clone(),
-        provider: lash_config.active_provider().clone(),
+        provider: active_provider.clone(),
         model_variant,
         max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
@@ -483,7 +499,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         println!(
             "{}",
             info_text(
-                lash_config.active_provider(),
+                &active_provider,
                 &model,
                 session_policy.model_variant.as_deref(),
                 execution_mode,
@@ -591,7 +607,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         turn_input_injection_bridge,
         &mut logger,
         &args,
-        lash_config.active_provider().clone(),
+        active_provider.clone(),
         model,
         resolved_model_spec.context_window(),
         session_name,

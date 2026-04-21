@@ -407,7 +407,7 @@ fn persisted_session_config_from_state(
     state: &crate::PersistedSessionState,
 ) -> crate::PersistedSessionConfig {
     crate::PersistedSessionConfig {
-        provider_id: state.policy.provider.id().to_string(),
+        provider_id: state.policy.provider.kind().to_string(),
         configured_model: state.policy.model.clone(),
         context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
         execution_mode: state.policy.execution_mode,

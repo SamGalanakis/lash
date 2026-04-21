@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use lash::DynamicStateSnapshot;
+use lash::provider::ProviderHandle;
 
 use crate::app::UiResumeState;
 use crate::persistence::{persist_committed_runtime_state, snapshot_execution_state};
@@ -596,7 +597,7 @@ pub async fn fork_current_session(
     runtime: Option<&mut lash::LashRuntime>,
     logger: &SessionLogger,
     ui_state: &UiResumeState,
-    _provider: &lash::Provider,
+    _provider: &ProviderHandle,
     configured_model: &str,
     _context_window: u64,
     _model_variant: Option<&str>,
@@ -636,7 +637,7 @@ pub async fn fork_current_session(
             session_id: crate::ROOT_SESSION_ID.to_string(),
             graph: lash::SessionGraph::default(),
             config: lash::PersistedSessionConfig {
-                provider_id: _provider.id().to_string(),
+                provider_id: _provider.kind().to_string(),
                 configured_model: configured_model.to_string(),
                 context_window: _context_window,
                 execution_mode: lash::ExecutionMode::Standard,
@@ -691,15 +692,14 @@ pub async fn fork_current_session(
 mod fork_tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash::provider::{Provider, ProviderOptions};
+    use lash::provider::ProviderHandle;
     use std::collections::{BTreeMap, BTreeSet};
 
-    fn dummy_provider() -> Provider {
-        Provider::OpenAiGeneric {
-            api_key: "test".to_string(),
-            base_url: "https://example.invalid/v1".to_string(),
-            options: ProviderOptions::default(),
-        }
+    fn dummy_provider() -> ProviderHandle {
+        ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
+            "test",
+            "https://example.invalid/v1",
+        )))
     }
 
     fn empty_dynamic_state() -> DynamicStateSnapshot {
@@ -742,7 +742,7 @@ mod fork_tests {
             session_id: "root".to_string(),
             graph,
             config: lash::PersistedSessionConfig {
-                provider_id: dummy_provider().id().to_string(),
+                provider_id: dummy_provider().kind().to_string(),
                 configured_model: "gpt-test".to_string(),
                 context_window: 1024,
                 execution_mode: lash::ExecutionMode::Standard,
@@ -1030,7 +1030,7 @@ mod fork_tests {
             session_id: "root".to_string(),
             graph: live_graph,
             config: lash::PersistedSessionConfig {
-                provider_id: dummy_provider().id().to_string(),
+                provider_id: dummy_provider().kind().to_string(),
                 configured_model: "gpt-test".to_string(),
                 context_window: 1024,
                 execution_mode: lash::ExecutionMode::Standard,

@@ -15,6 +15,7 @@ lash-mode-rlm = { path = "../../../lash-mode-rlm" }
 lash-mode-standard = { path = "../../../lash-mode-standard" }
 lash-plugin-observational-memory = { path = "../../../lash-plugin-observational-memory" }
 lash-plugin-rolling-history = { path = "../../../lash-plugin-rolling-history" }
+lash-provider-openai = { path = "../../../lash-provider-openai" }
 lash-subagents = { path = "../../../lash-subagents" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }

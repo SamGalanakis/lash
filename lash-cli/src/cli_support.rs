@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lash::provider::Provider;
+use lash::provider::ProviderHandle;
 use lash::*;
 use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
@@ -386,7 +386,7 @@ pub(crate) fn execution_mode_label(mode: ExecutionMode) -> &'static str {
 }
 
 pub(crate) fn validate_model_selection(
-    provider: &Provider,
+    provider: &ProviderHandle,
     selection: &ModelSelection,
 ) -> Result<(), String> {
     provider
@@ -405,7 +405,7 @@ Resolved provider model ID: `{normalized}`"
 }
 
 pub(crate) fn resolve_model_selection(
-    provider: &Provider,
+    provider: &ProviderHandle,
     selection: &ModelSelection,
     catalog: &CachedModelCatalog,
 ) -> Result<ResolvedModelSpec, String> {
@@ -426,7 +426,7 @@ Resolved provider model ID: `{normalized}`"
 }
 
 pub(crate) fn resolve_model_variant(
-    provider: &Provider,
+    provider: &ProviderHandle,
     model: &str,
     requested: Option<&str>,
 ) -> Result<Option<String>, String> {
@@ -442,7 +442,7 @@ pub(crate) fn resolve_model_variant(
 }
 
 pub(crate) fn variant_lines(
-    provider: &Provider,
+    provider: &ProviderHandle,
     model: &str,
     current_variant: Option<&str>,
 ) -> Vec<String> {
@@ -521,7 +521,7 @@ pub(crate) fn info_text_unconfigured(execution_mode: ExecutionMode, cwd: &str) -
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn info_text(
-    provider: &Provider,
+    provider: &ProviderHandle,
     configured_model: &str,
     model_variant: Option<&str>,
     execution_mode: ExecutionMode,
@@ -538,7 +538,7 @@ pub(crate) fn info_text(
     let mut lines = vec![
         format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash::SANSIO_VERSION),
-        format!("provider: {} ({})", provider.label(), provider.id()),
+        format!("provider: {} ({})", provider.label(), provider.kind()),
         format!("configured model: {}", configured_model),
         format!("resolved model: {}", resolved_model),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
@@ -879,11 +879,11 @@ mod tests {
 
     #[test]
     fn info_text_includes_session_id_and_db_path() {
-        let provider = Provider::OpenAiGeneric {
-            api_key: "test".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            options: Default::default(),
-        };
+        let provider =
+            ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
+                "test",
+                "https://openrouter.ai/api/v1",
+            )));
         let text = info_text(
             &provider,
             "google/gemini-3-flash-preview",

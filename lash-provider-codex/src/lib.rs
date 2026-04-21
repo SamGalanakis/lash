@@ -1,26 +1,44 @@
 use async_trait::async_trait;
 use base64::Engine;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::llm::adapters::streaming::{drive_sse_response, emit_progress};
-use crate::llm::timeouts::{
-    LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
+use lash::llm::streaming::{drive_sse_response, emit_progress};
+use lash::llm::timeouts::{
+    build_http_client, read_response_text, response_start_timeout, send_request,
 };
-use crate::llm::transport::{LlmTransport, LlmTransportError};
-#[cfg(test)]
-use crate::llm::types::LlmMessage;
-use crate::llm::types::{
-    LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmUsage, ModelSelection,
+use lash::llm::transport::LlmTransportError;
+use lash::llm::types::{
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
+    LlmStreamEvent, LlmToolChoice, LlmUsage,
 };
-use crate::provider::Provider;
+use lash::provider::{
+    AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
+};
 
-pub struct CodexOAuthAdapter {
+pub mod oauth;
+
+const OPENAI_GPT5_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"];
+const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
+const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
+
+fn has_xhigh_suffix(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.contains("5.2") || lower.contains("5.3") || lower.contains("5.4")
+}
+
+/// OpenAI Codex OAuth provider (ChatGPT Plus/Pro/Team via device-code flow).
+#[derive(Clone, Debug)]
+pub struct CodexProvider {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: u64,
+    pub account_id: Option<String>,
+    pub options: ProviderOptions,
     client: reqwest::Client,
-    request_timeout: Option<std::time::Duration>,
-    chunk_timeout: std::time::Duration,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -93,7 +111,7 @@ impl CodexStreamState {
 
     fn finish_message(&mut self, item: Option<&Value>) {
         if let Some(item) = item {
-            let text = CodexOAuthAdapter::message_text_from_item(item);
+            let text = CodexProvider::message_text_from_item(item);
             if !text.is_empty() {
                 self.reconcile_current_message_text(&text);
             }
@@ -394,11 +412,11 @@ impl CodexStreamState {
         }
 
         if let Some(final_response) = &self.final_response {
-            let parts = CodexOAuthAdapter::response_parts_from_value(final_response);
+            let parts = CodexProvider::response_parts_from_value(final_response);
             if !parts.is_empty() {
                 return parts;
             }
-            let text = CodexOAuthAdapter::extract_text(final_response);
+            let text = CodexProvider::extract_text(final_response);
             if !text.is_empty() {
                 return vec![LlmOutputPart::Text { text }];
             }
@@ -427,13 +445,7 @@ impl CodexStreamState {
     }
 }
 
-impl Default for CodexOAuthAdapter {
-    fn default() -> Self {
-        Self::new(LlmTimeouts::default())
-    }
-}
-
-impl CodexOAuthAdapter {
+impl CodexProvider {
     const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
     const CODEX_RESPONSES_URL: &'static str = "https://chatgpt.com/backend-api/codex/responses";
     /// Maximum number of submission attempts (1 initial + up to 3 retries).
@@ -443,23 +455,34 @@ impl CodexOAuthAdapter {
     /// Matches pi-mono `BASE_DELAY_MS` at `openai-codex-responses.ts:47`.
     const BASE_DELAY_MS: u64 = 1000;
 
-    pub fn new(timeouts: LlmTimeouts) -> Self {
+    pub fn new(
+        access_token: impl Into<String>,
+        refresh_token: impl Into<String>,
+        expires_at: u64,
+    ) -> Self {
         Self {
+            access_token: access_token.into(),
+            refresh_token: refresh_token.into(),
+            expires_at,
+            account_id: None,
+            options: ProviderOptions::default(),
             client: build_http_client(),
-            request_timeout: timeouts.request_timeout,
-            chunk_timeout: timeouts.chunk_timeout,
         }
     }
 
-    /// Use an embedder-provided `reqwest::Client` instead of building a
-    /// fresh one. Shares the TLS stack + connection pool across every
-    /// adapter constructed from the same pool.
-    pub fn with_client(client: std::sync::Arc<reqwest::Client>, timeouts: LlmTimeouts) -> Self {
-        Self {
-            client: (*client).clone(),
-            request_timeout: timeouts.request_timeout,
-            chunk_timeout: timeouts.chunk_timeout,
-        }
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
+    pub fn with_options(mut self, options: ProviderOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
+        self.client = (*client).clone();
+        self
     }
 
     /// Decide whether an HTTP failure should be retried.
@@ -581,7 +604,7 @@ impl CodexOAuthAdapter {
         .with_code(code)
     }
 
-    fn input_image_part(att: &crate::llm::types::LlmAttachment) -> Value {
+    fn input_image_part(att: &LlmAttachment) -> Value {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
         let data_url = format!("data:{};base64,{}", att.mime, b64);
         json!({
@@ -918,11 +941,11 @@ impl CodexOAuthAdapter {
             .collect()
     }
 
-    fn tool_choice_value(choice: &crate::llm::types::LlmToolChoice) -> &'static str {
+    fn tool_choice_value(choice: &LlmToolChoice) -> &'static str {
         match choice {
-            crate::llm::types::LlmToolChoice::Auto => "auto",
-            crate::llm::types::LlmToolChoice::None => "none",
-            crate::llm::types::LlmToolChoice::Required => "required",
+            LlmToolChoice::Auto => "auto",
+            LlmToolChoice::None => "none",
+            LlmToolChoice::Required => "required",
         }
     }
 
@@ -1399,30 +1422,79 @@ impl CodexOAuthAdapter {
 }
 
 #[async_trait]
-impl LlmTransport for CodexOAuthAdapter {
-    fn default_root_model(&self) -> &'static str {
+impl Provider for CodexProvider {
+    fn kind(&self) -> &'static str {
+        "codex"
+    }
+
+    fn label(&self) -> &'static str {
+        "OpenAI Codex OAuth"
+    }
+
+    fn default_model(&self) -> &str {
         "gpt-5.4"
     }
 
-    fn default_agent_model(&self, tier: &str) -> Option<ModelSelection> {
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        let lower = model.to_ascii_lowercase();
+        if !lower.contains("gpt-5") {
+            return &[];
+        }
+        if lower.contains("codex") {
+            if has_xhigh_suffix(&lower) {
+                CODEX_XHIGH_VARIANTS
+            } else {
+                CODEX_VARIANTS
+            }
+        } else if has_xhigh_suffix(&lower) {
+            OPENAI_GPT5_XHIGH_VARIANTS
+        } else {
+            OPENAI_GPT5_VARIANTS
+        }
+    }
+
+    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
+        let variants = self.supported_variants(model);
+        if variants.is_empty() {
+            return None;
+        }
+        if variants.contains(&"xhigh") {
+            Some("xhigh")
+        } else {
+            Some("high")
+        }
+    }
+
+    fn request_variant_config(
+        &self,
+        model: &str,
+        variant: &str,
+    ) -> Option<VariantRequestConfig> {
+        if self.validate_variant(model, variant).is_err() {
+            return None;
+        }
+        Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
+    }
+
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
         match tier {
-            "low" => Some(ModelSelection {
-                model: "gpt-5.4-mini",
-                variant: Some("low"),
+            "low" => Some(AgentModelSelection {
+                model: "gpt-5.4-mini".to_string(),
+                variant: Some("low".to_string()),
             }),
-            "medium" => Some(ModelSelection {
-                model: "gpt-5.4",
-                variant: Some("medium"),
+            "medium" => Some(AgentModelSelection {
+                model: "gpt-5.4".to_string(),
+                variant: Some("medium".to_string()),
             }),
-            "high" => Some(ModelSelection {
-                model: "gpt-5.4",
-                variant: Some("high"),
+            "high" => Some(AgentModelSelection {
+                model: "gpt-5.4".to_string(),
+                variant: Some("high".to_string()),
             }),
             _ => None,
         }
     }
 
-    fn normalize_model(&self, model: &str) -> String {
+    fn resolve_model(&self, model: &str) -> String {
         model.to_string()
     }
 
@@ -1434,32 +1506,44 @@ impl LlmTransport for CodexOAuthAdapter {
         }
     }
 
+    fn options(&self) -> &ProviderOptions {
+        &self.options
+    }
+
+    fn options_mut(&mut self) -> &mut ProviderOptions {
+        &mut self.options
+    }
+
     fn requires_streaming(&self) -> bool {
         true
     }
 
-    async fn ensure_ready(&self, _provider: &mut Provider) -> Result<bool, LlmTransportError> {
+    async fn ensure_fresh(&mut self) -> Result<bool, lash::oauth::OAuthError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        if now + 300 >= self.expires_at {
+            let tokens = oauth::refresh_tokens(&self.refresh_token).await?;
+            self.access_token = tokens.access_token;
+            self.refresh_token = tokens.refresh_token;
+            self.expires_at = tokens.expires_at;
+            if let Some(new_account_id) = tokens.account_id {
+                self.account_id = Some(new_account_id);
+            }
+            return Ok(true);
+        }
         Ok(false)
     }
 
     async fn complete(
-        &self,
-        provider: &mut Provider,
+        &mut self,
         req: LlmRequest,
     ) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
-        let (access_token, account_id) = match provider {
-            Provider::Codex {
-                access_token,
-                account_id,
-                ..
-            } => (access_token.clone(), account_id.clone()),
-            _ => {
-                return Err(LlmTransportError::new(
-                    "Codex adapter received non-Codex provider",
-                ));
-            }
-        };
+        let access_token = self.access_token.clone();
+        let account_id = self.account_id.clone();
+        let timeouts = self.options.llm_timeouts();
 
         let body = Self::build_request_body(&req, stream_events.is_some());
 
@@ -1503,8 +1587,8 @@ impl LlmTransport for CodexOAuthAdapter {
                 http,
                 request_body.clone(),
                 response_start_timeout(
-                    self.request_timeout,
-                    self.chunk_timeout,
+                    timeouts.request_timeout,
+                    timeouts.chunk_timeout,
                     stream_events.is_some(),
                 ),
                 "Codex response start timed out",
@@ -1526,7 +1610,7 @@ impl LlmTransport for CodexOAuthAdapter {
                     // Non-success: read body text, decide whether to retry.
                     let text = match read_response_text(
                         resp,
-                        self.request_timeout,
+                        timeouts.request_timeout,
                         "Codex response body timed out",
                     )
                     .await
@@ -1614,7 +1698,7 @@ impl LlmTransport for CodexOAuthAdapter {
 
         if !parse_stream {
             let text =
-                read_response_text(resp, self.request_timeout, "Codex response body timed out")
+                read_response_text(resp, timeouts.request_timeout, "Codex response body timed out")
                     .await
                     .map_err(|err| {
                         Self::non_sse_body_read_error(status.as_u16(), content_type.as_deref(), err)
@@ -1691,7 +1775,7 @@ impl LlmTransport for CodexOAuthAdapter {
         let mut state = CodexStreamState::default();
         drive_sse_response(
             resp,
-            self.chunk_timeout,
+            timeouts.chunk_timeout,
             "Codex stream chunk timed out",
             |raw| {
                 let prev_len = state.deltas.len();
@@ -1737,1132 +1821,87 @@ impl LlmTransport for CodexOAuthAdapter {
             format!("HTTP POST {} (stream)", Self::CODEX_RESPONSES_URL),
         ))
     }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "access_token".to_string(),
+            serde_json::Value::String(self.access_token.clone()),
+        );
+        map.insert(
+            "refresh_token".to_string(),
+            serde_json::Value::String(self.refresh_token.clone()),
+        );
+        map.insert(
+            "expires_at".to_string(),
+            serde_json::Value::Number(self.expires_at.into()),
+        );
+        if let Some(account_id) = &self.account_id {
+            map.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(account_id.clone()),
+            );
+        } else {
+            map.insert("account_id".to_string(), serde_json::Value::Null);
+        }
+        if !self.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Deserialize)]
+struct CodexProviderConfig {
+    access_token: String,
+    refresh_token: String,
+    expires_at: u64,
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    options: ProviderOptions,
+}
 
-    fn message(role: LlmRole, kind: &str, content: &str) -> LlmMessage {
-        match kind {
-            "text" => LlmMessage::text(role, content),
-            "tool_result" => LlmMessage::new(
-                role,
-                vec![LlmContentBlock::ToolResult {
-                    call_id: String::new(),
-                    content: content.to_string(),
-                    tool_name: None,
-                }],
-            ),
-            "image" => LlmMessage::new(role, vec![LlmContentBlock::Image { attachment_idx: 0 }]),
-            other => panic!("unknown test message kind: {other}"),
-        }
+/// Factory that registers [`CodexProvider`] with lash's global
+/// provider registry.
+pub struct CodexProviderFactory;
+
+impl CodexProviderFactory {
+    pub fn register() {
+        lash::register_provider_factory(std::sync::Arc::new(Self));
     }
+}
 
-    /// Assistant turn that combines any pre-text with a tool_call block.
-    fn assistant_tool_call(
-        text: Option<&str>,
-        call_id: &str,
-        tool_name: &str,
-        args: &str,
-        item_id: Option<&str>,
-    ) -> LlmMessage {
-        let mut blocks: Vec<LlmContentBlock> = Vec::new();
-        if let Some(text) = text
-            && !text.is_empty()
-        {
-            blocks.push(LlmContentBlock::Text(text.to_string()));
-        }
-        blocks.push(LlmContentBlock::ToolCall {
-            call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            input_json: args.to_string(),
-            item_id: item_id.map(str::to_string),
-            signature: None,
-        });
-        LlmMessage::new(LlmRole::Assistant, blocks)
+impl ProviderFactory for CodexProviderFactory {
+    fn kind(&self) -> &'static str {
+        "codex"
     }
-
-    fn user_tool_result(call_id: &str, content: &str) -> LlmMessage {
-        LlmMessage::new(
-            LlmRole::User,
-            vec![LlmContentBlock::ToolResult {
-                call_id: call_id.to_string(),
-                content: content.to_string(),
-                tool_name: None,
-            }],
-        )
+    fn cli_label(&self) -> &'static str {
+        "OpenAI Codex OAuth"
     }
-
-    #[test]
-    fn parses_codex_sse_delta_and_completed_usage() {
-        let mut state = CodexStreamState::default();
-
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.output_text.delta","delta":"Hi "}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.completed","response":{"output_text":"Hi there","usage":{"input_tokens":30,"output_tokens":8,"input_tokens_details":{"cached_tokens":10}}}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(state.full_text, "Hi there");
-        assert_eq!(state.usage.input_tokens, 30);
-        assert_eq!(state.usage.output_tokens, 8);
-        assert_eq!(state.usage.cached_input_tokens, 10);
+    fn setup_name(&self) -> &'static str {
+        "Codex"
     }
-
-    #[test]
-    fn parses_codex_sse_payload_when_header_missing() {
-        let payload = r#"event: response.output_text.delta
-data: {"type":"response.output_text.delta","delta":"Hey "}
-
-event: response.output_text.delta
-data: {"type":"response.output_text.delta","delta":"there"}
-
-event: response.completed
-data: {"type":"response.completed","response":{"output_text":"Hey there","usage":{"input_tokens":9,"output_tokens":2,"input_tokens_details":{"cached_tokens":3}}}}
-"#;
-
-        let mut state = CodexStreamState::default();
-        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
-
-        assert_eq!(state.full_text, "Hey there");
-        assert_eq!(state.usage.input_tokens, 9);
-        assert_eq!(state.usage.output_tokens, 2);
-        assert_eq!(state.usage.cached_input_tokens, 3);
+    fn setup_description(&self) -> &'static str {
+        "ChatGPT Plus/Pro/Team"
     }
-
-    #[test]
-    fn extracts_tool_calls_from_completed_stream_response() {
-        let payload = r#"event: response.completed
-data: {"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"README.md\"}"}],"usage":{"input_tokens":12,"output_tokens":3}}}
-"#;
-
-        let mut state = CodexStreamState::default();
-        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
-
-        let parts = state.response_parts();
-        assert_eq!(
-            parts,
-            vec![LlmOutputPart::ToolCall {
-                call_id: "call_1".to_string(),
-                tool_name: "read_file".to_string(),
-                input_json: "{\"path\":\"README.md\"}".to_string(),
-                item_id: None,
-                signature: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn extracts_tool_calls_from_stream_events_when_completed_response_is_empty() {
-        let payload = r#"event: response.output_item.added
-data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","arguments":"","call_id":"call_1","name":"exec_command"},"output_index":0}
-
-event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","delta":"{\"cmd\":\"date","item_id":"fc_1","output_index":0}
-
-event: response.function_call_arguments.done
-data: {"type":"response.function_call_arguments.done","arguments":"{\"cmd\":\"date -u\"}","item_id":"fc_1","output_index":0}
-
-event: response.output_item.done
-data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","arguments":"{\"cmd\":\"date -u\"}","call_id":"call_1","name":"exec_command"},"output_index":0}
-
-event: response.completed
-data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":12,"output_tokens":3}}}
-"#;
-
-        let mut state = CodexStreamState::default();
-        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
-
-        assert_eq!(
-            state.response_parts(),
-            vec![LlmOutputPart::ToolCall {
-                call_id: "call_1".to_string(),
-                tool_name: "exec_command".to_string(),
-                input_json: "{\"cmd\":\"date -u\"}".to_string(),
-                item_id: Some("fc_1".to_string()),
-                signature: None,
-            }]
-        );
-        assert_eq!(state.usage.input_tokens, 12);
-        assert_eq!(state.usage.output_tokens, 3);
-    }
-
-    #[test]
-    fn output_text_done_does_not_duplicate_a_repeated_tail() {
-        let mut state = CodexStreamState::default();
-
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.output_text.delta","delta":"I’ve got the wiring. "}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.output_text.delta","delta":"I’m doing one direct read pass."}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.output_text.done","text":"I’m doing one direct read pass."}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","text":"I’ve got the wiring. I’m doing one direct read pass."}]}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.completed","response":{"output_text":"I’ve got the wiring. I’m doing one direct read pass.","usage":{"input_tokens":12,"output_tokens":9}}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            state.deltas,
-            vec![
-                "I’ve got the wiring. ".to_string(),
-                "I’m doing one direct read pass.".to_string(),
-            ]
-        );
-        assert_eq!(
-            state.full_text,
-            "I’ve got the wiring. I’m doing one direct read pass."
-        );
-    }
-
-    #[test]
-    fn consecutive_message_items_are_separated_with_paragraph_break() {
-        let mut state = CodexStreamState::default();
-
-        for event in [
-            r#"{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}}"#,
-            r#"{"type":"response.output_text.delta","delta":"I'm checking the repo."}"#,
-            r#"{"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","text":"I'm checking the repo."}]}}"#,
-            r#"{"type":"response.output_item.added","item":{"id":"msg_2","type":"message","status":"in_progress","content":[]}}"#,
-            r#"{"type":"response.output_text.delta","delta":"Next I'm fetching remote state."}"#,
-            r#"{"type":"response.output_item.done","item":{"id":"msg_2","type":"message","status":"completed","content":[{"type":"output_text","text":"Next I'm fetching remote state."}]}}"#,
-            r#"{"type":"response.completed","response":{"output":[{"content":[{"type":"output_text","text":"I'm checking the repo."}]},{"content":[{"type":"output_text","text":"Next I'm fetching remote state."}]}],"usage":{"input_tokens":10,"output_tokens":12}}}"#,
-        ] {
-            CodexOAuthAdapter::process_sse_event(event, &mut state, None).unwrap();
-        }
-
-        assert_eq!(
-            state.deltas,
-            vec![
-                "I'm checking the repo.".to_string(),
-                "\n\n".to_string(),
-                "Next I'm fetching remote state.".to_string(),
-            ]
-        );
-        assert_eq!(
-            state.full_text,
-            "I'm checking the repo.\n\nNext I'm fetching remote state."
-        );
-    }
-
-    #[test]
-    fn completed_response_appends_only_missing_suffix_once() {
-        let mut state = CodexStreamState::default();
-
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.output_text.delta","delta":"Hi "}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.completed","response":{"output_text":"Hi there","usage":{"input_tokens":30,"output_tokens":8}}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(state.deltas, vec!["Hi ".to_string(), "there".to_string()]);
-        assert_eq!(state.full_text, "Hi there");
-    }
-
-    #[test]
-    fn structured_messages_build_responses_input_items() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                message(LlmRole::System, "text", "sys"),
-                message(LlmRole::User, "text", "question"),
-                assistant_tool_call(None, "call_1", "read_file", r#"{"path":"README.md"}"#, None),
-                user_tool_result("call_1", "ok"),
-                message(LlmRole::User, "text", "new turn"),
-            ],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (instructions, input) = CodexOAuthAdapter::build_input(&req);
-
-        assert_eq!(instructions, "sys");
-        assert_eq!(input.len(), 4);
-        assert_eq!(input[0]["role"], "user");
-        assert_eq!(input[1]["type"], "function_call");
-        assert_eq!(input[2]["type"], "function_call_output");
-        assert_eq!(input[3]["role"], "user");
-        assert_eq!(input[3]["content"][0]["text"], "new turn");
-    }
-
-    #[test]
-    fn build_input_emits_function_call_id_alongside_call_id() {
-        // Simulates a replay where Codex previously returned a function_call
-        // with both `call_id` ("call_1") and item-id ("fc_abc"). The adapter
-        // must re-emit the item-id on the next turn so Codex can pair it with
-        // its sibling reasoning item.
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                message(LlmRole::System, "text", "sys"),
-                message(LlmRole::User, "text", "question"),
-                assistant_tool_call(
-                    None,
-                    "call_1",
-                    "read_file",
-                    r#"{"path":"README.md"}"#,
-                    Some("fc_abc"),
-                ),
-                user_tool_result("call_1", "ok"),
-                message(LlmRole::User, "text", "next"),
-            ],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (_, input) = CodexOAuthAdapter::build_input(&req);
-
-        assert_eq!(input[1]["type"], "function_call");
-        assert_eq!(input[1]["call_id"], "call_1");
-        assert_eq!(input[1]["id"], "fc_abc");
-    }
-
-    #[test]
-    fn build_input_omits_function_call_id_when_not_captured() {
-        // Replay from a provider that didn't surface an item-id: the adapter
-        // must not synthesize one or leave a bogus value on the request body.
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                message(LlmRole::System, "text", "sys"),
-                message(LlmRole::User, "text", "question"),
-                assistant_tool_call(None, "call_x", "noop", "{}", None),
-            ],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (_, input) = CodexOAuthAdapter::build_input(&req);
-        assert_eq!(input[1]["type"], "function_call");
-        assert_eq!(input[1]["call_id"], "call_x");
-        assert!(input[1].get("id").is_none());
-    }
-
-    #[test]
-    fn sse_stream_captures_function_call_item_id() {
-        // The SSE parser should pull `fc_...` off the function_call item and
-        // surface it on the resulting `LlmOutputPart::ToolCall::id`.
-        let payload = r#"event: response.output_item.added
-data: {"type":"response.output_item.added","item":{"id":"fc_zzz","type":"function_call","status":"in_progress","arguments":"","call_id":"call_1","name":"exec_command"},"output_index":0}
-
-event: response.function_call_arguments.done
-data: {"type":"response.function_call_arguments.done","arguments":"{\"cmd\":\"date\"}","item_id":"fc_zzz","output_index":0}
-
-event: response.output_item.done
-data: {"type":"response.output_item.done","item":{"id":"fc_zzz","type":"function_call","status":"completed","arguments":"{\"cmd\":\"date\"}","call_id":"call_1","name":"exec_command"},"output_index":0}
-
-event: response.completed
-data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":1,"output_tokens":1}}}
-"#;
-
-        let mut state = CodexStreamState::default();
-        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
-
-        assert_eq!(
-            state.response_parts(),
-            vec![LlmOutputPart::ToolCall {
-                call_id: "call_1".to_string(),
-                tool_name: "exec_command".to_string(),
-                input_json: "{\"cmd\":\"date\"}".to_string(),
-                item_id: Some("fc_zzz".to_string()),
-                signature: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn structured_messages_preserve_empty_function_call_output() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                assistant_tool_call(None, "call_ask", "ask", r#"{"question":"Pick one"}"#, None),
-                user_tool_result("call_ask", ""),
-                message(LlmRole::User, "text", "continue"),
-            ],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (_, input) = CodexOAuthAdapter::build_input(&req);
-
-        assert_eq!(input.len(), 3);
-        assert_eq!(input[0]["type"], "function_call");
-        assert_eq!(input[1]["type"], "function_call_output");
-        assert_eq!(input[1]["call_id"], "call_ask");
-        assert_eq!(input[1]["output"], "");
-        assert_eq!(input[2]["role"], "user");
-    }
-
-    #[test]
-    fn tool_result_text_only_keeps_bare_string_output() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                assistant_tool_call(None, "call_1", "read_file", r#"{"path":"README.md"}"#, None),
-                user_tool_result("call_1", "file contents"),
-            ],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (_, input) = CodexOAuthAdapter::build_input(&req);
-
-        assert_eq!(input.len(), 2);
-        assert_eq!(input[1]["type"], "function_call_output");
-        assert_eq!(input[1]["call_id"], "call_1");
-        // Text-only results stay a bare string (common case Codex accepts).
-        assert_eq!(input[1]["output"], "file contents");
-        assert!(input[1]["output"].is_string());
-    }
-
-    #[test]
-    fn tool_result_with_image_emits_structured_output_array() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                assistant_tool_call(None, "call_img", "get_circle", "{}", None),
-                // Session layer packs the tool_result, placeholder text,
-                // and image blocks into a single user LlmMessage — the
-                // adapter folds the image into the tool_result's output.
-                LlmMessage::new(
-                    LlmRole::User,
-                    vec![
-                        LlmContentBlock::ToolResult {
-                            call_id: "call_img".to_string(),
-                            content: "A red circle.".to_string(),
-                            tool_name: None,
-                        },
-                        LlmContentBlock::Text("[Tool image: circle-0]".to_string()),
-                        LlmContentBlock::Image { attachment_idx: 0 },
-                    ],
-                ),
-                message(LlmRole::User, "text", "what color is it?"),
-            ],
-            attachments: vec![crate::llm::types::LlmAttachment {
-                mime: "image/png".to_string(),
-                data: vec![0x89, 0x50, 0x4E, 0x47],
-            }],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (_, input) = CodexOAuthAdapter::build_input(&req);
-
-        // function_call + function_call_output(with image folded in) +
-        // trailing user question. No stray trailing image/user placeholder
-        // items should be emitted.
-        assert_eq!(input.len(), 3);
-        assert_eq!(input[0]["type"], "function_call");
-        assert_eq!(input[1]["type"], "function_call_output");
-        assert_eq!(input[1]["call_id"], "call_img");
-
-        let output = &input[1]["output"];
-        assert!(
-            output.is_array(),
-            "expected structured output array when tool result carries an image"
-        );
-        let items = output.as_array().unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["type"], "input_text");
-        assert_eq!(items[0]["text"], "A red circle.");
-        assert_eq!(items[1]["type"], "input_image");
-        assert_eq!(items[1]["image_url"], "data:image/png;base64,iVBORw==");
-
-        // Trailing user question should still be present as its own user
-        // message, and must not contain the image.
-        assert_eq!(input[2]["role"], "user");
-        assert_eq!(input[2]["content"][0]["text"], "what color is it?");
-    }
-
-    #[test]
-    fn build_request_body_sets_prompt_cache_key_from_session_id() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                message(LlmRole::System, "text", "sys"),
-                message(LlmRole::User, "text", "hello"),
-            ],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::None,
-            model_variant: None,
-            session_id: Some("sess-123".to_string()),
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let body = CodexOAuthAdapter::build_request_body(&req, false);
-        assert_eq!(body["prompt_cache_key"], "sess-123");
-        assert_eq!(body["store"], false);
-        assert_eq!(body["instructions"], "sys");
-        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
-        assert_eq!(body["text"]["verbosity"], "medium");
-    }
-
-    #[test]
-    fn build_request_body_uses_top_level_instructions_instead_of_system_input() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                message(LlmRole::System, "text", "system guidance"),
-                message(LlmRole::User, "text", "hello"),
-            ],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::None,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let body = CodexOAuthAdapter::build_request_body(&req, false);
-
-        assert_eq!(body["instructions"], "system guidance");
-        assert_eq!(body["input"].as_array().map(Vec::len), Some(1));
-        assert_eq!(body["input"][0]["role"], "user");
-        assert!(body["input"][0].get("type").is_none());
-    }
-
-    #[test]
-    fn build_request_body_emits_codex_style_function_tools() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                message(LlmRole::System, "text", "sys"),
-                message(LlmRole::User, "text", "hello"),
-            ],
-            attachments: vec![],
-            tools: vec![crate::llm::types::LlmToolSpec {
-                name: "find".to_string(),
-                description: "Locate code".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"}
-                    },
-                    "required": ["query"]
-                }),
-                output_schema: serde_json::Value::Null,
-            }]
-            .into(),
-            tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let body = CodexOAuthAdapter::build_request_body(&req, true);
-
-        assert_eq!(body["tool_choice"], "auto");
-        assert_eq!(body["parallel_tool_calls"], true);
-        assert_eq!(body["tools"][0]["type"], "function");
-        assert_eq!(body["tools"][0]["name"], "find");
-        assert_eq!(body["tools"][0]["strict"], false);
-        assert!(body["tools"][0].get("output_schema").is_none());
-    }
-
-    #[test]
-    fn build_request_body_adds_text_format_for_structured_output() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                message(LlmRole::System, "text", "sys"),
-                message(LlmRole::User, "text", "hello"),
-            ],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::None,
-            model_variant: None,
-            session_id: None,
-            output_spec: Some(crate::llm::types::LlmOutputSpec::JsonSchema(
-                crate::llm::types::LlmJsonSchema {
-                    name: "shape".to_string(),
-                    schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-                    strict: true,
-                },
-            )),
-            stream_events: None,
-        };
-
-        let body = CodexOAuthAdapter::build_request_body(&req, false);
-
-        assert_eq!(body["text"]["format"]["type"], "json_schema");
-        assert_eq!(body["text"]["format"]["name"], "shape");
-        assert_eq!(body["text"]["format"]["strict"], true);
-        assert_eq!(body["text"]["verbosity"], "medium");
-    }
-
-    #[test]
-    fn codex_transport_requires_streaming() {
-        let adapter = CodexOAuthAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
-        assert!(LlmTransport::requires_streaming(&adapter));
-    }
-
-    #[test]
-    fn codex_streaming_requests_parse_stream_even_without_sse_content_type() {
-        assert!(CodexOAuthAdapter::should_parse_stream(true, None));
-        assert!(CodexOAuthAdapter::should_parse_stream(
-            true,
-            Some("application/octet-stream")
-        ));
-        assert!(CodexOAuthAdapter::should_parse_stream(
-            false,
-            Some("text/event-stream; charset=utf-8")
-        ));
-        assert!(!CodexOAuthAdapter::should_parse_stream(
-            false,
-            Some("application/json")
-        ));
-    }
-
-    #[test]
-    fn user_text_messages_use_input_text_content_type() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![message(LlmRole::User, "text", "hello")],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::None,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (_, input) = CodexOAuthAdapter::build_input(&req);
-        let item = &input[0];
-
-        assert_eq!(item["role"], "user");
-        assert_eq!(item["content"][0]["type"], "input_text");
-        assert_eq!(item["content"][0]["text"], "hello");
-    }
-
-    #[test]
-    fn user_image_messages_encode_images_as_data_urls() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![LlmMessage::new(
-                LlmRole::User,
-                vec![LlmContentBlock::Image { attachment_idx: 0 }],
-            )],
-            attachments: vec![crate::llm::types::LlmAttachment {
-                mime: "image/png".to_string(),
-                data: vec![0, 1, 2, 3],
-            }],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::None,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (_, input) = CodexOAuthAdapter::build_input(&req);
-        let item = &input[0];
-
-        assert_eq!(item["role"], "user");
-        assert_eq!(item["content"][0]["type"], "input_image");
-        assert_eq!(
-            item["content"][0]["image_url"],
-            "data:image/png;base64,AAECAw=="
-        );
-        assert!(item["content"][0].get("image_base64").is_none());
-        assert!(item["content"][0].get("mime_type").is_none());
-    }
-
-    #[test]
-    fn structured_image_messages_use_input_image_data_urls() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![LlmMessage::new(
-                LlmRole::User,
-                vec![LlmContentBlock::Image { attachment_idx: 0 }],
-            )],
-            attachments: vec![crate::llm::types::LlmAttachment {
-                mime: "image/png".to_string(),
-                data: vec![0, 1, 2, 3],
-            }],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::None,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let (_, input) = CodexOAuthAdapter::build_input(&req);
-        let part = &input[0]["content"][0];
-
-        assert_eq!(part["type"], "input_image");
-        assert_eq!(part["image_url"], "data:image/png;base64,AAECAw==");
-        assert!(part.get("image_base64").is_none());
-        assert!(part.get("mime_type").is_none());
-    }
-
-    #[test]
-    fn clamp_reasoning_effort_promotes_minimal_on_gpt_5_2_3_4() {
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.2", "minimal"),
-            "low"
-        );
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.3", "minimal"),
-            "low"
-        );
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.4", "minimal"),
-            "low"
-        );
-        // Provider-prefixed ids are normalised before matching.
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("openai/gpt-5.4", "minimal"),
-            "low"
-        );
-        // Non-minimal efforts pass through unchanged on these models.
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.4", "high"),
-            "high"
-        );
-    }
-
-    #[test]
-    fn reasoning_summary_events_produce_reasoning_parts_and_deltas() {
-        let payload = r#"event: response.output_item.added
-data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","summary":[]}}
-
-event: response.reasoning_summary_part.added
-data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","part":{"type":"summary_text","text":""}}
-
-event: response.reasoning_summary_text.delta
-data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Checking the "}
-
-event: response.reasoning_summary_text.delta
-data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"codebase."}
-
-event: response.reasoning_summary_text.done
-data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","text":"Checking the codebase."}
-
-event: response.reasoning_summary_part.done
-data: {"type":"response.reasoning_summary_part.done","item_id":"rs_1"}
-
-event: response.output_item.done
-data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"Checking the codebase."}]}}
-
-event: response.output_item.added
-data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}}
-
-event: response.output_text.delta
-data: {"type":"response.output_text.delta","delta":"Done."}
-
-event: response.output_item.done
-data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","text":"Done."}]}}
-
-event: response.completed
-data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"input_tokens":12,"output_tokens":3}}}
-"#;
-
-        let mut state = CodexStreamState::default();
-        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
-
-        // Reasoning deltas should have been accumulated on the
-        // `reasoning_deltas` channel so the UI can render incrementally.
-        assert_eq!(
-            state.reasoning_deltas,
-            vec!["Checking the ".to_string(), "codebase.".to_string()]
-        );
-
-        // The finalized response parts should carry a `Reasoning` entry
-        // before the assistant text, exposing the trace to consumers that
-        // rehydrate the turn after the stream ends.
-        let parts = state.response_parts();
-        assert_eq!(parts.len(), 2);
-        assert_eq!(
-            parts[0],
-            LlmOutputPart::Reasoning {
-                text: "Checking the codebase.".to_string(),
-                signature: None,
-                redacted: false,
-                item_id: Some("rs_1".to_string()),
-                encrypted_content: None,
-                summary: vec!["Checking the codebase.".to_string()],
-            }
-        );
-        assert_eq!(
-            parts[1],
-            LlmOutputPart::Text {
-                text: "Done.".to_string(),
-            }
-        );
-
-        // `full_text` must still report only the assistant's answer so
-        // downstream text-centric code paths (usage logging, etc.) stay
-        // unaffected by the new reasoning signal.
-        assert_eq!(state.full_text, "Done.");
-    }
-
-    #[test]
-    fn multiple_reasoning_summary_parts_become_separate_parts() {
-        let mut state = CodexStreamState::default();
-
-        for event in [
-            r#"{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}"#,
-            r#"{"type":"response.reasoning_summary_text.delta","delta":"First paragraph."}"#,
-            r#"{"type":"response.reasoning_summary_part.done"}"#,
-            r#"{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}"#,
-            r#"{"type":"response.reasoning_summary_text.delta","delta":"Second paragraph."}"#,
-            r#"{"type":"response.reasoning_summary_part.done"}"#,
-        ] {
-            CodexOAuthAdapter::process_sse_event(event, &mut state, None).unwrap();
-        }
-
-        let parts = state.response_parts();
-        assert_eq!(
-            parts,
-            vec![
-                LlmOutputPart::Reasoning {
-                    text: "First paragraph.".to_string(),
-                    signature: None,
-                    redacted: false,
-                    item_id: None,
-                    encrypted_content: None,
-                    summary: Vec::new(),
-                },
-                LlmOutputPart::Reasoning {
-                    text: "Second paragraph.".to_string(),
-                    signature: None,
-                    redacted: false,
-                    item_id: None,
-                    encrypted_content: None,
-                    summary: Vec::new(),
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn clamp_reasoning_effort_downgrades_xhigh_on_gpt_5_1() {
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1", "xhigh"),
-            "high"
-        );
-        // Other efforts pass through.
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1", "minimal"),
-            "minimal"
-        );
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1", "medium"),
-            "medium"
-        );
-    }
-
-    #[test]
-    fn clamp_reasoning_effort_codex_mini_only_high_or_medium() {
-        // xhigh is capped at high.
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "xhigh"),
-            "high"
-        );
-        // high stays high.
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "high"),
-            "high"
-        );
-        // Everything else collapses to medium (codex-mini only supports
-        // medium/high per pi-mono's clampReasoningEffort).
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "minimal"),
-            "medium"
-        );
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "low"),
-            "medium"
-        );
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.1-codex-mini", "medium"),
-            "medium"
-        );
-    }
-
-    #[test]
-    fn clamp_reasoning_effort_passthrough_for_other_models() {
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("gpt-5.0", "minimal"),
-            "minimal"
-        );
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("o4-mini", "high"),
-            "high"
-        );
-        assert_eq!(
-            CodexOAuthAdapter::clamp_reasoning_effort("some-future-model", "xhigh"),
-            "xhigh"
-        );
-    }
-
-    #[test]
-    fn reasoning_object_includes_summary_auto_and_clamped_effort() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![message(LlmRole::User, "text", "hi")],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::None,
-            model_variant: Some("minimal".to_string()),
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let body = CodexOAuthAdapter::build_request_body(&req, false);
-        let reasoning = body.get("reasoning").expect("reasoning present");
-        // minimal on gpt-5.4 clamps to low.
-        assert_eq!(reasoning["effort"], "low");
-        // summary: "auto" is always included.
-        assert_eq!(reasoning["summary"], "auto");
-    }
-
-    #[test]
-    fn reasoning_omitted_when_no_variant_provided() {
-        let req = LlmRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![message(LlmRole::User, "text", "hi")],
-            attachments: vec![],
-            tools: vec![].into(),
-            tool_choice: crate::llm::types::LlmToolChoice::None,
-            model_variant: None,
-            session_id: None,
-            output_spec: None,
-            stream_events: None,
-        };
-
-        let body = CodexOAuthAdapter::build_request_body(&req, false);
-        assert!(body.get("reasoning").is_none());
-    }
-
-    // ------------------------------------------------------------------
-    // Retry / backoff (fix for audit finding 1.5)
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn should_retry_skips_429_usage_limit_reached() {
-        // Pi explicitly does not retry usage_limit_reached errors — the user
-        // has no quota, so retrying burns latency for a guaranteed failure.
-        let body = r#"{"error":{"type":"usage_limit_reached","message":"You've hit your ChatGPT usage limit","plan_type":"plus"}}"#;
-        assert!(!CodexOAuthAdapter::should_retry(429, body, 0));
-        // Still false on subsequent attempts, just in case the loop somehow
-        // gets there.
-        assert!(!CodexOAuthAdapter::should_retry(429, body, 1));
-    }
-
-    #[test]
-    fn should_retry_retries_normal_429() {
-        let body = r#"{"error":{"type":"rate_limit_exceeded","message":"Too many requests"}}"#;
-        assert!(CodexOAuthAdapter::should_retry(429, body, 0));
-        assert!(CodexOAuthAdapter::should_retry(429, body, 1));
-        assert!(CodexOAuthAdapter::should_retry(429, body, 2));
-        // The final attempt must not retry (we've used all attempts).
-        assert!(!CodexOAuthAdapter::should_retry(
-            429,
-            body,
-            CodexOAuthAdapter::MAX_ATTEMPTS - 1
-        ));
-    }
-
-    #[test]
-    fn should_retry_retries_5xx() {
-        assert!(CodexOAuthAdapter::should_retry(500, "internal error", 0));
-        assert!(CodexOAuthAdapter::should_retry(502, "bad gateway", 0));
-        assert!(CodexOAuthAdapter::should_retry(
-            503,
-            "service unavailable",
-            1
-        ));
-        assert!(CodexOAuthAdapter::should_retry(504, "gateway timeout", 0));
-        // 599 is still 5xx.
-        assert!(CodexOAuthAdapter::should_retry(599, "", 0));
-        // 600 is not 5xx.
-        assert!(!CodexOAuthAdapter::should_retry(600, "", 0));
-    }
-
-    #[test]
-    fn should_retry_does_not_retry_4xx_other_than_429() {
-        assert!(!CodexOAuthAdapter::should_retry(400, "bad request", 0));
-        assert!(!CodexOAuthAdapter::should_retry(401, "unauthorized", 0));
-        assert!(!CodexOAuthAdapter::should_retry(403, "forbidden", 0));
-        assert!(!CodexOAuthAdapter::should_retry(404, "not found", 0));
-        assert!(!CodexOAuthAdapter::should_retry(418, "I'm a teapot", 0,));
-    }
-
-    #[test]
-    fn backoff_delay_matches_pi_exponential_schedule() {
-        // Pi's schedule is `BASE_DELAY_MS * 2 ** attempt`:
-        //   attempt 0 -> 1000ms
-        //   attempt 1 -> 2000ms
-        //   attempt 2 -> 4000ms
-        assert_eq!(
-            CodexOAuthAdapter::backoff_delay(0),
-            Duration::from_millis(1000)
-        );
-        assert_eq!(
-            CodexOAuthAdapter::backoff_delay(1),
-            Duration::from_millis(2000)
-        );
-        assert_eq!(
-            CodexOAuthAdapter::backoff_delay(2),
-            Duration::from_millis(4000)
-        );
-    }
-
-    #[test]
-    fn reasoning_summary_done_reconciles_missing_suffix() {
-        let mut state = CodexStreamState::default();
-
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.reasoning_summary_text.delta","delta":"Looking"}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-        // Server sends the `done` event with the full text; the
-        // accumulator must pick up the missing suffix without duplicating
-        // the prefix that already arrived.
-        CodexOAuthAdapter::process_sse_event(
-            r#"{"type":"response.reasoning_summary_text.done","text":"Looking at it."}"#,
-            &mut state,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            state.reasoning_deltas,
-            vec!["Looking".to_string(), " at it.".to_string()]
-        );
-        let parts = state.response_parts();
-        assert_eq!(parts.len(), 1);
-        assert_eq!(
-            parts[0],
-            LlmOutputPart::Reasoning {
-                text: "Looking at it.".to_string(),
-                signature: None,
-                redacted: false,
-                item_id: None,
-                encrypted_content: None,
-                summary: Vec::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn codex_error_summary_renders_usage_limit_with_plan_and_reset() {
-        // `resets_at` 2 minutes in the future → rounded up to "~2 min".
-        let future = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 150;
-        let body = format!(
-            r#"{{"error":{{"code":"usage_limit_reached","plan_type":"Plus","resets_at":{future},"message":"ignored"}}}}"#,
-        );
-        let summary = CodexOAuthAdapter::codex_error_summary(429, &body).expect("summary");
-        assert!(summary.starts_with("You have hit your ChatGPT usage limit (plus plan)."));
-        assert!(summary.contains("Try again in ~"));
-        assert!(summary.contains(" min."));
-    }
-
-    #[test]
-    fn codex_error_summary_falls_back_to_error_message_on_other_errors() {
-        let body = r#"{"error":{"code":"invalid_request_error","message":"Bad thing"}}"#;
-        let summary = CodexOAuthAdapter::codex_error_summary(400, body).expect("summary");
-        assert_eq!(summary, "Codex request failed with 400: Bad thing");
-    }
-
-    #[test]
-    fn codex_error_summary_returns_none_for_unparseable_body() {
-        assert!(CodexOAuthAdapter::codex_error_summary(500, "oops").is_none());
+    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String> {
+        let cfg: CodexProviderConfig =
+            serde_json::from_value(config).map_err(|err| err.to_string())?;
+        Ok(Box::new(CodexProvider {
+            access_token: cfg.access_token,
+            refresh_token: cfg.refresh_token,
+            expires_at: cfg.expires_at,
+            account_id: cfg.account_id,
+            options: cfg.options,
+            client: build_http_client(),
+        }))
     }
 }

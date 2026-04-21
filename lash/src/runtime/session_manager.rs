@@ -46,7 +46,6 @@ pub(super) struct RuntimeSessionManager {
     current_tool_catalog: Arc<Vec<serde_json::Value>>,
     current_prompt_bridge: Option<HostPromptBridge>,
     current_store: Option<Arc<dyn crate::store::RuntimeStore>>,
-    llm_factory: LlmFactory,
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     /// Session-scoped token cost ledger shared with the parent
@@ -317,7 +316,6 @@ impl RuntimeSessionManager {
             current_tool_catalog: runtime.active_tool_catalog_shared(),
             current_prompt_bridge: prompt_bridge,
             current_store: runtime.services.store.clone(),
-            llm_factory: Arc::clone(&runtime.llm_factory),
             registry: Arc::clone(&runtime.managed_sessions),
             turns: Arc::clone(&runtime.managed_turns),
             token_ledger: Arc::clone(&runtime.shared_token_ledger),
@@ -728,7 +726,6 @@ impl SessionManager for RuntimeSessionManager {
             }
         }
         .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        runtime.llm_factory = Arc::clone(&self.llm_factory);
         let mode_session = runtime
             .session
             .as_ref()
@@ -1286,19 +1283,19 @@ impl SessionManager for RuntimeSessionManager {
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
         let mut provider = self.current_policy.provider.clone();
-        let llm = (self.llm_factory)(&provider);
-        let model = llm.normalize_model(&request.model);
+        let model = provider.resolve_model(&request.model);
         if let Some(variant) = request.model_variant.as_deref() {
             provider
                 .validate_variant(&model, variant)
                 .map_err(crate::PluginError::Session)?;
         }
-        llm.ensure_ready(&mut provider)
+        provider
+            .ensure_ready()
             .await
             .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
         let llm_request = crate::direct::build_llm_request(&provider, request, model.clone());
-        let response = llm
-            .complete(&mut provider, llm_request)
+        let response = provider
+            .complete(llm_request)
             .await
             .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
         let usage = TokenUsage {

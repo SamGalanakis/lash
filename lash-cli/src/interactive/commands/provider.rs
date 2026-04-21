@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use lash::provider::{LashConfig, ProviderKind};
+use lash::provider::LashConfig;
 use lash::*;
 use lash_tui::Terminal;
 
@@ -17,7 +17,7 @@ pub(super) async fn handle_model(
     new_model: Option<String>,
     app: &mut App,
     runtime: &mut Option<LashRuntime>,
-    provider: &mut Provider,
+    provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     model_catalog: &CachedModelCatalog,
 ) -> anyhow::Result<bool> {
@@ -92,7 +92,7 @@ pub(super) async fn handle_variant(
     new_variant: Option<String>,
     app: &mut App,
     runtime: &mut Option<LashRuntime>,
-    provider: &Provider,
+    provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
 ) -> anyhow::Result<bool> {
     let Some(new_variant) = new_variant else {
@@ -185,7 +185,7 @@ pub(super) async fn handle_change_provider(
     terminal: &mut Terminal,
     app: &mut App,
     paused: &Arc<AtomicBool>,
-    provider: &mut Provider,
+    provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     model_catalog: &CachedModelCatalog,
     runtime: &mut Option<LashRuntime>,
@@ -206,8 +206,27 @@ pub(super) async fn handle_change_provider(
     paused.store(false, Ordering::Relaxed);
 
     match setup_result {
-        Ok(mut new_cfg) => {
-            if let Err(e) = new_cfg.active_provider_mut().ensure_fresh().await {
+        Ok(new_cfg) => {
+            let mut new_provider = match new_cfg.build_active_provider() {
+                Ok(p) => p,
+                Err(err) => {
+                    push_system_message(
+                        app,
+                        format!(
+                            "Provider setup completed, but materializing failed: {}",
+                            err
+                        ),
+                    );
+                    *provider = previous_provider;
+                    app.model = previous_model;
+                    app.context_window = previous_context_window;
+                    app.context_usage_excludes_cached_input = previous_context_usage;
+                    *current_model_variant = previous_variant;
+                    app.set_model_variant(current_model_variant.clone());
+                    return Ok(false);
+                }
+            };
+            if let Err(e) = new_provider.ensure_fresh().await {
                 push_system_message(
                     app,
                     format!("Provider setup completed, but token refresh failed: {}", e),
@@ -220,13 +239,15 @@ pub(super) async fn handle_change_provider(
                 app.set_model_variant(current_model_variant.clone());
                 return Ok(false);
             }
+            let mut new_cfg = new_cfg;
+            new_cfg.upsert_provider(&new_provider);
             if let Err(e) = new_cfg.save(&crate::paths::config_file()) {
                 push_system_message(
                     app,
                     format!("Provider updated, but saving config failed: {}", e),
                 );
             }
-            *provider = new_cfg.active_provider().clone();
+            *provider = new_provider;
             if let Err(err) = model_catalog
                 .refresh_if_stale(lash::model_info::DEFAULT_REFRESH_INTERVAL)
                 .await
@@ -297,12 +318,7 @@ pub(super) async fn handle_change_provider(
             app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
             app.model = selection.model.clone();
             app.set_model_variant(current_model_variant.clone());
-            let saved_kinds = new_cfg
-                .provider_kinds()
-                .into_iter()
-                .map(ProviderKind::cli_label)
-                .collect::<Vec<_>>()
-                .join(", ");
+            let saved_kinds = new_cfg.provider_kinds().join(", ");
             push_system_message(
                 app,
                 format!(
@@ -336,7 +352,17 @@ pub(super) async fn handle_change_provider(
     Ok(false)
 }
 
-pub(super) fn handle_logout(app: &mut App, provider: &Provider) -> anyhow::Result<bool> {
+fn kind_cli_label(kind: &str) -> &'static str {
+    match kind {
+        "anthropic" => "Anthropic API (Claude)",
+        "openai-compatible" => "OpenAI-compatible (API key)",
+        "codex" => "OpenAI Codex OAuth",
+        "google_oauth" => "Google OAuth (Gemini)",
+        _ => "Provider",
+    }
+}
+
+pub(super) fn handle_logout(app: &mut App, provider: &ProviderHandle) -> anyhow::Result<bool> {
     let active_kind = provider.kind();
     match LashConfig::load(&crate::paths::config_file()) {
         Some(mut cfg) => {
@@ -350,7 +376,7 @@ pub(super) fn handle_logout(app: &mut App, provider: &Provider) -> anyhow::Resul
                         app,
                         format!(
                             "Removed stored credentials for {}.\n\nThis running session may continue using in-memory credentials.\nUse `/provider` or `/login` to sign in again without restarting.",
-                            active_kind.cli_label()
+                            kind_cli_label(active_kind)
                         ),
                     ),
                     Err(e) => {
@@ -359,14 +385,14 @@ pub(super) fn handle_logout(app: &mut App, provider: &Provider) -> anyhow::Resul
                 }
             } else {
                 cfg.remove_provider(active_kind);
-                let next_kind = cfg.active_provider_kind();
+                let next_kind = cfg.active_provider_kind().to_string();
                 match cfg.save(&crate::paths::config_file()) {
                     Ok(()) => push_system_message(
                         app,
                         format!(
                             "Removed stored credentials for {}.\nNew sessions will default to {}.\n\nThis running session may continue using in-memory credentials.",
-                            active_kind.cli_label(),
-                            next_kind.cli_label()
+                            kind_cli_label(active_kind),
+                            kind_cli_label(&next_kind)
                         ),
                     ),
                     Err(e) => push_system_message(

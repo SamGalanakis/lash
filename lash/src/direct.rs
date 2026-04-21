@@ -1,10 +1,9 @@
-use crate::llm::factory::adapter_for;
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{
     LlmAttachment, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputSpec,
     LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice,
 };
-use crate::provider::{Provider, save_provider};
+use crate::provider::{ProviderHandle, save_provider};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectRole {
@@ -105,12 +104,12 @@ impl From<LlmTransportError> for DirectLlmError {
 }
 
 pub struct DirectLlmClient {
-    provider: Provider,
+    provider: ProviderHandle,
     credential_store_path: Option<std::path::PathBuf>,
 }
 
 impl DirectLlmClient {
-    pub fn new(provider: Provider) -> Self {
+    pub fn new(provider: ProviderHandle) -> Self {
         Self {
             provider,
             credential_store_path: None,
@@ -126,11 +125,11 @@ impl DirectLlmClient {
         self
     }
 
-    pub fn provider(&self) -> &Provider {
+    pub fn provider(&self) -> &ProviderHandle {
         &self.provider
     }
 
-    pub fn provider_mut(&mut self) -> &mut Provider {
+    pub fn provider_mut(&mut self) -> &mut ProviderHandle {
         &mut self.provider
     }
 
@@ -147,16 +146,16 @@ impl DirectLlmClient {
             let _ = save_provider(path, &self.provider);
         }
 
-        let llm = adapter_for(&self.provider);
-        let normalized_model = llm.normalize_model(&request.model);
+        let normalized_model = self.provider.resolve_model(&request.model);
         if let Some(variant) = request.model_variant.as_deref() {
             self.provider
                 .validate_variant(&normalized_model, variant)
                 .map_err(DirectLlmError::InvalidRequest)?;
         }
 
-        let changed = llm
-            .ensure_ready(&mut self.provider)
+        let changed = self
+            .provider
+            .ensure_ready()
             .await
             .map_err(|err| DirectLlmError::ProviderInit(err.message))?;
         if changed && let Some(path) = self.credential_store_path.as_ref() {
@@ -164,14 +163,15 @@ impl DirectLlmClient {
         }
 
         let llm_request = build_llm_request(&self.provider, request, normalized_model);
-        llm.complete(&mut self.provider, llm_request)
+        self.provider
+            .complete(llm_request)
             .await
             .map_err(DirectLlmError::from)
     }
 }
 
 pub(crate) fn build_llm_request(
-    provider: &Provider,
+    provider: &ProviderHandle,
     request: DirectRequest,
     model: String,
 ) -> LlmRequest {
@@ -237,89 +237,15 @@ pub(crate) fn build_llm_request(
 }
 
 fn transport_stream_events_for_direct(
-    provider: &Provider,
+    provider: &ProviderHandle,
     requested: Option<LlmEventSender>,
 ) -> Option<LlmEventSender> {
     if requested.is_some() {
         return requested;
     }
-    let llm = adapter_for(provider);
-    if llm.requires_streaming() {
+    if provider.requires_streaming() {
         Some(LlmEventSender::new(|_event: LlmStreamEvent| {}))
     } else {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_llm_request_preserves_single_user_message_as_message() {
-        let provider = Provider::OpenAiGeneric {
-            api_key: "tok".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            options: crate::provider::ProviderOptions::default(),
-        };
-        let request = DirectRequest::json("gpt-5", "hello");
-
-        let llm_request = build_llm_request(&provider, request, "gpt-5".into());
-
-        assert_eq!(llm_request.messages.len(), 1);
-        assert_eq!(llm_request.messages[0].role, LlmRole::User);
-        assert!(matches!(
-            &llm_request.messages[0].blocks[0],
-            LlmContentBlock::Text(text) if text == "hello"
-        ));
-        assert!(matches!(
-            llm_request.output_spec,
-            Some(LlmOutputSpec::JsonObject)
-        ));
-    }
-
-    #[test]
-    fn build_llm_request_preserves_multi_message_history() {
-        let provider = Provider::OpenAiGeneric {
-            api_key: "tok".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            options: crate::provider::ProviderOptions::default(),
-        };
-        let request = DirectRequest {
-            model: "gpt-5".into(),
-            model_variant: None,
-            messages: vec![
-                DirectMessage {
-                    role: DirectRole::System,
-                    parts: vec![DirectPart::Text("extra".into())],
-                },
-                DirectMessage {
-                    role: DirectRole::User,
-                    parts: vec![DirectPart::Text("q".into())],
-                },
-                DirectMessage {
-                    role: DirectRole::Assistant,
-                    parts: vec![DirectPart::Text("a".into())],
-                },
-            ],
-            attachments: Vec::new(),
-            output: DirectOutputSpec::Text,
-            stream_events: None,
-            session_id: None,
-        };
-
-        let llm_request = build_llm_request(&provider, request, "gpt-5".into());
-
-        fn text(msg: &LlmMessage) -> &str {
-            match &msg.blocks[0] {
-                LlmContentBlock::Text(text) => text.as_str(),
-                _ => panic!("expected Text block"),
-            }
-        }
-        assert_eq!(llm_request.messages.len(), 3);
-        assert_eq!(llm_request.messages[0].role, LlmRole::System);
-        assert_eq!(text(&llm_request.messages[0]), "extra");
-        assert_eq!(text(&llm_request.messages[1]), "q");
-        assert_eq!(text(&llm_request.messages[2]), "a");
     }
 }

@@ -21,6 +21,10 @@ lash-mode-standard = { path = "../lash-mode-standard" }
 lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode" }
 lash-plugin-prompt-context = { path = "../lash-plugin-prompt-context" }
 lash-plugin-ui-activity = { path = "../lash-plugin-ui-activity" }
+lash-provider-anthropic = { path = "../lash-provider-anthropic" }
+lash-provider-codex = { path = "../lash-provider-codex" }
+lash-provider-google = { path = "../lash-provider-google" }
+lash-provider-openai = { path = "../lash-provider-openai" }
 lash-subagents = { path = "../lash-subagents" }
 lash-ui = { path = "../lash-ui" }
 lash-tui = { path = "../lash-tui" }

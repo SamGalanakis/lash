@@ -299,7 +299,7 @@ impl Default for PersistedSessionState {
 
 pub(super) fn persisted_session_config(policy: &SessionPolicy) -> crate::PersistedSessionConfig {
     crate::PersistedSessionConfig {
-        provider_id: policy.provider.id().to_string(),
+        provider_id: policy.provider.kind().to_string(),
         configured_model: policy.model.clone(),
         context_window: policy.max_context_tokens.unwrap_or_default() as u64,
         execution_mode: policy.execution_mode,

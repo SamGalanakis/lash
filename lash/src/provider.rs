@@ -1,81 +1,50 @@
+//! Provider trait and registry for pluggable LLM backends.
+//!
+//! `Provider` is the trait every concrete LLM backend implements. It
+//! merges what used to be two concepts — a `Provider` enum that held
+//! config state and an `LlmTransport` trait that drove the wire
+//! protocol — into one type per backend. Each provider crate exports a
+//! concrete struct + [`ProviderFactory`]; lash core holds no adapter
+//! code of its own.
+//!
+//! Serialization: [`ProviderHandle`] is the owning handle that
+//! [`SessionPolicy`] stores. It round-trips through [`ProviderSpec`] —
+//! a `{ "type": kind, …config }` JSON object whose shape matches the
+//! legacy `#[serde(tag = "type")]` enum exactly, so existing
+//! `~/.lash/config.json` files load without migration.
+
 use std::collections::BTreeMap;
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::llm::factory::adapter_for;
 use crate::llm::timeouts::{DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts};
+use crate::llm::transport::LlmTransportError;
+use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::mcp::McpServerConfig;
 use crate::model_info::{ModelCatalog, ResolvedModelSpec};
-use crate::oauth::{self, OAuthError};
+use crate::oauth::OAuthError;
 
-/// Well-known OpenRouter base URL; used to detect OpenRouter-specific features
-/// at runtime (prompt caching, reasoning variants) but not as a default.
-pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum ProviderKind {
-    #[serde(rename = "anthropic")]
-    Anthropic,
-    #[serde(rename = "codex")]
-    Codex,
-    #[serde(rename = "google_oauth")]
-    GoogleOAuth,
-    #[serde(rename = "openai-compatible", alias = "openai-generic")]
-    OpenAiGeneric,
+/// Per-request tuning a provider produces for a model + variant. Each
+/// concrete provider crate interprets its own variant strings and emits
+/// the request-shaping parameters its wire protocol needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VariantRequestConfig {
+    ReasoningEffort(String),
+    GoogleThinkingLevel { level: String },
+    GoogleThinkingBudget { budget_tokens: i32 },
+    AnthropicAdaptiveThinking { effort: String },
+    AnthropicThinkingBudget { budget_tokens: i32 },
 }
 
-impl ProviderKind {
-    pub const ALL: [ProviderKind; 4] = [
-        ProviderKind::Anthropic,
-        ProviderKind::Codex,
-        ProviderKind::GoogleOAuth,
-        ProviderKind::OpenAiGeneric,
-    ];
-
-    pub fn id(self) -> &'static str {
-        match self {
-            ProviderKind::Anthropic => "anthropic",
-            ProviderKind::Codex => "codex",
-            ProviderKind::GoogleOAuth => "google_oauth",
-            ProviderKind::OpenAiGeneric => "openai-compatible",
-        }
-    }
-
-    pub fn cli_label(self) -> &'static str {
-        match self {
-            ProviderKind::Anthropic => "Anthropic API (Claude)",
-            ProviderKind::Codex => "OpenAI Codex OAuth",
-            ProviderKind::GoogleOAuth => "Google OAuth (Gemini)",
-            ProviderKind::OpenAiGeneric => "OpenAI-compatible (API key)",
-        }
-    }
-
-    pub fn setup_name(self) -> &'static str {
-        match self {
-            ProviderKind::Anthropic => "Anthropic API",
-            ProviderKind::Codex => "Codex",
-            ProviderKind::GoogleOAuth => "Google OAuth",
-            ProviderKind::OpenAiGeneric => "OpenAI-compatible",
-        }
-    }
-
-    pub fn setup_description(self) -> &'static str {
-        match self {
-            ProviderKind::Anthropic => "Claude via Anthropic API key",
-            ProviderKind::Codex => "ChatGPT Plus/Pro/Team",
-            ProviderKind::GoogleOAuth => "Gemini via Google account",
-            ProviderKind::OpenAiGeneric => "Any OpenAI-compatible API endpoint",
-        }
-    }
-
-    pub fn default_base_url(self) -> Option<&'static str> {
-        match self {
-            ProviderKind::Anthropic => Some("https://api.anthropic.com"),
-            _ => None,
-        }
-    }
+/// Model + optional variant returned by `Provider::default_agent_model`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentModelSelection {
+    pub model: String,
+    pub variant: Option<String>,
 }
 
 /// Auxiliary service secrets that are independent of LLM provider auth.
@@ -100,7 +69,7 @@ pub enum RequestTimeout {
 impl Serialize for RequestTimeout {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde::Serializer,
+        S: Serializer,
     {
         match self {
             Self::Disabled => serializer.serialize_bool(false),
@@ -112,7 +81,7 @@ impl Serialize for RequestTimeout {
 impl<'de> Deserialize<'de> for RequestTimeout {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
         struct RequestTimeoutVisitor;
 
@@ -170,6 +139,22 @@ impl ProviderOptions {
     pub fn is_default(&self) -> bool {
         self.timeout.is_none() && self.chunk_timeout.is_none()
     }
+
+    pub fn llm_timeouts(&self) -> LlmTimeouts {
+        let request_timeout = match self.timeout {
+            Some(RequestTimeout::Disabled) => None,
+            Some(RequestTimeout::Millis(ms)) => Some(Duration::from_millis(ms)),
+            None => Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)),
+        };
+        let chunk_timeout_ms = self
+            .chunk_timeout
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_CHUNK_TIMEOUT_MS);
+        LlmTimeouts {
+            request_timeout,
+            chunk_timeout: Duration::from_millis(chunk_timeout_ms),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -184,158 +169,91 @@ impl RuntimeSettings {
     }
 }
 
-/// Stored configuration: provider credentials + service API keys.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LashConfig {
-    pub active_provider: ProviderKind,
-    pub providers: BTreeMap<ProviderKind, Provider>,
-    #[serde(default, skip_serializing_if = "AuxiliarySecrets::is_empty")]
-    pub auxiliary_secrets: AuxiliarySecrets,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub mcp_servers: BTreeMap<String, McpServerConfig>,
-    /// User-overridable model names per subagent capability. Generic
-    /// name → model map; the meaning of each name is owned by whatever
-    /// builds the subagent capability registry. The on-disk shape (e.g.
-    /// `[agent_models]\nlow="..."\nmedium="..."`) is unchanged from when
-    /// this was a typed `AgentModels { low, medium, high }` struct.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_models: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "RuntimeSettings::is_default")]
-    pub runtime: RuntimeSettings,
-}
+/// Concrete LLM backend. Each provider crate (`lash-provider-anthropic`,
+/// `lash-provider-openai`, `lash-provider-codex`, `lash-provider-google`)
+/// ships one `impl Provider` struct plus a [`ProviderFactory`] that
+/// registers it with lash's global registry.
+#[async_trait]
+pub trait Provider: Send + Sync + std::fmt::Debug {
+    fn kind(&self) -> &'static str;
+    fn label(&self) -> &'static str;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type")]
-pub enum Provider {
-    #[serde(rename = "openai-compatible", alias = "openai-generic")]
-    OpenAiGeneric {
-        api_key: String,
-        #[serde(default)]
-        base_url: String,
-        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
-        options: ProviderOptions,
-    },
-    Codex {
-        access_token: String,
-        refresh_token: String,
-        expires_at: u64,
-        account_id: Option<String>,
-        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
-        options: ProviderOptions,
-    },
-    GoogleOAuth {
-        access_token: String,
-        refresh_token: String,
-        expires_at: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        project_id: Option<String>,
-        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
-        options: ProviderOptions,
-    },
-    Anthropic {
-        api_key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        base_url: Option<String>,
-        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
-        options: ProviderOptions,
-    },
-}
+    fn default_model(&self) -> &str;
+    fn supported_variants(&self, model: &str) -> &'static [&'static str];
+    fn default_model_variant(&self, model: &str) -> Option<&'static str>;
 
-impl Provider {
-    pub fn kind(&self) -> ProviderKind {
-        match self {
-            Provider::OpenAiGeneric { .. } => ProviderKind::OpenAiGeneric,
-            Provider::Codex { .. } => ProviderKind::Codex,
-            Provider::GoogleOAuth { .. } => ProviderKind::GoogleOAuth,
-            Provider::Anthropic { .. } => ProviderKind::Anthropic,
+    fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
+        let variants = self.supported_variants(model);
+        if variants.is_empty() {
+            return Err(format!(
+                "Model `{}` on {} does not expose configurable variants.",
+                model,
+                self.label()
+            ));
         }
+        if variants.contains(&variant) {
+            return Ok(());
+        }
+        Err(format!(
+            "Unsupported variant `{}` for `{}` on {}. Available: {}",
+            variant,
+            model,
+            self.label(),
+            variants.join(", ")
+        ))
     }
 
-    pub fn label(&self) -> &'static str {
-        self.kind().cli_label()
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig>;
+
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection>;
+
+    fn resolve_model(&self, model: &str) -> String {
+        model.to_string()
     }
 
-    pub fn id(&self) -> &'static str {
-        self.kind().id()
+    fn context_lookup_model(&self, model: &str) -> String {
+        model.to_string()
     }
 
-    /// Default model for this provider.
-    pub fn default_model(&self) -> &str {
-        adapter_for(self).default_root_model()
-    }
-
-    /// Supported provider-native variants for a specific model.
-    pub fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        crate::model_variant::supported_variants(self, model)
-    }
-
-    /// Recommended default variant for a specific model on this provider.
-    pub fn default_model_variant(&self, model: &str) -> Option<&str> {
-        crate::model_variant::default_variant(self, model)
-    }
-
-    /// Validate a provider-native variant for a model.
-    pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
-        crate::model_variant::validate(self, model, variant)
-    }
-
-    /// Built-in model for an agent intelligence tier. Returns (model_name, optional_variant).
-    pub fn default_agent_model(&self, tier: &str) -> Option<(&str, Option<&str>)> {
-        adapter_for(self)
-            .default_agent_model(tier)
-            .map(|m| (m.model, m.variant))
-    }
-
-    /// Resolve a configured model name against provider-specific expectations.
-    pub fn resolve_model(&self, model: &str) -> String {
-        adapter_for(self).normalize_model(model)
-    }
-
-    /// Canonical model ID to use for context-window lookup.
-    pub fn context_lookup_model(&self, model: &str) -> String {
-        adapter_for(self).context_lookup_model(model)
-    }
-
-    pub fn input_usage_excludes_cached_tokens(&self) -> bool {
+    fn input_usage_excludes_cached_tokens(&self) -> bool {
         false
     }
 
-    pub fn options(&self) -> &ProviderOptions {
-        match self {
-            Provider::OpenAiGeneric { options, .. }
-            | Provider::Codex { options, .. }
-            | Provider::GoogleOAuth { options, .. }
-            | Provider::Anthropic { options, .. } => options,
-        }
+    fn options(&self) -> &ProviderOptions;
+    fn options_mut(&mut self) -> &mut ProviderOptions;
+
+    fn llm_timeouts(&self) -> LlmTimeouts {
+        self.options().llm_timeouts()
     }
 
-    pub fn options_mut(&mut self) -> &mut ProviderOptions {
-        match self {
-            Provider::OpenAiGeneric { options, .. }
-            | Provider::Codex { options, .. }
-            | Provider::GoogleOAuth { options, .. }
-            | Provider::Anthropic { options, .. } => options,
-        }
+    fn requires_streaming(&self) -> bool {
+        false
     }
 
-    pub fn llm_timeouts(&self) -> LlmTimeouts {
-        let request_timeout = match self.options().timeout {
-            Some(RequestTimeout::Disabled) => None,
-            Some(RequestTimeout::Millis(ms)) => Some(Duration::from_millis(ms)),
-            None => Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)),
-        };
-        let chunk_timeout_ms = self
-            .options()
-            .chunk_timeout
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_CHUNK_TIMEOUT_MS);
-        LlmTimeouts {
-            request_timeout,
-            chunk_timeout: Duration::from_millis(chunk_timeout_ms),
-        }
+    /// Refresh OAuth tokens if needed. Returns `true` if the provider's
+    /// stored credentials were updated (caller should persist via
+    /// `LashConfig::save`). Default is a no-op for API-key providers.
+    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
+        Ok(false)
     }
 
+    /// Adapter-level warmup (project-id discovery, handshake, etc.).
+    /// Returns `true` if provider state changed and should be persisted.
+    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+        Ok(false)
+    }
+
+    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError>;
+
+    /// Emit the provider-specific JSON body used by [`ProviderSpec`]. The
+    /// object must NOT contain a `type` field — [`ProviderSpec::Serialize`]
+    /// layers that on top.
+    fn serialize_config(&self) -> serde_json::Value;
+
+    fn clone_boxed(&self) -> Box<dyn Provider>;
+}
+
+impl dyn Provider {
     /// Validate model syntax only.
     pub fn validate_model_name(&self, model: &str) -> Result<(), String> {
         let m = model.trim();
@@ -371,59 +289,330 @@ impl Provider {
             info,
         })
     }
+}
 
-    /// Refresh OAuth tokens if needed. No-op for OpenAI-compatible.
-    /// Returns `true` if tokens were updated (caller should persist).
-    pub async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+/// Owning handle to a boxed provider. Session state + config store this
+/// instead of `Box<dyn Provider>` so we can add Clone / Serialize /
+/// Deserialize impls without running into orphan-rule conflicts.
+pub struct ProviderHandle {
+    inner: Box<dyn Provider>,
+}
 
-        match self {
-            Provider::Codex {
-                access_token,
-                refresh_token,
-                expires_at,
-                account_id,
-                ..
-            } => {
-                if now + 300 >= *expires_at {
-                    let tokens = oauth::codex_refresh_tokens(refresh_token).await?;
-                    *access_token = tokens.access_token;
-                    *refresh_token = tokens.refresh_token;
-                    *expires_at = tokens.expires_at;
-                    if let Some(new_account_id) = tokens.account_id {
-                        *account_id = Some(new_account_id);
-                    }
-                    return Ok(true);
-                }
-            }
-            Provider::GoogleOAuth {
-                access_token,
-                refresh_token,
-                expires_at,
-                ..
-            } => {
-                if now + 300 >= *expires_at {
-                    let tokens = oauth::google_refresh_tokens(refresh_token).await?;
-                    *access_token = tokens.access_token;
-                    *refresh_token = tokens.refresh_token;
-                    *expires_at = tokens.expires_at;
-                    return Ok(true);
-                }
-            }
-            Provider::OpenAiGeneric { .. } | Provider::Anthropic { .. } => {}
+impl ProviderHandle {
+    pub fn new(provider: Box<dyn Provider>) -> Self {
+        Self { inner: provider }
+    }
+
+    pub fn into_inner(self) -> Box<dyn Provider> {
+        self.inner
+    }
+
+    pub fn as_dyn(&self) -> &dyn Provider {
+        &*self.inner
+    }
+
+    pub fn as_dyn_mut(&mut self) -> &mut dyn Provider {
+        &mut *self.inner
+    }
+
+    pub fn to_spec(&self) -> ProviderSpec {
+        ProviderSpec {
+            kind: self.inner.kind().to_string(),
+            config: self.inner.serialize_config(),
         }
-        Ok(false)
     }
 }
 
+impl std::fmt::Debug for ProviderHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+impl Clone for ProviderHandle {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone_boxed(),
+        }
+    }
+}
+
+impl PartialEq for ProviderHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.kind() == other.inner.kind()
+            && self.inner.serialize_config() == other.inner.serialize_config()
+    }
+}
+
+impl Eq for ProviderHandle {}
+
+impl std::ops::Deref for ProviderHandle {
+    type Target = dyn Provider;
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
+
+impl std::ops::DerefMut for ProviderHandle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.inner
+    }
+}
+
+impl Serialize for ProviderHandle {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_spec().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderHandle {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let spec = ProviderSpec::deserialize(deserializer)?;
+        build_provider(&spec)
+            .map(ProviderHandle::new)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Default for ProviderHandle {
+    fn default() -> Self {
+        Self::new(Box::new(UnconfiguredProvider::default()))
+    }
+}
+
+/// Placeholder provider used when `SessionPolicy::default()` is
+/// constructed without an explicit provider. Every transport-level
+/// method errors; calling code MUST replace this before executing a
+/// turn. It exists solely so `..Default::default()` shorthand keeps
+/// working in host code that always overrides the provider field.
+#[derive(Clone, Debug, Default)]
+pub struct UnconfiguredProvider {
+    options: ProviderOptions,
+}
+
+#[async_trait]
+impl Provider for UnconfiguredProvider {
+    fn kind(&self) -> &'static str {
+        "unconfigured"
+    }
+
+    fn label(&self) -> &'static str {
+        "Unconfigured"
+    }
+
+    fn default_model(&self) -> &str {
+        ""
+    }
+
+    fn supported_variants(&self, _model: &str) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn default_model_variant(&self, _model: &str) -> Option<&'static str> {
+        None
+    }
+
+    fn request_variant_config(&self, _model: &str, _variant: &str) -> Option<VariantRequestConfig> {
+        None
+    }
+
+    fn default_agent_model(&self, _tier: &str) -> Option<AgentModelSelection> {
+        None
+    }
+
+    fn options(&self) -> &ProviderOptions {
+        &self.options
+    }
+
+    fn options_mut(&mut self) -> &mut ProviderOptions {
+        &mut self.options
+    }
+
+    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        Err(LlmTransportError::new(
+            "no provider configured: host must install a provider factory and set SessionPolicy.provider before running a turn",
+        ))
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        serde_json::Value::Object(Default::default())
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
+}
+
+/// Serializable representation of a provider. JSON shape is the flat
+/// form `{"type": kind, …config}` so `~/.lash/config.json` stays
+/// backward-compatible with the old `#[serde(tag = "type")]` enum.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderSpec {
+    pub kind: String,
+    pub config: serde_json::Value,
+}
+
+impl Serialize for ProviderSpec {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = match &self.config {
+            serde_json::Value::Object(map) => serde_json::Value::Object(map.clone()),
+            serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+            other => {
+                return Err(serde::ser::Error::custom(format!(
+                    "ProviderSpec.config must serialize to a JSON object, got {}",
+                    other
+                )));
+            }
+        };
+        if let serde_json::Value::Object(ref mut map) = value {
+            map.insert(
+                "type".to_string(),
+                serde_json::Value::String(self.kind.clone()),
+            );
+        }
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderSpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let kind = if let serde_json::Value::Object(ref mut map) = value {
+            let raw = map
+                .remove("type")
+                .ok_or_else(|| serde::de::Error::missing_field("type"))?;
+            let kind = raw
+                .as_str()
+                .ok_or_else(|| serde::de::Error::custom("provider `type` must be a string"))?
+                .to_string();
+            // Legacy alias normalization.
+            match kind.as_str() {
+                "openai-generic" => "openai-compatible".to_string(),
+                _ => kind,
+            }
+        } else {
+            return Err(serde::de::Error::custom(
+                "provider spec must be a JSON object",
+            ));
+        };
+        Ok(Self {
+            kind,
+            config: value,
+        })
+    }
+}
+
+/// Registers a concrete provider type with lash's global registry. Each
+/// provider crate ships one factory; hosts (`lash-cli`, bench runners,
+/// custom embedders) call [`register_provider_factory`] for every
+/// backend they want to offer.
+pub trait ProviderFactory: Send + Sync {
+    fn kind(&self) -> &'static str;
+
+    /// Human-readable label shown in `/provider` and setup UI.
+    fn cli_label(&self) -> &'static str;
+
+    /// Short name used in the setup menu header.
+    fn setup_name(&self) -> &'static str;
+
+    /// One-line description shown next to the setup menu option.
+    fn setup_description(&self) -> &'static str;
+
+    /// Suggested default base URL (shown as placeholder in setup).
+    fn default_base_url(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Instantiate a provider from its [`ProviderSpec::config`] blob.
+    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String>;
+}
+
+#[derive(Clone, Default)]
+pub struct ProviderRegistry {
+    factories: BTreeMap<&'static str, Arc<dyn ProviderFactory>>,
+}
+
+impl ProviderRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&mut self, factory: Arc<dyn ProviderFactory>) {
+        self.factories.insert(factory.kind(), factory);
+    }
+
+    pub fn build_from_spec(&self, spec: &ProviderSpec) -> Result<Box<dyn Provider>, String> {
+        let factory = self.factories.get(spec.kind.as_str()).ok_or_else(|| {
+            format!(
+                "provider `{}` is not registered. Call `lash::register_provider_factory` at startup.",
+                spec.kind
+            )
+        })?;
+        factory.deserialize(spec.config.clone())
+    }
+
+    pub fn kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.factories.keys().copied()
+    }
+
+    pub fn factory(&self, kind: &str) -> Option<&Arc<dyn ProviderFactory>> {
+        self.factories.get(kind)
+    }
+
+    pub fn factories(&self) -> impl Iterator<Item = &Arc<dyn ProviderFactory>> {
+        self.factories.values()
+    }
+}
+
+static PROVIDER_REGISTRY: LazyLock<RwLock<ProviderRegistry>> =
+    LazyLock::new(|| RwLock::new(ProviderRegistry::new()));
+
+/// Register a provider factory in the global registry. Hosts call this
+/// once per backend at process startup, before constructing any
+/// `LashConfig` or session from disk.
+pub fn register_provider_factory(factory: Arc<dyn ProviderFactory>) {
+    PROVIDER_REGISTRY.write().unwrap().register(factory);
+}
+
+/// Snapshot of the global registry. Useful for enumerating registered
+/// kinds from UI code.
+pub fn global_provider_registry() -> ProviderRegistry {
+    PROVIDER_REGISTRY.read().unwrap().clone()
+}
+
+/// Materialize a provider from its serialized form using the global
+/// registry. Returns `Err` if no factory is registered for `spec.kind`.
+pub fn build_provider(spec: &ProviderSpec) -> Result<Box<dyn Provider>, String> {
+    PROVIDER_REGISTRY.read().unwrap().build_from_spec(spec)
+}
+
+/// Stored configuration: provider credentials + service API keys.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LashConfig {
+    pub active_provider: String,
+    pub providers: BTreeMap<String, ProviderSpec>,
+    #[serde(default, skip_serializing_if = "AuxiliarySecrets::is_empty")]
+    pub auxiliary_secrets: AuxiliarySecrets,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    /// User-overridable model names per subagent capability. Generic
+    /// name → model map; the meaning of each name is owned by whatever
+    /// builds the subagent capability registry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_models: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "RuntimeSettings::is_default")]
+    pub runtime: RuntimeSettings,
+}
+
 impl LashConfig {
-    pub fn new(provider: Provider) -> Self {
-        let kind = provider.kind();
+    /// Construct a config from an already-built provider handle. The
+    /// provider's current spec becomes the active entry.
+    pub fn new(provider: &ProviderHandle) -> Self {
+        let spec = provider.to_spec();
+        let kind = spec.kind.clone();
         let mut providers = BTreeMap::new();
-        providers.insert(kind, provider);
+        providers.insert(kind.clone(), spec);
         Self {
             active_provider: kind,
             providers,
@@ -434,57 +623,75 @@ impl LashConfig {
         }
     }
 
-    pub fn active_provider(&self) -> &Provider {
+    pub fn from_spec(spec: ProviderSpec) -> Self {
+        let kind = spec.kind.clone();
+        let mut providers = BTreeMap::new();
+        providers.insert(kind.clone(), spec);
+        Self {
+            active_provider: kind,
+            providers,
+            auxiliary_secrets: AuxiliarySecrets::default(),
+            mcp_servers: BTreeMap::new(),
+            agent_models: BTreeMap::new(),
+            runtime: RuntimeSettings::default(),
+        }
+    }
+
+    pub fn active_provider_spec(&self) -> &ProviderSpec {
         self.providers
             .get(&self.active_provider)
             .expect("active provider missing from config")
     }
 
-    pub fn active_provider_mut(&mut self) -> &mut Provider {
+    pub fn active_provider_spec_mut(&mut self) -> &mut ProviderSpec {
         self.providers
             .get_mut(&self.active_provider)
             .expect("active provider missing from config")
     }
 
-    pub fn active_provider_kind(&self) -> ProviderKind {
-        self.active_provider
+    pub fn active_provider_kind(&self) -> &str {
+        &self.active_provider
     }
 
-    pub fn set_active_provider_kind(&mut self, kind: ProviderKind) -> Result<(), String> {
-        if !self.providers.contains_key(&kind) {
-            return Err(format!("provider `{}` is not configured", kind.id()));
+    pub fn set_active_provider_kind(&mut self, kind: &str) -> Result<(), String> {
+        if !self.providers.contains_key(kind) {
+            return Err(format!("provider `{}` is not configured", kind));
         }
-        self.active_provider = kind;
+        self.active_provider = kind.to_string();
         Ok(())
     }
 
-    pub fn provider(&self, kind: ProviderKind) -> Option<&Provider> {
-        self.providers.get(&kind)
+    pub fn provider_spec(&self, kind: &str) -> Option<&ProviderSpec> {
+        self.providers.get(kind)
     }
 
-    pub fn provider_kinds(&self) -> Vec<ProviderKind> {
-        self.providers.keys().copied().collect()
+    pub fn provider_kinds(&self) -> Vec<String> {
+        self.providers.keys().cloned().collect()
     }
 
-    pub fn has_provider(&self, kind: ProviderKind) -> bool {
-        self.providers.contains_key(&kind)
+    pub fn has_provider(&self, kind: &str) -> bool {
+        self.providers.contains_key(kind)
     }
 
-    pub fn upsert_provider(&mut self, provider: Provider) {
-        let kind = provider.kind();
-        self.providers.insert(kind, provider);
+    pub fn upsert_provider_spec(&mut self, spec: ProviderSpec) {
+        self.providers.insert(spec.kind.clone(), spec);
     }
 
-    pub fn remove_provider(&mut self, kind: ProviderKind) -> Option<Provider> {
-        let removed = self.providers.remove(&kind)?;
+    pub fn upsert_provider(&mut self, provider: &ProviderHandle) {
+        self.upsert_provider_spec(provider.to_spec());
+    }
+
+    pub fn remove_provider(&mut self, kind: &str) -> Option<ProviderSpec> {
+        let removed = self.providers.remove(kind)?;
         if self.providers.is_empty() {
             return Some(removed);
         }
         if self.active_provider == kind {
-            self.active_provider = *self
+            self.active_provider = self
                 .providers
                 .keys()
                 .next()
+                .cloned()
                 .expect("providers should be non-empty after removal");
         }
         Some(removed)
@@ -492,6 +699,11 @@ impl LashConfig {
 
     pub fn provider_count(&self) -> usize {
         self.providers.len()
+    }
+
+    /// Materialize the active provider via the global registry.
+    pub fn build_active_provider(&self) -> Result<ProviderHandle, String> {
+        build_provider(self.active_provider_spec()).map(ProviderHandle::new)
     }
 
     /// Load from the given config path. Returns `None` if missing or
@@ -550,19 +762,17 @@ impl LashConfig {
     }
 }
 
-/// Save just the provider portion (preserves other config fields like API keys).
-/// Used by the agent loop after token refresh.
-pub fn save_provider(path: &std::path::Path, provider: &Provider) -> Result<(), std::io::Error> {
-    let mut config = LashConfig::load(path).unwrap_or_else(|| LashConfig {
-        active_provider: provider.kind(),
-        providers: BTreeMap::from([(provider.kind(), provider.clone())]),
-        auxiliary_secrets: AuxiliarySecrets::default(),
-        mcp_servers: BTreeMap::new(),
-        agent_models: BTreeMap::new(),
-        runtime: RuntimeSettings::default(),
-    });
-    config.upsert_provider(provider.clone());
-    config.active_provider = provider.kind();
+/// Write back the active provider's refreshed credentials, preserving
+/// other fields in the stored config. Called by the runtime after each
+/// successful OAuth refresh.
+pub fn save_provider(
+    path: &std::path::Path,
+    provider: &ProviderHandle,
+) -> Result<(), std::io::Error> {
+    let spec = provider.to_spec();
+    let mut config = LashConfig::load(path).unwrap_or_else(|| LashConfig::from_spec(spec.clone()));
+    config.upsert_provider_spec(spec.clone());
+    config.active_provider = spec.kind;
     config.save(path)
 }
 
@@ -570,204 +780,50 @@ pub fn save_provider(path: &std::path::Path, provider: &Provider) -> Result<(), 
 mod tests {
     use super::*;
 
-    fn openai_generic() -> Provider {
-        Provider::OpenAiGeneric {
-            api_key: "test-key".into(),
-            base_url: OPENROUTER_BASE_URL.into(),
-            options: ProviderOptions::default(),
-        }
-    }
-
-    fn codex() -> Provider {
-        Provider::Codex {
-            access_token: "tok".into(),
-            refresh_token: "ref".into(),
-            expires_at: u64::MAX,
-            account_id: Some("acct".into()),
-            options: ProviderOptions::default(),
-        }
-    }
-
-    fn google_oauth() -> Provider {
-        Provider::GoogleOAuth {
-            access_token: "tok".into(),
-            refresh_token: "ref".into(),
-            expires_at: u64::MAX,
-            project_id: Some("test-proj".into()),
-            options: ProviderOptions::default(),
-        }
+    #[test]
+    fn provider_spec_roundtrips_as_flat_object() {
+        let spec = ProviderSpec {
+            kind: "anthropic".to_string(),
+            config: serde_json::json!({
+                "api_key": "sk-ant-test",
+                "base_url": null
+            }),
+        };
+        let serialized = serde_json::to_value(&spec).expect("serialize");
+        assert_eq!(serialized["type"], serde_json::json!("anthropic"));
+        assert_eq!(serialized["api_key"], serde_json::json!("sk-ant-test"));
+        let roundtripped: ProviderSpec = serde_json::from_value(serialized).expect("deserialize");
+        assert_eq!(roundtripped.kind, spec.kind);
+        assert_eq!(roundtripped.config["api_key"], spec.config["api_key"]);
     }
 
     #[test]
-    fn default_model() {
-        assert_eq!(
-            openai_generic().default_model(),
-            "anthropic/claude-sonnet-4.6"
-        );
-        assert_eq!(codex().default_model(), "gpt-5.4");
-        assert_eq!(google_oauth().default_model(), "gemini-3.1-pro-preview");
+    fn provider_spec_accepts_legacy_openai_generic_alias() {
+        let raw = serde_json::json!({
+            "type": "openai-generic",
+            "api_key": "k"
+        });
+        let spec: ProviderSpec = serde_json::from_value(raw).expect("legacy alias");
+        assert_eq!(spec.kind, "openai-compatible");
     }
 
     #[test]
-    fn supported_variants_follow_provider_rules() {
-        assert_eq!(
-            codex().supported_variants("gpt-5.4"),
-            &["minimal", "low", "medium", "high", "xhigh"]
-        );
-        assert_eq!(
-            codex().supported_variants("gpt-5.3-codex"),
-            &["low", "medium", "high", "xhigh"]
-        );
-        assert_eq!(codex().default_model_variant("gpt-5.4"), Some("xhigh"));
-        assert_eq!(
-            google_oauth().supported_variants("gemini-3.1-pro-preview"),
-            &["low", "medium", "high"]
-        );
-        assert_eq!(
-            openai_generic().supported_variants("anthropic/claude-sonnet-4.6"),
-            &["none", "minimal", "low", "medium", "high", "xhigh"]
-        );
-    }
-
-    #[test]
-    fn default_agent_model_openai_generic() {
-        let p = openai_generic();
-        assert!(p.default_agent_model("low").is_some());
-        assert!(p.default_agent_model("medium").is_some());
-        assert!(p.default_agent_model("high").is_some());
-    }
-
-    #[test]
-    fn default_agent_model_codex() {
-        let p = codex();
-        let (m, re) = p.default_agent_model("low").unwrap();
-        assert_eq!(m, "gpt-5.4-mini");
-        assert_eq!(re, Some("low"));
-        let (m, re) = p.default_agent_model("medium").unwrap();
-        assert_eq!(m, "gpt-5.4");
-        assert_eq!(re, Some("medium"));
-        let (m, re) = p.default_agent_model("high").unwrap();
-        assert_eq!(m, "gpt-5.4");
-        assert_eq!(re, Some("high"));
-    }
-
-    #[test]
-    fn default_agent_model_google_oauth() {
-        let p = google_oauth();
-        assert_eq!(
-            p.default_agent_model("low"),
-            Some(("gemini-3-flash-preview", Some("low")))
-        );
-        assert_eq!(
-            p.default_agent_model("medium"),
-            Some(("gemini-3.1-pro-preview", Some("medium")))
-        );
-        assert_eq!(
-            p.default_agent_model("high"),
-            Some(("gemini-3.1-pro-preview", Some("high")))
-        );
-    }
-
-    #[test]
-    fn default_agent_model_unknown_tier() {
-        assert!(openai_generic().default_agent_model("").is_none());
-        assert!(codex().default_agent_model("extreme").is_none());
-        assert!(google_oauth().default_agent_model("extreme").is_none());
-    }
-
-    #[test]
-    fn resolve_model_openai_generic_passthrough() {
-        let p = openai_generic();
-        assert_eq!(
-            p.resolve_model("anthropic/claude-sonnet-4.6"),
-            "anthropic/claude-sonnet-4.6"
-        );
-    }
-
-    #[test]
-    fn resolve_model_codex_passthrough() {
-        let p = codex();
-        assert_eq!(p.resolve_model("gpt-5.1-codex"), "gpt-5.1-codex");
-    }
-
-    #[test]
-    fn resolve_model_google_passthrough() {
-        let p = google_oauth();
-        assert_eq!(
-            p.resolve_model("gemini-3-pro-preview"),
-            "gemini-3-pro-preview"
-        );
-    }
-
-    #[test]
-    fn context_lookup_model_google_adds_prefix() {
-        let p = google_oauth();
-        assert_eq!(
-            p.context_lookup_model("gemini-3-pro-preview"),
-            "google/gemini-3-pro-preview"
-        );
-        assert_eq!(
-            p.context_lookup_model("google/gemini-3-pro-preview"),
-            "google/gemini-3-pro-preview"
-        );
-    }
-
-    #[test]
-    fn context_lookup_model_codex_adds_prefix() {
-        let p = codex();
-        assert_eq!(p.context_lookup_model("gpt-5.4"), "openai/gpt-5.4");
-        assert_eq!(p.context_lookup_model("openai/gpt-5.4"), "openai/gpt-5.4");
-    }
-
-    #[test]
-    fn default_agent_model_google_oauth_tiers() {
-        let p = google_oauth();
-        assert_eq!(
-            p.default_agent_model("low"),
-            Some(("gemini-3-flash-preview", Some("low")))
-        );
-        assert_eq!(
-            p.default_agent_model("medium"),
-            Some(("gemini-3.1-pro-preview", Some("medium")))
-        );
-        assert_eq!(
-            p.default_agent_model("high"),
-            Some(("gemini-3.1-pro-preview", Some("high")))
-        );
-    }
-
-    #[test]
-    fn validate_model_rejects_empty_and_whitespace() {
-        let p = codex();
-        assert!(p.validate_model_name("").is_err());
-        assert!(p.validate_model_name("   ").is_err());
-        assert!(p.validate_model_name("gpt 5.3").is_err());
-    }
-
-    #[test]
-    fn resolve_model_spec_accepts_known_default_model() {
-        let p = codex();
-        let catalog = crate::model_info::ModelCatalog::from_models_dev_json(
-            crate::model_info::bundled_models_dev_snapshot(),
-        )
-        .expect("bundled models.dev snapshot parses");
-        let spec = p
-            .resolve_model_spec(p.default_model(), &catalog)
-            .expect("default model resolves");
-        assert!(spec.context_window() > 0);
-    }
-
-    #[test]
-    fn resolve_model_spec_rejects_unknown_model() {
-        let p = openai_generic();
-        let catalog = crate::model_info::ModelCatalog::from_models_dev_json(
-            crate::model_info::bundled_models_dev_snapshot(),
-        )
-        .expect("bundled models.dev snapshot parses");
-        assert!(
-            p.resolve_model_spec("this-model-does-not-exist-xyz-123", &catalog)
-                .is_err()
-        );
+    fn lash_config_roundtrips_existing_shape() {
+        let raw = serde_json::json!({
+            "active_provider": "openai-compatible",
+            "providers": {
+                "openai-compatible": {
+                    "type": "openai-compatible",
+                    "api_key": "k",
+                    "base_url": "https://example.com/v1"
+                }
+            }
+        });
+        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config");
+        assert_eq!(cfg.active_provider, "openai-compatible");
+        let spec = cfg.active_provider_spec();
+        assert_eq!(spec.kind, "openai-compatible");
+        assert_eq!(spec.config["api_key"], serde_json::json!("k"));
     }
 
     #[test]
@@ -783,7 +839,6 @@ mod tests {
             },
             "tavily_api_key": "legacy-key"
         });
-
         let err = serde_json::from_value::<LashConfig>(raw).expect_err("unknown field rejected");
         assert!(err.to_string().contains("unknown field `tavily_api_key`"));
     }
@@ -803,46 +858,8 @@ mod tests {
                 "tavily_api_key": "new-key"
             }
         });
-
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
         assert_eq!(cfg.tavily_api_key(), Some("new-key"));
-    }
-
-    #[test]
-    fn mcp_servers_preserved() {
-        let raw = serde_json::json!({
-            "active_provider": "openai-compatible",
-            "providers": {
-                "openai-compatible": {
-                    "type": "openai-compatible",
-                    "api_key": "k",
-                    "base_url": "https://example.com/v1"
-                }
-            },
-            "mcp_servers": {
-                "docs": {
-                    "transport": "stdio",
-                    "command": "npx",
-                    "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
-                }
-            }
-        });
-
-        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
-        match cfg.mcp_servers().get("docs") {
-            Some(McpServerConfig::Stdio { command, args, .. }) => {
-                assert_eq!(command, "npx");
-                assert_eq!(
-                    args,
-                    &vec![
-                        "-y".to_string(),
-                        "@modelcontextprotocol/server-filesystem".to_string(),
-                        ".".to_string()
-                    ]
-                );
-            }
-            other => panic!("unexpected MCP config: {other:?}"),
-        }
     }
 
     #[test]
@@ -862,82 +879,7 @@ mod tests {
                 }
             }
         });
-
-        // Legacy configs may carry a `runtime.context_strategy` field from
-        // before the rolling-history plugin was extracted. The field is no
-        // longer read — this test just confirms deserialization still
-        // succeeds rather than rejecting the unknown key.
         let _cfg: LashConfig =
             serde_json::from_value(raw).expect("legacy config json still deserializes");
-    }
-
-    #[test]
-    fn provider_timeouts_default_to_standard_values() {
-        let timeouts = openai_generic().llm_timeouts();
-        assert_eq!(
-            timeouts.request_timeout,
-            Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS))
-        );
-        assert_eq!(
-            timeouts.chunk_timeout,
-            Duration::from_millis(DEFAULT_CHUNK_TIMEOUT_MS)
-        );
-    }
-
-    #[test]
-    fn provider_timeout_false_disables_request_deadline() {
-        let raw = serde_json::json!({
-            "type": "openai-compatible",
-            "api_key": "k",
-            "base_url": "https://example.com/v1",
-            "options": {
-                "timeout": false,
-                "chunk_timeout": 45000
-            }
-        });
-
-        let provider: Provider = serde_json::from_value(raw).expect("valid provider json");
-        let timeouts = provider.llm_timeouts();
-        assert_eq!(timeouts.request_timeout, None);
-        assert_eq!(timeouts.chunk_timeout, Duration::from_millis(45_000));
-    }
-
-    #[test]
-    fn provider_timeout_requires_false_or_positive_integer() {
-        let err = serde_json::from_value::<Provider>(serde_json::json!({
-            "type": "openai-compatible",
-            "api_key": "k",
-            "base_url": "https://example.com/v1",
-            "options": {
-                "timeout": true
-            }
-        }))
-        .expect_err("true timeout should be rejected");
-        assert!(
-            err.to_string()
-                .contains("timeout must be a positive integer or false")
-        );
-    }
-
-    #[test]
-    fn switches_and_updates_saved_providers() {
-        let mut cfg = LashConfig::new(codex());
-        cfg.upsert_provider(google_oauth());
-        cfg.set_active_provider_kind(ProviderKind::GoogleOAuth)
-            .expect("switch provider");
-
-        assert_eq!(cfg.active_provider().kind(), ProviderKind::GoogleOAuth);
-        assert!(cfg.has_provider(ProviderKind::Codex));
-        assert!(cfg.has_provider(ProviderKind::GoogleOAuth));
-        assert_eq!(cfg.provider_count(), 2);
-    }
-
-    #[test]
-    fn removing_active_provider_promotes_another_saved_provider() {
-        let mut cfg = LashConfig::new(codex());
-        cfg.upsert_provider(google_oauth());
-        let removed = cfg.remove_provider(ProviderKind::Codex).expect("removed");
-        assert_eq!(removed.kind(), ProviderKind::Codex);
-        assert_eq!(cfg.active_provider().kind(), ProviderKind::GoogleOAuth);
     }
 }

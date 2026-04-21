@@ -25,7 +25,6 @@ use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, 
 use crate::plugin::{
     CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
 };
-use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine};
 use crate::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, SessionEvent, SessionPolicy, TokenUsage,
@@ -312,7 +311,6 @@ pub struct LashRuntime {
     pub(in crate::runtime) services: RuntimeServices,
     pub(in crate::runtime) state: PersistedSessionState,
     pub(in crate::runtime) runtime_scope_id: Arc<str>,
-    pub(in crate::runtime) llm_factory: LlmFactory,
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     pub(in crate::runtime) overflow_recovery_attempted: bool,
@@ -403,7 +401,12 @@ impl LashRuntime {
         if state.session_id.is_empty() {
             state.session_id = "root".to_string();
         }
-        if state.policy == SessionPolicy::default() {
+        // Defaulted state (e.g. `PersistedSessionState::default()` used
+        // by fresh-session constructors) carries an unconfigured policy.
+        // Fill it in from the caller's policy so tests and hosts that
+        // pass a real policy alongside default state don't trip the
+        // max_context_tokens guard below.
+        if state.policy.provider.kind() == "unconfigured" {
             state.policy = policy.clone();
         }
         normalize_session_graph(&mut state);
@@ -446,7 +449,6 @@ impl LashRuntime {
                 state.read_view(),
             ))
             .await;
-        let llm_factory = Arc::clone(&host.core.llm_factory);
         Ok(Self {
             session: Some(session),
             policy,
@@ -454,7 +456,6 @@ impl LashRuntime {
             services,
             state,
             runtime_scope_id: Arc::<str>::from(uuid::Uuid::new_v4().to_string()),
-            llm_factory,
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
             overflow_recovery_attempted: false,
@@ -1378,7 +1379,6 @@ impl LashRuntime {
             base_graph: self.state.session_graph.clone(),
             tool_calls: self.state.session_graph.shared_projected_tool_calls(),
             llm_stream_summaries: HashMap::new(),
-            llm_factory: Arc::clone(&self.llm_factory),
             session_manager: manager,
             prompt_bridge,
             rlm_termination: rlm_termination_override
@@ -1505,7 +1505,7 @@ impl LashRuntime {
 
         let last_prompt_usage = assembler
             .last_llm_usage()
-            .and_then(|usage| normalize_prompt_usage(&self.policy.provider, usage));
+            .and_then(|usage| normalize_prompt_usage(self.policy.provider.as_dyn(), usage));
         let finalize_manager = if self.session.is_some() {
             Some(
                 self.runtime_session_manager_for_turn(None, None)

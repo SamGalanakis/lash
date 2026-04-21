@@ -1,5 +1,4 @@
 use super::*;
-use crate::llm::transport::LlmTransport;
 
 /// Result of running stream hooks over a visible chunk. Carries both
 /// the (possibly rewritten) text and an `abort_requested` flag that the
@@ -134,7 +133,6 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) base_graph: crate::SessionGraph,
     pub(super) tool_calls: Arc<Vec<ToolCallRecord>>,
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
-    pub(super) llm_factory: LlmFactory,
     pub(super) session_manager: Arc<dyn SessionManager>,
     pub(super) prompt_bridge: HostPromptBridge,
     pub(super) rlm_termination: crate::RlmTermination,
@@ -152,10 +150,6 @@ impl RuntimeTurnDriver {
         if let Some(probe) = self.turn_phase_probe.as_ref() {
             probe.end(phase);
         }
-    }
-
-    fn llm(&self, provider: &Provider) -> Box<dyn LlmTransport> {
-        (self.llm_factory)(provider)
     }
 
     pub(super) async fn run(
@@ -504,9 +498,8 @@ impl RuntimeTurnDriver {
             _ => {}
         }
 
-        let llm = self.llm(&policy.provider);
-        let model = llm.normalize_model(&policy.model);
-        match llm.ensure_ready(&mut policy.provider).await {
+        let model = policy.provider.resolve_model(&policy.model);
+        match policy.provider.ensure_ready().await {
             Ok(changed) => {
                 if changed && let Some(path) = self.host.core.credential_store_path.as_ref() {
                     let _ = crate::provider::save_provider(path, &policy.provider);
@@ -661,10 +654,8 @@ impl RuntimeTurnDriver {
         };
 
         let mut call_provider = self.policy.provider.clone();
-        let llm_factory = Arc::clone(&self.llm_factory);
         let mut llm_task = tokio::spawn(async move {
-            let llm = llm_factory(&call_provider);
-            let result = llm.complete(&mut call_provider, llm_request).await;
+            let result = call_provider.complete(llm_request).await;
             (result, call_provider)
         });
 
@@ -1414,7 +1405,7 @@ fn debug_request_body(req: &LlmRequest) -> String {
 struct TrailingUsageCatcher {
     llm_task: tokio::task::JoinHandle<(
         Result<LlmResponse, crate::llm::transport::LlmTransportError>,
-        crate::Provider,
+        crate::ProviderHandle,
     )>,
     llm_stream_rx: tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
     event_tx: mpsc::Sender<RuntimeStreamEvent>,

@@ -12,12 +12,12 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::plugin::PluginFactory;
-use lash::provider::OPENROUTER_BASE_URL;
+use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
     PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot,
-    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, Provider, ProviderOptions,
+    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderHandle,
     RlmGlobalsPatchPluginBody, RuntimeCoreConfig, RuntimeStore, SessionAppendNode, SessionEvent,
     SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
     TurnInput, TurnInputInjectionBridge, diff_usage_reports,
@@ -580,7 +580,7 @@ fn summarize_domain_selection(domains: &[String]) -> String {
 
 async fn run_question(
     output_dir: &Path,
-    provider: &Provider,
+    provider: &ProviderHandle,
     args: &Args,
     execution_mode: ExecutionMode,
     context_approach: &ContextApproach,
@@ -962,7 +962,7 @@ fn build_globals_patch(question: &LongCoTQuestion) -> RlmGlobalsPatchPluginBody 
     }
 }
 
-fn resolve_provider(args: &Args) -> anyhow::Result<Provider> {
+fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
     match args.provider_id.as_str() {
         "openai-compatible" | "openai-generic" => {
             let api_key = resolve_api_key(args).ok_or_else(|| {
@@ -970,11 +970,11 @@ fn resolve_provider(args: &Args) -> anyhow::Result<Provider> {
                     "missing API key — set OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY in .env, or pass --api-key"
                 )
             })?;
-            Ok(Provider::OpenAiGeneric {
+            let provider = lash_provider_openai::OpenAiGenericProvider::new(
                 api_key,
-                base_url: resolve_base_url(args),
-                options: ProviderOptions::default(),
-            })
+                resolve_base_url(args),
+            );
+            Ok(ProviderHandle::new(Box::new(provider)))
         }
         other => bail!(
             "provider `{other}` is not supported by this harness; use the OpenAI-compatible path"
