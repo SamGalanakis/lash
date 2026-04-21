@@ -177,7 +177,6 @@ impl RuntimeSettings {
 #[async_trait]
 pub trait Provider: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> &'static str;
-    fn label(&self) -> &'static str;
 
     fn default_model(&self) -> &str;
     fn supported_variants(&self, model: &str) -> &'static [&'static str];
@@ -189,7 +188,7 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
             return Err(format!(
                 "Model `{}` on {} does not expose configurable variants.",
                 model,
-                self.label()
+                provider_cli_label(self.kind())
             ));
         }
         if variants.contains(&variant) {
@@ -199,7 +198,7 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
             "Unsupported variant `{}` for `{}` on {}. Available: {}",
             variant,
             model,
-            self.label(),
+            provider_cli_label(self.kind()),
             variants.join(", ")
         ))
     }
@@ -276,7 +275,7 @@ impl dyn Provider {
             return Err(format!(
                 "model `{}` has no context-window entry in the supplied model catalog for {}. Provide an explicit model spec or choose a cataloged model.",
                 configured_model,
-                self.label(),
+                provider_cli_label(self.kind()),
             ));
         };
         Ok(ResolvedModelSpec {
@@ -383,10 +382,6 @@ pub struct UnconfiguredProvider {
 impl Provider for UnconfiguredProvider {
     fn kind(&self) -> &'static str {
         "unconfigured"
-    }
-
-    fn label(&self) -> &'static str {
-        "Unconfigured"
     }
 
     fn default_model(&self) -> &str {
@@ -567,6 +562,14 @@ pub fn build_provider(spec: &ProviderSpec) -> Result<Box<dyn Provider>, String> 
 /// hard-coding per-kind strings.
 pub fn provider_factory(kind: &str) -> Option<Arc<dyn ProviderFactory>> {
     PROVIDER_REGISTRY.read().unwrap().factory(kind).cloned()
+}
+
+/// Human-readable label for a provider kind when its factory is registered.
+/// Falls back to the stable kind string for unregistered test/internal providers.
+pub fn provider_cli_label(kind: &'static str) -> &'static str {
+    provider_factory(kind)
+        .map(|factory| factory.cli_label())
+        .unwrap_or(kind)
 }
 
 /// Stored configuration: provider credentials + service API keys.

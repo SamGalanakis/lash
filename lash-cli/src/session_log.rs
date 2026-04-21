@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -242,7 +243,7 @@ fn collect_session_candidates() -> Vec<(PathBuf, String, SystemTime)> {
         };
         candidates.push((path, filename, modified));
     }
-    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+    candidates.sort_by_key(|candidate| Reverse(candidate.2));
     candidates
 }
 
@@ -278,7 +279,7 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
         .filter_map(|(path, filename, modified)| parse_session_info(&path, filename, modified))
         .take(limit)
         .collect();
-    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+    sessions.sort_by_key(|session| Reverse(session.modified));
     sessions
 }
 

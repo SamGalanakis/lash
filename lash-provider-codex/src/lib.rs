@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use lash::llm::streaming::{drive_sse_response, emit_progress};
 use lash::llm::timeouts::{
-    build_http_client, read_response_text, response_start_timeout, send_request,
+    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
+    send_request,
 };
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
@@ -1427,10 +1428,6 @@ impl Provider for CodexProvider {
         "codex"
     }
 
-    fn label(&self) -> &'static str {
-        "OpenAI Codex OAuth"
-    }
-
     fn default_model(&self) -> &str {
         "gpt-5.4"
     }
@@ -1465,11 +1462,7 @@ impl Provider for CodexProvider {
         }
     }
 
-    fn request_variant_config(
-        &self,
-        model: &str,
-        variant: &str,
-    ) -> Option<VariantRequestConfig> {
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
         if self.validate_variant(model, variant).is_err() {
             return None;
         }
@@ -1532,10 +1525,7 @@ impl Provider for CodexProvider {
         Ok(false)
     }
 
-    async fn complete(
-        &mut self,
-        req: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError> {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let access_token = self.access_token.clone();
         let account_id = self.account_id.clone();
@@ -1581,7 +1571,7 @@ impl Provider for CodexProvider {
             let http = build_request();
             let send_result = send_request(
                 http,
-                request_body.clone(),
+                request_body.clone().map(request_body_snapshot),
                 response_start_timeout(
                     timeouts.request_timeout,
                     timeouts.chunk_timeout,
@@ -1693,12 +1683,15 @@ impl Provider for CodexProvider {
             Self::should_parse_stream(stream_events.is_some(), content_type.as_deref());
 
         if !parse_stream {
-            let text =
-                read_response_text(resp, timeouts.request_timeout, "Codex response body timed out")
-                    .await
-                    .map_err(|err| {
-                        Self::non_sse_body_read_error(status.as_u16(), content_type.as_deref(), err)
-                    })?;
+            let text = read_response_text(
+                resp,
+                timeouts.request_timeout,
+                "Codex response body timed out",
+            )
+            .await
+            .map_err(|err| {
+                Self::non_sse_body_read_error(status.as_u16(), content_type.as_deref(), err)
+            })?;
             if Self::looks_like_sse_payload(&text) {
                 let mut state = CodexStreamState::default();
                 Self::parse_sse_payload(&text, &mut state)?;

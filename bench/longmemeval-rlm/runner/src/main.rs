@@ -14,18 +14,18 @@ use chrono::Utc;
 use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
-use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
     PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, ProviderHandle,
-    RlmGlobalsPatchPluginBody, RuntimeCoreConfig, RuntimeStore, SessionAppendNode, SessionEvent,
-    SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
-    TurnInput, TurnInputInjectionBridge, diff_usage_reports,
+    PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RlmGlobalsPatchPluginBody,
+    RuntimeCoreConfig, RuntimeStore, SessionAppendNode, SessionEvent, SessionPolicy,
+    SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput,
+    TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
+use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -934,10 +934,8 @@ fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
                     "missing API key for LongMemEval runner; set OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY in .env, or pass --api-key"
                 )
             })?;
-            let provider = lash_provider_openai::OpenAiGenericProvider::new(
-                api_key,
-                resolve_base_url(args),
-            );
+            let provider =
+                lash_provider_openai::OpenAiGenericProvider::new(api_key, resolve_base_url(args));
             Ok(ProviderHandle::new(Box::new(provider)))
         }
         other => bail!(

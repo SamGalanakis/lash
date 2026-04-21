@@ -452,7 +452,7 @@ pub(crate) fn variant_lines(
         lines.push(format!(
             "`{}` on {} does not expose configurable variants.",
             model,
-            provider.label()
+            provider_display_label(provider)
         ));
         return lines;
     }
@@ -466,6 +466,10 @@ pub(crate) fn variant_lines(
     lines.push(format!("Available variants: {}", supported.join(", ")));
     lines.push("Usage: `/variant <name>` or `/variant default`".to_string());
     lines
+}
+
+pub(crate) fn provider_display_label(provider: &ProviderHandle) -> &'static str {
+    lash::provider_cli_label(provider.kind())
 }
 
 pub(crate) fn hash12(bytes: &[u8]) -> String {
@@ -513,10 +517,7 @@ pub(crate) fn info_text_unconfigured(execution_mode: ExecutionMode, cwd: &str) -
         format!("cwd: {}", cwd),
         "session: (not started)".to_string(),
     ]
-    .join(
-        "
-",
-    )
+    .join("\n")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -538,7 +539,11 @@ pub(crate) fn info_text(
     let mut lines = vec![
         format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash::SANSIO_VERSION),
-        format!("provider: {} ({})", provider.label(), provider.kind()),
+        format!(
+            "provider: {} ({})",
+            provider_display_label(provider),
+            provider.kind()
+        ),
         format!("configured model: {}", configured_model),
         format!("resolved model: {}", resolved_model),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
@@ -566,10 +571,7 @@ pub(crate) fn info_text(
         lines.push(format!("session db: {}", session_db_path));
     }
 
-    lines.join(
-        "
-",
-    )
+    lines.join("\n")
 }
 
 pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &UiExtensions) -> String {
@@ -639,10 +641,7 @@ pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &UiExtensions) -> 
     lines.push("Shortcuts:".to_string());
     lines.extend(render_shortcut_lines(ui_extensions, false));
 
-    lines.join(
-        "
-",
-    )
+    lines.join("\n")
 }
 
 pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {

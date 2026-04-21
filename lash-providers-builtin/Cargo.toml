@@ -1,0 +1,11 @@
+[package]
+name = "lash-providers-builtin"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash-provider-anthropic = { path = "../lash-provider-anthropic" }
+lash-provider-codex = { path = "../lash-provider-codex" }
+lash-provider-google = { path = "../lash-provider-google" }
+lash-provider-openai = { path = "../lash-provider-openai" }

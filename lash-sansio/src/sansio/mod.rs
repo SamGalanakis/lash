@@ -807,9 +807,7 @@ impl TurnMachine {
         };
         match result {
             Err(error) => {
-                if error.retryable
-                    && waiting.retry_attempt < self.config.retry_policy.max_retries
-                {
+                if error.retryable && waiting.retry_attempt < self.config.retry_policy.max_retries {
                     self.schedule_llm_retry(
                         waiting.retry_attempt,
                         error,

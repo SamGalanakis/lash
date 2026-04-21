@@ -280,10 +280,7 @@ dependencies = [
  "lash-mode-standard",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
- "lash-provider-anthropic",
- "lash-provider-codex",
- "lash-provider-google",
- "lash-provider-openai",
+ "lash-providers-builtin",
  "lash-subagents",
  "serde",
  "serde_json",
@@ -1854,6 +1851,7 @@ version = "0.2.62"
 dependencies = [
  "async-trait",
  "base64",
+ "bytes",
  "chrono",
  "fff-search",
  "flate2",
@@ -1923,6 +1921,7 @@ dependencies = [
  "lash-provider-codex",
  "lash-provider-google",
  "lash-provider-openai",
+ "lash-providers-builtin",
  "lash-subagents",
  "lash-tui",
  "lash-ui",
@@ -1971,11 +1970,9 @@ dependencies = [
  "lash",
  "lash-mode-standard",
  "lash-sansio",
- "lashlang",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1984,7 +1981,6 @@ version = "0.2.62"
 dependencies = [
  "async-trait",
  "lash",
- "lash-sansio",
  "serde_json",
  "tokio",
 ]
@@ -2102,6 +2098,16 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "lash-providers-builtin"
+version = "0.2.61"
+dependencies = [
+ "lash-provider-anthropic",
+ "lash-provider-codex",
+ "lash-provider-google",
+ "lash-provider-openai",
 ]
 
 [[package]]

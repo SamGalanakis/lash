@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::llm::transport::LlmTransportError;
-use crate::llm::types::{LlmRequest, LlmUsage};
+use crate::llm::types::LlmUsage;
 use crate::plugin::StaticPluginFactory;
-use crate::provider::{Provider, ProviderHandle, ProviderOptions, VariantRequestConfig};
 use crate::store::RuntimeStore;
+use crate::testing::TestProvider;
 use tokio_util::sync::CancellationToken;
 
 fn default_state() -> PersistedSessionState {
@@ -174,86 +174,31 @@ struct MockCall {
     response: Result<LlmResponse, LlmTransportError>,
 }
 
-#[derive(Clone, Debug, Default)]
-struct MockProvider {
-    calls: Arc<Mutex<Vec<MockCall>>>,
-    options: ProviderOptions,
-}
-
-impl MockProvider {
-    fn new(calls: Vec<MockCall>) -> Self {
-        Self {
-            calls: Arc::new(Mutex::new(calls)),
-            options: ProviderOptions::default(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider for MockProvider {
-    fn kind(&self) -> &'static str {
-        "mock"
-    }
-
-    fn label(&self) -> &'static str {
-        "Mock"
-    }
-
-    fn default_model(&self) -> &str {
-        "mock-model"
-    }
-
-    fn supported_variants(&self, _model: &str) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn default_model_variant(&self, _model: &str) -> Option<&'static str> {
-        None
-    }
-
-    fn request_variant_config(&self, _model: &str, _variant: &str) -> Option<VariantRequestConfig> {
-        None
-    }
-
-    fn default_agent_model(&self, _tier: &str) -> Option<crate::provider::AgentModelSelection> {
-        None
-    }
-
-    fn requires_streaming(&self) -> bool {
-        true
-    }
-
-    fn options(&self) -> &ProviderOptions {
-        &self.options
-    }
-
-    fn options_mut(&mut self) -> &mut ProviderOptions {
-        &mut self.options
-    }
-
-    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        let call = self.calls.lock().expect("lock calls").remove(0);
-        if let Some(tx) = req.stream_events.as_ref() {
-            for event in &call.stream_events {
-                tx.send(event.clone());
+fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
+    let calls = Arc::new(Mutex::new(calls));
+    TestProvider::builder()
+        .kind("mock")
+        .default_model("mock-model")
+        .requires_streaming(true)
+        .complete(move |req| {
+            let calls = Arc::clone(&calls);
+            async move {
+                let call = calls.lock().expect("lock calls").remove(0);
+                if let Some(tx) = req.stream_events.as_ref() {
+                    for event in &call.stream_events {
+                        tx.send(event.clone());
+                    }
+                }
+                call.response
             }
-        }
-        call.response
-    }
-
-    fn serialize_config(&self) -> serde_json::Value {
-        serde_json::Value::Object(Default::default())
-    }
-
-    fn clone_boxed(&self) -> Box<dyn Provider> {
-        Box::new(self.clone())
-    }
+        })
+        .build()
 }
 
 fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
         execution_mode: ExecutionMode::Standard,
-        provider: ProviderHandle::new(Box::new(MockProvider::default())),
+        provider: mock_provider(Vec::new()).into_handle(),
         model: "mock-model".to_string(),
         max_context_tokens: Some(200_000),
         ..SessionPolicy::default()
@@ -383,7 +328,7 @@ impl crate::ToolProvider for EmptyTools {
     }
 }
 
-async fn standard_runtime_with_transport(transport: MockProvider) -> LashRuntime {
+async fn standard_runtime_with_transport(transport: TestProvider) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
@@ -397,7 +342,7 @@ async fn standard_runtime_with_transport(transport: MockProvider) -> LashRuntime
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
@@ -424,7 +369,7 @@ fn plugin_host_rejects_observational_memory_without_supporting_plugin() {
     );
 }
 
-async fn standard_runtime_with_transport_and_background(transport: MockProvider) -> LashRuntime {
+async fn standard_runtime_with_transport_and_background(transport: TestProvider) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(
         test_host_config(),
@@ -442,12 +387,12 @@ async fn standard_runtime_with_transport_and_background(transport: MockProvider)
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
 async fn standard_runtime_with_shared_background_executor(
-    transport: MockProvider,
+    transport: TestProvider,
     executor: Arc<dyn SessionTaskExecutor>,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
@@ -464,12 +409,12 @@ async fn standard_runtime_with_shared_background_executor(
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
 async fn standard_runtime_with_transport_and_host(
-    transport: MockProvider,
+    transport: TestProvider,
     host: EmbeddedRuntimeHost,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
@@ -485,7 +430,7 @@ async fn standard_runtime_with_transport_and_host(
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
@@ -495,7 +440,7 @@ async fn runtime_requires_explicit_max_context_tokens() {
     let result = LashRuntime::from_embedded_state(
         SessionPolicy {
             execution_mode: ExecutionMode::Standard,
-            provider: ProviderHandle::new(Box::new(MockProvider::default())),
+            provider: mock_provider(Vec::new()).into_handle(),
             model: "mock-model".to_string(),
             max_context_tokens: None,
             ..SessionPolicy::default()
@@ -522,7 +467,7 @@ async fn runtime_requires_explicit_max_context_tokens() {
 fn rlm_test_policy() -> SessionPolicy {
     SessionPolicy {
         execution_mode: ExecutionMode::Rlm,
-        provider: ProviderHandle::new(Box::new(MockProvider::default())),
+        provider: mock_provider(Vec::new()).into_handle(),
         model: "mock-model".to_string(),
         max_context_tokens: Some(200_000),
         ..SessionPolicy::default()
@@ -530,7 +475,7 @@ fn rlm_test_policy() -> SessionPolicy {
 }
 
 #[cfg(feature = "tool-impls")]
-async fn rlm_runtime_with_transport(transport: MockProvider) -> LashRuntime {
+async fn rlm_runtime_with_transport(transport: TestProvider) -> LashRuntime {
     let plugins = default_tool_session("root", ExecutionMode::Rlm, true);
     let mut runtime = LashRuntime::from_embedded_state(
         rlm_test_policy(),
@@ -550,13 +495,13 @@ async fn rlm_runtime_with_transport(transport: MockProvider) -> LashRuntime {
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
 #[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
 async fn rlm_runtime_with_transport_and_store(
-    transport: MockProvider,
+    transport: TestProvider,
     store: Arc<dyn crate::store::RuntimeStore>,
 ) -> LashRuntime {
     let plugins = default_tool_session("root", ExecutionMode::Rlm, true);
@@ -579,7 +524,7 @@ async fn rlm_runtime_with_transport_and_store(
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
@@ -612,7 +557,7 @@ async fn active_tool_catalog_uses_runtime_execution_mode() {
 }
 
 async fn standard_runtime_with_bridge(
-    transport: MockProvider,
+    transport: TestProvider,
     turn_injection_bridge: crate::TurnInjectionBridge,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
@@ -628,12 +573,12 @@ async fn standard_runtime_with_bridge(
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
 async fn standard_runtime_with_input_bridge(
-    transport: MockProvider,
+    transport: TestProvider,
     turn_input_injection_bridge: crate::TurnInputInjectionBridge,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
@@ -649,7 +594,7 @@ async fn standard_runtime_with_input_bridge(
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
@@ -714,7 +659,7 @@ impl crate::SessionPlugin for RuntimeTestPlugin {
 
 async fn runtime_with_plugins(
     plugins: Vec<Arc<dyn crate::PluginFactory>>,
-    transport: MockProvider,
+    transport: TestProvider,
 ) -> LashRuntime {
     runtime_with_plugins_and_tools_and_host(
         plugins,
@@ -728,7 +673,7 @@ async fn runtime_with_plugins(
 async fn runtime_with_plugins_and_tools(
     plugins: Vec<Arc<dyn crate::PluginFactory>>,
     tools: Arc<dyn crate::ToolProvider>,
-    transport: MockProvider,
+    transport: TestProvider,
 ) -> LashRuntime {
     runtime_with_plugins_and_tools_and_host(plugins, tools, transport, test_host_config()).await
 }
@@ -736,7 +681,7 @@ async fn runtime_with_plugins_and_tools(
 async fn runtime_with_plugins_and_tools_and_host(
     plugins: Vec<Arc<dyn crate::PluginFactory>>,
     tools: Arc<dyn crate::ToolProvider>,
-    transport: MockProvider,
+    transport: TestProvider,
     host: EmbeddedRuntimeHost,
 ) -> LashRuntime {
     let mut factories = plugins;
@@ -757,7 +702,7 @@ async fn runtime_with_plugins_and_tools_and_host(
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
 
@@ -872,53 +817,17 @@ async fn session_config_change_hook_receives_context_window_updates() {
             }))
         }),
     });
-    let transport = MockProvider::new(Vec::new());
+    let transport = mock_provider(Vec::new());
     let mut runtime = runtime_with_plugins(vec![plugin], transport).await;
 
-    #[derive(Clone, Debug, Default)]
-    struct AltProvider(crate::provider::ProviderOptions);
-    #[async_trait::async_trait]
-    impl Provider for AltProvider {
-        fn kind(&self) -> &'static str {
-            "alt"
-        }
-        fn label(&self) -> &'static str {
-            "Alt"
-        }
-        fn default_model(&self) -> &str {
-            "alt-model"
-        }
-        fn supported_variants(&self, _m: &str) -> &'static [&'static str] {
-            &[]
-        }
-        fn default_model_variant(&self, _m: &str) -> Option<&'static str> {
-            None
-        }
-        fn request_variant_config(&self, _m: &str, _v: &str) -> Option<VariantRequestConfig> {
-            None
-        }
-        fn default_agent_model(&self, _t: &str) -> Option<crate::provider::AgentModelSelection> {
-            None
-        }
-        fn options(&self) -> &ProviderOptions {
-            &self.0
-        }
-        fn options_mut(&mut self) -> &mut ProviderOptions {
-            &mut self.0
-        }
-        async fn complete(&mut self, _r: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-            Err(LlmTransportError::new("alt provider not wired"))
-        }
-        fn serialize_config(&self) -> serde_json::Value {
-            serde_json::Value::Object(Default::default())
-        }
-        fn clone_boxed(&self) -> Box<dyn Provider> {
-            Box::new(self.clone())
-        }
-    }
+    let alt_provider = TestProvider::builder()
+        .kind("alt")
+        .default_model("alt-model")
+        .complete_error("alt provider not wired")
+        .build();
     runtime
         .update_session_config(
-            Some(ProviderHandle::new(Box::new(AltProvider::default()))),
+            Some(alt_provider.into_handle()),
             Some("alt-model".to_string()),
             Some(None),
             Some(123_456),
@@ -962,7 +871,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
             }))
         }),
     });
-    let transport = MockProvider::new(Vec::new());
+    let transport = mock_provider(Vec::new());
     let mut runtime = runtime_with_plugins(vec![plugin], transport).await;
 
     let turn = runtime
@@ -994,7 +903,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
 
 #[tokio::test]
 async fn normal_turn_preserves_user_input_provenance_in_state() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
         response: Ok(LlmResponse {
             full_text: "Done".to_string(),
@@ -1053,7 +962,7 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
 
 #[tokio::test]
 async fn retryable_llm_failures_exhaust_and_fail_turn() {
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: Vec::new(),
             response: Err(
@@ -1123,7 +1032,7 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
             message: crate::PluginMessage::text(crate::MessageRole::User, "one more thing"),
         }])
         .expect("enqueue");
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: Vec::new(),
             response: Ok(LlmResponse {
@@ -1223,7 +1132,7 @@ async fn bridge_checkpoint_injection_preserves_images() {
             user_input: None,
         }])
         .expect("enqueue");
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: Vec::new(),
             response: Ok(LlmResponse {
@@ -1298,7 +1207,7 @@ async fn checkpoint_hook_can_inject_messages() {
             }))
         }),
     });
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: Vec::new(),
             response: Ok(LlmResponse {
@@ -1367,7 +1276,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
         }])
         .expect("enqueue injected turn input");
 
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
         response: Ok(LlmResponse {
             full_text: "answer".to_string(),
@@ -1494,7 +1403,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
             }))
         }),
     });
-    let transport = MockProvider::new(Vec::new());
+    let transport = mock_provider(Vec::new());
     let mut runtime = runtime_with_plugins(vec![plugin], transport).await;
 
     append_message(
@@ -1542,7 +1451,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
 
 #[tokio::test]
 async fn session_manager_can_stream_and_await_child_session_turns() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("child ".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
@@ -1625,7 +1534,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         Vec::new(),
         Arc::new(EmptyTools),
-        MockProvider::new(Vec::new()),
+        mock_provider(Vec::new()),
         host,
     )
     .await;
@@ -1690,7 +1599,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
 
 #[tokio::test]
 async fn session_manager_rejects_duplicate_child_session_ids() {
-    let runtime = runtime_with_plugins(Vec::new(), MockProvider::new(Vec::new())).await;
+    let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     manager
         .create_session(crate::SessionCreateRequest {
@@ -1839,7 +1748,7 @@ impl crate::ToolProvider for ChildSessionTool {
 
 #[tokio::test]
 async fn session_manager_create_session_accepts_custom_context_surface() {
-    let runtime = runtime_with_plugins(Vec::new(), MockProvider::new(Vec::new())).await;
+    let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     let handle = manager
         .create_session(crate::SessionCreateRequest {
@@ -1876,7 +1785,7 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
 
 #[tokio::test]
 async fn parent_turn_receives_live_child_token_usage_events() {
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: vec![
                 LlmStreamEvent::Part(LlmOutputPart::ToolCall {
@@ -1977,7 +1886,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
 
 #[tokio::test]
 async fn parent_turn_keeps_cached_only_child_usage_live() {
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: vec![
                 LlmStreamEvent::Part(LlmOutputPart::ToolCall {
@@ -2407,7 +2316,7 @@ fn normalize_items_resolves_relative_paths_with_base_dir() {
 
 #[tokio::test]
 async fn standard_runtime_assembles_stream_only_text_response() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("What time ".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
@@ -2467,7 +2376,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
 async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() {
     let expected =
         "I’m continuing with a type-safety cleanup now: replace the remaining raw JSON paths.";
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("I’m continuing with a type-safety cleanup now: ".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
@@ -2517,7 +2426,7 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
     // Model emits one tool call that would sleep for 10s; we cancel the turn
     // and expect run_tool_calls to tear down promptly (< 2s), either via
     // JoinSet::abort_all or via the tool observing the cancellation token.
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: vec![
                 LlmStreamEvent::Part(LlmOutputPart::ToolCall {
@@ -2595,7 +2504,7 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
 
 #[tokio::test]
 async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_empty() {
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: vec![
                 LlmStreamEvent::Part(LlmOutputPart::ToolCall {
@@ -2660,7 +2569,7 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
 
 #[tokio::test]
 async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streamed() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![],
         response: Ok(LlmResponse {
             full_text: "Intro paragraph.\n\n## Heading".to_string(),
@@ -2714,7 +2623,7 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
 #[cfg(feature = "tool-impls")]
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_session_manager_forwards_user_prompts_when_available() {
-    let transport = MockProvider::new(Vec::new());
+    let transport = mock_provider(Vec::new());
     let runtime = rlm_runtime_with_transport(transport).await;
     let prompt_bridge = HostPromptBridge::new();
     let manager = runtime
@@ -2760,7 +2669,7 @@ async fn runtime_session_manager_forwards_user_prompts_when_available() {
 
 #[tokio::test]
 async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("Hi".to_string()),
             LlmStreamEvent::Usage(LlmUsage {
@@ -2804,7 +2713,7 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
 
 #[tokio::test]
 async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("Hi".to_string()),
             LlmStreamEvent::Usage(LlmUsage {
@@ -2853,7 +2762,7 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
 
 #[tokio::test]
 async fn standard_runtime_debug_log_records_stream_event_entries() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("Hello ".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
@@ -2983,7 +2892,7 @@ async fn standard_runtime_debug_log_records_stream_event_entries() {
 
 #[tokio::test]
 async fn standard_runtime_debug_log_records_failed_llm_calls() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
         response: Err(crate::llm::transport::LlmTransportError::new(
             "HTTP request failed: builder error",
@@ -3055,7 +2964,7 @@ fn normalize_prompt_usage_uses_input_tokens_for_openai_compatible() {
         cached_input_tokens: 20,
         reasoning_tokens: 0,
     };
-    let stub = MockProvider::default();
+    let stub = mock_provider(Vec::new());
     let prompt_usage = normalize_prompt_usage(&stub, &usage).expect("prompt usage");
     assert_eq!(prompt_usage.prompt_context_tokens, 80);
     assert_eq!(prompt_usage.context_budget_tokens, 80);
@@ -3126,7 +3035,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
             }))
         }),
     });
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: Vec::new(),
             response: Ok(LlmResponse {
@@ -3207,7 +3116,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
 
 #[tokio::test]
 async fn completed_turns_are_persisted_for_custom_runtime_store() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![LlmStreamEvent::Delta("Stored answer".to_string())],
         response: Ok(LlmResponse {
             full_text: "Stored answer".to_string(),
@@ -3237,7 +3146,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
 
     let _turn = runtime
         .run_turn_assembled(
@@ -3271,7 +3180,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
 #[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn completed_turns_are_persisted_in_session_graph() {
-    let transport = MockProvider::new(vec![MockCall {
+    let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("Stored answer".to_string()),
             LlmStreamEvent::Usage(LlmUsage {
@@ -3317,7 +3226,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    runtime.policy.provider = transport.clone().into_handle();
 
     let _turn = runtime
         .run_turn_assembled(
@@ -3371,7 +3280,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
         cached_input_tokens: 5,
         reasoning_tokens: 6,
     };
-    let transport = MockProvider::new(vec![
+    let transport = mock_provider(vec![
         MockCall {
             stream_events: vec![
                 LlmStreamEvent::Delta("stored".to_string()),
@@ -3466,7 +3375,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
     )
     .await
     .expect("resumed runtime");
-    resumed.policy.provider = ProviderHandle::new(Box::new(transport.clone()));
+    resumed.policy.provider = transport.clone().into_handle();
 
     let second_turn = resumed
         .run_turn_assembled(
@@ -3579,8 +3488,7 @@ fn session_usage_report_aggregates_sources_and_models() {
 
 #[tokio::test]
 async fn await_background_work_waits_for_registered_jobs() {
-    let runtime =
-        standard_runtime_with_transport_and_background(MockProvider::new(Vec::new())).await;
+    let runtime = standard_runtime_with_transport_and_background(mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     let observed = Arc::new(AtomicBool::new(false));
     let observed_task = Arc::clone(&observed);
@@ -3610,12 +3518,12 @@ async fn await_background_work_waits_for_registered_jobs() {
 async fn await_background_work_does_not_cross_runtime_sessions_with_same_logical_id() {
     let executor: Arc<dyn SessionTaskExecutor> = Arc::new(TokioSessionTaskExecutor::default());
     let runtime_one = standard_runtime_with_shared_background_executor(
-        MockProvider::new(Vec::new()),
+        mock_provider(Vec::new()),
         Arc::clone(&executor),
     )
     .await;
     let runtime_two = standard_runtime_with_shared_background_executor(
-        MockProvider::new(Vec::new()),
+        mock_provider(Vec::new()),
         Arc::clone(&executor),
     )
     .await;

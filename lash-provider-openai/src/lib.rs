@@ -2,10 +2,12 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::LazyLock;
 
 use lash::llm::streaming::drive_sse_response;
 use lash::llm::timeouts::{
-    build_http_client, read_response_text, response_start_timeout, send_request,
+    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
+    send_request,
 };
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
@@ -22,6 +24,8 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 const OPENROUTER_REASONING_VARIANTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh"];
+
+static DEFAULT_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
 
 fn base_url_is_openrouter(base_url: &str) -> bool {
     base_url.trim_end_matches('/') == OPENROUTER_BASE_URL
@@ -373,7 +377,7 @@ impl OpenAiGenericProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             options: ProviderOptions::default(),
-            client: build_http_client(),
+            client: DEFAULT_HTTP_CLIENT.clone(),
         }
     }
 
@@ -1235,10 +1239,6 @@ impl Provider for OpenAiGenericProvider {
         "openai-compatible"
     }
 
-    fn label(&self) -> &'static str {
-        "OpenAI-compatible (API key)"
-    }
-
     fn default_model(&self) -> &str {
         "anthropic/claude-sonnet-4.6"
     }
@@ -1268,11 +1268,7 @@ impl Provider for OpenAiGenericProvider {
         }
     }
 
-    fn request_variant_config(
-        &self,
-        model: &str,
-        variant: &str,
-    ) -> Option<VariantRequestConfig> {
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
         if self.validate_variant(model, variant).is_err() {
             return None;
         }
@@ -1317,10 +1313,7 @@ impl Provider for OpenAiGenericProvider {
         &mut self.options
     }
 
-    async fn complete(
-        &mut self,
-        req: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError> {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let timeouts = self.options.llm_timeouts();
         let api_key = self.api_key.clone();
@@ -1328,14 +1321,15 @@ impl Provider for OpenAiGenericProvider {
         let (body, base_url) = self.build_request_body(&req, stream_events.is_some())?;
 
         // Serialize once. reqwest's `.json(&body)` would re-run
-        // `serde_json::to_vec` internally, wasting a ~MB+ alloc per
-        // request. We keep a clone as `request_body` for retry/error
-        // replay and trace logs; that's one allocation we can't avoid
-        // without threading `Arc<String>` through the error type.
+        // `serde_json::to_vec` internally, wasting a large allocation per
+        // request on long histories. Keep the bytes cheaply cloneable for
+        // transport errors, but do not attach a full request copy to
+        // successful responses; the runtime fills a compact debug request
+        // when LLM logging is enabled.
         let body_string = serde_json::to_string(&body).map_err(|e| {
             LlmTransportError::new(format!("Failed to serialize OpenAI-compatible body: {e}"))
         })?;
-        let request_body = Some(body_string.clone());
+        let request_body = request_body_snapshot(body_string);
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
         let request = self
             .client
@@ -1343,10 +1337,10 @@ impl Provider for OpenAiGenericProvider {
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .body(body_string);
+            .body(request_body.clone());
         let resp = send_request(
             request,
-            request_body.clone(),
+            Some(request_body.clone()),
             response_start_timeout(
                 timeouts.request_timeout,
                 timeouts.chunk_timeout,
@@ -1383,7 +1377,7 @@ impl Provider for OpenAiGenericProvider {
                 retryable: status.as_u16() == 429 || status.as_u16() >= 500,
                 raw: Some(text),
                 code: Some(status.as_u16().to_string()),
-                request_body,
+                request_body: Some(String::from_utf8_lossy(&request_body).into_owned()),
             });
         }
 
@@ -1437,7 +1431,7 @@ impl Provider for OpenAiGenericProvider {
                 parts,
                 usage,
                 provider_usage,
-                request_body,
+                request_body: None,
                 http_summary: Some(format!("HTTP POST {}", url)),
             });
         }
@@ -1506,7 +1500,7 @@ impl Provider for OpenAiGenericProvider {
             parts,
             usage,
             provider_usage,
-            request_body,
+            request_body: None,
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
         })
     }

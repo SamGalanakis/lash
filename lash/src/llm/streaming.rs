@@ -5,14 +5,14 @@ use std::time::Duration;
 
 struct SseBuffer {
     pending: String,
-    event_lines: Vec<String>,
+    event_data: String,
 }
 
 impl SseBuffer {
     fn new() -> Self {
         Self {
             pending: String::new(),
-            event_lines: Vec::new(),
+            event_data: String::new(),
         }
     }
 
@@ -22,12 +22,30 @@ impl SseBuffer {
     {
         self.pending.push_str(&String::from_utf8_lossy(chunk));
         while let Some(pos) = self.pending.find('\n') {
-            let mut line = self.pending[..pos].to_string();
+            let line_end = if pos > 0 && self.pending.as_bytes()[pos - 1] == b'\r' {
+                pos - 1
+            } else {
+                pos
+            };
+            let should_flush = {
+                let line = &self.pending[..line_end];
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if !self.event_data.is_empty() {
+                        self.event_data.push('\n');
+                    }
+                    self.event_data.push_str(data);
+                    false
+                } else if line.starts_with("event:") {
+                    false
+                } else {
+                    line.trim().is_empty()
+                }
+            };
             self.pending.drain(..=pos);
-            if line.ends_with('\r') {
-                line.pop();
+            if should_flush {
+                self.flush_event(&mut on_event)?;
             }
-            self.handle_line(line, &mut on_event)?;
         }
         Ok(())
     }
@@ -36,41 +54,30 @@ impl SseBuffer {
     where
         F: FnMut(String) -> Result<(), LlmTransportError>,
     {
-        if !self.pending.trim().is_empty()
-            && let Some(data) = self.pending.trim().strip_prefix("data:")
         {
-            self.event_lines.push(data.trim().to_string());
+            let pending = self.pending.trim();
+            if !pending.is_empty()
+                && let Some(data) = pending.strip_prefix("data:")
+            {
+                let data = data.trim();
+                if !self.event_data.is_empty() {
+                    self.event_data.push('\n');
+                }
+                self.event_data.push_str(data);
+            }
         }
         self.pending.clear();
         self.flush_event(&mut on_event)
-    }
-
-    fn handle_line<F>(&mut self, line: String, on_event: &mut F) -> Result<(), LlmTransportError>
-    where
-        F: FnMut(String) -> Result<(), LlmTransportError>,
-    {
-        if let Some(data) = line.strip_prefix("data:") {
-            self.event_lines.push(data.trim().to_string());
-            return Ok(());
-        }
-        if line.starts_with("event:") {
-            return Ok(());
-        }
-        if line.trim().is_empty() {
-            return self.flush_event(on_event);
-        }
-        Ok(())
     }
 
     fn flush_event<F>(&mut self, on_event: &mut F) -> Result<(), LlmTransportError>
     where
         F: FnMut(String) -> Result<(), LlmTransportError>,
     {
-        if self.event_lines.is_empty() {
+        if self.event_data.is_empty() {
             return Ok(());
         }
-        let raw = self.event_lines.join("\n");
-        self.event_lines.clear();
+        let raw = std::mem::take(&mut self.event_data);
         on_event(raw)
     }
 }

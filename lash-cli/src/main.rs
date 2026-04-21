@@ -23,6 +23,7 @@ mod resume;
 mod resume_snapshot;
 mod runtime_perf;
 mod scratch_tui;
+mod session_bootstrap;
 mod session_log;
 mod setup;
 #[cfg(test)]

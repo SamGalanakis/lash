@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 
 use lash::llm::streaming::drive_sse_response;
 use lash::llm::timeouts::{
-    build_http_client, read_response_text, response_start_timeout, send_request,
+    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
+    send_request,
 };
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
@@ -812,10 +813,6 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
-    fn label(&self) -> &'static str {
-        "Anthropic API (Claude)"
-    }
-
     fn default_model(&self) -> &str {
         "claude-opus-4-7"
     }
@@ -854,11 +851,7 @@ impl Provider for AnthropicProvider {
         }
     }
 
-    fn request_variant_config(
-        &self,
-        model: &str,
-        variant: &str,
-    ) -> Option<VariantRequestConfig> {
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
         if self.validate_variant(model, variant).is_err() {
             return None;
         }
@@ -915,10 +908,7 @@ impl Provider for AnthropicProvider {
         &mut self.options
     }
 
-    async fn complete(
-        &mut self,
-        req: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError> {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let timeouts = self.options.llm_timeouts();
         let base_url = self
@@ -950,7 +940,7 @@ impl Provider for AnthropicProvider {
 
         let resp = send_request(
             request,
-            request_body.clone(),
+            request_body.clone().map(request_body_snapshot),
             response_start_timeout(timeouts.request_timeout, timeouts.chunk_timeout, true),
             "Anthropic response start timed out",
         )

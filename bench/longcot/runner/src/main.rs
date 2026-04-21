@@ -12,7 +12,6 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::plugin::PluginFactory;
-use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
@@ -25,6 +24,7 @@ use lash::{
 use lash_export::{ExportFormat, SessionSelector, export};
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
+use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -970,10 +970,8 @@ fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
                     "missing API key — set OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY in .env, or pass --api-key"
                 )
             })?;
-            let provider = lash_provider_openai::OpenAiGenericProvider::new(
-                api_key,
-                resolve_base_url(args),
-            );
+            let provider =
+                lash_provider_openai::OpenAiGenericProvider::new(api_key, resolve_base_url(args));
             Ok(ProviderHandle::new(Box::new(provider)))
         }
         other => bail!(

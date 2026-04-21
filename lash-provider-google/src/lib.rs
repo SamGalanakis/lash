@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 
 use lash::llm::streaming::{drive_sse_response, emit_progress};
 use lash::llm::timeouts::{
-    build_http_client, read_response_text, response_start_timeout, send_request,
+    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
+    send_request,
 };
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
@@ -875,7 +876,7 @@ impl GoogleOAuthProvider {
         }
         let resp = send_request(
             http,
-            request_body.clone(),
+            request_body.clone().map(request_body_snapshot),
             response_start_timeout(
                 self.options.llm_timeouts().request_timeout,
                 self.options.llm_timeouts().chunk_timeout,
@@ -1054,10 +1055,6 @@ impl Provider for GoogleOAuthProvider {
         "google_oauth"
     }
 
-    fn label(&self) -> &'static str {
-        "Google OAuth (Gemini)"
-    }
-
     fn default_model(&self) -> &str {
         "gemini-3.1-pro-preview"
     }
@@ -1082,11 +1079,7 @@ impl Provider for GoogleOAuthProvider {
         Some("high")
     }
 
-    fn request_variant_config(
-        &self,
-        model: &str,
-        variant: &str,
-    ) -> Option<VariantRequestConfig> {
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
         if self.validate_variant(model, variant).is_err() {
             return None;
         }
@@ -1113,9 +1106,7 @@ impl Provider for GoogleOAuthProvider {
             }),
             "medium" | "high" => Some(AgentModelSelection {
                 model: "gemini-3.1-pro-preview".to_string(),
-                variant: Some(
-                    if tier == "medium" { "medium" } else { "high" }.to_string(),
-                ),
+                variant: Some(if tier == "medium" { "medium" } else { "high" }.to_string()),
             }),
             _ => None,
         }
@@ -1162,17 +1153,16 @@ impl Provider for GoogleOAuthProvider {
                 .ok()
                 .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok());
             let access_token = self.access_token.clone();
-            let resolved = self.resolve_project_id(&access_token, hint.as_deref()).await?;
+            let resolved = self
+                .resolve_project_id(&access_token, hint.as_deref())
+                .await?;
             self.project_id = resolved;
             return Ok(true);
         }
         Ok(false)
     }
 
-    async fn complete(
-        &mut self,
-        req: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError> {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let access_token = self.access_token.clone();
         let project_id = self.project_id.clone();

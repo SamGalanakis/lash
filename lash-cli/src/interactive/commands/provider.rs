@@ -9,8 +9,8 @@ use crate::app::App;
 use crate::setup;
 use crate::{
     ensure_supported_execution_mode, execution_mode_label, execution_mode_usage,
-    parse_execution_mode, parse_model_selection, push_system_message, resolve_model_selection,
-    resolve_model_variant, validate_model_selection, variant_lines,
+    parse_execution_mode, parse_model_selection, provider_display_label, push_system_message,
+    resolve_model_selection, resolve_model_variant, validate_model_selection, variant_lines,
 };
 
 pub(super) async fn handle_model(
@@ -24,7 +24,7 @@ pub(super) async fn handle_model(
     let Some(new_model) = new_model else {
         let mut lines = vec![
             format!("Current model: `{}`", app.model),
-            format!("Provider: {}", provider.label()),
+            format!("Provider: {}", provider_display_label(provider)),
         ];
         lines.extend(variant_lines(
             provider,
@@ -98,7 +98,7 @@ pub(super) async fn handle_variant(
     let Some(new_variant) = new_variant else {
         let mut lines = vec![
             format!("Current model: `{}`", app.model),
-            format!("Provider: {}", provider.label()),
+            format!("Provider: {}", provider_display_label(provider)),
         ];
         lines.extend(variant_lines(
             provider,
@@ -328,7 +328,7 @@ pub(super) async fn handle_change_provider(
                     } else {
                         "switched"
                     },
-                    provider.label(),
+                    provider_display_label(provider),
                     saved_kinds,
                     selection.model
                 ),

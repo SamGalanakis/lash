@@ -14,14 +14,15 @@ use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
-use crate::interactive::{generate_session_name, run_app};
-use crate::session_log::{self, DbSessionStoreFactory, SessionLogger};
+use crate::interactive::run_app;
+use crate::session_bootstrap::{SessionBootstrap, SessionBootstrapSource};
+use crate::session_log::DbSessionStoreFactory;
 use crate::{Args, setup};
 use crate::{
     apply_context_approach_overrides, autonomous_prompt_template, cleanup_terminal,
     ensure_supported_execution_mode, hash12, info_text, info_text_unconfigured, models_dev_catalog,
-    parse_context_approach, parse_execution_mode, parse_model_selection, resolve_model_selection,
-    resolve_model_variant, validate_model_selection,
+    parse_context_approach, parse_execution_mode, parse_model_selection, provider_display_label,
+    resolve_model_selection, resolve_model_variant, validate_model_selection,
 };
 
 fn plugin_factories_for_surface(
@@ -162,19 +163,8 @@ fn resolve_rlm_globals_patch(
     Ok(Some(patch))
 }
 
-fn register_providers() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        lash_provider_anthropic::AnthropicProviderFactory::register();
-        lash_provider_openai::OpenAiGenericProviderFactory::register();
-        lash_provider_codex::CodexProviderFactory::register();
-        lash_provider_google::GoogleOAuthProviderFactory::register();
-    });
-}
-
 pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::Result<()> {
-    register_providers();
+    lash_providers_builtin::register_all();
     // Handle --reset before any TUI/provider setup
     if args.reset {
         use std::io::Write;
@@ -290,7 +280,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
             Ok(false) => (c, provider),
             Err(err) => {
                 if interactive_startup {
-                    let provider_label = provider.label();
+                    let provider_label = provider_display_label(&provider);
                     startup_system_message = Some(format!(
                         "{} refresh failed: {}. Lash opened in recovery mode. Use /provider or relaunch with --provider to reauthenticate or switch providers.",
                         provider_label, err
@@ -340,14 +330,10 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         None
     };
 
-    let sessions_dir = crate::paths::lash_home().join("sessions");
-    std::fs::create_dir_all(&sessions_dir)?;
-    let session_filename = args
-        .resume
-        .clone()
-        .unwrap_or_else(session_log::new_session_filename);
+    let session_bootstrap =
+        SessionBootstrap::open(SessionBootstrapSource::from_resume_arg(args.resume.clone()))?;
     tracing::debug!(
-        session_file = session_filename,
+        session_file = session_bootstrap.filename(),
         resumed = args.resume.is_some(),
         llm_log_path = ?llm_log_path,
         debug_logging = crate::detailed_debug_logging_enabled(args.debug),
@@ -364,36 +350,17 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     } else {
         prompt_template
     };
-    // Build store (SQLite-backed archive)
-    let db_path = sessions_dir.join(&session_filename);
-    let store = Arc::new(Store::open(&db_path)?);
-    let resume_start = if args.resume.is_some() {
-        store
-            .load_session_meta()
-            .map(|meta| session_log::SessionStart {
-                session_id: meta.session_id,
-                session_name: meta.session_name,
-            })
-    } else {
-        None
-    };
+    let store = session_bootstrap.store();
     // Autonomous runs still need a stable session id so provider-side prompt caching
     // and benchmark accounting can key repeated requests within the same session.
-    let run_session_id = resume_start
-        .as_ref()
-        .map(|start| start.session_id.clone())
-        .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+    let run_session_id = session_bootstrap.run_session_id();
 
     // Peek the persisted session config so we can use the correct
     // execution mode and context approach BEFORE building the plugin
     // host and runtime. Without this, resuming a Rlm session from a
     // Standard-mode bootstrap would fail to start the lashlang thread
     // and would build plugins with the wrong mode.
-    let persisted_session_config = if args.resume.is_some() {
-        store.load_session_head().map(|head| head.config)
-    } else {
-        None
-    };
+    let persisted_session_config = session_bootstrap.persisted_config();
 
     // Execution mode: CLI flag wins, then persisted config, then Standard.
     // Resolved BEFORE building the plugin host + runtime so the lashlang
@@ -495,7 +462,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
-        let session_db_path = db_path.to_string_lossy().to_string();
+        let session_db_path = session_bootstrap.db_path().to_string_lossy().to_string();
         println!(
             "{}",
             info_text(
@@ -516,29 +483,9 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         return Ok(());
     }
     let initial_model_variant = session_policy.model_variant.clone();
-    let session_name = resume_start
-        .as_ref()
-        .map(|start| start.session_name.clone())
-        .unwrap_or_else(|| generate_session_name(&sessions_dir));
-    let mut logger = if resume_start.is_some() {
-        SessionLogger::resume(Arc::clone(&store), &session_filename)?
-    } else {
-        SessionLogger::new(
-            Arc::clone(&store),
-            session_filename.clone(),
-            &model,
-            run_session_id,
-            session_name.clone(),
-        )?
-    };
-    let initial_graph = if args.resume.is_some() {
-        store
-            .load_session_head()
-            .map(|head| head.graph)
-            .unwrap_or_default()
-    } else {
-        lash::SessionGraph::default()
-    };
+    let session_name = session_bootstrap.session_name();
+    let mut logger = session_bootstrap.logger(&model, run_session_id)?;
+    let initial_graph = session_bootstrap.initial_graph();
     let services = lash::PersistentRuntimeServices::new_with_bridges(
         root_plugins,
         turn_injection_bridge.clone(),
@@ -551,8 +498,9 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         session_graph: initial_graph,
         ..PersistedSessionState::default()
     };
-    let embedded_host = EmbeddedRuntimeHost::new(host_core)
-        .with_session_store_factory(Arc::new(DbSessionStoreFactory::new(sessions_dir.clone())));
+    let embedded_host = EmbeddedRuntimeHost::new(host_core).with_session_store_factory(Arc::new(
+        DbSessionStoreFactory::new(session_bootstrap.sessions_dir().to_path_buf()),
+    ));
     let mut runtime = LashRuntime::from_persistent_background_state(
         session_policy.clone(),
         BackgroundRuntimeHost::new(embedded_host, Arc::new(TokioSessionTaskExecutor::default())),

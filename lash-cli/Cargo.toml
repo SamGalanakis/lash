@@ -14,7 +14,7 @@ name = "lash"
 path = "src/main.rs"
 
 [dependencies]
-lash = { path = "../lash", default-features = false, features = ["full"] }
+lash = { path = "../lash", default-features = false, features = ["full", "testing"] }
 lash-default-tools = { path = "../lash-default-tools" }
 lash-mode-rlm = { path = "../lash-mode-rlm", features = ["sqlite-store"] }
 lash-mode-standard = { path = "../lash-mode-standard" }
@@ -25,6 +25,7 @@ lash-provider-anthropic = { path = "../lash-provider-anthropic" }
 lash-provider-codex = { path = "../lash-provider-codex" }
 lash-provider-google = { path = "../lash-provider-google" }
 lash-provider-openai = { path = "../lash-provider-openai" }
+lash-providers-builtin = { path = "../lash-providers-builtin" }
 lash-subagents = { path = "../lash-subagents" }
 lash-ui = { path = "../lash-ui" }
 lash-tui = { path = "../lash-tui" }

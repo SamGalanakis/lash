@@ -4,7 +4,9 @@
 //! providing a configurable mock implementation plus a couple of small
 //! builders for common policy / turn fixtures.
 
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
@@ -19,19 +21,71 @@ use crate::{
     TokenUsage, TurnInput, TurnStatus,
 };
 
-/// In-tree test provider used by lash's own tests and shared with
-/// downstream plugin crates through `lash::testing`. It satisfies every
-/// trait method with fixed defaults and refuses to actually execute an
-/// LLM call (returns an error from `complete`). Downstream tests that
-/// need a real provider plug in one of the `lash-provider-*` crates.
-#[derive(Clone, Debug, Default)]
-pub struct StubProvider {
-    pub options: ProviderOptions,
+type CompletionFuture =
+    Pin<Box<dyn Future<Output = Result<LlmResponse, LlmTransportError>> + Send>>;
+type CompletionFn = dyn Fn(LlmRequest) -> CompletionFuture + Send + Sync;
+type SupportedVariantsFn = dyn Fn(&str) -> &'static [&'static str] + Send + Sync;
+type DefaultVariantFn = dyn Fn(&str) -> Option<&'static str> + Send + Sync;
+type RequestVariantConfigFn = dyn Fn(&str, &str) -> Option<VariantRequestConfig> + Send + Sync;
+type DefaultAgentModelFn = dyn Fn(&str) -> Option<AgentModelSelection> + Send + Sync;
+type SerializeConfigFn = dyn Fn() -> serde_json::Value + Send + Sync;
+
+fn no_supported_variants(_model: &str) -> &'static [&'static str] {
+    &[]
 }
 
-impl StubProvider {
-    pub fn new() -> Self {
-        Self::default()
+fn no_default_variant(_model: &str) -> Option<&'static str> {
+    None
+}
+
+fn no_request_variant_config(_model: &str, _variant: &str) -> Option<VariantRequestConfig> {
+    None
+}
+
+fn no_default_agent_model(_tier: &str) -> Option<AgentModelSelection> {
+    None
+}
+
+fn empty_provider_config() -> serde_json::Value {
+    serde_json::Value::Object(Default::default())
+}
+
+/// Configurable provider fixture used by lash's own tests and shared
+/// with downstream plugin crates through `lash::testing`.
+#[derive(Clone)]
+pub struct TestProvider {
+    kind: &'static str,
+    default_model: String,
+    supported_variants: Arc<SupportedVariantsFn>,
+    default_model_variant: Arc<DefaultVariantFn>,
+    request_variant_config: Arc<RequestVariantConfigFn>,
+    default_agent_model: Arc<DefaultAgentModelFn>,
+    requires_streaming: bool,
+    options: ProviderOptions,
+    serialize_config: Arc<SerializeConfigFn>,
+    complete: Arc<CompletionFn>,
+}
+
+impl std::fmt::Debug for TestProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestProvider")
+            .field("kind", &self.kind)
+            .field("default_model", &self.default_model)
+            .field("requires_streaming", &self.requires_streaming)
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for TestProvider {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
+impl TestProvider {
+    pub fn builder() -> TestProviderBuilder {
+        TestProviderBuilder::new()
     }
 
     pub fn into_handle(self) -> ProviderHandle {
@@ -39,43 +93,169 @@ impl StubProvider {
     }
 }
 
+pub struct TestProviderBuilder {
+    provider: TestProvider,
+}
+
+impl TestProviderBuilder {
+    pub fn new() -> Self {
+        Self {
+            provider: TestProvider {
+                kind: "test",
+                default_model: "mock-model".to_string(),
+                supported_variants: Arc::new(no_supported_variants),
+                default_model_variant: Arc::new(no_default_variant),
+                request_variant_config: Arc::new(no_request_variant_config),
+                default_agent_model: Arc::new(no_default_agent_model),
+                requires_streaming: false,
+                options: ProviderOptions::default(),
+                serialize_config: Arc::new(empty_provider_config),
+                complete: Arc::new(|_request| {
+                    Box::pin(async {
+                        Err(LlmTransportError::new(
+                            "TestProvider::complete was called without a test completion handler",
+                        ))
+                    })
+                }),
+            },
+        }
+    }
+
+    pub fn kind(mut self, kind: &'static str) -> Self {
+        self.provider.kind = kind;
+        self
+    }
+
+    pub fn default_model(mut self, model: impl Into<String>) -> Self {
+        self.provider.default_model = model.into();
+        self
+    }
+
+    pub fn supported_variants<F>(mut self, supported_variants: F) -> Self
+    where
+        F: Fn(&str) -> &'static [&'static str] + Send + Sync + 'static,
+    {
+        self.provider.supported_variants = Arc::new(supported_variants);
+        self
+    }
+
+    pub fn default_model_variant<F>(mut self, default_model_variant: F) -> Self
+    where
+        F: Fn(&str) -> Option<&'static str> + Send + Sync + 'static,
+    {
+        self.provider.default_model_variant = Arc::new(default_model_variant);
+        self
+    }
+
+    pub fn request_variant_config<F>(mut self, request_variant_config: F) -> Self
+    where
+        F: Fn(&str, &str) -> Option<VariantRequestConfig> + Send + Sync + 'static,
+    {
+        self.provider.request_variant_config = Arc::new(request_variant_config);
+        self
+    }
+
+    pub fn default_agent_model<F>(mut self, default_agent_model: F) -> Self
+    where
+        F: Fn(&str) -> Option<AgentModelSelection> + Send + Sync + 'static,
+    {
+        self.provider.default_agent_model = Arc::new(default_agent_model);
+        self
+    }
+
+    pub fn requires_streaming(mut self, requires_streaming: bool) -> Self {
+        self.provider.requires_streaming = requires_streaming;
+        self
+    }
+
+    pub fn options(mut self, options: ProviderOptions) -> Self {
+        self.provider.options = options;
+        self
+    }
+
+    pub fn serialize_config<F>(mut self, serialize_config: F) -> Self
+    where
+        F: Fn() -> serde_json::Value + Send + Sync + 'static,
+    {
+        self.provider.serialize_config = Arc::new(serialize_config);
+        self
+    }
+
+    pub fn complete<F, Fut>(mut self, complete: F) -> Self
+    where
+        F: Fn(LlmRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<LlmResponse, LlmTransportError>> + Send + 'static,
+    {
+        self.provider.complete = Arc::new(move |request| Box::pin(complete(request)));
+        self
+    }
+
+    pub fn complete_error(mut self, message: impl Into<String>) -> Self {
+        let message = Arc::new(message.into());
+        self.provider.complete = Arc::new(move |_request| {
+            let message = Arc::clone(&message);
+            Box::pin(async move { Err(LlmTransportError::new(message.as_str())) })
+        });
+        self
+    }
+
+    pub fn build(self) -> TestProvider {
+        self.provider
+    }
+}
+
+impl Default for TestProviderBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
-impl Provider for StubProvider {
+impl Provider for TestProvider {
     fn kind(&self) -> &'static str {
-        "stub"
+        self.kind
     }
-    fn label(&self) -> &'static str {
-        "Stub"
-    }
+
     fn default_model(&self) -> &str {
-        "mock-model"
+        &self.default_model
     }
-    fn supported_variants(&self, _model: &str) -> &'static [&'static str] {
-        &[]
+
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        (self.supported_variants)(model)
     }
-    fn default_model_variant(&self, _model: &str) -> Option<&'static str> {
-        None
+
+    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
+        (self.default_model_variant)(model)
     }
-    fn request_variant_config(&self, _model: &str, _variant: &str) -> Option<VariantRequestConfig> {
-        None
+
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
+        (self.request_variant_config)(model, variant)
     }
-    fn default_agent_model(&self, _tier: &str) -> Option<AgentModelSelection> {
-        None
+
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
+        (self.default_agent_model)(tier)
     }
+
+    fn requires_streaming(&self) -> bool {
+        self.requires_streaming
+    }
+
     fn options(&self) -> &ProviderOptions {
         &self.options
     }
+
     fn options_mut(&mut self) -> &mut ProviderOptions {
         &mut self.options
     }
-    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        Err(LlmTransportError::new(
-            "StubProvider::complete was called; tests must supply a real provider or mock",
-        ))
+
+    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        (self.complete)(request).await
     }
+
     fn serialize_config(&self) -> serde_json::Value {
-        serde_json::Value::Object(Default::default())
+        (self.serialize_config)()
     }
+
     fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
@@ -85,7 +265,14 @@ impl Provider for StubProvider {
 /// + model used by lash's in-tree tests.
 pub fn mock_session_policy() -> SessionPolicy {
     SessionPolicy {
-        provider: StubProvider::new().into_handle(),
+        provider: TestProvider::builder()
+            .kind("stub")
+            .default_model("mock-model")
+            .complete_error(
+                "TestProvider::complete was called; tests must supply a real provider or mock",
+            )
+            .build()
+            .into_handle(),
         model: "mock-model".to_string(),
         execution_mode: ExecutionMode::Standard,
         ..Default::default()
@@ -283,8 +470,6 @@ impl SessionManager for MockSessionManager {
 // `lash-plugin-rolling-history` / `lash-plugin-observational-memory`
 // as dev-deps, which would create a dev-dep cycle.
 // ─────────────────────────────────────────────────────────────────────
-
-use std::sync::Arc;
 
 use crate::context_approach::ContextApproachKind;
 use crate::plugin::{PluginFactory, PluginSessionContext, PluginSpec, SessionPlugin};

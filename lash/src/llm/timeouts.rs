@@ -6,6 +6,8 @@ use crate::llm::transport::LlmTransportError;
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_CHUNK_TIMEOUT_MS: u64 = 120_000;
 
+pub type RequestBodySnapshot = bytes::Bytes;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LlmTimeouts {
     pub request_timeout: Option<Duration>,
@@ -25,6 +27,10 @@ pub fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .build()
         .expect("failed to build reqwest client for llm transport")
+}
+
+pub fn request_body_snapshot(body: String) -> RequestBodySnapshot {
+    bytes::Bytes::from(body)
 }
 
 fn is_retryable_http_error(error: &reqwest::Error) -> bool {
@@ -65,7 +71,7 @@ where
 
 pub async fn send_request(
     request: reqwest::RequestBuilder,
-    request_body: Option<String>,
+    request_body: Option<RequestBodySnapshot>,
     timeout: Option<Duration>,
     timeout_message: &str,
 ) -> Result<reqwest::Response, LlmTransportError> {
@@ -75,7 +81,7 @@ pub async fn send_request(
                 let error = LlmTransportError::new(format!("HTTP request failed: {e}"))
                     .retryable(is_retryable_http_error(&e));
                 if let Some(request_body) = request_body {
-                    error.with_request_body(request_body)
+                    error.with_request_body(String::from_utf8_lossy(&request_body).into_owned())
                 } else {
                     error
                 }

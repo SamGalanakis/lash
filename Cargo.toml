@@ -14,6 +14,7 @@ members = [
     "lash-provider-codex",
     "lash-provider-google",
     "lash-provider-openai",
+    "lash-providers-builtin",
     "lash-subagents",
     "lash-ui",
     "lash-tui",

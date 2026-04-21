@@ -940,19 +940,8 @@ fn build_plugin_session(
         .context("build plugin session")
 }
 
-fn register_providers() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        lash_provider_anthropic::AnthropicProviderFactory::register();
-        lash_provider_openai::OpenAiGenericProviderFactory::register();
-        lash_provider_codex::CodexProviderFactory::register();
-        lash_provider_google::GoogleOAuthProviderFactory::register();
-    });
-}
-
 fn resolve_provider(args: &Args) -> Result<(ProviderHandle, String, String)> {
-    register_providers();
+    lash_providers_builtin::register_all();
     let config_path = std::env::var("LASH_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {

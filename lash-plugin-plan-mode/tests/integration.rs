@@ -593,9 +593,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn(
-                "root",
-            ))),
+            turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn("root"))),
             host: manager,
         })
         .await
@@ -639,9 +637,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn(
-                "root",
-            ))),
+            turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn("root"))),
             host: Arc::clone(&manager),
         })
         .await

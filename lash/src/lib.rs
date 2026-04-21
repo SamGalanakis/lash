@@ -93,7 +93,7 @@ pub use plugin::{
 pub use provider::{
     AgentModelSelection, LashConfig, Provider, ProviderFactory, ProviderHandle, ProviderOptions,
     ProviderRegistry, ProviderSpec, RequestTimeout, VariantRequestConfig, build_provider,
-    provider_factory, register_provider_factory,
+    provider_cli_label, provider_factory, register_provider_factory,
 };
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,

@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use lash::DynamicStateSnapshot;
@@ -8,7 +7,8 @@ use lash::provider::ProviderHandle;
 
 use crate::app::UiResumeState;
 use crate::persistence::{persist_committed_runtime_state, snapshot_execution_state};
-use crate::session_log::{self, SessionLogger};
+use crate::session_bootstrap::SessionBootstrap;
+use crate::session_log::SessionLogger;
 
 #[allow(clippy::too_many_arguments)]
 async fn persist_parent_root_snapshot(
@@ -648,19 +648,10 @@ pub async fn fork_current_session(
             token_ledger: Vec::new(),
         });
 
-    let sessions_dir = session_log::sessions_dir();
-    let child_session_name = crate::generate_session_name(&sessions_dir);
-    let child_filename = session_log::new_session_filename();
-    let child_db_path = sessions_dir.join(&child_filename);
-    let child_store = Arc::new(lash::Store::open(&child_db_path)?);
-    let child_logger = SessionLogger::new(
-        Arc::clone(&child_store),
-        child_filename.clone(),
-        configured_model,
-        Some(uuid::Uuid::new_v4().to_string()),
-        child_session_name.clone(),
-    )?;
-    child_logger.mark_as_child_of(&logger.session_id)?;
+    let child_bootstrap = SessionBootstrap::fork_child(&logger.session_id, configured_model)?;
+    let child_store = child_bootstrap.store();
+    let child_filename = child_bootstrap.filename().to_string();
+    let child_session_name = child_bootstrap.session_name();
     if let Some((live_snapshot, live_delta)) = live_snapshot_for_fork.as_ref() {
         materialize_child_from_graph(
             child_store.as_ref(),
@@ -691,9 +682,11 @@ pub async fn fork_current_session(
 #[cfg(test)]
 mod fork_tests {
     use super::*;
+    use crate::session_log;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash::provider::ProviderHandle;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
 
     fn dummy_provider() -> ProviderHandle {
         ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(

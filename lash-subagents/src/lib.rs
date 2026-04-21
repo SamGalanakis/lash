@@ -850,92 +850,35 @@ mod tests {
         // one. Each stub returns a different per-tier model from
         // `default_agent_model` so the final child policy's model shows
         // which provider the capability lookup resolved against.
-        #[derive(Clone, Debug, Default)]
-        struct TieredStub {
-            tag: &'static str,
-            options: lash::ProviderOptions,
-        }
-        #[async_trait::async_trait]
-        impl lash::Provider for TieredStub {
-            fn kind(&self) -> &'static str {
-                // Static &'static str via match over the tag so
-                // downstream registry code can still compare.
-                match self.tag {
-                    "stale" => "stale-stub",
-                    "live" => "live-stub",
-                    _ => "stub",
-                }
-            }
-            fn label(&self) -> &'static str {
-                self.kind()
-            }
-            fn default_model(&self) -> &str {
-                match self.tag {
-                    "stale" => "stale-model",
-                    "live" => "live-model",
-                    _ => "mock-model",
-                }
-            }
-            fn supported_variants(&self, _m: &str) -> &'static [&'static str] {
-                &[]
-            }
-            fn default_model_variant(&self, _m: &str) -> Option<&'static str> {
-                None
-            }
-            fn request_variant_config(
-                &self,
-                _m: &str,
-                _v: &str,
-            ) -> Option<lash::VariantRequestConfig> {
-                None
-            }
-            fn default_agent_model(
-                &self,
-                tier: &str,
-            ) -> Option<lash::AgentModelSelection> {
-                let model = match (self.tag, tier) {
-                    ("stale", "low") => "stale-low",
-                    ("live", "low") => "live-low",
-                    _ => return None,
-                };
-                Some(lash::AgentModelSelection {
-                    model: model.to_string(),
-                    variant: None,
+        fn tiered_provider(tag: &'static str) -> lash::testing::TestProvider {
+            let (kind, default_model, low_model) = match tag {
+                "stale" => ("stale-stub", "stale-model", "stale-low"),
+                "live" => ("live-stub", "live-model", "live-low"),
+                _ => ("stub", "mock-model", "mock-low"),
+            };
+            lash::testing::TestProvider::builder()
+                .kind(kind)
+                .default_model(default_model)
+                .default_agent_model(move |tier| {
+                    if tier == "low" {
+                        Some(lash::AgentModelSelection {
+                            model: low_model.to_string(),
+                            variant: None,
+                        })
+                    } else {
+                        None
+                    }
                 })
-            }
-            fn options(&self) -> &lash::ProviderOptions {
-                &self.options
-            }
-            fn options_mut(&mut self) -> &mut lash::ProviderOptions {
-                &mut self.options
-            }
-            async fn complete(
-                &mut self,
-                _r: lash::llm::types::LlmRequest,
-            ) -> Result<lash::LlmResponse, lash::llm::transport::LlmTransportError>
-            {
-                Err(lash::llm::transport::LlmTransportError::new("stub"))
-            }
-            fn serialize_config(&self) -> serde_json::Value {
-                serde_json::Value::Object(Default::default())
-            }
-            fn clone_boxed(&self) -> Box<dyn lash::Provider> {
-                Box::new(self.clone())
-            }
+                .complete_error("stub")
+                .build()
         }
         let stale_policy = SessionPolicy {
-            provider: lash::ProviderHandle::new(Box::new(TieredStub {
-                tag: "stale",
-                options: Default::default(),
-            })),
+            provider: tiered_provider("stale").into_handle(),
             execution_mode: lash::ExecutionMode::Standard,
             ..SessionPolicy::default()
         };
         let live_policy = SessionPolicy {
-            provider: lash::ProviderHandle::new(Box::new(TieredStub {
-                tag: "live",
-                options: Default::default(),
-            })),
+            provider: tiered_provider("live").into_handle(),
             execution_mode: lash::ExecutionMode::Standard,
             max_context_tokens: Some(1234),
             ..SessionPolicy::default()
