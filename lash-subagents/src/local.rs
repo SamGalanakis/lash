@@ -46,8 +46,8 @@ use crate::routing::{
 use crate::types::{
     AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode, FollowupTaskRequest,
     FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse, SendMessageRequest,
-    SendMessageResponse, SessionAgentInfo, SpawnAgentRequest, SpawnAgentResponse,
-    WaitAgentEvent, WaitAgentRequest, WaitAgentResponse,
+    SendMessageResponse, SessionAgentInfo, SpawnAgentRequest, SpawnAgentResponse, WaitAgentEvent,
+    WaitAgentRequest, WaitAgentResponse,
 };
 
 #[derive(Clone, Default)]

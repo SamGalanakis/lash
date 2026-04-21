@@ -18,7 +18,7 @@ mod web_search;
 
 pub use apply_patch::ApplyPatchTool;
 #[cfg(feature = "sqlite-store")]
-pub(crate) use apply_patch::{PatchAction, inspect_patch_ops};
+pub use apply_patch::{PatchAction, PatchFileOp, inspect_patch_ops};
 pub use ask::AskTool;
 pub(crate) use composite::CompositeToolProvider;
 pub use fetch_url::FetchUrl;

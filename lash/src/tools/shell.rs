@@ -1010,7 +1010,7 @@ fn shell_supports_login(shell_name: &str) -> bool {
 }
 
 fn shell_output_dir() -> std::io::Result<PathBuf> {
-    let dir = crate::lash_cache_dir().join("tool-output");
+    let dir = std::env::temp_dir().join("lash-tool-output");
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -1415,7 +1415,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_cancel_token_kills_running_child() {
-        use crate::test_support::MockSessionManager;
+        use crate::testing::MockSessionManager;
         use std::sync::Arc;
         use std::time::Instant;
 
@@ -1462,7 +1462,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_during_write_stdin_wait_kills_child_by_pid() {
-        use crate::test_support::MockSessionManager;
+        use crate::testing::MockSessionManager;
         use std::sync::Arc;
         use std::time::Instant;
 

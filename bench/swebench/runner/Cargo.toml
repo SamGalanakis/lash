@@ -9,10 +9,14 @@ name = "bench-swebench"
 path = "src/main.rs"
 
 [dependencies]
+dirs = "6"
 lash = { path = "../../../lash", default-features = false, features = ["full"] }
 lash-default-tools = { path = "../../../lash-default-tools" }
 lash-mode-rlm = { path = "../../../lash-mode-rlm" }
 lash-mode-standard = { path = "../../../lash-mode-standard" }
+lash-plugin-observational-memory = { path = "../../../lash-plugin-observational-memory" }
+lash-plugin-rolling-history = { path = "../../../lash-plugin-rolling-history" }
+lash-providers-builtin = { path = "../../../lash-providers-builtin" }
 lash-subagents = { path = "../../../lash-subagents" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }

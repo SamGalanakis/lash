@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use lash::{ExecutionMode, Provider, SessionPolicy};
+use lash::{ExecutionMode, ProviderHandle, SessionPolicy};
 
 /// State the registry exposes to a `Capability` while it resolves a spawn.
 pub struct CapabilityContext<'a> {
@@ -107,8 +107,8 @@ fn pick_tier_model(tier: &TierCapability, policy: &SessionPolicy) -> (String, Op
         let variant = preferred_variant(&policy.provider, model, tier.name());
         return (model.clone(), variant);
     }
-    if let Some((model, variant)) = policy.provider.default_agent_model(tier.name()) {
-        return (model.to_string(), variant.map(str::to_string));
+    if let Some(selection) = policy.provider.default_agent_model(tier.name()) {
+        return (selection.model, selection.variant);
     }
     let model = policy.model.clone();
     let variant = policy
@@ -119,7 +119,7 @@ fn pick_tier_model(tier: &TierCapability, policy: &SessionPolicy) -> (String, Op
     (model, variant)
 }
 
-fn preferred_variant(provider: &Provider, model: &str, tier_name: &str) -> Option<String> {
+fn preferred_variant(provider: &ProviderHandle, model: &str, tier_name: &str) -> Option<String> {
     if provider.supported_variants(model).contains(&tier_name) {
         return Some(tier_name.to_string());
     }

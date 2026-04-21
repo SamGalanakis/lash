@@ -1,23 +1,28 @@
 use std::sync::Arc;
 
-use lash::provider::{LashConfig, Provider};
+use lash::provider::{LashConfig, ProviderHandle};
 use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
+use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
+use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
+use lash_plugin_ui_activity::UiActivityPluginFactory;
+use lash_provider_openai::OpenAiGenericProvider;
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
-use crate::interactive::{generate_session_name, run_app};
-use crate::session_log::{self, DbSessionStoreFactory, SessionLogger};
+use crate::interactive::run_app;
+use crate::session_bootstrap::{SessionBootstrap, SessionBootstrapSource};
+use crate::session_log::DbSessionStoreFactory;
 use crate::{Args, setup};
 use crate::{
     apply_context_approach_overrides, autonomous_prompt_template, cleanup_terminal,
     ensure_supported_execution_mode, hash12, info_text, info_text_unconfigured, models_dev_catalog,
-    parse_context_approach, parse_execution_mode, parse_model_selection, resolve_model_selection,
-    resolve_model_variant, validate_model_selection,
+    parse_context_approach, parse_execution_mode, parse_model_selection, provider_display_label,
+    resolve_model_selection, resolve_model_variant, validate_model_selection,
 };
 
 fn plugin_factories_for_surface(
@@ -55,20 +60,18 @@ fn plugin_factories_for_surface(
         },
         instruction_source: Some(Arc::clone(&instruction_source)),
     });
-    plugin_factories.push(Arc::new(BuiltinPromptContextPluginFactory::new(
+    plugin_factories.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
     )) as Arc<dyn PluginFactory>);
     if profile.interactive_extras {
-        plugin_factories.push(Arc::new(BuiltinPlanModePluginFactory::new(
-            Default::default(),
-        )));
-        plugin_factories.push(Arc::new(lash::BuiltinUiActivityPluginFactory));
+        plugin_factories.push(Arc::new(PlanModePluginFactory::new(Default::default())));
+        plugin_factories.push(Arc::new(UiActivityPluginFactory));
         // `update_plan` drives the sticky plan dock at the bottom of
         // the TUI. Interactive-only here; root-only inside the plugin
         // itself (the factory returns an inert plugin for subagent
         // / compaction / other non-root sessions).
-        plugin_factories.push(Arc::new(lash::BuiltinUpdatePlanPluginFactory));
+        plugin_factories.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_factories.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
     plugin_factories.push(Arc::new(
@@ -161,6 +164,7 @@ fn resolve_rlm_globals_patch(
 }
 
 pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::Result<()> {
+    lash_providers_builtin::register_all();
     // Handle --reset before any TUI/provider setup
     if args.reset {
         use std::io::Write;
@@ -174,8 +178,8 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         const BOLD: &str = "\x1b[1m";
         const RESET: &str = "\x1b[0m";
 
-        let lash_dir = lash::lash_home();
-        let cache_dir = lash::lash_cache_dir();
+        let lash_dir = crate::paths::lash_home();
+        let cache_dir = crate::paths::lash_cache_dir();
 
         eprintln!();
         eprintln!("  {SODIUM}{BOLD}/ reset{RESET}");
@@ -222,7 +226,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     }
 
     // Resolve config before TUI init (may need interactive terminal)
-    let existing_config = LashConfig::load();
+    let existing_config = LashConfig::load(&crate::paths::config_file());
     if args.info && existing_config.is_none() && args.api_key.is_none() {
         let execution_mode =
             ensure_supported_execution_mode(match args.execution_mode.as_deref() {
@@ -238,44 +242,55 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     }
     let interactive_startup = !args.info && args.print_prompt.is_none();
     let mut startup_system_message: Option<String> = None;
-    let mut lash_config = if args.provider || existing_config.is_none() {
+    let (mut lash_config, active_provider) = if args.provider || existing_config.is_none() {
         if let Some(ref key) = args.api_key {
             // Shortcut: env var or --api-key activates OpenAI-compatible directly.
-            let provider = Provider::OpenAiGeneric {
-                api_key: key.clone(),
-                base_url: args.base_url.clone(),
-                options: lash::provider::ProviderOptions::default(),
-            };
+            let provider = ProviderHandle::new(Box::new(OpenAiGenericProvider::new(
+                key.clone(),
+                args.base_url.clone(),
+            )));
             let mut cfg = existing_config
                 .clone()
-                .unwrap_or_else(|| LashConfig::new(provider.clone()));
-            cfg.upsert_provider(provider.clone());
+                .unwrap_or_else(|| LashConfig::new(&provider));
+            cfg.upsert_provider(&provider);
             let _ = cfg.set_active_provider_kind(provider.kind());
             cfg.set_tavily_api_key(args.tavily_api_key.clone());
-            cfg
+            (cfg, provider)
         } else {
-            setup::run_setup_with_existing(existing_config.as_ref()).await?
+            let cfg = setup::run_setup_with_existing(existing_config.as_ref()).await?;
+            let provider = cfg
+                .build_active_provider()
+                .map_err(|err| anyhow::anyhow!("build active provider: {err}"))?;
+            (cfg, provider)
         }
     } else {
         // SAFETY: else branch means existing_config.is_some() (checked above)
         #[allow(clippy::unnecessary_unwrap)]
-        let mut c = existing_config.unwrap();
-        match c.active_provider_mut().ensure_fresh().await {
-            Ok(true) => c.save()?, // persist refreshed tokens
-            Ok(false) => {}
+        let c = existing_config.unwrap();
+        let mut provider = c
+            .build_active_provider()
+            .map_err(|err| anyhow::anyhow!("build active provider: {err}"))?;
+        match provider.ensure_fresh().await {
+            Ok(true) => {
+                let mut c = c;
+                c.upsert_provider(&provider);
+                c.save(&crate::paths::config_file())?;
+                (c, provider)
+            }
+            Ok(false) => (c, provider),
             Err(err) => {
                 if interactive_startup {
-                    let provider_label = c.active_provider().label();
+                    let provider_label = provider_display_label(&provider);
                     startup_system_message = Some(format!(
                         "{} refresh failed: {}. Lash opened in recovery mode. Use /provider or relaunch with --provider to reauthenticate or switch providers.",
                         provider_label, err
                     ));
+                    (c, provider)
                 } else {
                     return Err(err.into());
                 }
             }
         }
-        c
     };
 
     // CLI env/flags override stored config
@@ -283,7 +298,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         lash_config.set_tavily_api_key(Some(key.clone()));
     }
     if args.print_prompt.is_none() {
-        lash_config.save()?;
+        lash_config.save(&crate::paths::config_file())?;
     }
     let model_catalog = models_dev_catalog().map_err(anyhow::Error::msg)?;
     if let Err(err) = model_catalog
@@ -296,25 +311,17 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     let requested_model = args
         .model
         .clone()
-        .unwrap_or_else(|| lash_config.active_provider().default_model().to_string());
+        .unwrap_or_else(|| active_provider.default_model().to_string());
     let selection = parse_model_selection(&requested_model).map_err(anyhow::Error::msg)?;
-    validate_model_selection(lash_config.active_provider(), &selection)
-        .map_err(anyhow::Error::msg)?;
-    let resolved_model_spec = resolve_model_selection(
-        lash_config.active_provider(),
-        &selection,
-        model_catalog.as_ref(),
-    )
-    .map_err(anyhow::Error::msg)?;
+    validate_model_selection(&active_provider, &selection).map_err(anyhow::Error::msg)?;
+    let resolved_model_spec =
+        resolve_model_selection(&active_provider, &selection, model_catalog.as_ref())
+            .map_err(anyhow::Error::msg)?;
     let model = selection.model.clone();
-    let model_variant = resolve_model_variant(
-        lash_config.active_provider(),
-        &model,
-        args.variant.as_deref(),
-    )
-    .map_err(anyhow::Error::msg)?;
+    let model_variant = resolve_model_variant(&active_provider, &model, args.variant.as_deref())
+        .map_err(anyhow::Error::msg)?;
     let llm_log_path = if crate::detailed_debug_logging_enabled(args.debug) {
-        let dir = lash::lash_home().join("sessions");
+        let dir = crate::paths::lash_home().join("sessions");
         Some(dir.join(format!(
             "{}.llm.jsonl",
             chrono::Local::now().format("%Y%m%d_%H%M%S")
@@ -323,14 +330,10 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         None
     };
 
-    let sessions_dir = lash::lash_home().join("sessions");
-    std::fs::create_dir_all(&sessions_dir)?;
-    let session_filename = args
-        .resume
-        .clone()
-        .unwrap_or_else(session_log::new_session_filename);
+    let session_bootstrap =
+        SessionBootstrap::open(SessionBootstrapSource::from_resume_arg(args.resume.clone()))?;
     tracing::debug!(
-        session_file = session_filename,
+        session_file = session_bootstrap.filename(),
         resumed = args.resume.is_some(),
         llm_log_path = ?llm_log_path,
         debug_logging = crate::detailed_debug_logging_enabled(args.debug),
@@ -347,36 +350,17 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     } else {
         prompt_template
     };
-    // Build store (SQLite-backed archive)
-    let db_path = sessions_dir.join(&session_filename);
-    let store = Arc::new(Store::open(&db_path)?);
-    let resume_start = if args.resume.is_some() {
-        store
-            .load_session_meta()
-            .map(|meta| session_log::SessionStart {
-                session_id: meta.session_id,
-                session_name: meta.session_name,
-            })
-    } else {
-        None
-    };
+    let store = session_bootstrap.store();
     // Autonomous runs still need a stable session id so provider-side prompt caching
     // and benchmark accounting can key repeated requests within the same session.
-    let run_session_id = resume_start
-        .as_ref()
-        .map(|start| start.session_id.clone())
-        .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+    let run_session_id = session_bootstrap.run_session_id();
 
     // Peek the persisted session config so we can use the correct
     // execution mode and context approach BEFORE building the plugin
     // host and runtime. Without this, resuming a Rlm session from a
     // Standard-mode bootstrap would fail to start the lashlang thread
     // and would build plugins with the wrong mode.
-    let persisted_session_config = if args.resume.is_some() {
-        store.load_session_head().map(|head| head.config)
-    } else {
-        None
-    };
+    let persisted_session_config = session_bootstrap.persisted_config();
 
     // Execution mode: CLI flag wins, then persisted config, then Standard.
     // Resolved BEFORE building the plugin host + runtime so the lashlang
@@ -419,10 +403,14 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         ));
     }
 
-    let instruction_source: Arc<dyn InstructionSource> = Arc::new(FsInstructionSource::new());
+    let instruction_source: Arc<dyn InstructionSource> =
+        Arc::new(FsInstructionSource::with_config(InstructionLoaderConfig {
+            global_root: Some(crate::paths::lash_home()),
+            ..Default::default()
+        }));
     let session_policy = SessionPolicy {
         model: model.clone(),
-        provider: lash_config.active_provider().clone(),
+        provider: active_provider.clone(),
         model_variant,
         max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
@@ -432,7 +420,8 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     };
     let host_core = RuntimeCoreConfig::default()
         .with_prompt_template(prompt_template)
-        .with_llm_log_path(llm_log_path);
+        .with_llm_log_path(llm_log_path)
+        .with_credential_store_path(Some(crate::paths::config_file()));
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let turn_injection_bridge = TurnInjectionBridge::new();
@@ -473,11 +462,11 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
-        let session_db_path = db_path.to_string_lossy().to_string();
+        let session_db_path = session_bootstrap.db_path().to_string_lossy().to_string();
         println!(
             "{}",
             info_text(
-                lash_config.active_provider(),
+                &active_provider,
                 &model,
                 session_policy.model_variant.as_deref(),
                 execution_mode,
@@ -494,29 +483,9 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         return Ok(());
     }
     let initial_model_variant = session_policy.model_variant.clone();
-    let session_name = resume_start
-        .as_ref()
-        .map(|start| start.session_name.clone())
-        .unwrap_or_else(|| generate_session_name(&sessions_dir));
-    let mut logger = if resume_start.is_some() {
-        SessionLogger::resume(Arc::clone(&store), &session_filename)?
-    } else {
-        SessionLogger::new(
-            Arc::clone(&store),
-            session_filename.clone(),
-            &model,
-            run_session_id,
-            session_name.clone(),
-        )?
-    };
-    let initial_graph = if args.resume.is_some() {
-        store
-            .load_session_head()
-            .map(|head| head.graph)
-            .unwrap_or_default()
-    } else {
-        lash::SessionGraph::default()
-    };
+    let session_name = session_bootstrap.session_name();
+    let mut logger = session_bootstrap.logger(&model, run_session_id)?;
+    let initial_graph = session_bootstrap.initial_graph();
     let services = lash::PersistentRuntimeServices::new_with_bridges(
         root_plugins,
         turn_injection_bridge.clone(),
@@ -529,8 +498,9 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         session_graph: initial_graph,
         ..PersistedSessionState::default()
     };
-    let embedded_host = EmbeddedRuntimeHost::new(host_core)
-        .with_session_store_factory(Arc::new(DbSessionStoreFactory::new(sessions_dir.clone())));
+    let embedded_host = EmbeddedRuntimeHost::new(host_core).with_session_store_factory(Arc::new(
+        DbSessionStoreFactory::new(session_bootstrap.sessions_dir().to_path_buf()),
+    ));
     let mut runtime = LashRuntime::from_persistent_background_state(
         session_policy.clone(),
         BackgroundRuntimeHost::new(embedded_host, Arc::new(TokioSessionTaskExecutor::default())),
@@ -556,7 +526,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         return run_autonomous(
             runtime,
             prompt,
-            SkillCatalog::load(),
+            SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
             AutonomousPersistenceContext {
                 store: Arc::clone(&store),
                 await_background_work: args.await_background_work,
@@ -585,7 +555,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         turn_input_injection_bridge,
         &mut logger,
         &args,
-        lash_config.active_provider().clone(),
+        active_provider.clone(),
         model,
         resolved_model_spec.context_window(),
         session_name,

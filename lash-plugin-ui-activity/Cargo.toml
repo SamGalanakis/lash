@@ -1,0 +1,13 @@
+[package]
+name = "lash-plugin-ui-activity"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash" }
+serde_json = "1"
+
+[dev-dependencies]
+lash = { path = "../lash", features = ["testing"] }
+tokio = { version = "1", features = ["full"] }

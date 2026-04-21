@@ -13,13 +13,11 @@ sqlite-store = ["lash/sqlite-store"]
 
 [dependencies]
 lash = { path = "../lash" }
-lash-sansio = { path = "../lash-sansio" }
-lashlang = { path = "../lashlang" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracing = "0.1"
 
 [dev-dependencies]
+lash-sansio = { path = "../lash-sansio" }
 lash-mode-standard = { path = "../lash-mode-standard" }
 tokio = { version = "1", features = ["full"] }

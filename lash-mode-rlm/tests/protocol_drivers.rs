@@ -5,7 +5,9 @@ use lash::sansio::{self, Effect, ProtocolDriverHandle, Response, TurnMachine, Tu
 use lash_mode_rlm::RlmDriver;
 use lash_mode_standard::StandardDriver;
 use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
-use lash_sansio::{CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent};
+use lash_sansio::{
+    CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, RetryPolicy, SessionEvent,
+};
 
 fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
     test_config_with_termination(mode, sansio::RlmTermination::default())
@@ -31,6 +33,7 @@ fn test_config_with_termination(
         session_id: "test".to_string(),
         emit_llm_debug_log: false,
         rlm_termination,
+        retry_policy: RetryPolicy::default(),
     }
 }
 

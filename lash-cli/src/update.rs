@@ -539,7 +539,7 @@ fn load_update_state(repo: &str) -> Option<UpdateState> {
 }
 
 fn save_update_state(state: &UpdateState) -> anyhow::Result<()> {
-    std::fs::create_dir_all(lash::lash_home())?;
+    std::fs::create_dir_all(crate::paths::lash_home())?;
     std::fs::write(update_state_path(), serde_json::to_vec_pretty(state)?)
         .context("Failed to persist update-check state")
 }
@@ -550,7 +550,7 @@ fn load_install_manifest() -> Option<InstallManifest> {
 }
 
 fn save_install_manifest(manifest: &InstallManifest) -> anyhow::Result<()> {
-    std::fs::create_dir_all(lash::lash_home())?;
+    std::fs::create_dir_all(crate::paths::lash_home())?;
     std::fs::write(
         install_manifest_path(),
         serde_json::to_vec_pretty(manifest)?,
@@ -559,11 +559,11 @@ fn save_install_manifest(manifest: &InstallManifest) -> anyhow::Result<()> {
 }
 
 fn update_state_path() -> PathBuf {
-    lash::lash_home().join("update-state.json")
+    crate::paths::lash_home().join("update-state.json")
 }
 
 fn install_manifest_path() -> PathBuf {
-    lash::lash_home().join("install.json")
+    crate::paths::lash_home().join("install.json")
 }
 
 fn is_stale(state: &UpdateState, now: i64) -> bool {

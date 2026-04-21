@@ -3,11 +3,38 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use lash::oauth;
-use lash::provider::{LashConfig, Provider, ProviderKind};
+use lash::provider::{LashConfig, ProviderHandle};
+use lash_provider_anthropic::AnthropicProvider;
+use lash_provider_codex::CodexProvider;
+use lash_provider_codex::oauth as codex_oauth;
+use lash_provider_google::GoogleOAuthProvider;
+use lash_provider_google::oauth as google_oauth;
+use lash_provider_openai::OpenAiGenericProvider;
 use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, Terminal};
 use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
+
+/// Provider kinds the CLI setup UI knows how to walk through, in the
+/// order they appear in the menu. Matches `ProviderFactory::kind()` for
+/// the four first-party provider crates lash-cli links.
+const KIND_ORDER: &[&str] = &["anthropic", "openai-compatible", "codex", "google_oauth"];
+
+fn kind_index(kind: &str) -> Option<usize> {
+    KIND_ORDER.iter().position(|k| *k == kind)
+}
+
+fn kind_setup_name(kind: &str) -> &'static str {
+    lash::provider_factory(kind)
+        .map(|f| f.setup_name())
+        .unwrap_or("Unknown")
+}
+
+fn kind_setup_description(kind: &str) -> &'static str {
+    lash::provider_factory(kind)
+        .map(|f| f.setup_description())
+        .unwrap_or("")
+}
 
 enum SetupStep {
     SelectProvider {
@@ -51,20 +78,14 @@ enum CredentialMode {
 struct SetupApp {
     step: SetupStep,
     tick: u64,
-    saved_kinds: BTreeSet<ProviderKind>,
-    active_kind: Option<ProviderKind>,
+    saved_kinds: BTreeSet<String>,
+    active_kind: Option<String>,
 }
 
 impl SetupApp {
     fn new(existing: Option<&LashConfig>) -> Self {
-        let active_kind = existing.map(LashConfig::active_provider_kind);
-        let selected = active_kind
-            .and_then(|kind| {
-                ProviderKind::ALL
-                    .iter()
-                    .position(|candidate| *candidate == kind)
-            })
-            .unwrap_or(0);
+        let active_kind = existing.map(|cfg| cfg.active_provider_kind().to_string());
+        let selected = active_kind.as_deref().and_then(kind_index).unwrap_or(0);
         Self {
             step: SetupStep::SelectProvider { selected },
             tick: 0,
@@ -89,7 +110,7 @@ async fn run_setup_inner(
 ) -> anyhow::Result<LashConfig> {
     let existing_config = existing.cloned();
     let mut app = SetupApp::new(existing_config.as_ref());
-    let mut provider: Option<Provider> = None;
+    let mut provider: Option<ProviderHandle> = None;
     let mut tavily_key = existing.and_then(|cfg| cfg.tavily_api_key().map(str::to_string));
     let existing_agent_models = existing
         .map(|cfg| cfg.agent_models.clone())
@@ -159,17 +180,18 @@ async fn run_setup_inner(
                 _ => unreachable!(),
             };
 
-            match oauth::codex_poll_device_auth(&device_auth_id, &user_code).await {
+            match codex_oauth::poll_device_auth(&device_auth_id, &user_code).await {
                 Ok(Some((auth_code, code_verifier))) => {
-                    match oauth::codex_exchange_code(&auth_code, &code_verifier).await {
+                    match codex_oauth::exchange_code(&auth_code, &code_verifier).await {
                         Ok(tokens) => {
-                            provider = Some(Provider::Codex {
-                                access_token: tokens.access_token,
-                                refresh_token: tokens.refresh_token,
-                                expires_at: tokens.expires_at,
-                                account_id: tokens.account_id,
-                                options: lash::provider::ProviderOptions::default(),
-                            });
+                            provider = Some(ProviderHandle::new(Box::new(
+                                CodexProvider::new(
+                                    tokens.access_token,
+                                    tokens.refresh_token,
+                                    tokens.expires_at,
+                                )
+                                .with_account_id(tokens.account_id),
+                            )));
                             app.step = if tavily_key.is_some() {
                                 SetupStep::Done
                             } else {
@@ -231,31 +253,38 @@ async fn run_setup_inner(
                     *selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    *selected = (*selected + 1).min(ProviderKind::ALL.len().saturating_sub(1));
+                    *selected = (*selected + 1).min(KIND_ORDER.len().saturating_sub(1));
                 }
                 KeyCode::Enter => {
-                    let kind = ProviderKind::ALL[*selected];
-                    if let Some(saved) = existing_config
+                    let kind = KIND_ORDER[*selected];
+                    if let Some(saved_spec) = existing_config
                         .as_ref()
-                        .and_then(|cfg| cfg.provider(kind))
+                        .and_then(|cfg| cfg.provider_spec(kind))
                         .cloned()
                     {
-                        provider = Some(saved);
-                        app.active_kind = Some(kind);
-                        app.step = if tavily_key.is_some() {
-                            SetupStep::Done
-                        } else {
-                            SetupStep::InputTavily {
-                                input: String::new(),
-                                cursor: 0,
+                        match lash::build_provider(&saved_spec) {
+                            Ok(boxed) => {
+                                provider = Some(ProviderHandle::new(boxed));
+                                app.active_kind = Some(kind.to_string());
+                                app.step = if tavily_key.is_some() {
+                                    SetupStep::Done
+                                } else {
+                                    SetupStep::InputTavily {
+                                        input: String::new(),
+                                        cursor: 0,
+                                    }
+                                };
                             }
-                        };
+                            Err(_) => {
+                                start_provider_flow(&mut app, kind, existing_config.as_ref()).await;
+                            }
+                        }
                     } else {
                         start_provider_flow(&mut app, kind, existing_config.as_ref()).await;
                     }
                 }
                 KeyCode::Char('r') => {
-                    let kind = ProviderKind::ALL[*selected];
+                    let kind = KIND_ORDER[*selected];
                     start_provider_flow(&mut app, kind, existing_config.as_ref()).await;
                 }
                 _ => {}
@@ -290,11 +319,8 @@ async fn run_setup_inner(
                                 *error = Some("API key cannot be empty.".into());
                                 continue;
                             }
-                            provider = Some(Provider::Anthropic {
-                                api_key: value,
-                                base_url: None,
-                                options: lash::provider::ProviderOptions::default(),
-                            });
+                            provider =
+                                Some(ProviderHandle::new(Box::new(AnthropicProvider::new(value))));
                             app.step = if tavily_key.is_some() {
                                 SetupStep::Done
                             } else {
@@ -320,19 +346,19 @@ async fn run_setup_inner(
                                 *error = Some("OAuth state expired. Press Esc and retry.".into());
                                 continue;
                             };
-                            match oauth::google_exchange_code(&value, &verifier_value).await {
+                            match google_oauth::exchange_code(&value, &verifier_value).await {
                                 Ok(tokens) => {
-                                    provider = Some(Provider::GoogleOAuth {
-                                        access_token: tokens.access_token,
-                                        refresh_token: tokens.refresh_token,
-                                        expires_at: tokens.expires_at,
-                                        project_id: std::env::var("GOOGLE_CLOUD_PROJECT")
-                                            .ok()
-                                            .or_else(|| {
-                                                std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok()
-                                            }),
-                                        options: lash::provider::ProviderOptions::default(),
-                                    });
+                                    let project_id = std::env::var("GOOGLE_CLOUD_PROJECT")
+                                        .ok()
+                                        .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok());
+                                    provider = Some(ProviderHandle::new(Box::new(
+                                        GoogleOAuthProvider::new(
+                                            tokens.access_token,
+                                            tokens.refresh_token,
+                                            tokens.expires_at,
+                                        )
+                                        .with_project_id(project_id),
+                                    )));
                                     app.step = if tavily_key.is_some() {
                                         SetupStep::Done
                                     } else {
@@ -345,7 +371,7 @@ async fn run_setup_inner(
                                 Err(err) => {
                                     *error = Some(err.to_string());
                                     let (new_verifier, challenge) = oauth::generate_pkce();
-                                    match oauth::google_authorize_url(&challenge) {
+                                    match google_oauth::authorize_url(&challenge) {
                                         Ok(url) => {
                                             persist_oauth_url(&url);
                                             *browser_error =
@@ -388,11 +414,10 @@ async fn run_setup_inner(
                     if base_url.is_empty() {
                         continue;
                     }
-                    provider = Some(Provider::OpenAiGeneric {
-                        api_key: api_key.clone(),
+                    provider = Some(ProviderHandle::new(Box::new(OpenAiGenericProvider::new(
+                        api_key.clone(),
                         base_url,
-                        options: lash::provider::ProviderOptions::default(),
-                    });
+                    ))));
                     app.step = if tavily_key.is_some() {
                         SetupStep::Done
                     } else {
@@ -432,8 +457,8 @@ async fn run_setup_inner(
     }
 
     let provider = provider.expect("provider must be selected before setup finishes");
-    let mut config = existing_config.unwrap_or_else(|| LashConfig::new(provider.clone()));
-    config.upsert_provider(provider.clone());
+    let mut config = existing_config.unwrap_or_else(|| LashConfig::new(&provider));
+    config.upsert_provider(&provider);
     config
         .set_active_provider_kind(provider.kind())
         .expect("active provider must exist after upsert");
@@ -442,15 +467,11 @@ async fn run_setup_inner(
     Ok(config)
 }
 
-async fn start_provider_flow(
-    app: &mut SetupApp,
-    kind: ProviderKind,
-    existing: Option<&LashConfig>,
-) {
+async fn start_provider_flow(app: &mut SetupApp, kind: &str, existing: Option<&LashConfig>) {
     match kind {
-        ProviderKind::Codex => match oauth::codex_request_device_code().await {
+        "codex" => match codex_oauth::request_device_code().await {
             Ok(device) => {
-                let _ = open_browser(oauth::CODEX_DEVICE_VERIFY_URL);
+                let _ = open_browser(codex_oauth::CODEX_DEVICE_VERIFY_URL);
                 app.step = SetupStep::CodexDeviceAuth {
                     user_code: device.user_code,
                     device_auth_id: device.device_auth_id,
@@ -469,9 +490,9 @@ async fn start_provider_flow(
                 };
             }
         },
-        ProviderKind::GoogleOAuth => {
+        "google_oauth" => {
             let (verifier, challenge) = oauth::generate_pkce();
-            match oauth::google_authorize_url(&challenge) {
+            match google_oauth::authorize_url(&challenge) {
                 Ok(url) => {
                     persist_oauth_url(&url);
                     let browser_error = open_browser(&url).err().map(|err| err.to_string());
@@ -498,7 +519,7 @@ async fn start_provider_flow(
                 }
             }
         }
-        ProviderKind::OpenAiGeneric => {
+        "openai-compatible" => {
             let existing_key = existing_openai_key(existing);
             app.step = SetupStep::InputCredential {
                 input: existing_key.clone(),
@@ -510,7 +531,7 @@ async fn start_provider_flow(
                 mode: CredentialMode::OpenAiGenericKey,
             };
         }
-        ProviderKind::Anthropic => {
+        "anthropic" => {
             let existing_key = existing_anthropic_key(existing);
             app.step = SetupStep::InputCredential {
                 input: existing_key.clone(),
@@ -521,6 +542,11 @@ async fn start_provider_flow(
                 browser_error: None,
                 mode: CredentialMode::AnthropicKey,
             };
+        }
+        _ => {
+            // Unknown kind — shouldn't happen since KIND_ORDER is
+            // closed. Fall back to the provider picker.
+            app.step = SetupStep::SelectProvider { selected: 0 };
         }
     }
 }
@@ -574,7 +600,7 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                 Line::from(""),
             ];
 
-            for (idx, kind) in ProviderKind::ALL.iter().enumerate() {
+            for (idx, kind) in KIND_ORDER.iter().enumerate() {
                 let selected_marker = if *selected == idx { "▸" } else { " " };
                 let name_style = if *selected == idx {
                     Style::default()
@@ -583,10 +609,10 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                 } else {
                     Style::default().fg(theme::text_subtle())
                 };
-                let mut meta = kind.setup_description().to_string();
-                if app.active_kind == Some(*kind) {
+                let mut meta = kind_setup_description(kind).to_string();
+                if app.active_kind.as_deref() == Some(*kind) {
                     meta.push_str(" · active");
-                } else if app.saved_kinds.contains(kind) {
+                } else if app.saved_kinds.contains(*kind) {
                     meta.push_str(" · saved");
                 }
                 lines.push(Line::from(vec![
@@ -596,7 +622,7 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                             .fg(theme::brand())
                             .add_modifier(Modifier::Bold),
                     ),
-                    Span::styled(format!("{:<22}", kind.setup_name()), name_style),
+                    Span::styled(format!("{:<22}", kind_setup_name(kind)), name_style),
                     Span::styled(meta, Style::default().fg(theme::text_faint())),
                 ]));
             }
@@ -1065,34 +1091,28 @@ fn visible_start(input: &str, width: usize, cursor_byte: usize) -> usize {
         .min(total.saturating_sub(width))
 }
 
-fn existing_openai_base_url(existing: Option<&LashConfig>) -> String {
+fn provider_spec_field(existing: Option<&LashConfig>, kind: &str, field: &str) -> String {
     existing
-        .and_then(|cfg| cfg.provider(ProviderKind::OpenAiGeneric))
-        .and_then(|provider| match provider {
-            Provider::OpenAiGeneric { base_url, .. } => Some(base_url.clone()),
-            _ => None,
+        .and_then(|cfg| cfg.provider_spec(kind))
+        .and_then(|spec| {
+            spec.config
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(String::from)
         })
         .unwrap_or_default()
+}
+
+fn existing_openai_base_url(existing: Option<&LashConfig>) -> String {
+    provider_spec_field(existing, "openai-compatible", "base_url")
 }
 
 fn existing_openai_key(existing: Option<&LashConfig>) -> String {
-    existing
-        .and_then(|cfg| cfg.provider(ProviderKind::OpenAiGeneric))
-        .and_then(|provider| match provider {
-            Provider::OpenAiGeneric { api_key, .. } => Some(api_key.clone()),
-            _ => None,
-        })
-        .unwrap_or_default()
+    provider_spec_field(existing, "openai-compatible", "api_key")
 }
 
 fn existing_anthropic_key(existing: Option<&LashConfig>) -> String {
-    existing
-        .and_then(|cfg| cfg.provider(ProviderKind::Anthropic))
-        .and_then(|provider| match provider {
-            Provider::Anthropic { api_key, .. } => Some(api_key.clone()),
-            _ => None,
-        })
-        .unwrap_or_default()
+    provider_spec_field(existing, "anthropic", "api_key")
 }
 
 fn open_browser(url: &str) -> std::io::Result<()> {

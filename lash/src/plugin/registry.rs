@@ -217,11 +217,61 @@ pub trait SessionPlugin: Send + Sync {
     }
 }
 
+/// Registers a plugin with the runtime and produces a per-session
+/// `SessionPlugin` instance for each new session.
+///
+/// # Cheap-build / stateful-factory contract
+///
+/// `build(ctx)` **must be cheap**. It runs on the hot path every time
+/// a new session is created (including subagents, forked children,
+/// and compaction children) and any latency here is paid per session.
+///
+/// Specifically, `build` must **not**:
+/// - perform any I/O (disk reads, HTTP calls, DB queries),
+/// - compile regexes, templates, or schemas,
+/// - open network connections or initialize connection pools,
+/// - load models, parse large config files, or allocate large buffers,
+/// - block the current thread for non-trivial work.
+///
+/// Expensive state belongs on the `PluginFactory` struct itself,
+/// wrapped in `Arc` so it can be cheaply cloned into per-session
+/// closures. The `PluginFactory` is constructed once by the embedder
+/// and held in the `RuntimeEnvironment`; its fields outlive every
+/// session. Hooks captured into a `PluginSpec` are closures that
+/// clone the `Arc`s off `self` and reference the shared state
+/// directly, so every session sees the same pool / cache / compiled
+/// artifact without rebuilding it.
+///
+/// The typical shape is:
+/// ```ignore
+/// pub struct MyFactory {
+///     pool: Arc<ConnectionPool>,          // expensive, built once
+///     compiled: Arc<Regex>,               // expensive, built once
+/// }
+///
+/// impl PluginFactory for MyFactory {
+///     fn id(&self) -> &'static str { "my_plugin" }
+///
+///     fn build(&self, _ctx: &PluginSessionContext)
+///         -> Result<Arc<dyn SessionPlugin>, PluginError>
+///     {
+///         // Cheap: clone Arcs, assemble spec, wrap in SpecPlugin.
+///         let pool = Arc::clone(&self.pool);
+///         let spec = PluginSpec::new().with_before_turn(Arc::new(move |_ctx| {
+///             let pool = Arc::clone(&pool);
+///             Box::pin(async move { /* use pool */ Ok(vec![]) })
+///         }));
+///         Ok(Arc::new(SpecPluginFromSpec::new("my_plugin", spec)))
+///     }
+/// }
+/// ```
 pub trait PluginFactory: Send + Sync {
     fn id(&self) -> &'static str;
     fn supported_context_approaches(&self) -> &'static [ContextApproachKind] {
         &[]
     }
+    /// Produce a session-scoped plugin. **Must be cheap** — see the
+    /// trait-level docs for the full contract.
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError>;
 }
 

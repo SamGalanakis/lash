@@ -16,14 +16,15 @@ use dataset::{SweBenchInstance, load_instances};
 use lash::plugin::PluginFactory;
 use lash::provider::LashConfig;
 use lash::{
-    BackgroundRuntimeHost, BuiltinObservationalMemoryPluginFactory,
-    BuiltinRollingHistoryPluginFactory, BuiltinToolResultProjectionPluginFactory, ContextApproach,
+    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, ContextApproach,
     EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, Provider, RuntimeCoreConfig, RuntimeStore, SessionEvent,
-    SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
-    TurnInput, TurnInputInjectionBridge, diff_usage_reports,
+    PersistentRuntimeServices, PluginHost, ProviderHandle, RuntimeCoreConfig, RuntimeStore,
+    SessionEvent, SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor,
+    TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
+use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
+use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -538,7 +539,7 @@ fn select_instances(mut instances: Vec<SweBenchInstance>, args: &Args) -> Vec<Sw
 async fn run_instance(
     run_dir: &Path,
     workspace_root: &Path,
-    provider: &Provider,
+    provider: &ProviderHandle,
     args: &Args,
     model: &str,
     execution_mode: ExecutionMode,
@@ -889,10 +890,10 @@ fn build_plugin_session(
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
     match context_approach {
         ContextApproach::RollingHistory(_) => {
-            factories.push(Arc::new(BuiltinRollingHistoryPluginFactory::default()));
+            factories.push(Arc::new(RollingHistoryPluginFactory::default()));
         }
         ContextApproach::ObservationalMemory(_) => {
-            factories.push(Arc::new(BuiltinObservationalMemoryPluginFactory));
+            factories.push(Arc::new(ObservationalMemoryPluginFactory));
         }
     }
     factories.push(Arc::new(
@@ -939,17 +940,25 @@ fn build_plugin_session(
         .context("build plugin session")
 }
 
-fn resolve_provider(args: &Args) -> Result<(Provider, String, String)> {
-    let config = LashConfig::load();
+fn resolve_provider(args: &Args) -> Result<(ProviderHandle, String, String)> {
+    lash_providers_builtin::register_all();
+    let config_path = std::env::var("LASH_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".lash")
+        })
+        .join("config.json");
+    let config = LashConfig::load(&config_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "~/.lash/config.json not found or invalid — set up a provider with `lash --provider` or re-login"
+        )
+    })?;
     let provider = config
-        .as_ref()
-        .map(|c| c.active_provider().clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "~/.lash/config.json not found or invalid — set up a provider with `lash --provider` or re-login"
-            )
-        })?;
-    let kind = provider.kind().id().to_string();
+        .build_active_provider()
+        .map_err(|err| anyhow::anyhow!(err))?;
+    let kind = provider.kind().to_string();
     let model = args
         .model
         .clone()

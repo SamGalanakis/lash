@@ -225,6 +225,10 @@ impl PluginSession {
         self.commands.values().map(|cmd| cmd.def.clone()).collect()
     }
 
+    pub fn has_assistant_stream_hooks(&self) -> bool {
+        !self.assistant_stream_hooks.is_empty()
+    }
+
     /// Invoke a plugin-registered slash command.
     pub async fn invoke_command(
         &self,

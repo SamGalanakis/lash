@@ -3,7 +3,7 @@ use std::sync::Arc;
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState, fresh_message_id};
 use lash::{
     CachedModelCatalog, DynamicStateSnapshot, DynamicToolProvider, ExecutionMode, LashRuntime,
-    PersistedSessionConfig, PersistedSessionState, PersistedTurnState, PromptUsage, Provider,
+    PersistedSessionConfig, PersistedSessionState, PersistedTurnState, PromptUsage, ProviderHandle,
     Store, TokenUsage,
 };
 
@@ -118,7 +118,7 @@ async fn restore_model_from_graph_config(
     config: Option<&PersistedSessionConfig>,
     app: &mut App,
     runtime: &mut Option<LashRuntime>,
-    provider: &Provider,
+    provider: &ProviderHandle,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let Some(config) = config else {
@@ -178,7 +178,7 @@ async fn apply_graph_resume_state(
     app: &mut App,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
-    provider: &Provider,
+    provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
@@ -310,7 +310,7 @@ pub async fn load_resumed_session(
     runtime: &mut Option<LashRuntime>,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
-    provider: &Provider,
+    provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
@@ -358,7 +358,7 @@ pub async fn load_resumed_session_by_id(
     runtime: &mut Option<LashRuntime>,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
-    provider: &Provider,
+    provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
@@ -390,7 +390,7 @@ pub async fn restore_session_state(
     app: &mut App,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
-    provider: &Provider,
+    provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
@@ -579,7 +579,7 @@ mod tests {
     }
 
     async fn build_runtime(
-        provider: &Provider,
+        provider: &ProviderHandle,
     ) -> (
         Arc<DynamicToolProvider>,
         DynamicStateSnapshot,
@@ -641,7 +641,7 @@ mod tests {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-resume-usage");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = lash::lash_home().join("sessions");
+        let sessions_dir = crate::paths::lash_home().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let db_path = sessions_dir.join("resume-usage.db");
@@ -669,11 +669,11 @@ mod tests {
             crate::app::UiResumeState::default(),
         );
 
-        let provider = Provider::OpenAiGeneric {
-            api_key: "test-key".into(),
-            base_url: "https://example.invalid/v1".into(),
-            options: lash::ProviderOptions::default(),
-        };
+        let provider =
+            lash::ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
+                "test-key",
+                "https://example.invalid/v1",
+            )));
         let (dynamic_tools, mut desired_dynamic, model_catalog, runtime) =
             build_runtime(&provider).await;
 
@@ -721,7 +721,7 @@ mod tests {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-resume-live-snapshot");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = lash::lash_home().join("sessions");
+        let sessions_dir = crate::paths::lash_home().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let db_path = sessions_dir.join("resume-live.db");
@@ -777,11 +777,11 @@ mod tests {
         .await
         .expect("live snapshot");
 
-        let provider = Provider::OpenAiGeneric {
-            api_key: "test-key".into(),
-            base_url: "https://example.invalid/v1".into(),
-            options: lash::ProviderOptions::default(),
-        };
+        let provider =
+            lash::ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
+                "test-key",
+                "https://example.invalid/v1",
+            )));
         let (dynamic_tools, mut desired_dynamic, model_catalog, runtime) =
             build_runtime(&provider).await;
 
@@ -831,7 +831,7 @@ mod tests {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-load-resume-live-turn");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = lash::lash_home().join("sessions");
+        let sessions_dir = crate::paths::lash_home().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let filename = "resume-ui.db";
@@ -855,11 +855,11 @@ mod tests {
             },
         );
 
-        let provider = Provider::OpenAiGeneric {
-            api_key: "test-key".into(),
-            base_url: "https://example.invalid/v1".into(),
-            options: lash::ProviderOptions::default(),
-        };
+        let provider =
+            lash::ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
+                "test-key",
+                "https://example.invalid/v1",
+            )));
         let model_catalog =
             CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
                 .expect("catalog");

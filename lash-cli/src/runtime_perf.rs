@@ -8,14 +8,14 @@ use std::time::Instant;
 
 use anyhow::Context;
 use chrono::Utc;
-use lash::llm::adapters::openrouter::OpenAiGenericAdapter;
-use lash::llm::transport::{LlmTransport, LlmTransportError};
-use lash::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
+use lash::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
+use lash::testing::TestProvider;
 use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
+use lash_provider_openai::OpenAiGenericProvider;
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -259,11 +259,6 @@ pub(crate) struct RuntimePerfReport {
     summary: Vec<RuntimePerfScenarioSummary>,
 }
 
-#[derive(Clone)]
-struct BenchmarkTransport {
-    scenario: RuntimePerfScenario,
-}
-
 struct BenchmarkRuntime {
     runtime: LashRuntime,
     _openai_compat_server: Option<OpenAiCompatBenchServer>,
@@ -399,12 +394,6 @@ impl RuntimeStore for RuntimePerfStore {
     }
 }
 
-impl BenchmarkTransport {
-    fn new(scenario: RuntimePerfScenario) -> Self {
-        Self { scenario }
-    }
-}
-
 impl OpenAiCompatBenchServer {
     async fn start(profile: BenchmarkStreamProfile) -> anyhow::Result<Self> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -501,62 +490,38 @@ impl RuntimeTurnPhaseProbe for RuntimePerfPhaseProbe {
     }
 }
 
-#[async_trait::async_trait]
-impl LlmTransport for BenchmarkTransport {
-    fn default_root_model(&self) -> &'static str {
-        "mock-model"
-    }
-
-    fn default_agent_model(&self, _tier: &str) -> Option<lash::llm::types::ModelSelection> {
-        None
-    }
-
-    fn requires_streaming(&self) -> bool {
-        true
-    }
-
-    fn normalize_model(&self, model: &str) -> String {
-        model.to_string()
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        model.to_string()
-    }
-
-    async fn ensure_ready(&self, _provider: &mut Provider) -> Result<bool, LlmTransportError> {
-        Ok(false)
-    }
-
-    async fn complete(
-        &self,
-        _provider: &mut Provider,
-        req: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError> {
-        let profile = benchmark_stream_profile(self.scenario);
-        let usage = LlmUsage {
-            input_tokens: 1_024,
-            output_tokens: 64,
-            cached_input_tokens: 512,
-            reasoning_tokens: 48,
-        };
-        if let Some(tx) = req.stream_events.as_ref() {
-            for delta in &profile.deltas {
-                tx.send(LlmStreamEvent::Delta(delta.clone()));
+fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider {
+    TestProvider::builder()
+        .kind("benchmark")
+        .default_model("mock-model")
+        .requires_streaming(true)
+        .complete(move |req| async move {
+            let profile = benchmark_stream_profile(scenario);
+            let usage = LlmUsage {
+                input_tokens: 1_024,
+                output_tokens: 64,
+                cached_input_tokens: 512,
+                reasoning_tokens: 48,
+            };
+            if let Some(tx) = req.stream_events.as_ref() {
+                for delta in &profile.deltas {
+                    tx.send(LlmStreamEvent::Delta(delta.clone()));
+                }
+                tx.send(LlmStreamEvent::Usage(usage.clone()));
             }
-            tx.send(LlmStreamEvent::Usage(usage.clone()));
-        }
-        Ok(LlmResponse {
-            full_text: profile.full_text.clone(),
-            deltas: profile.deltas.clone(),
-            parts: vec![LlmOutputPart::Text {
-                text: profile.full_text,
-            }],
-            usage,
-            provider_usage: None,
-            request_body: None,
-            http_summary: None,
+            Ok(LlmResponse {
+                full_text: profile.full_text.clone(),
+                deltas: profile.deltas.clone(),
+                parts: vec![LlmOutputPart::Text {
+                    text: profile.full_text,
+                }],
+                usage,
+                provider_usage: None,
+                request_body: None,
+                http_summary: None,
+            })
         })
-    }
+        .build()
 }
 
 pub(crate) fn default_output_path() -> PathBuf {
@@ -888,16 +853,19 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
     } else {
         None
     };
+    let base_url = openai_compat_server
+        .as_ref()
+        .map(|server| server.base_url.clone())
+        .unwrap_or_else(|| "https://example.invalid/v1".to_string());
+    let provider: ProviderHandle = match scenario {
+        RuntimePerfScenario::OpenAiCompatStream => ProviderHandle::new(Box::new(
+            OpenAiGenericProvider::new("test-key", base_url.clone()),
+        )),
+        _ => benchmark_provider(scenario).into_handle(),
+    };
     let policy = SessionPolicy {
         model: "mock-model".to_string(),
-        provider: Provider::OpenAiGeneric {
-            api_key: "test-key".to_string(),
-            base_url: openai_compat_server
-                .as_ref()
-                .map(|server| server.base_url.clone())
-                .unwrap_or_else(|| "https://example.invalid/v1".to_string()),
-            options: ProviderOptions::default(),
-        },
+        provider,
         max_context_tokens: Some(200_000),
         execution_mode,
         context_approach: context_approach.clone(),
@@ -925,12 +893,6 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         .with_store(Arc::clone(&store))
         .with_session_task_executor(Arc::new(TokioSessionTaskExecutor::default()))
         .with_plugin_host(plugin_host);
-    let builder = match scenario {
-        RuntimePerfScenario::OpenAiCompatStream => builder.with_llm_factory(|provider| {
-            Box::new(OpenAiGenericAdapter::new(provider.llm_timeouts()))
-        }),
-        _ => builder.with_llm_factory(move |_| Box::new(BenchmarkTransport::new(scenario))),
-    };
     let runtime = builder.build().await?;
     Ok(BenchmarkRuntime {
         runtime,
@@ -1196,26 +1158,31 @@ async fn serve_openai_compat_connection(
 }
 
 async fn drain_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<()> {
-    let mut buffer = Vec::new();
+    let mut headers = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut content_length = None;
     let mut header_len = None;
+    let mut total_read = 0usize;
     loop {
         let read = stream.read(&mut chunk).await?;
         if read == 0 {
             return Ok(());
         }
-        buffer.extend_from_slice(&chunk[..read]);
+        total_read += read;
+        if header_len.is_none() {
+            headers.extend_from_slice(&chunk[..read]);
+        }
         if header_len.is_none()
-            && let Some(index) = find_bytes(&buffer, b"\r\n\r\n")
+            && let Some(index) = find_bytes(&headers, b"\r\n\r\n")
         {
             let end = index + 4;
+            let header_text = String::from_utf8_lossy(&headers);
             header_len = Some(end);
-            let headers = String::from_utf8_lossy(&buffer[..end]);
-            content_length = Some(parse_content_length(&headers).unwrap_or(0));
+            content_length = Some(parse_content_length(&header_text).unwrap_or(0));
+            headers.clear();
         }
         if let (Some(header_len), Some(content_length)) = (header_len, content_length)
-            && buffer.len() >= header_len + content_length
+            && total_read >= header_len + content_length
         {
             return Ok(());
         }
@@ -1761,8 +1728,7 @@ fn alloc_delta(before: Stats, after: Stats) -> RuntimePerfAllocationDelta {
         bytes_allocated: diff.bytes_allocated,
         bytes_deallocated: diff.bytes_deallocated,
         bytes_reallocated: diff.bytes_reallocated,
-        net_live_bytes: diff.bytes_allocated as i64 + diff.bytes_reallocated as i64
-            - diff.bytes_deallocated as i64,
+        net_live_bytes: diff.bytes_allocated as i64 - diff.bytes_deallocated as i64,
     }
 }
 

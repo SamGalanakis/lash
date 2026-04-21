@@ -425,7 +425,7 @@ mod tests {
         .expect("plugin session")
     }
 
-    use crate::test_support::MockSessionManager;
+    use crate::testing::MockSessionManager;
 
     fn dispatch_context() -> ToolDispatchContext {
         let (event_tx, _event_rx) = mpsc::channel(8);

@@ -133,7 +133,7 @@ pub(super) async fn handle_fork(
     logger: &mut SessionLogger,
     dynamic_tools: &Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
-    provider: &Provider,
+    provider: &ProviderHandle,
     current_model_variant: &Option<String>,
     toolset_hash: &str,
 ) -> anyhow::Result<bool> {
@@ -211,7 +211,7 @@ pub(super) async fn handle_resume(
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     last_turn: &mut Option<TurnReplayPayload>,
-    provider: &Provider,
+    provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     session_manager: &mut Arc<dyn SessionManager>,
@@ -290,7 +290,7 @@ pub(super) async fn handle_resume(
 }
 
 pub(super) fn handle_skills(app: &mut App) -> anyhow::Result<bool> {
-    app.skills = SkillCatalog::load();
+    app.skills = SkillCatalog::from_dirs(&crate::paths::default_skill_dirs());
     let items: Vec<(String, String)> = app
         .skills
         .iter()

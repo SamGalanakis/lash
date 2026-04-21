@@ -73,7 +73,7 @@ pub(crate) async fn run_app(
     turn_input_injection_bridge: TurnInputInjectionBridge,
     logger: &mut SessionLogger,
     args: &Args,
-    mut provider: Provider,
+    mut provider: ProviderHandle,
     model: String,
     initial_context_window: u64,
     session_name: String,

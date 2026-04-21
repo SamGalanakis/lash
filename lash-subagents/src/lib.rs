@@ -660,7 +660,9 @@ mod tests {
     use async_trait::async_trait;
     use lash::PersistedSessionState;
     use lash::plugin::{PluginError, SessionHandle, SessionManager, SessionTurnHandle};
-    use lash::provider::{Provider, ProviderOptions};
+    // Provider/ProviderOptions imports were used by inline Codex/Google
+    // enum constructions, which the refactor replaced with test-only
+    // stub providers defined inside each test.
 
     #[test]
     fn output_schema_supports_scalars_and_lists() {
@@ -843,25 +845,40 @@ mod tests {
             }
         }
 
+        // Two distinct stub providers so we can verify that spawn
+        // resolves against the *live* policy, not the factory's stale
+        // one. Each stub returns a different per-tier model from
+        // `default_agent_model` so the final child policy's model shows
+        // which provider the capability lookup resolved against.
+        fn tiered_provider(tag: &'static str) -> lash::testing::TestProvider {
+            let (kind, default_model, low_model) = match tag {
+                "stale" => ("stale-stub", "stale-model", "stale-low"),
+                "live" => ("live-stub", "live-model", "live-low"),
+                _ => ("stub", "mock-model", "mock-low"),
+            };
+            lash::testing::TestProvider::builder()
+                .kind(kind)
+                .default_model(default_model)
+                .default_agent_model(move |tier| {
+                    if tier == "low" {
+                        Some(lash::AgentModelSelection {
+                            model: low_model.to_string(),
+                            variant: None,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .complete_error("stub")
+                .build()
+        }
         let stale_policy = SessionPolicy {
-            provider: Provider::Codex {
-                access_token: "token".to_string(),
-                refresh_token: "refresh".to_string(),
-                expires_at: 0,
-                account_id: None,
-                options: ProviderOptions::default(),
-            },
+            provider: tiered_provider("stale").into_handle(),
             execution_mode: lash::ExecutionMode::Standard,
             ..SessionPolicy::default()
         };
         let live_policy = SessionPolicy {
-            provider: Provider::GoogleOAuth {
-                access_token: "token".to_string(),
-                refresh_token: "refresh".to_string(),
-                expires_at: 0,
-                project_id: None,
-                options: ProviderOptions::default(),
-            },
+            provider: tiered_provider("live").into_handle(),
             execution_mode: lash::ExecutionMode::Standard,
             max_context_tokens: Some(1234),
             ..SessionPolicy::default()
@@ -907,6 +924,6 @@ mod tests {
             live_policy.max_context_tokens
         );
         assert_ne!(child_policy.model, stale_choice);
-        assert_eq!(child_policy.model, "gemini-3-flash-preview");
+        assert_eq!(child_policy.model, "live-low");
     }
 }

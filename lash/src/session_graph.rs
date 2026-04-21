@@ -650,6 +650,10 @@ impl SessionGraph {
             .and_then(|idx| self.nodes.get(*idx))
     }
 
+    pub fn node_index(&self, node_id: &str) -> Option<usize> {
+        self.cache().by_id.get(node_id).copied()
+    }
+
     pub fn merge_active_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
         let current_nodes = self.active_path_nodes();
         let target = build_projection_items(messages, tool_calls);

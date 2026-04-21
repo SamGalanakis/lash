@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lash::provider::Provider;
+use lash::provider::ProviderHandle;
 use lash::*;
 use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
@@ -174,7 +174,9 @@ fn render_shortcut_lines(ui_extensions: &UiExtensions, spaced_history_arrows: bo
 
 pub(crate) fn models_dev_catalog() -> Result<Arc<CachedModelCatalog>, String> {
     CachedModelCatalog::models_dev(
-        Arc::new(FileModelCatalogStore::default_models_dev()),
+        Arc::new(FileModelCatalogStore::new(
+            crate::paths::model_catalog_cache_file(),
+        )),
         Some(Arc::new(ModelsDevHttpSource::default_models_dev())),
     )
     .map(Arc::new)
@@ -384,7 +386,7 @@ pub(crate) fn execution_mode_label(mode: ExecutionMode) -> &'static str {
 }
 
 pub(crate) fn validate_model_selection(
-    provider: &Provider,
+    provider: &ProviderHandle,
     selection: &ModelSelection,
 ) -> Result<(), String> {
     provider
@@ -403,7 +405,7 @@ Resolved provider model ID: `{normalized}`"
 }
 
 pub(crate) fn resolve_model_selection(
-    provider: &Provider,
+    provider: &ProviderHandle,
     selection: &ModelSelection,
     catalog: &CachedModelCatalog,
 ) -> Result<ResolvedModelSpec, String> {
@@ -424,7 +426,7 @@ Resolved provider model ID: `{normalized}`"
 }
 
 pub(crate) fn resolve_model_variant(
-    provider: &Provider,
+    provider: &ProviderHandle,
     model: &str,
     requested: Option<&str>,
 ) -> Result<Option<String>, String> {
@@ -440,7 +442,7 @@ pub(crate) fn resolve_model_variant(
 }
 
 pub(crate) fn variant_lines(
-    provider: &Provider,
+    provider: &ProviderHandle,
     model: &str,
     current_variant: Option<&str>,
 ) -> Vec<String> {
@@ -450,7 +452,7 @@ pub(crate) fn variant_lines(
         lines.push(format!(
             "`{}` on {} does not expose configurable variants.",
             model,
-            provider.label()
+            provider_display_label(provider)
         ));
         return lines;
     }
@@ -464,6 +466,10 @@ pub(crate) fn variant_lines(
     lines.push(format!("Available variants: {}", supported.join(", ")));
     lines.push("Usage: `/variant <name>` or `/variant default`".to_string());
     lines
+}
+
+pub(crate) fn provider_display_label(provider: &ProviderHandle) -> &'static str {
+    lash::provider_cli_label(provider.kind())
 }
 
 pub(crate) fn hash12(bytes: &[u8]) -> String {
@@ -511,15 +517,12 @@ pub(crate) fn info_text_unconfigured(execution_mode: ExecutionMode, cwd: &str) -
         format!("cwd: {}", cwd),
         "session: (not started)".to_string(),
     ]
-    .join(
-        "
-",
-    )
+    .join("\n")
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn info_text(
-    provider: &Provider,
+    provider: &ProviderHandle,
     configured_model: &str,
     model_variant: Option<&str>,
     execution_mode: ExecutionMode,
@@ -536,7 +539,11 @@ pub(crate) fn info_text(
     let mut lines = vec![
         format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash::SANSIO_VERSION),
-        format!("provider: {} ({})", provider.label(), provider.id()),
+        format!(
+            "provider: {} ({})",
+            provider_display_label(provider),
+            provider.kind()
+        ),
         format!("configured model: {}", configured_model),
         format!("resolved model: {}", resolved_model),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
@@ -564,10 +571,7 @@ pub(crate) fn info_text(
         lines.push(format!("session db: {}", session_db_path));
     }
 
-    lines.join(
-        "
-",
-    )
+    lines.join("\n")
 }
 
 pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &UiExtensions) -> String {
@@ -637,10 +641,7 @@ pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &UiExtensions) -> 
     lines.push("Shortcuts:".to_string());
     lines.extend(render_shortcut_lines(ui_extensions, false));
 
-    lines.join(
-        "
-",
-    )
+    lines.join("\n")
 }
 
 pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
@@ -877,11 +878,11 @@ mod tests {
 
     #[test]
     fn info_text_includes_session_id_and_db_path() {
-        let provider = Provider::OpenAiGeneric {
-            api_key: "test".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            options: Default::default(),
-        };
+        let provider =
+            ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
+                "test",
+                "https://openrouter.ai/api/v1",
+            )));
         let text = info_text(
             &provider,
             "google/gemini-3-flash-preview",

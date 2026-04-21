@@ -47,11 +47,22 @@ fn run() -> Result<()> {
         SessionSelector::Id(cli.session.as_str())
     };
 
-    let rendered =
-        export(selector, format, cli.out.as_deref()).with_context(|| "rendering session")?;
+    let sessions_dir = default_sessions_dir();
+    let rendered = export(selector, &sessions_dir, format, cli.out.as_deref())
+        .with_context(|| "rendering session")?;
 
     if cli.out.is_none() {
         print!("{rendered}");
     }
     Ok(())
+}
+
+fn default_sessions_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("LASH_HOME") {
+        return PathBuf::from(dir).join("sessions");
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".lash")
+        .join("sessions")
 }

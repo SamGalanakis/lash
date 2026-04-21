@@ -220,7 +220,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bench-longcot"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -231,6 +231,9 @@ dependencies = [
  "lash-export",
  "lash-mode-rlm",
  "lash-mode-standard",
+ "lash-plugin-observational-memory",
+ "lash-plugin-rolling-history",
+ "lash-provider-openai",
  "lash-subagents",
  "regex",
  "serde",
@@ -241,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "bench-longmemeval-rlm"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -249,6 +252,9 @@ dependencies = [
  "clap",
  "dotenvy",
  "lash",
+ "lash-plugin-observational-memory",
+ "lash-plugin-rolling-history",
+ "lash-provider-openai",
  "lash-subagents",
  "regex",
  "reqwest",
@@ -260,17 +266,21 @@ dependencies = [
 
 [[package]]
 name = "bench-swebench"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "clap",
+ "dirs 6.0.0",
  "dotenvy",
  "lash",
  "lash-default-tools",
  "lash-mode-rlm",
  "lash-mode-standard",
+ "lash-plugin-observational-memory",
+ "lash-plugin-rolling-history",
+ "lash-providers-builtin",
  "lash-subagents",
  "serde",
  "serde_json",
@@ -1837,12 +1847,12 @@ dependencies = [
 
 [[package]]
 name = "lash"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "base64",
+ "bytes",
  "chrono",
- "dirs 6.0.0",
  "fff-search",
  "flate2",
  "futures-util",
@@ -1871,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "lash-autoresearch"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "lash",
@@ -1886,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "lash-cli"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1896,6 +1906,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dhat",
+ "dirs 6.0.0",
  "image",
  "lash",
  "lash-autoresearch",
@@ -1903,6 +1914,14 @@ dependencies = [
  "lash-export",
  "lash-mode-rlm",
  "lash-mode-standard",
+ "lash-plugin-plan-mode",
+ "lash-plugin-prompt-context",
+ "lash-plugin-ui-activity",
+ "lash-provider-anthropic",
+ "lash-provider-codex",
+ "lash-provider-google",
+ "lash-provider-openai",
+ "lash-providers-builtin",
  "lash-subagents",
  "lash-tui",
  "lash-ui",
@@ -1925,30 +1944,55 @@ dependencies = [
 
 [[package]]
 name = "lash-default-tools"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "lash",
+ "lash-plugin-observational-memory",
+ "lash-plugin-rolling-history",
 ]
 
 [[package]]
 name = "lash-export"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs 6.0.0",
  "lash",
  "serde_json",
 ]
 
 [[package]]
 name = "lash-mode-rlm"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "lash",
  "lash-mode-standard",
  "lash-sansio",
- "lashlang",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "lash-mode-standard"
+version = "0.2.62"
+dependencies = [
+ "async-trait",
+ "lash",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "lash-plugin-observational-memory"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "lash",
+ "regex",
  "serde",
  "serde_json",
  "tokio",
@@ -1956,19 +2000,119 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-mode-standard"
+name = "lash-plugin-plan-mode"
 version = "0.2.61"
 dependencies = [
  "async-trait",
  "lash",
- "lash-sansio",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lash-plugin-prompt-context"
+version = "0.2.61"
+dependencies = [
+ "chrono",
+ "lash",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "lash-plugin-rolling-history"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "lash",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "lash-plugin-ui-activity"
+version = "0.2.61"
+dependencies = [
+ "lash",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "lash-sansio"
+name = "lash-provider-anthropic"
 version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "base64",
+ "lash",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "lash-provider-codex"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "base64",
+ "lash",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lash-provider-google"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "base64",
+ "lash",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "lash-provider-openai"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "base64",
+ "lash",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "lash-providers-builtin"
+version = "0.2.61"
+dependencies = [
+ "lash-provider-anthropic",
+ "lash-provider-codex",
+ "lash-provider-google",
+ "lash-provider-openai",
+]
+
+[[package]]
+name = "lash-sansio"
+version = "0.2.62"
 dependencies = [
  "base64",
  "serde",
@@ -1978,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "lash-subagents"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "lash",
@@ -1992,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "lash-tui"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2001,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "lash-ui"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "lash",
@@ -2011,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "lashlang"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "compact_str",
  "criterion",

@@ -1,8 +1,7 @@
-use async_trait::async_trait;
-
-use crate::provider::Provider;
-
-use super::types::{LlmRequest, LlmResponse, ModelSelection};
+//! Transport-level error type shared by all provider impls. The
+//! `LlmTransport` trait that used to live here has merged into
+//! [`crate::provider::Provider`] — each concrete provider now owns its
+//! own wire code and exposes a single `complete` method.
 
 #[derive(Debug, thiserror::Error, Clone)]
 #[error("{message}")]
@@ -44,22 +43,4 @@ impl LlmTransportError {
         self.request_body = Some(request_body.into());
         self
     }
-}
-
-#[async_trait]
-pub trait LlmTransport: Send + Sync {
-    fn default_root_model(&self) -> &'static str;
-    fn default_agent_model(&self, tier: &str) -> Option<ModelSelection>;
-    fn requires_streaming(&self) -> bool {
-        false
-    }
-    fn normalize_model(&self, model: &str) -> String;
-    fn context_lookup_model(&self, model: &str) -> String;
-
-    async fn ensure_ready(&self, provider: &mut Provider) -> Result<bool, LlmTransportError>;
-    async fn complete(
-        &self,
-        provider: &mut Provider,
-        req: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError>;
 }

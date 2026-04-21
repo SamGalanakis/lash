@@ -815,7 +815,7 @@ impl EditorState {
     }
 
     pub fn load_history(&mut self) {
-        let path = lash::lash_home().join("history");
+        let path = crate::paths::lash_home().join("history");
         if let Ok(content) = std::fs::read_to_string(&path) {
             self.input_history = content
                 .lines()
@@ -826,7 +826,7 @@ impl EditorState {
     }
 
     pub fn save_history(&self) {
-        let dir = lash::lash_home();
+        let dir = crate::paths::lash_home();
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("history");
         let start = self.input_history.len().saturating_sub(500);

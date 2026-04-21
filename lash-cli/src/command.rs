@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn parses_all_primary_commands() {
-        let skills = SkillCatalog::load();
+        let skills = SkillCatalog::from_dirs(&crate::paths::default_skill_dirs());
         let plugin_commands: Vec<CommandDef> = Vec::new();
         for spec in COMMANDS {
             assert!(
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn parses_aliases_and_arguments() {
-        let skills = SkillCatalog::load();
+        let skills = SkillCatalog::from_dirs(&crate::paths::default_skill_dirs());
         let plugin_commands: Vec<CommandDef> = Vec::new();
         assert!(matches!(
             parse("/new", &skills, &plugin_commands),
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn parses_plugin_registered_commands() {
-        let skills = SkillCatalog::load();
+        let skills = SkillCatalog::from_dirs(&crate::paths::default_skill_dirs());
         let plugin_commands = vec![CommandDef {
             name: "/compact",
             usage: "/compact [focus]",
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn completion_spacing_matches_argument_commands() {
-        let skills = SkillCatalog::load();
+        let skills = SkillCatalog::from_dirs(&crate::paths::default_skill_dirs());
         let plugin_commands: Vec<CommandDef> = Vec::new();
         for cmd in [
             "/model",
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn completions_include_plugin_commands() {
-        let skills = SkillCatalog::load();
+        let skills = SkillCatalog::from_dirs(&crate::paths::default_skill_dirs());
         let plugin_commands = vec![CommandDef {
             name: "/compact",
             usage: "/compact [focus]",

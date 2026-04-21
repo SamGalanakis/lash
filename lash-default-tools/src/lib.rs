@@ -7,10 +7,11 @@ use lash::tools::{
     StandardShell, WebSearch, shell_prompt_contributions,
 };
 use lash::{
-    BuiltinObservationalMemoryPluginFactory, BuiltinRollingHistoryPluginFactory,
     BuiltinToolResultProjectionPluginFactory, ContextApproach, ExecutionMode, FsInstructionSource,
     PluginHost, ToolProvider,
 };
+use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
+use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefaultToolBundle {
@@ -92,10 +93,10 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
                 factories.push(Arc::new(BuiltinToolResultProjectionPluginFactory::default()));
             }
             DefaultToolBundle::RollingHistory => {
-                factories.push(Arc::new(BuiltinRollingHistoryPluginFactory::default()));
+                factories.push(Arc::new(RollingHistoryPluginFactory::default()));
             }
             DefaultToolBundle::ObservationalMemory => {
-                factories.push(Arc::new(BuiltinObservationalMemoryPluginFactory));
+                factories.push(Arc::new(ObservationalMemoryPluginFactory));
             }
             DefaultToolBundle::Shell => {
                 factories.push(Arc::new(StaticPluginFactory::new(
@@ -260,8 +261,8 @@ mod tests {
     #[test]
     fn observational_memory_bundle_advertises_om_support() {
         let host = PluginHost::new(vec![
-            Arc::new(BuiltinRollingHistoryPluginFactory::default()) as Arc<dyn lash::PluginFactory>,
-            Arc::new(BuiltinObservationalMemoryPluginFactory) as Arc<dyn lash::PluginFactory>,
+            Arc::new(RollingHistoryPluginFactory::default()) as Arc<dyn lash::PluginFactory>,
+            Arc::new(ObservationalMemoryPluginFactory) as Arc<dyn lash::PluginFactory>,
         ]);
         assert!(
             host.supports_context_approach(&lash::ContextApproach::ObservationalMemory(

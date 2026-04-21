@@ -4,10 +4,9 @@ pub use lash_sansio::session_model::prompt;
 
 use tokio::sync::mpsc;
 
-use crate::llm::factory::adapter_for;
 use crate::llm::types::{LlmEventSender, LlmStreamEvent};
 use crate::plugin::PluginMessage;
-use crate::provider::Provider;
+use crate::provider::ProviderHandle;
 use crate::{ContextApproach, ExecutionMode};
 
 pub use lash_sansio::session_model::{
@@ -82,10 +81,15 @@ pub(crate) fn plugin_message_to_message(
 }
 
 /// Resolved session policy for a running session.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// `provider` is a [`ProviderHandle`] — serializes through
+/// [`crate::provider::ProviderSpec`], rebuilt via the global
+/// [`crate::provider::ProviderRegistry`] on load. Hosts register the
+/// concrete provider types they support at startup.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionPolicy {
     pub model: String,
-    pub provider: Provider,
+    pub provider: ProviderHandle,
     pub max_context_tokens: Option<usize>,
     pub model_variant: Option<String>,
     pub session_id: Option<String>,
@@ -95,35 +99,15 @@ pub struct SessionPolicy {
     pub context_approach: ContextApproach,
 }
 
-impl Default for SessionPolicy {
-    fn default() -> Self {
-        Self {
-            model: "anthropic/claude-sonnet-4.6".to_string(),
-            provider: Provider::OpenAiGeneric {
-                api_key: String::new(),
-                base_url: String::new(),
-                options: crate::provider::ProviderOptions::default(),
-            },
-            max_context_tokens: None,
-            model_variant: None,
-            session_id: None,
-            max_turns: None,
-            execution_mode: crate::default_execution_mode(),
-            context_approach: ContextApproach::default(),
-        }
-    }
-}
-
 pub(crate) fn transport_stream_events(
-    provider: &Provider,
+    provider: &ProviderHandle,
     requested: Option<tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>>,
 ) -> Option<LlmEventSender> {
     if let Some(requested) = requested {
         return Some(make_stream_event_sender(requested));
     }
 
-    let llm = adapter_for(provider);
-    if llm.requires_streaming() {
+    if provider.requires_streaming() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
         drop(rx);
         Some(make_stream_event_sender(tx))

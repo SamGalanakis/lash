@@ -14,10 +14,18 @@ name = "lash"
 path = "src/main.rs"
 
 [dependencies]
-lash = { path = "../lash", default-features = false, features = ["full"] }
+lash = { path = "../lash", default-features = false, features = ["full", "testing"] }
 lash-default-tools = { path = "../lash-default-tools" }
 lash-mode-rlm = { path = "../lash-mode-rlm", features = ["sqlite-store"] }
 lash-mode-standard = { path = "../lash-mode-standard" }
+lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode" }
+lash-plugin-prompt-context = { path = "../lash-plugin-prompt-context" }
+lash-plugin-ui-activity = { path = "../lash-plugin-ui-activity" }
+lash-provider-anthropic = { path = "../lash-provider-anthropic" }
+lash-provider-codex = { path = "../lash-provider-codex" }
+lash-provider-google = { path = "../lash-provider-google" }
+lash-provider-openai = { path = "../lash-provider-openai" }
+lash-providers-builtin = { path = "../lash-providers-builtin" }
 lash-subagents = { path = "../lash-subagents" }
 lash-ui = { path = "../lash-ui" }
 lash-tui = { path = "../lash-tui" }
@@ -41,6 +49,7 @@ pulldown-cmark = "0.13"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
+dirs = "6"
 sha2 = "0.10"
 base64 = "0.22"
 stats_alloc = "0.1"

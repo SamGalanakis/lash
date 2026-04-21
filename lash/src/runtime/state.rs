@@ -114,8 +114,20 @@ pub struct PersistedSessionState {
     pub token_ledger: Vec<TokenLedgerEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<crate::store::BlobRef>,
+    /// Count of nodes the store currently holds. Resident nodes at
+    /// indices `[0..persisted_graph_node_count)` are what the store has;
+    /// indices `[persisted_graph_node_count..)` are new and need
+    /// appending on the next commit.
+    ///
+    /// Invariant: residency trim (drops resident orphans) must reset this
+    /// to `state.session_graph.nodes.len()` so subsequent appends stay in
+    /// bounds — the dropped nodes stay in the store, but nothing resident
+    /// is "new" right after a trim.
     #[serde(skip)]
     pub persisted_graph_node_count: usize,
+    /// Signals that the next commit must write the full graph (a
+    /// destructive rewrite happened, e.g. `heal_orphaned_leaf`). Cleared
+    /// after the next commit.
     #[serde(skip)]
     pub graph_replace_required: bool,
 }
@@ -287,7 +299,7 @@ impl Default for PersistedSessionState {
 
 pub(super) fn persisted_session_config(policy: &SessionPolicy) -> crate::PersistedSessionConfig {
     crate::PersistedSessionConfig {
-        provider_id: policy.provider.id().to_string(),
+        provider_id: policy.provider.kind().to_string(),
         configured_model: policy.model.clone(),
         context_window: policy.max_context_tokens.unwrap_or_default() as u64,
         execution_mode: policy.execution_mode,
@@ -377,6 +389,13 @@ pub(super) async fn persist_session_graph_and_head(
     state: &mut PersistedSessionState,
 ) {
     let nodes_len = state.session_graph.nodes.len();
+    debug_assert!(
+        state.persisted_graph_node_count <= nodes_len || state.graph_replace_required,
+        "persisted_graph_node_count ({}) exceeds resident ({}) without graph_replace_required — \
+         residency trim or heal path forgot to reset the count",
+        state.persisted_graph_node_count,
+        nodes_len
+    );
     if state.graph_replace_required || state.persisted_graph_node_count > nodes_len {
         store.replace_session_graph(&state.session_graph).await;
     } else if state.persisted_graph_node_count < nodes_len {
@@ -431,8 +450,60 @@ pub(super) fn append_session_nodes_to_state(
     node_ids
 }
 
+/// Heal any graph corruption (orphaned leaf) on load.
+///
+/// Must run BEFORE any residency-based trim (phase-9 feature) because
+/// healing's fallback search relies on having the full node set in RAM.
+/// Under `Residency::ActivePathOnly`, the runtime loads only the active
+/// path; if the leaf doesn't resolve against that reduced set, the
+/// caller falls back to a full `load_session_graph()` + `normalize` +
+/// trim.
 pub(super) fn normalize_session_graph(state: &mut PersistedSessionState) {
     if state.session_graph.heal_orphaned_leaf() {
         state.graph_replace_required = true;
+    }
+}
+
+/// Trim the resident node set according to `Residency`. Called AFTER
+/// `normalize_session_graph` during `from_environment` load. Under
+/// `KeepAll` this is a no-op; under `ActivePathOnly` it replaces the
+/// resident graph with just the active path. Orphans remain on disk —
+/// the host decides whether/when to tombstone + vacuum them via
+/// `LashRuntime::orphaned_node_ids` + the store primitives.
+///
+/// Preserves the "resident[0..persisted_graph_node_count) were committed"
+/// invariant. Active path is root-to-leaf; any unpersisted resident
+/// nodes (appended after the last commit) live at the tail, so the
+/// new persisted count = number of kept active-path nodes whose
+/// original index was < the old count.
+pub(super) fn apply_residency_on_load(
+    state: &mut PersistedSessionState,
+    residency: crate::Residency,
+) {
+    match residency {
+        crate::Residency::KeepAll => {}
+        crate::Residency::ActivePathOnly => {
+            let old_persisted = state.persisted_graph_node_count;
+            let new_persisted = state
+                .session_graph
+                .active_path_nodes()
+                .iter()
+                .filter(|node| {
+                    state
+                        .session_graph
+                        .node_index(&node.node_id)
+                        .map(|orig_idx| orig_idx < old_persisted)
+                        .unwrap_or(false)
+                })
+                .count();
+            state.session_graph = state.session_graph.fork_current_path();
+            state.persisted_graph_node_count = new_persisted;
+            debug_assert!(
+                state.persisted_graph_node_count <= state.session_graph.nodes.len(),
+                "residency trim left persisted count ({}) > resident ({})",
+                state.persisted_graph_node_count,
+                state.session_graph.nodes.len()
+            );
+        }
     }
 }

@@ -12,18 +12,19 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::plugin::PluginFactory;
-use lash::provider::OPENROUTER_BASE_URL;
 use lash::{
-    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinRollingHistoryPluginFactory,
-    BuiltinToolResultProjectionPluginFactory, ContextApproach, EmbeddedRuntimeHost, EventSink,
-    ExecutionMode, InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices,
-    PluginHost, PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, Provider, ProviderOptions, RlmGlobalsPatchPluginBody, RuntimeCoreConfig,
-    RuntimeStore, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
-    diff_usage_reports,
+    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
+    ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
+    PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot,
+    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderHandle,
+    RlmGlobalsPatchPluginBody, RuntimeCoreConfig, RuntimeStore, SessionAppendNode, SessionEvent,
+    SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
+    TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_export::{ExportFormat, SessionSelector, export};
+use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
+use lash_plugin_rolling_history::RollingHistoryPluginFactory;
+use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -579,7 +580,7 @@ fn summarize_domain_selection(domains: &[String]) -> String {
 
 async fn run_question(
     output_dir: &Path,
-    provider: &Provider,
+    provider: &ProviderHandle,
     args: &Args,
     execution_mode: ExecutionMode,
     context_approach: &ContextApproach,
@@ -737,6 +738,7 @@ async fn run_question(
     let trace_path = question_dir.join("trace.html");
     if let Err(err) = export(
         SessionSelector::Path(&store_path),
+        std::path::Path::new(""),
         ExportFormat::Html,
         Some(&trace_path),
     ) {
@@ -819,10 +821,10 @@ fn build_plugin_session(
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
     match context_approach {
         ContextApproach::RollingHistory(_) => {
-            factories.push(Arc::new(BuiltinRollingHistoryPluginFactory::default()));
+            factories.push(Arc::new(RollingHistoryPluginFactory::default()));
         }
         ContextApproach::ObservationalMemory(_) => {
-            factories.push(Arc::new(lash::BuiltinObservationalMemoryPluginFactory));
+            factories.push(Arc::new(ObservationalMemoryPluginFactory));
         }
     }
     // The RLM runtime refuses to start without mode-session plugins
@@ -960,7 +962,7 @@ fn build_globals_patch(question: &LongCoTQuestion) -> RlmGlobalsPatchPluginBody 
     }
 }
 
-fn resolve_provider(args: &Args) -> anyhow::Result<Provider> {
+fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
     match args.provider_id.as_str() {
         "openai-compatible" | "openai-generic" => {
             let api_key = resolve_api_key(args).ok_or_else(|| {
@@ -968,11 +970,9 @@ fn resolve_provider(args: &Args) -> anyhow::Result<Provider> {
                     "missing API key — set OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY in .env, or pass --api-key"
                 )
             })?;
-            Ok(Provider::OpenAiGeneric {
-                api_key,
-                base_url: resolve_base_url(args),
-                options: ProviderOptions::default(),
-            })
+            let provider =
+                lash_provider_openai::OpenAiGenericProvider::new(api_key, resolve_base_url(args));
+            Ok(ProviderHandle::new(Box::new(provider)))
         }
         other => bail!(
             "provider `{other}` is not supported by this harness; use the OpenAI-compatible path"

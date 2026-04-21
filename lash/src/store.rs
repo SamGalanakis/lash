@@ -71,9 +71,10 @@ CREATE TABLE IF NOT EXISTS session_head (
 );
 
 CREATE TABLE IF NOT EXISTS graph_nodes (
-    seq       INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id   TEXT NOT NULL UNIQUE,
-    node_json TEXT NOT NULL
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id    TEXT NOT NULL UNIQUE,
+    node_json  TEXT NOT NULL,
+    tombstoned INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS usage_deltas (
@@ -98,7 +99,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
 ";
 
 #[cfg(feature = "sqlite-store")]
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 13;
 
 #[cfg(feature = "sqlite-store")]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -250,6 +251,14 @@ pub struct GcReport {
     pub deleted_blob_count: usize,
 }
 
+/// Result of a `RuntimeStore::vacuum()` call.
+/// `removed_node_count` counts the tombstoned graph-node rows that were
+/// physically deleted from the store. Returned so hosts can emit metrics.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VacuumReport {
+    pub removed_node_count: usize,
+}
+
 #[cfg(feature = "sqlite-store")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BuiltinBlobProfile {
@@ -398,7 +407,7 @@ fn persisted_session_config_from_state(
     state: &crate::PersistedSessionState,
 ) -> crate::PersistedSessionConfig {
     crate::PersistedSessionConfig {
-        provider_id: state.policy.provider.id().to_string(),
+        provider_id: state.policy.provider.kind().to_string(),
         configured_model: state.policy.model.clone(),
         context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
         execution_mode: state.policy.execution_mode,
@@ -467,6 +476,8 @@ pub enum RuntimeCommit {
 pub struct PersistedStateCommitResult {
     pub checkpoint_ref: BlobRef,
     pub manifest: SessionCheckpoint,
+    /// Total node count the store now holds after the commit. The runtime
+    /// replaces its `persisted_graph_node_count` with this value.
     pub persisted_graph_node_count: usize,
 }
 
@@ -500,14 +511,24 @@ fn build_checkpoint_from_persisted_state(
 
 fn graph_commit_from_state(state: &crate::PersistedSessionState) -> SessionGraphCommit {
     let nodes_len = state.session_graph.nodes.len();
+    debug_assert!(
+        state.persisted_graph_node_count <= nodes_len || state.graph_replace_required,
+        "graph_commit_from_state: persisted count ({}) > resident ({}) without \
+         graph_replace_required — residency trim or heal forgot to reset the count",
+        state.persisted_graph_node_count,
+        nodes_len
+    );
     if state.graph_replace_required || state.persisted_graph_node_count > nodes_len {
-        SessionGraphCommit::Replace(state.session_graph.clone())
-    } else {
-        SessionGraphCommit::Append {
-            nodes: state.session_graph.nodes[state.persisted_graph_node_count..].to_vec(),
-            leaf_node_id: state.session_graph.leaf_node_id.clone(),
-            graph_node_count: nodes_len,
-        }
+        return SessionGraphCommit::Replace(state.session_graph.clone());
+    }
+    // Append only the tail — indices `[persisted_graph_node_count..]`.
+    // Residency trim resets `persisted_graph_node_count` so the tail
+    // stays in bounds; heal/rewrite sets `graph_replace_required` above.
+    let new_nodes = state.session_graph.nodes[state.persisted_graph_node_count..].to_vec();
+    SessionGraphCommit::Append {
+        nodes: new_nodes,
+        leaf_node_id: state.session_graph.leaf_node_id.clone(),
+        graph_node_count: nodes_len,
     }
 }
 
@@ -713,8 +734,82 @@ pub trait RuntimeStore: Send + Sync {
         GcReport::default()
     }
 
+    /// Load only the active-path chain from `leaf_node_id` back to its
+    /// root (or from `load_session_head_meta().leaf_node_id` when
+    /// `leaf_node_id` is `None`). Embedder-optimal constructors use this
+    /// when `Residency::ActivePathOnly` so session hydration is
+    /// O(active-path), not O(total-history).
+    ///
+    /// Default: fall back to `load_session_graph().await` and filter to
+    /// the active-path. SQLite impls should override with a recursive
+    /// CTE.
+    async fn load_active_path_graph(&self, leaf_node_id: Option<&str>) -> crate::SessionGraph {
+        let mut graph = self.load_session_graph().await;
+        if let Some(leaf) = leaf_node_id
+            && graph.find_node(leaf).is_some()
+        {
+            graph.set_leaf_node_id(Some(leaf.to_string()));
+        }
+        if graph
+            .leaf_node_id
+            .as_ref()
+            .is_some_and(|id| graph.find_node(id).is_some())
+        {
+            graph.fork_current_path()
+        } else {
+            graph
+        }
+    }
+
+    /// Fetch a single node by id. Used for opt-in historic-node reads
+    /// under `ActivePathOnly` residency. Default: load the full graph
+    /// and linear-search; SQLite impls should override with an indexed
+    /// lookup.
+    async fn get_node(&self, node_id: &str) -> Option<crate::SessionNodeRecord> {
+        self.load_session_graph().await.find_node(node_id).cloned()
+    }
+
+    /// Mark nodes as eligible for `vacuum()`. Host-called primitive for
+    /// bounded-disk embedders. Default: no-op (backends that don't
+    /// support tombstoning behave as append-only).
+    async fn tombstone_nodes(&self, _ids: &[String]) {}
+
+    /// Physically remove nodes previously marked by `tombstone_nodes`.
+    /// Host-called primitive; the runtime never invokes it. Default:
+    /// no-op.
+    async fn vacuum(&self) -> VacuumReport {
+        VacuumReport::default()
+    }
+
     async fn load_persisted_session_state(&self) -> Option<crate::PersistedSessionState> {
         let head = self.load_session_head().await?;
+        let checkpoint = match head.checkpoint_ref.as_ref() {
+            Some(blob_ref) => get_checkpoint(self, blob_ref).await,
+            None => None,
+        };
+        Some(persisted_session_state_from_head(head, checkpoint))
+    }
+
+    /// Like `load_persisted_session_state` but loads only the active-path
+    /// chain. Used by `LashRuntime::resume` under `Residency::ActivePathOnly`
+    /// so hydration is O(active-path) instead of O(total-history). Default
+    /// delegates to `load_active_path_graph` (which itself falls back to
+    /// full-load-then-fork unless overridden).
+    async fn load_persisted_session_state_active_path(
+        &self,
+    ) -> Option<crate::PersistedSessionState> {
+        let meta = self.load_session_head_meta().await?;
+        let mut graph = self
+            .load_active_path_graph(meta.leaf_node_id.as_deref())
+            .await;
+        graph.set_leaf_node_id(meta.leaf_node_id.clone());
+        let head = SessionHead {
+            session_id: meta.session_id,
+            graph,
+            config: meta.config,
+            checkpoint_ref: meta.checkpoint_ref.clone(),
+            token_ledger: merge_token_ledger_entries(self.load_usage_deltas().await),
+        };
         let checkpoint = match head.checkpoint_ref.as_ref() {
             Some(blob_ref) => get_checkpoint(self, blob_ref).await,
             None => None,
@@ -752,12 +847,13 @@ pub trait RuntimeStore: Send + Sync {
                     }
                     SessionGraphCommit::Append { .. } => {}
                 }
+                let graph_node_count = commit.graph.graph_node_count();
                 self.save_session_head_meta(SessionHeadMeta {
                     session_id: commit.session_id,
                     config: commit.config,
                     checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
                     leaf_node_id: commit.graph.leaf_node_id().cloned(),
-                    graph_node_count: commit.graph.graph_node_count(),
+                    graph_node_count,
                     token_ledger: Vec::new(),
                 })
                 .await;
@@ -765,7 +861,7 @@ pub trait RuntimeStore: Send + Sync {
                 RuntimeCommitResult::PersistedState(PersistedStateCommitResult {
                     checkpoint_ref: stored_checkpoint.checkpoint_ref,
                     manifest: stored_checkpoint.manifest,
-                    persisted_graph_node_count: commit.graph.graph_node_count(),
+                    persisted_graph_node_count: graph_node_count,
                 })
             }
             RuntimeCommit::LiveResume(commit) => {
@@ -1352,7 +1448,11 @@ impl Store {
         conn: &Connection,
         leaf_node_id: Option<String>,
     ) -> crate::SessionGraph {
-        let mut stmt = match conn.prepare("SELECT node_json FROM graph_nodes ORDER BY seq ASC") {
+        // Tombstoned rows are physically still present until `vacuum()` is
+        // called; the runtime view should never see them.
+        let mut stmt = match conn
+            .prepare("SELECT node_json FROM graph_nodes WHERE tombstoned = 0 ORDER BY seq ASC")
+        {
             Ok(stmt) => stmt,
             Err(err) => {
                 tracing::warn!(error = %err, "failed to prepare graph load statement");
@@ -1793,6 +1893,7 @@ impl Store {
                         append_session_graph_nodes_tx(&tx, nodes)
                     }
                 }
+                let graph_node_count = commit.graph.graph_node_count();
                 save_session_head_meta_tx(
                     &tx,
                     SessionHeadMeta {
@@ -1800,7 +1901,7 @@ impl Store {
                         config: commit.config,
                         checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
                         leaf_node_id: commit.graph.leaf_node_id().cloned(),
-                        graph_node_count: commit.graph.graph_node_count(),
+                        graph_node_count,
                         token_ledger: Vec::new(),
                     },
                 );
@@ -1808,7 +1909,7 @@ impl Store {
                 RuntimeCommitResult::PersistedState(PersistedStateCommitResult {
                     checkpoint_ref: stored_checkpoint.checkpoint_ref,
                     manifest: stored_checkpoint.manifest,
-                    persisted_graph_node_count: commit.graph.graph_node_count(),
+                    persisted_graph_node_count: graph_node_count,
                 })
             }
             RuntimeCommit::LiveResume(commit) => {
@@ -2096,6 +2197,44 @@ impl RuntimeStore for Store {
     ) -> Result<RuntimeCommitResult, StoreError> {
         Self::apply_runtime_commit(self, commit)
     }
+
+    async fn get_node(&self, node_id: &str) -> Option<crate::SessionNodeRecord> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT node_json FROM graph_nodes WHERE node_id = ?1 AND tombstoned = 0",
+                params![node_id],
+                |row| row.get(0),
+            )
+            .ok();
+        row.and_then(|json| serde_json::from_str(&json).ok())
+    }
+
+    async fn tombstone_nodes(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().expect("tombstone transaction");
+        for id in ids {
+            tx.execute(
+                "UPDATE graph_nodes SET tombstoned = 1 WHERE node_id = ?1",
+                params![id],
+            )
+            .expect("tombstone graph node");
+        }
+        tx.commit().expect("commit tombstone");
+    }
+
+    async fn vacuum(&self) -> VacuumReport {
+        let conn = self.conn.lock().unwrap();
+        let removed = conn
+            .execute("DELETE FROM graph_nodes WHERE tombstoned = 1", [])
+            .unwrap_or(0);
+        VacuumReport {
+            removed_node_count: removed,
+        }
+    }
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -2108,6 +2247,14 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
 
     if user_version == 11 {
         migrate_schema_v11_to_v12(conn)?;
+        migrate_schema_v12_to_v13(conn)?;
+        conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        return Ok(());
+    }
+
+    if user_version == 12 {
+        migrate_schema_v12_to_v13(conn)?;
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         return Ok(());
@@ -2169,6 +2316,31 @@ fn migrate_schema_v11_to_v12(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 #[cfg(feature = "sqlite-store")]
+fn migrate_schema_v12_to_v13(conn: &Connection) -> rusqlite::Result<()> {
+    // Add tombstoned flag to graph_nodes. Default 0 preserves existing
+    // rows as live. Persistence policies (DropOrphans) flip this column
+    // to 1 on orphan trim; `vacuum()` deletes rows where tombstoned = 1.
+    //
+    // Idempotent: the `ALTER TABLE` fails with `duplicate column name`
+    // if the column already exists (possible when `ensure_schema` ran
+    // `execute_batch(SCHEMA)` first and `graph_nodes` was created fresh
+    // with the v13 shape). Swallow that specific error — other errors
+    // propagate.
+    if let Err(err) = conn.execute(
+        "ALTER TABLE graph_nodes ADD COLUMN tombstoned INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        let msg = err.to_string();
+        let already_added = msg.contains("duplicate column name");
+        let no_such_table = msg.contains("no such table");
+        if !already_added && !no_such_table {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite-store")]
 fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master
@@ -2182,10 +2354,7 @@ fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
 
 #[cfg(feature = "sqlite-store")]
 fn unsupported_schema_message() -> String {
-    format!(
-        "Unsupported lash session schema. Delete {} and try again.",
-        crate::lash_home().join("sessions").display()
-    )
+    "Unsupported lash session schema. Delete the session database and try again.".to_string()
 }
 
 #[cfg(all(test, feature = "sqlite-store"))]

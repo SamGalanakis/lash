@@ -24,10 +24,6 @@ struct ParsedFrontmatter {
 }
 
 impl SkillCatalog {
-    pub fn load() -> Self {
-        Self::from_dirs(&crate::default_skill_dirs())
-    }
-
     pub fn from_dirs(skill_dirs: &[PathBuf]) -> Self {
         let mut skills = Vec::new();
 

@@ -1,0 +1,15 @@
+[package]
+name = "lash-provider-openai"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "OpenAI-compatible (API key) provider for lash. Works with OpenRouter, OpenAI, vLLM, etc."
+
+[dependencies]
+lash = { path = "../lash" }
+async-trait = "0.1"
+base64 = "0.22"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
