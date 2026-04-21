@@ -5,7 +5,7 @@ use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
-use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentToolConfig, SubagentsPluginFactory};
+use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -29,12 +29,14 @@ fn plugin_factories_for_surface(
     session_policy: SessionPolicy,
     lash_config: &LashConfig,
 ) -> Vec<Arc<dyn PluginFactory>> {
-    let subagent_tool_config = SubagentToolConfig {
-        low_tier_execution_mode: lash_config
-            .runtime
-            .low_tier_subagent_execution_mode
-            .unwrap_or(ExecutionMode::Standard),
-    };
+    let low_tier_execution_mode = lash_config
+        .runtime
+        .low_tier_subagent_execution_mode
+        .unwrap_or(ExecutionMode::Standard);
+    let capability_registry = Arc::new(default_registry(
+        &lash_config.agent_models,
+        low_tier_execution_mode,
+    ));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
 
     let profile = DefaultToolSurfaceProfile::for_runtime(
@@ -62,6 +64,11 @@ fn plugin_factories_for_surface(
             Default::default(),
         )));
         plugin_factories.push(Arc::new(lash::BuiltinUiActivityPluginFactory));
+        // `update_plan` drives the sticky plan dock at the bottom of
+        // the TUI. Interactive-only here; root-only inside the plugin
+        // itself (the factory returns an inert plugin for subagent
+        // / compaction / other non-root sessions).
+        plugin_factories.push(Arc::new(lash::BuiltinUpdatePlanPluginFactory));
     }
     plugin_factories.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
     plugin_factories.push(Arc::new(
@@ -72,8 +79,7 @@ fn plugin_factories_for_surface(
     ));
     plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy,
-        subagent_tool_config,
-        lash_config.agent_models.clone(),
+        capability_registry,
         subagent_host,
     )));
     plugin_factories

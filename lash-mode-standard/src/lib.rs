@@ -51,10 +51,9 @@ use lash::{
 };
 use serde_json::Value;
 
-const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution is needed.
+const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls.
 
-- Use `batch` for two or more independent tool calls. Serialize calls when later arguments depend on earlier results.
-- After applying a change, verify the end-state. Do not re-verify before acting.
+- Use `batch` (up to 25 calls) for two or more independent tool calls. Serialize calls when later arguments depend on earlier results.
 - For direct conversational requests that need no tools, respond in prose only."#;
 
 const BATCH_MAX_TOOL_CALLS: usize = 25;
@@ -353,6 +352,16 @@ struct StandardToolCall {
     signature: Option<String>,
 }
 
+fn last_message_has_tool_result(ctx: &DriverContextView<'_>) -> bool {
+    ctx.messages().last().is_some_and(|message| {
+        matches!(message.role, MessageRole::User)
+            && message
+                .parts
+                .iter()
+                .any(|part| matches!(part.kind, PartKind::ToolResult))
+    })
+}
+
 impl ProtocolDriverHandle for StandardDriver {
     fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
@@ -446,6 +455,16 @@ impl ProtocolDriverHandle for StandardDriver {
 
         if tool_calls.is_empty() {
             if assistant_text.trim().is_empty() && reasoning_items.is_empty() {
+                if last_message_has_tool_result(&ctx) {
+                    // A model can intentionally complete a tool-only request
+                    // with an empty final answer, e.g. when the user says
+                    // "do nothing else" after the tool action.
+                    actions.push(DriverAction::StartCheckpoint {
+                        checkpoint: CheckpointKind::BeforeCompletion,
+                        on_empty: CheckpointResumeAction::Finish,
+                    });
+                    return actions;
+                }
                 actions.push(DriverAction::Emit(make_error_event(
                     "llm_provider",
                     Some("empty_response"),

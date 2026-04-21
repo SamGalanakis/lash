@@ -320,7 +320,6 @@ struct MdRenderer {
     in_code_block: bool,
     in_item: bool,
     list_stack: Vec<ListContext>,
-    pending_item_prefix: Option<String>,
     // Table buffering: collect all rows, then render with aligned columns
     in_table: bool,
     in_table_head: bool,
@@ -400,7 +399,6 @@ impl MdRenderer {
             in_code_block: false,
             in_item: false,
             list_stack: Vec::new(),
-            pending_item_prefix: None,
             in_table: false,
             in_table_head: false,
             table_rows: Vec::new(),
@@ -441,16 +439,6 @@ impl MdRenderer {
     fn flush_current_cell_line(&mut self) {
         let spans = std::mem::take(&mut self.current_cell_spans);
         self.current_cell_lines.push(Line::from(spans));
-    }
-
-    fn push_pending_item_prefix(&mut self) {
-        if !self.in_item || !self.spans.is_empty() {
-            return;
-        }
-        let Some(prefix) = self.pending_item_prefix.take() else {
-            return;
-        };
-        self.spans.push(Span::styled(prefix, self.current_style()));
     }
 
     /// Render the buffered table as a wrapped text-table with stable borders.
@@ -671,10 +659,14 @@ impl MdRenderer {
                     }
                     None => format!("{indent}{bullet} "),
                 };
-                self.pending_item_prefix = Some(prefix);
                 if depth > 0 {
                     self.push_style(theme::nested_list_item());
                 }
+                // Emit the list marker eagerly so it survives regardless of
+                // which inline event comes first (text, code, bold+code, …).
+                // Deferring the prefix to the first Text event used to drop
+                // it whenever an item started with inline code or similar.
+                self.spans.push(Span::styled(prefix, self.current_style()));
             }
             Event::End(TagEnd::Item) => {
                 self.flush_line();
@@ -683,7 +675,6 @@ impl MdRenderer {
                     self.pop_style();
                 }
                 self.in_item = false;
-                self.pending_item_prefix = None;
             }
 
             // ── Text ──
@@ -699,7 +690,6 @@ impl MdRenderer {
                         ]));
                     }
                 } else {
-                    self.push_pending_item_prefix();
                     self.spans
                         .push(Span::styled(text.to_string(), self.current_style()));
                 }
@@ -809,6 +799,137 @@ mod tests {
         assert!(
             rendered.iter().all(|line| !line.contains("bugs.5.")),
             "ordered item boundary collapsed into prior text: {rendered:#?}"
+        );
+    }
+
+    fn rendered_strings(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    /// Input → exact plain-text output golden. Asserts the whole rendered
+    /// shape, not just a property — use this when you want to lock in the
+    /// visual structure of a markdown fragment.
+    #[track_caller]
+    fn assert_render_eq(text: &str, max_width: usize, expected: &str) {
+        let rendered = render_markdown_compact(text, max_width);
+        let actual = rendered_strings(&rendered).join("\n");
+        assert_eq!(
+            actual, expected,
+            "\nINPUT:\n{text}\n\nLINES:\n{rendered:#?}"
+        );
+    }
+
+    #[test]
+    fn golden_ordered_list_with_mixed_inline_spans() {
+        // Reproduces the shape from the screenshot bug report: ordered list
+        // where some items start with bold text, one starts with bold+code,
+        // and one starts with plain text. All five markers must survive.
+        let text = "\
+1. **Cold parse.** `parse_execute` is slow.
+2. **Snapshot restore** costs time.
+3. **State churn** shows up too.
+4. **`parallel` has a scaling problem.** Branches clone state.
+5. The outer profiler is broken.";
+        let expected = "\
+1. Cold parse. parse_execute is slow.
+2. Snapshot restore costs time.
+3. State churn shows up too.
+4. parallel has a scaling problem. Branches clone state.
+5. The outer profiler is broken.";
+        assert_render_eq(text, 120, expected);
+    }
+
+    #[test]
+    fn golden_bullets_with_inline_code_and_bold() {
+        let text = "\
+- plain bullet
+- **bold** bullet
+- `code` bullet
+- *em* bullet";
+        let expected = "\
+\u{2022} plain bullet
+\u{2022} bold bullet
+\u{2022} code bullet
+\u{2022} em bullet";
+        assert_render_eq(text, 120, expected);
+    }
+
+    #[test]
+    fn golden_nested_list_preserves_both_levels() {
+        let text = "\
+1. outer one
+   - nested a
+   - nested b
+2. outer two";
+        // `End(List)` always emits a blank line, so the nested sublist
+        // ends with a paragraph break before the next top-level item. This
+        // is current behavior, not a bug — re-examine if sub-lists start
+        // feeling detached from their parent list.
+        let expected = "\
+1. outer one
+  \u{00b7} nested a
+  \u{00b7} nested b
+
+2. outer two";
+        assert_render_eq(text, 120, expected);
+    }
+
+    #[test]
+    fn golden_headings_bracket_blank_lines() {
+        let text = "Intro\n\n## Heading\n\nBody";
+        let expected = "Intro\n\nHeading\n\nBody";
+        assert_render_eq(text, 80, expected);
+    }
+
+    #[test]
+    fn golden_paragraph_then_fenced_code() {
+        let text = "Before\n\n```\nfn main() {}\n```\n\nAfter";
+        let expected = "Before\n\n\u{2502} fn main() {}\n\nAfter";
+        assert_render_eq(text, 80, expected);
+    }
+
+    #[test]
+    fn ordered_item_starting_with_inline_code_keeps_number_prefix() {
+        let text = "1. **`parallel` has a problem.** Each branch clones state.\n\n2. Another item.";
+        let rendered = rendered_strings(&render_markdown_compact(text, 120));
+        assert!(
+            rendered.iter().any(|line| line.starts_with("1. parallel")),
+            "ordered item starting with inline code should keep `1. ` prefix: {rendered:#?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.starts_with("2. Another")),
+            "subsequent items should keep their prefix: {rendered:#?}"
+        );
+    }
+
+    #[test]
+    fn ordered_item_starting_with_bare_inline_code_keeps_number_prefix() {
+        let text = "1. `foo` bar\n2. `baz` qux";
+        let rendered = rendered_strings(&render_markdown_compact(text, 120));
+        assert!(
+            rendered.iter().any(|line| line.starts_with("1. foo")),
+            "item starting with bare inline code should keep `1. ` prefix: {rendered:#?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.starts_with("2. baz")),
+            "second item: {rendered:#?}"
+        );
+    }
+
+    #[test]
+    fn bullet_item_starting_with_inline_code_keeps_bullet_prefix() {
+        let text = "- `foo` bar\n- `baz` qux";
+        let rendered = rendered_strings(&render_markdown_compact(text, 120));
+        assert!(
+            rendered.iter().any(|line| line.starts_with("\u{2022} foo")),
+            "bulleted item starting with inline code should keep bullet prefix: {rendered:#?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.starts_with("\u{2022} baz")),
+            "second bullet: {rendered:#?}"
         );
     }
 

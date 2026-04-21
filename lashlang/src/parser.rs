@@ -130,7 +130,7 @@ impl Parser {
             let mut seen = std::collections::HashSet::new();
             while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
                 let name_span = self.peek().span;
-                let name = self.expect_ident()?;
+                let name = self.expect_key_name()?;
                 if !seen.insert(name.clone()) {
                     return Err(ParseError::Expected {
                         expected: "unique branch name",
@@ -141,6 +141,10 @@ impl Parser {
                 self.expect_exact(TokenKind::Colon, "`:`")?;
                 let stmt = self.parse_stmt()?;
                 branches.push(NamedParallelBranch { name, stmt });
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
             }
             self.expect_exact(TokenKind::RBrace, "`}`")?;
             return Ok(ParallelBranches::Named(branches));
@@ -149,6 +153,13 @@ impl Parser {
         let mut statements = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             statements.push(self.parse_stmt()?);
+            // Accept commas as an optional branch separator so
+            // `parallel { a; b }` and `parallel { a, b }` parse the
+            // same — matches the leniency already in the named-branch
+            // path above.
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.bump();
+            }
         }
         self.expect_exact(TokenKind::RBrace, "`}`")?;
         Ok(ParallelBranches::Positional(statements))
@@ -331,7 +342,7 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::Dot => {
                     self.bump();
-                    let field = self.expect_ident()?;
+                    let field = self.expect_key_name()?;
                     expr = Expr::Field {
                         target: Box::new(expr),
                         field,
@@ -453,7 +464,7 @@ impl Parser {
     fn parse_record_entries(&mut self) -> Result<Vec<(AstString, Expr)>, ParseError> {
         let mut entries = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace) {
-            let key = self.expect_ident()?;
+            let key = self.expect_key_name()?;
             self.expect_exact(TokenKind::Colon, "`:`")?;
             let value = self.parse_expr()?;
             entries.push((key, value));
@@ -481,7 +492,7 @@ impl Parser {
         let mut seen = std::collections::HashSet::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace) {
             let name_token_span = self.peek().span;
-            let name = self.expect_ident()?;
+            let name = self.expect_key_name()?;
             if !seen.insert(name.clone()) {
                 return Err(ParseError::Expected {
                     expected: "unique field name",
@@ -509,8 +520,37 @@ impl Parser {
     }
 
     fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
+        let first = self.parse_type_term()?;
+        if !matches!(self.peek_kind(), TokenKind::Pipe) {
+            return Ok(first);
+        }
+        // Union: `str | null`, `int | str | null`, etc. `|` has lower
+        // precedence than any other type constructor — once we see it
+        // at top level, keep parsing `| <term>` until the run ends.
+        let mut variants = vec![first];
+        while matches!(self.peek_kind(), TokenKind::Pipe) {
+            self.bump();
+            variants.push(self.parse_type_term()?);
+        }
+        Ok(TypeExpr::Union(variants))
+    }
+
+    fn parse_type_term(&mut self) -> Result<TypeExpr, ParseError> {
         let token = self.peek().clone();
         match token.kind {
+            TokenKind::Null => {
+                self.bump();
+                Ok(TypeExpr::Null)
+            }
+            // A bare `{` in type position is the classic "forgot the
+            // `Type` keyword" mistake (`foo: { ok: bool }` instead of
+            // `foo: Type { ok: bool }`). Surface a targeted diagnostic
+            // rather than the generic "expected type expression" shrug.
+            TokenKind::LBrace => Err(ParseError::Expected {
+                expected: "type expression (type literals must start with `Type`, e.g. `Type { ok: bool }`)",
+                found: render_kind(&token.kind),
+                span: token.span,
+            }),
             TokenKind::Ident(name) => {
                 self.bump();
                 match name.as_str() {
@@ -586,6 +626,20 @@ impl Parser {
         }
     }
 
+    fn expect_key_name(&mut self) -> Result<AstString, ParseError> {
+        let token = self.bump();
+        match &token.kind {
+            TokenKind::Ident(name) | TokenKind::String(name) => Ok(name.clone()),
+            other => keyword_key_name(other)
+                .map(Into::into)
+                .ok_or_else(|| ParseError::Expected {
+                    expected: "identifier, string key, or keyword key",
+                    found: render_kind(other),
+                    span: token.span,
+                }),
+        }
+    }
+
     fn expect_exact(
         &mut self,
         expected_kind: TokenKind,
@@ -620,7 +674,7 @@ impl Parser {
     }
 
     fn peek_named_parallel_branch(&self) -> bool {
-        matches!(self.peek_kind(), TokenKind::Ident(_))
+        token_can_be_key(self.peek_kind())
             && self
                 .tokens
                 .get(self.index + 1)
@@ -700,6 +754,33 @@ impl Parser {
     }
 }
 
+fn token_can_be_key(kind: &TokenKind) -> bool {
+    matches!(kind, TokenKind::Ident(_) | TokenKind::String(_)) || keyword_key_name(kind).is_some()
+}
+
+fn keyword_key_name(kind: &TokenKind) -> Option<&'static str> {
+    Some(match kind {
+        TokenKind::If => "if",
+        TokenKind::Else => "else",
+        TokenKind::For => "for",
+        TokenKind::In => "in",
+        TokenKind::Parallel => "parallel",
+        TokenKind::Start => "start",
+        TokenKind::Await => "await",
+        TokenKind::Cancel => "cancel",
+        TokenKind::Submit => "submit",
+        TokenKind::Print => "print",
+        TokenKind::Call => "call",
+        TokenKind::And => "and",
+        TokenKind::Or => "or",
+        TokenKind::Not => "not",
+        TokenKind::True => "true",
+        TokenKind::False => "false",
+        TokenKind::Null => "null",
+        _ => return None,
+    })
+}
+
 fn token_can_start_expr(kind: &TokenKind) -> bool {
     matches!(
         kind,
@@ -743,6 +824,7 @@ fn render_kind(kind: &TokenKind) -> String {
         TokenKind::BangEqual => "`!=`".to_string(),
         TokenKind::AndAnd => "`&&`".to_string(),
         TokenKind::OrOr => "`||`".to_string(),
+        TokenKind::Pipe => "`|`".to_string(),
         TokenKind::Less => "`<`".to_string(),
         TokenKind::LessEqual => "`<=`".to_string(),
         TokenKind::Greater => "`>`".to_string(),
@@ -944,6 +1026,33 @@ mod tests {
     }
 
     #[test]
+    fn positional_parallel_branches_accept_optional_commas() {
+        let program = parse(
+            r#"
+            results = parallel {
+              "branch_a",
+              40 + 2,
+              len([1,2,3]),
+            }
+            submit results
+            "#,
+        )
+        .expect("program should parse");
+
+        let Stmt::Assign {
+            expr: Expr::Parallel { branches },
+            ..
+        } = &program.statements[0]
+        else {
+            panic!("expected parallel expression assignment");
+        };
+        let ParallelBranches::Positional(statements) = branches else {
+            panic!("expected positional parallel branches");
+        };
+        assert_eq!(statements.len(), 3);
+    }
+
+    #[test]
     fn parses_named_parallel_branches() {
         let program = parse(
             r#"
@@ -971,6 +1080,34 @@ mod tests {
         assert!(matches!(branches[0].stmt, Stmt::Call(_)));
         assert_eq!(branches[1].name, "fmt");
         assert!(matches!(branches[1].stmt, Stmt::Expr(Expr::String(_))));
+    }
+
+    #[test]
+    fn named_parallel_branches_accept_optional_commas_and_keyword_names() {
+        let program = parse(
+            r#"
+            results = parallel {
+              parallel: "branch",
+              "quoted": "ok",
+            }
+            submit results.parallel
+            "#,
+        )
+        .expect("program should parse");
+
+        let Stmt::Assign {
+            expr: Expr::Parallel { branches },
+            ..
+        } = &program.statements[0]
+        else {
+            panic!("expected parallel expression assignment");
+        };
+        let ParallelBranches::Named(branches) = branches else {
+            panic!("expected named parallel branches");
+        };
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].name, "parallel");
+        assert_eq!(branches[1].name, "quoted");
     }
 
     #[test]
@@ -1231,9 +1368,67 @@ mod tests {
     }
 
     #[test]
+    fn type_literal_parses_nullable_field_as_union_with_null() {
+        let program = parse(
+            r#"
+            User = Type { name: str, email: str | null }
+            submit User
+            "#,
+        )
+        .expect("program should parse");
+        let Stmt::Assign { expr, .. } = &program.statements[0] else {
+            panic!("expected assign");
+        };
+        let Expr::TypeLiteral(ty) = expr else {
+            panic!("expected TypeLiteral");
+        };
+        let TypeExpr::Object(fields) = ty.as_ref() else {
+            panic!("expected object");
+        };
+        assert_eq!(fields.len(), 2);
+        let TypeExpr::Union(variants) = &fields[1].ty else {
+            panic!("expected email to be a Union, got {:?}", fields[1].ty);
+        };
+        assert_eq!(variants.len(), 2);
+        assert!(matches!(variants[0], TypeExpr::Str));
+        assert!(matches!(variants[1], TypeExpr::Null));
+    }
+
+    #[test]
+    fn type_literal_parses_three_way_union() {
+        let program = parse("x = Type { v: str | int | null }").expect("should parse");
+        let Stmt::Assign { expr, .. } = &program.statements[0] else {
+            panic!("expected assign");
+        };
+        let Expr::TypeLiteral(ty) = expr else {
+            panic!("expected TypeLiteral");
+        };
+        let TypeExpr::Object(fields) = ty.as_ref() else {
+            panic!("expected object");
+        };
+        let TypeExpr::Union(variants) = &fields[0].ty else {
+            panic!("expected union");
+        };
+        assert_eq!(variants.len(), 3);
+    }
+
+    #[test]
+    fn type_literal_bare_brace_in_field_position_gives_targeted_diagnostic() {
+        let err = parse("x = Type { nested: { ok: bool } }")
+            .expect_err("bare `{` in type position should fail");
+        let message = format!("{err}");
+        assert!(
+            message.contains("Type"),
+            "diagnostic should mention the `Type` keyword: {message}",
+        );
+    }
+
+    #[test]
     fn list_and_record_literals_accept_trailing_commas() {
         parse("x = [1, 2, 3,]\nsubmit x").expect("list trailing comma");
         parse("x = { a: 1, b: 2, }\nsubmit x").expect("record trailing comma");
+        parse("x = { parallel: 1, \"with space\": 2 }\nsubmit x.parallel")
+            .expect("record keyword and quoted keys");
         // Empty literals still work.
         parse("x = []\nsubmit x").expect("empty list");
         parse("x = {}\nsubmit x").expect("empty record");

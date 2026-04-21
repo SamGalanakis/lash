@@ -1237,6 +1237,84 @@ fn range_and_push_cover_common_collection_building() {
 }
 
 #[test]
+fn for_loop_assignments_carry_across_iterations() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        raw = split(" x , y , z ", ",")
+        parts = []
+        count = 0
+        snapshots = []
+        for part in raw {
+          parts = push(parts, trim(part))
+          count = count + 1
+          snapshots = push(snapshots, { part: trim(part), parts: parts, count: count })
+        }
+        submit { parts: parts, count: count, snapshots: snapshots }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(
+        record["parts"],
+        Value::List(
+            vec![
+                Value::String("x".into()),
+                Value::String("y".into()),
+                Value::String("z".into()),
+            ]
+            .into()
+        )
+    );
+    assert_eq!(record["count"], Value::Number(3.0));
+    let Value::List(snapshots) = &record["snapshots"] else {
+        panic!("expected snapshots list");
+    };
+    assert_eq!(snapshots.len(), 3);
+}
+
+#[test]
+fn named_parallel_accepts_commas_and_keyword_record_keys_execute() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        result = parallel {
+          parallel: { parallel: "ok" },
+          quoted: { "with space": 2 },
+        }
+        submit {
+          branch: result.parallel.parallel,
+          quoted_key: keys(result.quoted)[0],
+          quoted_value: values(result.quoted)[0]
+        }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(record["branch"], Value::String("ok".into()));
+    assert_eq!(record["quoted_key"], Value::String("with space".into()));
+    assert_eq!(record["quoted_value"], Value::Number(2.0));
+}
+
+#[test]
 fn string_comparisons_are_lexicographic() {
     let host = TestHost::default();
     let mut state = State::new();

@@ -616,6 +616,39 @@ fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
 }
 
 #[test]
+fn update_plan_panel_lights_up_plan_dock() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.start_turn();
+    assert!(
+        app.plan_dock.is_none(),
+        "dock starts empty before any update_plan event"
+    );
+
+    app.handle_session_event(SessionEvent::PluginEvent {
+        plugin_id: "update_plan".into(),
+        event: lash::PluginSurfaceEvent::PanelUpsert {
+            key: "plan".into(),
+            title: "PLAN".into(),
+            content: "- [x] Inspect\n- [~] Patch layout\n- [ ] Run tests\n".into(),
+        },
+    });
+
+    let dock = app.plan_dock.as_ref().expect("plan dock populated");
+    assert_eq!(dock.title, "PLAN");
+    assert_eq!(dock.items.len(), 3);
+    assert_eq!(dock.items[0].status, PlanDockItemStatus::Done);
+    assert_eq!(dock.items[1].status, PlanDockItemStatus::Active);
+    assert_eq!(dock.items[2].status, PlanDockItemStatus::Pending);
+    // Event must NOT land as an inline DisplayBlock::PluginPanel.
+    assert!(
+        !app.blocks
+            .iter()
+            .any(|block| matches!(block, DisplayBlock::PluginPanel(_))),
+        "update_plan panels route to the dock, not the scroll history"
+    );
+}
+
+#[test]
 fn plugin_panel_events_upsert_and_clear_blocks() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
@@ -913,6 +946,86 @@ fn interrupted_projection_appends_only_uncommitted_tail() {
 }
 
 #[test]
+fn interrupted_assistant_tail_ignores_visible_blocks_already_on_screen() {
+    let blocks = vec![
+        DisplayBlock::TurnStart(Turn::user(false)),
+        DisplayBlock::UserInput("ship it".into()),
+        DisplayBlock::AssistantText(
+            "Still running - cargo test in progress. Waiting for completion.".into(),
+        ),
+        DisplayBlock::AssistantText(
+            "It looks like there's a rendering issue stripping my variable names. Let me use a different approach.".into(),
+        ),
+    ];
+
+    let tail = interrupted_assistant_tail(
+        &blocks,
+        "Still running - cargo test in progress. Waiting for completion.\n\nIt looks like there's a rendering issue stripping my variable names. Let me use a different approach.\n\nLet me check the current state first.",
+    );
+
+    assert_eq!(
+        tail.as_deref(),
+        Some("Let me check the current state first.")
+    );
+}
+
+#[test]
+fn interrupted_projection_hides_rlm_execution_result_user_message() {
+    let result_message = Message {
+        id: "m1".to_string(),
+        role: MessageRole::User,
+        parts: vec![Part {
+            // RLM exec results are stored as `PartKind::Text` with
+            // `tool_call_id` + `tool_name` preserved, so the adapter
+            // serializes them as a plain user-role message (no fake
+            // `role=tool` pairing) while projection can still detect
+            // them as activities.
+            id: "m1.p0".to_string(),
+            kind: PartKind::Text,
+            content: "[Lashlang execution result]\n\nobservations:\nraw dump".to_string(),
+            attachment: None,
+            tool_call_id: Some("rlm_exec_0".to_string()),
+            tool_name: Some("execute_lashlang".to_string()),
+            tool_item_id: None,
+            tool_signature: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+        }],
+        user_input: None,
+        origin: None,
+    };
+    let tool_calls = vec![ToolCallRecord {
+        call_id: Some("rlm_exec_0".to_string()),
+        tool: "execute_lashlang".to_string(),
+        args: serde_json::json!({ "code": "print inspect" }),
+        result: serde_json::json!({
+            "observations": "raw dump",
+            "tool_calls": []
+        }),
+        success: true,
+        duration_ms: 0,
+    }];
+    let blocks = project_interrupted_blocks(
+        &[text_message("m0", MessageRole::User, "go"), result_message],
+        &tool_calls,
+        &UiResumeState::default(),
+        "Cancelled.",
+    );
+
+    assert!(blocks.iter().all(|block| {
+        !matches!(block, DisplayBlock::UserInput(text) if text.contains("[Lashlang execution result]"))
+    }));
+    assert!(blocks.iter().any(|block| {
+        matches!(
+            block,
+            DisplayBlock::Activity(activity)
+                if activity.call.kind == ActivityKind::Hidden
+                    && activity.call.tool_name == "execute_lashlang"
+        )
+    }));
+}
+
+#[test]
 fn non_manual_error_sets_transient_status() {
     let mut app = App::new("test-model".into(), "test".into());
     app.handle_session_event(SessionEvent::LlmRequest {
@@ -940,6 +1053,51 @@ fn non_manual_error_sets_transient_status() {
             .as_ref()
             .and_then(|turn| turn.status_detail.as_deref()),
         Some("LLM error: Claude request failed with 500")
+    );
+}
+
+#[test]
+fn retry_status_stays_visible_when_retry_request_starts() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.handle_session_event(SessionEvent::LlmRequest {
+        iteration: 0,
+        message_count: 0,
+        tool_list: String::new(),
+    });
+    app.handle_session_event(SessionEvent::RetryStatus {
+        wait_seconds: 2,
+        attempt: 2,
+        max_attempts: 4,
+        reason: "Codex returned non-SSE body but it could not be read".into(),
+        envelope: None,
+    });
+
+    assert_eq!(
+        app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+        Some("retrying")
+    );
+    assert_eq!(
+        app.live_turn
+            .as_ref()
+            .and_then(|turn| turn.status_detail.as_deref()),
+        Some("in 2s · attempt 2/4 · Codex returned non-SSE body but it could not be read")
+    );
+
+    app.handle_session_event(SessionEvent::LlmRequest {
+        iteration: 0,
+        message_count: 0,
+        tool_list: String::new(),
+    });
+
+    assert_eq!(
+        app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+        Some("retrying")
+    );
+    assert_eq!(
+        app.live_turn
+            .as_ref()
+            .and_then(|turn| turn.status_detail.as_deref()),
+        Some("attempt 2/4 · Codex returned non-SSE body but it could not be read")
     );
 }
 

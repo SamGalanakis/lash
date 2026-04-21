@@ -30,8 +30,9 @@ use crate::util::{is_cancelled_error, manual_interrupt_message};
 use self::projection::{append_activity_block, push_system_message_block_if_new};
 
 pub(crate) use self::projection::{
-    latest_assistant_text_from_messages, preview_text_lines, project_interrupted_blocks,
-    projected_blocks_from_state, smart_truncate_preview_line, strip_ansi_escape_sequences,
+    interrupted_assistant_tail, latest_assistant_text_from_messages, preview_text_lines,
+    project_interrupted_blocks, projected_blocks_from_state, smart_truncate_preview_line,
+    strip_ansi_escape_sequences,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -40,6 +41,42 @@ pub struct PluginPanelBlock {
     pub key: String,
     pub title: String,
     pub content: String,
+}
+
+/// One row in the sticky plan dock. `status` drives the glyph + color:
+/// `✓` lichen for `Done`, `■` sodium for `Active` (at most one), `□`
+/// chalk-dim for `Pending`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanDockItem {
+    pub text: String,
+    pub status: PlanDockItemStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanDockItemStatus {
+    Done,
+    Active,
+    Pending,
+}
+
+/// The persistent plan companion rendered at the bottom of the TUI
+/// frame. Populated by the `plan_mode` plugin's panel events and
+/// cleared when the plan is dismissed. See `docs/design-language.html`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanDockState {
+    pub title: String,
+    /// Optional meta line shown alongside the title (e.g. `3m 3s · ↓ 1.7k tokens · thinking`).
+    /// Rendered in ash-text next to the title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<String>,
+    pub items: Vec<PlanDockItem>,
+}
+
+impl PlanDockState {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.title.trim().is_empty()
+    }
 }
 
 pub use crate::editor::{LargePaste, PendingImage, SuggestionKind};
@@ -476,6 +513,10 @@ pub struct App {
     pub repo_status: Option<RepoStatus>,
     /// Active plugin-owned mode indicators rendered in the input chrome.
     pub plugin_mode_indicators: BTreeMap<String, String>,
+    /// Active plan surfaced by the `plan_mode` plugin. When present it
+    /// renders as a sticky dock between the history viewport and the
+    /// input row instead of as an inline panel in the scroll.
+    pub plan_dock: Option<PlanDockState>,
     /// UI extension registry used for slash-command completion and host actions.
     ui_extensions: Arc<UiExtensions>,
     /// Current working directory with ~ substitution.
@@ -484,6 +525,8 @@ pub struct App {
     pub activity_state: ActivityState,
     /// Set only when this local UI requested cancellation via Esc.
     manual_interrupt_requested: bool,
+    /// Retry details to keep visible once the retry request is in flight.
+    pending_retry_status: Option<String>,
     /// Current text selection state.
     pub selection: TextSelection,
     /// Cached history area rect from the last draw, used to map mouse coords.
@@ -515,6 +558,7 @@ impl App {
     pub fn start_turn(&mut self) {
         self.running = true;
         self.manual_interrupt_requested = false;
+        self.pending_retry_status = None;
         self.iteration = 0;
         self.live_assistant = None;
         self.assistant_text_finalized = false;
@@ -528,6 +572,7 @@ impl App {
     pub fn stop_turn(&mut self) {
         self.running = false;
         self.manual_interrupt_requested = false;
+        self.pending_retry_status = None;
         self.commit_live_assistant_block();
         self.clear_live_tool_output();
         self.live_output_chars_estimate = 0;
@@ -582,6 +627,7 @@ impl App {
 
     fn clear_status(&mut self) {
         self.manual_interrupt_requested = false;
+        self.pending_retry_status = None;
         self.live_turn = None;
     }
 
@@ -712,10 +758,12 @@ impl App {
                 .ok()
                 .and_then(|cwd| crate::repo_status::detect_repo_status(&cwd)),
             plugin_mode_indicators: BTreeMap::new(),
+            plan_dock: None,
             ui_extensions: Arc::new(UiExtensions::default()),
             cwd,
             activity_state: ActivityState::default(),
             manual_interrupt_requested: false,
+            pending_retry_status: None,
             selection: TextSelection::default(),
             history_area: Rect::default(),
         }
@@ -1249,7 +1297,11 @@ impl App {
             SessionEvent::LlmRequest { iteration, .. } => {
                 self.finalize_live_assistant();
                 self.iteration = iteration + 1;
-                self.set_status("thinking", None, true);
+                if let Some(detail) = self.pending_retry_status.take() {
+                    self.set_status("retrying", Some(detail), true);
+                } else {
+                    self.set_status("thinking", None, true);
+                }
                 self.live_output_chars_estimate = 0;
                 self.live_output_tokens_estimate = 0;
                 self.keep_latest_user_block_visible();
@@ -1265,12 +1317,12 @@ impl App {
                 if reason.chars().count() > 60 {
                     reason_short.push_str("...");
                 }
+                let retry_detail =
+                    format!("attempt {}/{} · {}", attempt, max_attempts, reason_short);
+                self.pending_retry_status = Some(retry_detail.clone());
                 self.set_status(
                     "retrying",
-                    Some(format!(
-                        "in {}s · attempt {}/{} · {}",
-                        wait_seconds, attempt, max_attempts, reason_short
-                    )),
+                    Some(format!("in {}s · {}", wait_seconds, retry_detail)),
                     true,
                 );
                 self.scroll_to_bottom();
@@ -1326,6 +1378,7 @@ impl App {
                 let mutation = plugin_surface::apply_surface_event(
                     &mut self.blocks,
                     &mut self.plugin_mode_indicators,
+                    &self.plan_dock,
                     &plugin_id,
                     event,
                 );
@@ -1337,6 +1390,14 @@ impl App {
                     self.scroll_to_bottom();
                 }
                 if mutation.indicators_changed {
+                    self.dirty = true;
+                }
+                if let Some(next_dock) = mutation.plan_dock_change {
+                    // The dock steals height from the history viewport,
+                    // so invalidating the cache keeps wrapping/fold
+                    // positions correct.
+                    self.plan_dock = next_dock.filter(|state| !state.is_empty());
+                    self.invalidate_height_cache();
                     self.dirty = true;
                 }
             }

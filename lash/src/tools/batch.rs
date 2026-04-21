@@ -3,7 +3,7 @@ use crate::{ToolDefinition, ToolExecutionMode, ToolParam};
 pub fn batch_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "batch".to_string(),
-        description: "Execute multiple independent tool calls concurrently. Calls start in parallel; ordering is not guaranteed.".to_string(),
+        description: "Execute up to 25 independent tool calls concurrently. Calls start in parallel; ordering is not guaranteed. Anything past 25 is dropped.".to_string(),
         params: vec![ToolParam {
             name: "tool_calls".to_string(),
             r#type: "list".to_string(),

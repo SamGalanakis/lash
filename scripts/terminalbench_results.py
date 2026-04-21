@@ -302,8 +302,20 @@ def load_provider_metadata(config_path: Path | None) -> dict[str, Any]:
 
 
 def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
+    """Walk lash's `sessions/*.llm.jsonl` traces and surface:
+
+    * `record_count`   — every line in the trace (stream deltas + summaries)
+    * `call_count`     — number of actual LLM request/response cycles
+                         (kind != "stream_event" rows carry `request`/`response`)
+    * `turn_count`     — distinct `turn` indexes seen
+    * token totals     — summed from the summary rows' `usage` blocks
+
+    Prior to this split the dashboard conflated deltas with calls, showing
+    "1,302 LLM CALLS" for what was really a 3-turn session.
+    """
     models: list[str] = []
     record_count = 0
+    call_count = 0
     turns: set[int] = set()
     files: list[dict[str, Any]] = []
     token_totals = {
@@ -315,6 +327,7 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
     usage_record_count = 0
     for llm_path in llm_paths:
         file_record_count = 0
+        file_call_count = 0
         file_models: list[str] = []
         file_turns: set[int] = set()
         for line in llm_path.read_text(errors="replace").splitlines():
@@ -327,6 +340,21 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
                 continue
             record_count += 1
             file_record_count += 1
+            # A trace row is a real LLM round-trip only if it carries
+            # `request`/`response` fields — i.e. the summary line
+            # written at the end of each SSE stream. Stream-event rows
+            # and the late-arriving `token_usage_patch` rows (written
+            # by the trailing-usage catcher) both have other `kind`s
+            # and should be excluded from the LLM-CALLS tally.
+            record_kind = record.get("kind")
+            is_summary_call = (
+                record_kind != "stream_event"
+                and record_kind != "token_usage_patch"
+                and "request" in record
+            )
+            if is_summary_call:
+                call_count += 1
+                file_call_count += 1
             usage = record.get("usage")
             if isinstance(usage, dict):
                 token_totals["raw_input"] += int(usage.get("input_tokens") or 0)
@@ -354,12 +382,14 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
             {
                 "name": llm_path.name,
                 "record_count": file_record_count,
+                "call_count": file_call_count,
                 "turn_count": len(file_turns),
                 "models": file_models,
             }
         )
     return {
         "record_count": record_count,
+        "call_count": call_count,
         "turn_count": len(turns),
         "models": models,
         "files": files,
@@ -863,6 +893,7 @@ def combine_activity_metadata(
     trajectory_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     llm_record_count = int(llm_metadata.get("record_count") or 0)
+    llm_call_count = int(llm_metadata.get("call_count") or 0)
     llm_turn_count = int(llm_metadata.get("turn_count") or 0)
     session_turn_count = int(session_activity.get("turn_count") or 0)
     session_tool_count = int(session_activity.get("tool_call_count") or 0)
@@ -882,7 +913,11 @@ def combine_activity_metadata(
     return {
         "llm_record_count": llm_record_count,
         "llm_turn_count": max(llm_turn_count, session_turn_count, trajectory_turn_count),
-        "llm_call_count": max(llm_record_count, exec_result_count, trajectory_call_count),
+        # `llm_call_count` is actual provider round-trips (kind != stream_event).
+        # `llm_record_count` stays available for raw-delta counts. Fall through
+        # to `exec_result_count` / trajectory_call_count for non-lash runs
+        # that don't produce a lash LLM trace.
+        "llm_call_count": max(llm_call_count, exec_result_count, trajectory_call_count),
         "tool_call_count": max(
             session_tool_count,
             int(lash_log_activity.get("tool_call_count") or 0),

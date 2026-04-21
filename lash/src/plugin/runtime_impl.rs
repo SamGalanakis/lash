@@ -815,9 +815,54 @@ impl PluginHost {
         )
     }
 
+    /// Variant of [`build_session`] that records the caller as the
+    /// parent of the new session. Plugin factories read
+    /// [`PluginSessionContext::is_root_session`] to gate root-only
+    /// behavior; anything that goes through the plain `build_session`
+    /// is treated as a root session by default.
+    pub fn build_session_with_parent(
+        &self,
+        session_id: impl Into<String>,
+        parent_session_id: Option<String>,
+        execution_mode: ExecutionMode,
+        context_approach: crate::ContextApproach,
+        snapshot: Option<&PluginSessionSnapshot>,
+    ) -> Result<Arc<PluginSession>, PluginError> {
+        self.build_session_inner(
+            session_id.into(),
+            parent_session_id,
+            execution_mode,
+            context_approach,
+            snapshot,
+            ToolSurfaceContribution::default(),
+            None,
+        )
+    }
+
     pub fn build_session_with_surface(
         &self,
         session_id: impl Into<String>,
+        execution_mode: ExecutionMode,
+        context_approach: crate::ContextApproach,
+        snapshot: Option<&PluginSessionSnapshot>,
+        tool_surface_overlay: ToolSurfaceContribution,
+        tool_snapshot: Option<crate::DynamicStateSnapshot>,
+    ) -> Result<Arc<PluginSession>, PluginError> {
+        self.build_session_inner(
+            session_id.into(),
+            None,
+            execution_mode,
+            context_approach,
+            snapshot,
+            tool_surface_overlay,
+            tool_snapshot,
+        )
+    }
+
+    fn build_session_inner(
+        &self,
+        session_id: String,
+        parent_session_id: Option<String>,
         execution_mode: ExecutionMode,
         context_approach: crate::ContextApproach,
         snapshot: Option<&PluginSessionSnapshot>,
@@ -835,9 +880,10 @@ impl PluginHost {
             )));
         }
         let ctx = PluginSessionContext {
-            session_id: session_id.into(),
+            session_id,
             execution_mode,
             context_approach: context_approach.clone(),
+            parent_session_id,
         };
         let session_id = ctx.session_id.clone();
         let mut plugins = Vec::new();

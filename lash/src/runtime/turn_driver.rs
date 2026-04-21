@@ -335,6 +335,7 @@ impl RuntimeTurnDriver {
                     messages.shared(),
                     Arc::clone(&self.tool_calls),
                 ),
+                rlm_termination: self.rlm_termination.clone(),
             })
             .await
         {
@@ -719,16 +720,23 @@ impl RuntimeTurnDriver {
                     if *stream_state.abort_requested {
                         // A plugin stream hook asked us to end the LLM
                         // call now (e.g. RLM mask saw a closed fence).
-                        // Abort the in-flight request and synthesize a
-                        // response from what's already been streamed.
-                        llm_task.abort();
-                        // Drain any events that landed before the abort took effect.
+                        // Drain the channel cheaply for events already
+                        // sitting in the buffer, then hand the in-flight
+                        // HTTP task + channel to a background "trailing
+                        // usage catcher" so the next iteration can start
+                        // without waiting on the provider's final
+                        // `response.completed` SSE event (which is where
+                        // Codex puts the `usage` block). The catcher
+                        // appends a late-usage JSONL entry and emits a
+                        // `SessionEvent::TokenUsage` delta so persistent
+                        // accounting stays accurate without blocking.
                         if let Err(err) = self
                             .drain_standard_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
                             .await
                         {
                             break Err(err);
                         }
+
                         let mut resp = LlmResponse {
                             deltas: Vec::new(),
                             full_text: streamed_output.full_text(),
@@ -743,6 +751,17 @@ impl RuntimeTurnDriver {
                             Ok(resp) => resp,
                             Err(err) => break Err(err),
                         };
+
+                        spawn_trailing_usage_catcher(TrailingUsageCatcher {
+                            llm_task,
+                            llm_stream_rx,
+                            event_tx: event_tx.clone(),
+                            llm_log_path: self.host.core.llm_log_path.clone(),
+                            session_id: self.session_id.clone(),
+                            iteration,
+                            initial_usage: streamed_usage.clone(),
+                        });
+
                         break Ok(resp);
                     }
                 }
@@ -1427,4 +1446,118 @@ fn debug_request_body(req: &LlmRequest) -> String {
         "stream": req.stream_events.is_some(),
     })
     .to_string()
+}
+
+/// Parameters for the background task that catches trailing
+/// `LlmStreamEvent::Usage` events after an RLM stream-mask abort.
+/// Owning the channel + task lets the turn driver return the LLM
+/// response immediately while the provider's `response.completed`
+/// SSE event is still in flight.
+struct TrailingUsageCatcher {
+    llm_task: tokio::task::JoinHandle<(
+        Result<LlmResponse, crate::llm::transport::LlmTransportError>,
+        crate::Provider,
+    )>,
+    llm_stream_rx: tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
+    event_tx: mpsc::Sender<RuntimeStreamEvent>,
+    llm_log_path: Option<std::path::PathBuf>,
+    session_id: String,
+    iteration: usize,
+    initial_usage: LlmUsage,
+}
+
+/// Wait up to 2s for a late `Usage` event from the provider. If it
+/// arrives, emit a `SessionEvent::TokenUsage` delta so cumulative
+/// accounting stays accurate, and (when an LLM debug log is configured)
+/// append a `token_usage_patch` JSONL entry so the benchmark exporter
+/// — which sums `usage` blocks across trace lines — picks the delta up.
+/// Always aborts the in-flight `llm_task` when done so the HTTP socket
+/// closes promptly.
+fn spawn_trailing_usage_catcher(args: TrailingUsageCatcher) {
+    let TrailingUsageCatcher {
+        llm_task,
+        mut llm_stream_rx,
+        event_tx,
+        llm_log_path,
+        session_id,
+        iteration,
+        initial_usage,
+    } = args;
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2_000);
+        let mut latest = initial_usage.clone();
+        let mut saw_usage = false;
+        loop {
+            match tokio::time::timeout_at(deadline, llm_stream_rx.recv()).await {
+                Err(_) | Ok(None) => break,
+                Ok(Some(LlmStreamEvent::Usage(usage))) => {
+                    latest = usage;
+                    saw_usage = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+            }
+        }
+        llm_task.abort();
+        if !saw_usage || latest == initial_usage {
+            return;
+        }
+        let delta = LlmUsage {
+            input_tokens: (latest.input_tokens - initial_usage.input_tokens).max(0),
+            output_tokens: (latest.output_tokens - initial_usage.output_tokens).max(0),
+            cached_input_tokens: (latest.cached_input_tokens - initial_usage.cached_input_tokens)
+                .max(0),
+            reasoning_tokens: (latest.reasoning_tokens - initial_usage.reasoning_tokens).max(0),
+        };
+        if delta == LlmUsage::default() {
+            return;
+        }
+        // Session-level token ledger update. sansio's cumulative tracker
+        // adds `usage` into the running total on every TokenUsage event,
+        // so a delta-shaped second event correctly bumps totals without
+        // resetting them.
+        let token_delta = TokenUsage {
+            input_tokens: delta.input_tokens,
+            output_tokens: delta.output_tokens,
+            cached_input_tokens: delta.cached_input_tokens,
+            reasoning_tokens: delta.reasoning_tokens,
+        };
+        let _ = event_tx
+            .send(RuntimeStreamEvent::Session(SessionEvent::TokenUsage {
+                iteration,
+                usage: token_delta.clone(),
+                cumulative: token_delta.clone(),
+            }))
+            .await;
+        // Benchmark exporter reads usage from the LLM debug log. Append
+        // a patch entry there so `usage` sums across trace lines stay
+        // correct even when the initial request line landed with zeros.
+        if let Some(path) = llm_log_path {
+            let entry = serde_json::json!({
+                "kind": "token_usage_patch",
+                "turn": iteration,
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "session_id": session_id,
+                "usage": {
+                    "input_tokens": delta.input_tokens,
+                    "output_tokens": delta.output_tokens,
+                    "cached_input_tokens": delta.cached_input_tokens,
+                    "reasoning_tokens": delta.reasoning_tokens,
+                }
+            });
+            if let Ok(line) = serde_json::to_string(&entry) {
+                let _ = tokio::task::spawn_blocking(move || {
+                    use std::io::Write;
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&path)
+                    {
+                        let _ = writeln!(file, "{line}");
+                    }
+                })
+                .await;
+            }
+        }
+    });
 }

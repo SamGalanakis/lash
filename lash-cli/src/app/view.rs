@@ -24,6 +24,7 @@ impl App {
         self.live_output_tokens_estimate = 0;
         self.model_variant = None;
         self.clear_mode_indicators();
+        self.plan_dock = None;
         self.invalidate_height_cache();
     }
 
@@ -409,7 +410,9 @@ impl App {
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
         self.ensure_live_assistant_rendered(width);
-        self.height_cache.last().copied().unwrap_or(0) + self.live_assistant_height()
+        self.height_cache.last().copied().unwrap_or(0)
+            + self.live_assistant_height()
+            + crate::render::plan_dock_trailing_height(self)
     }
 
     pub fn streaming_output_height(&self) -> usize {

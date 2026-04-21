@@ -79,17 +79,6 @@ impl ProviderKind {
     }
 }
 
-/// User-overridable model names for delegation intelligence tiers.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct AgentModels {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub low: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub medium: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub high: Option<String>,
-}
-
 /// Auxiliary service secrets that are independent of LLM provider auth.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AuxiliarySecrets {
@@ -206,8 +195,13 @@ pub struct LashConfig {
     pub auxiliary_secrets: AuxiliarySecrets,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_models: Option<AgentModels>,
+    /// User-overridable model names per subagent capability. Generic
+    /// name → model map; the meaning of each name is owned by whatever
+    /// builds the subagent capability registry. The on-disk shape (e.g.
+    /// `[agent_models]\nlow="..."\nmedium="..."`) is unchanged from when
+    /// this was a typed `AgentModels { low, medium, high }` struct.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "RuntimeSettings::is_default")]
     pub runtime: RuntimeSettings,
 }
@@ -436,7 +430,7 @@ impl LashConfig {
             providers,
             auxiliary_secrets: AuxiliarySecrets::default(),
             mcp_servers: BTreeMap::new(),
-            agent_models: None,
+            agent_models: BTreeMap::new(),
             runtime: RuntimeSettings::default(),
         }
     }
@@ -570,7 +564,7 @@ pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
         providers: BTreeMap::from([(provider.kind(), provider.clone())]),
         auxiliary_secrets: AuxiliarySecrets::default(),
         mcp_servers: BTreeMap::new(),
-        agent_models: None,
+        agent_models: BTreeMap::new(),
         runtime: RuntimeSettings::default(),
     });
     config.upsert_provider(provider.clone());

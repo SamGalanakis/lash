@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -10,53 +9,24 @@ use lash::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Capability {
-    Low,
-    Medium,
-    High,
-}
-
-impl Capability {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(value: &str) -> Option<Self> {
-        value.parse().ok()
-    }
-}
-
-impl FromStr for Capability {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            _ => Err(()),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct SessionAgentInfo {
     pub path: String,
-    pub capability: Option<Capability>,
+    /// Registered capability name this agent was spawned with. `None` for
+    /// the implicit `/root` agent which is created on demand and has no
+    /// spawn-time capability binding.
+    pub capability: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SpawnAgentRequest {
     pub task_name: String,
     pub task: String,
-    pub capability: Capability,
+    /// Name of the capability the spawn was made with. The capability
+    /// itself is resolved by the caller via the registry; the host just
+    /// records the name for diagnostics, surfacing in the agent tree, and
+    /// the tool-surface deny path.
+    pub capability: String,
     pub create_request: SessionCreateRequest,
     pub turn_input: TurnInput,
 }
@@ -65,6 +35,7 @@ pub struct SpawnAgentRequest {
 pub struct SendMessageRequest {
     pub target: String,
     pub message: String,
+    pub delivery: DeliveryMode,
 }
 
 #[derive(Clone, Debug)]
@@ -72,12 +43,13 @@ pub struct FollowupTaskRequest {
     pub target: String,
     pub task: String,
     pub turn_input: TurnInput,
-    pub interrupt: bool,
+    pub delivery: DeliveryMode,
 }
 
 #[derive(Clone, Debug)]
 pub struct WaitAgentRequest {
     pub targets: Vec<String>,
+    pub until: WaitUntil,
     pub timeout_ms: Option<u64>,
 }
 
@@ -94,9 +66,10 @@ pub struct ListAgentsRequest {
 #[derive(Clone, Debug, Serialize)]
 pub struct SpawnAgentResponse {
     pub task_name: String,
-    pub path: String,
+    pub target: String,
+    pub task_id: String,
     pub session_id: String,
-    pub status: String,
+    pub run_state: String,
     pub capability: String,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -111,18 +84,28 @@ pub struct SpawnAgentResponse {
 pub struct SendMessageResponse {
     pub from: String,
     pub to: String,
-    pub queued: bool,
+    pub message_id: String,
+    pub delivery: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FollowupTaskResponse {
     pub target: String,
+    pub task_id: String,
+    pub delivery: String,
     pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct WaitAgentResponse {
     pub timed_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion: Option<WaitAgentCompletion>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<WaitAgentMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed: Option<WaitAgentClosed>,
     pub events: Vec<WaitAgentEvent>,
 }
 
@@ -138,27 +121,78 @@ pub struct ListAgentsResponse {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentSummary {
-    pub path: String,
+    pub target: String,
+    pub task_id: String,
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_path: Option<String>,
+    pub parent_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability: Option<String>,
-    pub status: String,
+    pub agent_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_task: Option<String>,
+    pub current_task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_task_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_task_state: Option<String>,
     pub queued_tasks: usize,
-    pub inbox_messages: usize,
+    pub queued_messages: usize,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct TaskToolCallSummary {
-    pub tool: String,
-    pub success: bool,
-    pub duration_ms: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    NextPossible,
+    Interrupt,
+    NextTurn,
+}
+
+impl DeliveryMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NextPossible => "next_possible",
+            Self::Interrupt => "interrupt",
+            Self::NextTurn => "next_turn",
+        }
+    }
+
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("next_possible") {
+            "next_possible" => Ok(Self::NextPossible),
+            "interrupt" => Ok(Self::Interrupt),
+            "next_turn" => Ok(Self::NextTurn),
+            other => Err(format!(
+                "invalid delivery: expected `next_possible`, `interrupt`, or `next_turn`, got `{other}`"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitUntil {
+    TaskCompleted,
+    Terminal,
+    Message,
+    AnyResult,
+    AnyEvent,
+}
+
+impl WaitUntil {
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("task_completed") {
+            "task_completed" => Ok(Self::TaskCompleted),
+            "terminal" => Ok(Self::Terminal),
+            "message" => Ok(Self::Message),
+            "any_result" => Ok(Self::AnyResult),
+            "any_event" => Ok(Self::AnyEvent),
+            other => Err(format!(
+                "invalid until: expected `task_completed`, `terminal`, `message`, `any_result`, or `any_event`, got `{other}`"
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -169,7 +203,6 @@ pub struct WaitAgentSessionSummary {
     pub task: String,
     pub iterations: usize,
     pub tool_calls: usize,
-    pub tool_call_details: Vec<TaskToolCallSummary>,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
@@ -177,10 +210,33 @@ pub struct WaitAgentSessionSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct WaitAgentCompletion {
+    pub target: String,
+    pub task: String,
+    pub status: String,
+    pub result: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub session: WaitAgentSessionSummary,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WaitAgentMessage {
+    pub from: String,
+    pub to: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WaitAgentClosed {
+    pub target: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WaitAgentEvent {
     TaskStarted {
-        path: String,
+        target: String,
         task: String,
         session_id: String,
         capability: String,
@@ -194,7 +250,7 @@ pub enum WaitAgentEvent {
         message: String,
     },
     TaskCompleted {
-        path: String,
+        target: String,
         task: String,
         status: String,
         result: Value,
@@ -203,7 +259,7 @@ pub enum WaitAgentEvent {
         session: WaitAgentSessionSummary,
     },
     AgentClosed {
-        path: String,
+        target: String,
     },
 }
 
@@ -282,7 +338,7 @@ struct AgentLocator {
 }
 
 #[derive(Clone)]
-struct InboxMessage {
+struct QueuedMessage {
     from: String,
     message: String,
 }
@@ -291,22 +347,31 @@ struct AgentRecord {
     session_id: String,
     parent_session_id: Option<String>,
     parent_path: Option<String>,
-    capability: Option<Capability>,
+    capability: Option<String>,
     model: String,
     model_variant: Option<String>,
-    active_task: Option<ActiveTask>,
-    queued_tasks: VecDeque<QueuedTask>,
-    inbox: VecDeque<InboxMessage>,
+    active_turn: Option<ActiveTurn>,
+    queued_turns: VecDeque<QueuedTurn>,
     closing: bool,
-    last_status: String,
+    last_task_state: Option<String>,
     /// Session that spawned this agent; used to complete the agent's entry
     /// in that session's background task registry when the agent exits.
     owner_session_id: String,
 }
 
-struct ActiveTask {
-    task: String,
+struct ActiveTurn {
+    kind: ActiveTurnKind,
     turn_id: String,
+}
+
+enum ActiveTurnKind {
+    Task { task: String },
+    Message { from: String },
+}
+
+enum QueuedTurn {
+    Task(QueuedTask),
+    Message(QueuedMessage),
 }
 
 struct QueuedTask {
@@ -314,9 +379,9 @@ struct QueuedTask {
     turn_input: TurnInput,
 }
 
-struct PreparedTaskLaunch {
+struct PreparedTurnLaunch {
     session_id: String,
-    task: String,
+    kind: ActiveTurnKind,
     turn_input: TurnInput,
     notify: Arc<tokio::sync::Notify>,
 }
@@ -328,11 +393,11 @@ impl LocalSubagentHost {
             .map_err(|_| "subagent host state poisoned".to_string())
     }
 
-    fn prepare_task_launch(
+    fn prepare_turn_launch(
         &self,
         root_session_id: &str,
         path: &str,
-    ) -> Result<Option<PreparedTaskLaunch>, String> {
+    ) -> Result<Option<PreparedTurnLaunch>, String> {
         let mut state = self.state_lock()?;
         let tree = match state.trees.get_mut(root_session_id) {
             Some(tree) => tree,
@@ -342,21 +407,28 @@ impl LocalSubagentHost {
             Some(agent) => agent,
             None => return Ok(None),
         };
-        if agent.closing || agent.active_task.is_some() {
+        if agent.closing || agent.active_turn.is_some() {
             return Ok(None);
         }
-        let Some(mut queued) = agent.queued_tasks.pop_front() else {
-            agent.last_status = "idle".to_string();
+        let Some(queued) = agent.queued_turns.pop_front() else {
             return Ok(None);
         };
-        if !agent.inbox.is_empty() {
-            let inbox = agent.inbox.drain(..).collect::<Vec<_>>();
-            queued.turn_input = merge_inbox_into_turn_input(queued.turn_input, &inbox);
-        }
-        Ok(Some(PreparedTaskLaunch {
+        let (kind, turn_input) = match queued {
+            QueuedTurn::Task(task) => (
+                ActiveTurnKind::Task {
+                    task: task.task.clone(),
+                },
+                task.turn_input,
+            ),
+            QueuedTurn::Message(message) => {
+                let turn_input = message_turn_input(&message.from, &message.message);
+                (ActiveTurnKind::Message { from: message.from }, turn_input)
+            }
+        };
+        Ok(Some(PreparedTurnLaunch {
             session_id: agent.session_id.clone(),
-            task: queued.task,
-            turn_input: queued.turn_input,
+            kind,
+            turn_input,
             notify: tree.notify.clone(),
         }))
     }
@@ -378,11 +450,10 @@ impl LocalSubagentHost {
                 capability: None,
                 model: String::new(),
                 model_variant: None,
-                active_task: None,
-                queued_tasks: VecDeque::new(),
-                inbox: VecDeque::new(),
+                active_turn: None,
+                queued_turns: VecDeque::new(),
                 closing: false,
-                last_status: "idle".to_string(),
+                last_task_state: None,
                 owner_session_id: session_id.to_string(),
             });
         let locator = AgentLocator {
@@ -396,6 +467,25 @@ impl LocalSubagentHost {
     }
 
     fn queue_event(tree: &mut AgentTree, event: WaitAgentEvent) {
+        // When a new task begins on an agent, purge any stale terminal
+        // events (`TaskCompleted` / `AgentClosed`) still sitting in the
+        // per-tree event queue for that same target. Without this, a
+        // `wait_agent` call made right after `followup_task` on an idle
+        // agent would drain the PRIOR task's completion and return
+        // immediately, skipping the follow-up entirely.
+        if let WaitAgentEvent::TaskStarted { target, .. } = &event {
+            let target = target.clone();
+            tree.events.retain(|existing| match existing {
+                WaitAgentEvent::TaskCompleted {
+                    target: other_target,
+                    ..
+                }
+                | WaitAgentEvent::AgentClosed {
+                    target: other_target,
+                } => other_target != &target,
+                _ => true,
+            });
+        }
         tree.events.push_back(event);
         tree.notify.notify_waiters();
     }
@@ -467,9 +557,8 @@ impl LocalSubagentHost {
             for path in &paths {
                 if let Some(agent) = tree.agents.get_mut(path) {
                     agent.closing = true;
-                    agent.queued_tasks.clear();
-                    agent.inbox.clear();
-                    if let Some(active) = &agent.active_task {
+                    agent.queued_turns.clear();
+                    if let Some(active) = &agent.active_turn {
                         turn_ids.push(active.turn_id.clone());
                     } else {
                         immediate_closes.push((
@@ -490,7 +579,12 @@ impl LocalSubagentHost {
             {
                 let mut state = self.state_lock()?;
                 if let Some(tree) = state.trees.get_mut(root_session_id) {
-                    Self::queue_event(tree, WaitAgentEvent::AgentClosed { path: path.clone() });
+                    Self::queue_event(
+                        tree,
+                        WaitAgentEvent::AgentClosed {
+                            target: path.clone(),
+                        },
+                    );
                 }
                 Self::remove_agent_locked(&mut state, root_session_id, path);
             }
@@ -504,13 +598,13 @@ impl LocalSubagentHost {
         Ok(paths)
     }
 
-    async fn start_next_task(
+    async fn start_next_turn(
         &self,
         manager: Arc<dyn SessionManager>,
         root_session_id: String,
         path: String,
     ) -> Result<(), String> {
-        let Some(launch) = self.prepare_task_launch(&root_session_id, &path)? else {
+        let Some(launch) = self.prepare_turn_launch(&root_session_id, &path)? else {
             return Ok(());
         };
         let turn = manager
@@ -531,28 +625,33 @@ impl LocalSubagentHost {
                     .agents
                     .get_mut(&path)
                     .ok_or_else(|| "subagent disappeared".to_string())?;
-                agent.active_task = Some(ActiveTask {
-                    task: launch.task.clone(),
+                let event = match &launch.kind {
+                    ActiveTurnKind::Task { task } => Some(WaitAgentEvent::TaskStarted {
+                        target: path.clone(),
+                        task: task.clone(),
+                        session_id: launch.session_id.clone(),
+                        capability: agent
+                            .capability
+                            .clone()
+                            .unwrap_or_else(|| "root".to_string()),
+                        model: agent.model.clone(),
+                        model_variant: agent.model_variant.clone(),
+                    }),
+                    ActiveTurnKind::Message { .. } => None,
+                };
+                agent.active_turn = Some(ActiveTurn {
+                    kind: launch.kind,
                     turn_id: turn_id.clone(),
                 });
-                agent.last_status = "running".to_string();
-                WaitAgentEvent::TaskStarted {
-                    path: path.clone(),
-                    task: launch.task.clone(),
-                    session_id: launch.session_id.clone(),
-                    capability: agent
-                        .capability
-                        .map(|capability| capability.as_str().to_string())
-                        .unwrap_or_else(|| "root".to_string()),
-                    model: agent.model.clone(),
-                    model_variant: agent.model_variant.clone(),
-                }
+                event
             };
-            Self::queue_event(tree, event);
+            if let Some(event) = event {
+                Self::queue_event(tree, event);
+            }
         }
         launch.notify.notify_waiters();
 
-        // If this task is starting on an already-registered subagent
+        // If this turn is starting on an already-registered subagent
         // (i.e. a follow-up that flipped the registry to `Idle`),
         // transition back to `Running` so `tasks_list` reflects the
         // active turn.
@@ -574,13 +673,13 @@ impl LocalSubagentHost {
         let host = self.clone();
         tokio::spawn(async move {
             let outcome = manager.await_turn(&turn_id).await;
-            host.finish_task(root_session_id, path, outcome, manager)
+            host.finish_turn(root_session_id, path, outcome, manager)
                 .await;
         });
         Ok(())
     }
 
-    async fn finish_task(
+    async fn finish_turn(
         &self,
         root_session_id: String,
         path: String,
@@ -593,65 +692,32 @@ impl LocalSubagentHost {
             && let Some(tree) = state.trees.get_mut(&root_session_id)
             && tree.agents.contains_key(&path)
         {
-            let (event, closing_session_id, queued_more) = {
+            let (events, closing_session_id, queued_more) = {
                 let agent = tree
                     .agents
                     .get_mut(&path)
                     .expect("checked contains_key above");
-                let completed_task = agent.active_task.take().map(|active| active.task);
-                let event = match &outcome {
-                    Ok(turn) => {
-                        let task = completed_task.unwrap_or_else(|| "task".to_string());
-                        let status = turn_status_label(&turn.status);
-                        agent.last_status = status.to_string();
-                        let session = build_session_summary(agent, &task, turn);
-                        WaitAgentEvent::TaskCompleted {
-                            path: path.clone(),
-                            task,
-                            status: status.to_string(),
-                            result: task_result_value(turn),
-                            error: None,
-                            session,
-                        }
+                let active = agent.active_turn.take();
+                let events = match active.map(|active| active.kind) {
+                    Some(ActiveTurnKind::Task { task }) => {
+                        vec![task_completion_event(agent, &path, task, &outcome)]
                     }
-                    Err(err) => {
-                        let task = completed_task.unwrap_or_else(|| "task".to_string());
-                        agent.last_status = "failed".to_string();
-                        WaitAgentEvent::TaskCompleted {
-                            path: path.clone(),
-                            task: task.clone(),
-                            status: "failed".to_string(),
-                            result: Value::Null,
-                            error: Some(err.to_string()),
-                            session: WaitAgentSessionSummary {
-                                id: agent.session_id.clone(),
-                                parent_session_id: agent.parent_session_id.clone(),
-                                task,
-                                iterations: 0,
-                                tool_calls: 0,
-                                tool_call_details: Vec::new(),
-                                model: agent.model.clone(),
-                                model_variant: agent.model_variant.clone(),
-                                token_usage: json!({
-                                    "input_tokens": 0,
-                                    "output_tokens": 0,
-                                    "cached_input_tokens": 0,
-                                    "reasoning_tokens": 0,
-                                    "total_tokens": 0,
-                                }),
-                            },
-                        }
+                    Some(ActiveTurnKind::Message { from }) => {
+                        vec![message_response_event(&path, from, &outcome)]
                     }
+                    None => Vec::new(),
                 };
                 let closing_session_id = if agent.closing {
                     Some(agent.session_id.clone())
                 } else {
                     None
                 };
-                (event, closing_session_id, !agent.queued_tasks.is_empty())
+                (events, closing_session_id, !agent.queued_turns.is_empty())
             };
 
-            Self::queue_event(tree, event);
+            for event in events {
+                Self::queue_event(tree, event);
+            }
             close_session_id = closing_session_id;
             start_next = close_session_id.is_none() && queued_more;
         }
@@ -662,7 +728,12 @@ impl LocalSubagentHost {
                 if let Ok(mut state) = self.state_lock() {
                     let owner = Self::owner_session_id_for_path(&state, &root_session_id, &path);
                     if let Some(tree) = state.trees.get_mut(&root_session_id) {
-                        Self::queue_event(tree, WaitAgentEvent::AgentClosed { path: path.clone() });
+                        Self::queue_event(
+                            tree,
+                            WaitAgentEvent::AgentClosed {
+                                target: path.clone(),
+                            },
+                        );
                     }
                     Self::remove_agent_locked(&mut state, &root_session_id, &path);
                     owner
@@ -686,7 +757,7 @@ impl LocalSubagentHost {
             let host = self.clone();
             tokio::task::block_in_place(move || {
                 let handle = tokio::runtime::Handle::current();
-                let _ = handle.block_on(host.start_next_task(manager, root_session_id, path));
+                let _ = handle.block_on(host.start_next_turn(manager, root_session_id, path));
             });
         } else {
             // Task finished, session kept alive, nothing queued — the
@@ -727,6 +798,32 @@ impl LocalSubagentHost {
         tree.events = kept;
         drained
     }
+
+    fn queue_message_turn(
+        &self,
+        root_session_id: &str,
+        path: &str,
+        message: QueuedMessage,
+        front: bool,
+    ) -> Result<bool, String> {
+        let mut state = self.state_lock()?;
+        let Some(tree) = state.trees.get_mut(root_session_id) else {
+            return Ok(false);
+        };
+        let Some(agent) = tree.agents.get_mut(path) else {
+            return Ok(false);
+        };
+        if agent.closing {
+            return Ok(false);
+        }
+        let should_start = agent.active_turn.is_none() && agent.queued_turns.is_empty();
+        if front {
+            agent.queued_turns.push_front(QueuedTurn::Message(message));
+        } else {
+            agent.queued_turns.push_back(QueuedTurn::Message(message));
+        }
+        Ok(should_start)
+    }
 }
 
 #[async_trait]
@@ -738,7 +835,7 @@ impl SubagentHost for LocalSubagentHost {
         let agent = tree.agents.get(&locator.path)?;
         Some(SessionAgentInfo {
             path: locator.path.clone(),
-            capability: agent.capability,
+            capability: agent.capability.clone(),
         })
     }
 
@@ -778,7 +875,7 @@ impl SubagentHost for LocalSubagentHost {
                     session_id: session_id.clone(),
                     parent_session_id: request.create_request.parent_session_id.clone(),
                     parent_path: Some(locator.path.clone()),
-                    capability: Some(request.capability),
+                    capability: Some(request.capability.clone()),
                     model: request
                         .create_request
                         .policy
@@ -790,11 +887,10 @@ impl SubagentHost for LocalSubagentHost {
                         .policy
                         .as_ref()
                         .and_then(|policy| policy.model_variant.clone()),
-                    active_task: None,
-                    queued_tasks: VecDeque::new(),
-                    inbox: VecDeque::new(),
+                    active_turn: None,
+                    queued_turns: VecDeque::new(),
                     closing: false,
-                    last_status: "spawning".to_string(),
+                    last_task_state: None,
                     owner_session_id: context.session_id.clone(),
                 },
             );
@@ -824,10 +920,10 @@ impl SubagentHost for LocalSubagentHost {
             agent.parent_session_id = session.parent_session_id.clone();
             agent.model = session.policy.model.clone();
             agent.model_variant = session.policy.model_variant.clone();
-            agent.queued_tasks.push_back(QueuedTask {
+            agent.queued_turns.push_back(QueuedTurn::Task(QueuedTask {
                 task: request.task.clone(),
                 turn_input: request.turn_input,
-            });
+            }));
             state.session_agents.insert(
                 session.session_id.clone(),
                 AgentLocator {
@@ -838,7 +934,7 @@ impl SubagentHost for LocalSubagentHost {
         }
 
         if let Err(err) = self
-            .start_next_task(
+            .start_next_turn(
                 Arc::clone(&context.host),
                 root_session_id.clone(),
                 path.clone(),
@@ -895,10 +991,11 @@ impl SubagentHost for LocalSubagentHost {
 
         Ok(SpawnAgentResponse {
             task_name: normalized_task_name,
-            path,
+            task_id: format!("subagent:{path}"),
+            target: path,
             session_id: session.session_id,
-            status: "running".to_string(),
-            capability: request.capability.as_str().to_string(),
+            run_state: "running".to_string(),
+            capability: request.capability,
             model: session.policy.model,
             model_variant: session.policy.model_variant,
             task_name_note,
@@ -910,13 +1007,12 @@ impl SubagentHost for LocalSubagentHost {
         context: &lash::ToolExecutionContext,
         request: SendMessageRequest,
     ) -> Result<SendMessageResponse, String> {
-        // Decide how the message should be delivered: if the target is
-        // actively running a turn, push it through the target session's
-        // turn-input injection bridge so it lands at the next iteration
-        // boundary (between tool results and the next LLM call). If the
-        // target is idle, fall back to the existing inbox path so the
-        // note is merged into the next task's initial input.
-        let (from, to, active_session_id) = {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let message = QueuedMessage {
+            from: String::new(),
+            message: request.message.clone(),
+        };
+        let (root_session_id, from, to, status, active_session_id, turn_to_cancel, should_start) = {
             let mut state = self.state_lock()?;
             let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
             let to = Self::resolve_target(&locator.path, &request.target)?;
@@ -928,16 +1024,49 @@ impl SubagentHost for LocalSubagentHost {
                 .agents
                 .get_mut(&to)
                 .ok_or_else(|| format!("unknown agent `{to}`"))?;
-            let active_session_id = target
-                .active_task
-                .as_ref()
-                .map(|_| target.session_id.clone());
-            if active_session_id.is_none() {
-                target.inbox.push_back(InboxMessage {
-                    from: locator.path.clone(),
-                    message: request.message.clone(),
-                });
+            if target.closing {
+                return Err(format!("agent `{to}` is closing"));
             }
+
+            let mut message = message.clone();
+            message.from = locator.path.clone();
+            let active_turn_id = target
+                .active_turn
+                .as_ref()
+                .map(|active| active.turn_id.clone());
+            let active_session_id = active_turn_id.as_ref().map(|_| target.session_id.clone());
+            let (status, turn_to_cancel, should_start) =
+                if to == "/root" && active_turn_id.is_none() {
+                    ("notified", None, false)
+                } else {
+                    match (active_turn_id, request.delivery) {
+                        (Some(_), DeliveryMode::NextPossible) => ("delivering", None, false),
+                        (Some(turn_id), DeliveryMode::Interrupt) => {
+                            target
+                                .queued_turns
+                                .push_front(QueuedTurn::Message(message.clone()));
+                            ("queued_after_interrupt", Some(turn_id), false)
+                        }
+                        (Some(_), DeliveryMode::NextTurn) => {
+                            target
+                                .queued_turns
+                                .push_back(QueuedTurn::Message(message.clone()));
+                            ("queued", None, false)
+                        }
+                        (None, DeliveryMode::NextTurn) => {
+                            target
+                                .queued_turns
+                                .push_back(QueuedTurn::Message(message.clone()));
+                            ("queued", None, false)
+                        }
+                        (None, DeliveryMode::NextPossible | DeliveryMode::Interrupt) => {
+                            target
+                                .queued_turns
+                                .push_back(QueuedTurn::Message(message.clone()));
+                            ("started", None, true)
+                        }
+                    }
+                };
             Self::queue_event(
                 tree,
                 WaitAgentEvent::Message {
@@ -946,11 +1075,21 @@ impl SubagentHost for LocalSubagentHost {
                     message: request.message.clone(),
                 },
             );
-            (locator.path, to, active_session_id)
+            (
+                locator.root_session_id,
+                locator.path,
+                to,
+                status.to_string(),
+                active_session_id,
+                turn_to_cancel,
+                should_start,
+            )
         };
 
-        if let Some(session_id) = active_session_id {
-            let text = format!("## Inbox\n\n- from {from}: {}", request.message);
+        if let Some(session_id) = active_session_id
+            && request.delivery == DeliveryMode::NextPossible
+        {
+            let text = format!("## Message from {from}\n\n{}", request.message);
             let plugin_message = PluginMessage {
                 role: MessageRole::User,
                 content: text,
@@ -958,36 +1097,59 @@ impl SubagentHost for LocalSubagentHost {
                 images: Vec::new(),
                 user_input: None,
             };
-            if let Err(err) = context
-                .host
-                .inject_turn_input(&session_id, plugin_message)
-                .await
-            {
-                // Bridge injection failed (session closed mid-flight,
-                // etc.). Fall back to the inbox path so the note isn't
-                // lost — it will merge into the next task start.
-                if let Ok(mut state) = self.state_lock()
-                    && let Some(locator) = state.session_agents.get(&context.session_id).cloned()
-                    && let Some(tree) = state.trees.get_mut(&locator.root_session_id)
-                    && let Some(target) = tree.agents.get_mut(&to)
-                {
-                    target.inbox.push_back(InboxMessage {
-                        from: from.clone(),
-                        message: request.message.clone(),
-                    });
+            let host = self.clone();
+            let manager = Arc::clone(&context.host);
+            let fallback = QueuedMessage {
+                from: from.clone(),
+                message: request.message.clone(),
+            };
+            let root_for_fallback = root_session_id.clone();
+            let target_for_fallback = to.clone();
+            tokio::spawn(async move {
+                if let Err(err) = manager.inject_turn_input(&session_id, plugin_message).await {
+                    let should_start = host
+                        .queue_message_turn(
+                            &root_for_fallback,
+                            &target_for_fallback,
+                            fallback,
+                            true,
+                        )
+                        .unwrap_or(false);
+                    if should_start {
+                        let _ = host
+                            .start_next_turn(
+                                Arc::clone(&manager),
+                                root_for_fallback,
+                                target_for_fallback.clone(),
+                            )
+                            .await;
+                    }
+                    tracing::debug!(
+                        target = %target_for_fallback,
+                        error = %err,
+                        "send_message bridge injection failed; queued message turn"
+                    );
                 }
-                tracing::debug!(
-                    target = %to,
-                    error = %err,
-                    "send_message bridge injection failed; fell back to inbox"
-                );
-            }
+            });
+        }
+
+        if let Some(turn_id) = turn_to_cancel {
+            let manager = Arc::clone(&context.host);
+            tokio::spawn(async move {
+                let _ = manager.cancel_turn(&turn_id).await;
+            });
+        }
+        if should_start {
+            self.start_next_turn(Arc::clone(&context.host), root_session_id, to.clone())
+                .await?;
         }
 
         Ok(SendMessageResponse {
             from,
             to,
-            queued: true,
+            message_id,
+            delivery: request.delivery.as_str().to_string(),
+            status,
         })
     }
 
@@ -1014,41 +1176,47 @@ impl SubagentHost for LocalSubagentHost {
             if agent.closing {
                 return Err(format!("agent `{target_path}` is closing"));
             }
-            let active_turn = agent.active_task.as_ref().map(|task| task.turn_id.clone());
-            let should_start = active_turn.is_none();
-            let disposition = if active_turn.is_some() && request.interrupt {
-                agent.queued_tasks.push_front(QueuedTask {
-                    task: request.task.clone(),
-                    turn_input: request.turn_input,
-                });
-                "queued_after_interrupt"
-            } else if active_turn.is_some() {
-                agent.queued_tasks.push_back(QueuedTask {
-                    task: request.task.clone(),
-                    turn_input: request.turn_input,
-                });
-                "queued"
-            } else {
-                agent.queued_tasks.push_back(QueuedTask {
-                    task: request.task.clone(),
-                    turn_input: request.turn_input,
-                });
-                "started"
+            let active_turn = agent.active_turn.as_ref().map(|turn| turn.turn_id.clone());
+            let queued = QueuedTurn::Task(QueuedTask {
+                task: request.task.clone(),
+                turn_input: request.turn_input,
+            });
+            let (disposition, turn_to_cancel, should_start) = match (active_turn, request.delivery)
+            {
+                (Some(turn_id), DeliveryMode::Interrupt) => {
+                    agent.queued_turns.push_front(queued);
+                    ("queued_after_interrupt", Some(turn_id), false)
+                }
+                (Some(_), DeliveryMode::NextPossible | DeliveryMode::NextTurn) => {
+                    agent.queued_turns.push_back(queued);
+                    ("queued", None, false)
+                }
+                (None, DeliveryMode::NextTurn) => {
+                    agent.queued_turns.push_back(queued);
+                    ("queued", None, false)
+                }
+                (None, DeliveryMode::NextPossible | DeliveryMode::Interrupt) => {
+                    agent.queued_turns.push_back(queued);
+                    ("started", None, true)
+                }
             };
             (
                 locator.root_session_id,
                 target_path,
                 disposition.to_string(),
-                active_turn.filter(|_| request.interrupt),
+                turn_to_cancel,
                 should_start,
             )
         };
 
         if let Some(turn_id) = turn_to_cancel {
-            let _ = context.host.cancel_turn(&turn_id).await;
+            let manager = Arc::clone(&context.host);
+            tokio::spawn(async move {
+                let _ = manager.cancel_turn(&turn_id).await;
+            });
         }
         if should_start {
-            self.start_next_task(
+            self.start_next_turn(
                 Arc::clone(&context.host),
                 root_session_id,
                 target_path.clone(),
@@ -1057,7 +1225,9 @@ impl SubagentHost for LocalSubagentHost {
         }
 
         Ok(FollowupTaskResponse {
+            task_id: format!("subagent:{target_path}"),
             target: target_path,
+            delivery: request.delivery.as_str().to_string(),
             status: disposition,
         })
     }
@@ -1087,43 +1257,50 @@ impl SubagentHost for LocalSubagentHost {
             )
         };
 
-        {
-            let mut state = self.state_lock()?;
-            let tree = state
-                .trees
-                .get_mut(&root_session_id)
-                .ok_or_else(|| "subagent tree missing".to_string())?;
-            let events = Self::drain_matching_events(tree, &current_path, &targets);
-            if !events.is_empty() {
-                return Ok(WaitAgentResponse {
-                    timed_out: false,
-                    events,
-                });
+        let timeout_ms = request.timeout_ms.unwrap_or(30_000);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let mut events = Vec::new();
+
+        loop {
+            // Register for the next notification before draining the queue,
+            // otherwise an event that lands between drain and await can be
+            // missed by notify_waiters.
+            let notified = notify.notified();
+            {
+                let mut state = self.state_lock()?;
+                let tree = state
+                    .trees
+                    .get_mut(&root_session_id)
+                    .ok_or_else(|| "subagent tree missing".to_string())?;
+                events.extend(
+                    Self::drain_matching_events(tree, &current_path, &targets)
+                        .into_iter()
+                        .filter(|event| event_visible_for_until(event, request.until)),
+                );
+                if wait_until_satisfied(&events, request.until) {
+                    return Ok(wait_response(false, events));
+                }
+            }
+
+            if timeout_ms == 0 || tokio::time::Instant::now() >= deadline {
+                return Ok(wait_response(true, events));
+            }
+
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                let mut state = self.state_lock()?;
+                let tree = state
+                    .trees
+                    .get_mut(&root_session_id)
+                    .ok_or_else(|| "subagent tree missing".to_string())?;
+                events.extend(
+                    Self::drain_matching_events(tree, &current_path, &targets)
+                        .into_iter()
+                        .filter(|event| event_visible_for_until(event, request.until)),
+                );
+                let timed_out = !wait_until_satisfied(&events, request.until);
+                return Ok(wait_response(timed_out, events));
             }
         }
-
-        let timeout_ms = request.timeout_ms.unwrap_or(30_000);
-        if timeout_ms == 0 {
-            return Ok(WaitAgentResponse {
-                timed_out: true,
-                events: Vec::new(),
-            });
-        }
-
-        let timed_out = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            notify.notified(),
-        )
-        .await
-        .is_err();
-
-        let mut state = self.state_lock()?;
-        let tree = state
-            .trees
-            .get_mut(&root_session_id)
-            .ok_or_else(|| "subagent tree missing".to_string())?;
-        let events = Self::drain_matching_events(tree, &current_path, &targets);
-        Ok(WaitAgentResponse { timed_out, events })
     }
 
     async fn close_agent(
@@ -1172,16 +1349,38 @@ impl SubagentHost for LocalSubagentHost {
             .iter()
             .filter(|(path, _)| is_same_or_descendant(path, &prefix))
             .map(|(path, agent)| AgentSummary {
-                path: path.clone(),
+                target: path.clone(),
+                task_id: format!("subagent:{path}"),
                 session_id: agent.session_id.clone(),
-                parent_path: agent.parent_path.clone(),
-                capability: agent
-                    .capability
-                    .map(|capability| capability.as_str().to_string()),
-                status: agent.last_status.clone(),
-                active_task: agent.active_task.as_ref().map(|task| task.task.clone()),
-                queued_tasks: agent.queued_tasks.len(),
-                inbox_messages: agent.inbox.len(),
+                parent_target: agent.parent_path.clone(),
+                capability: agent.capability.clone(),
+                agent_state: if agent.closing {
+                    "closed"
+                } else if agent.active_turn.is_some() {
+                    "running"
+                } else {
+                    "idle"
+                }
+                .to_string(),
+                current_task: agent
+                    .active_turn
+                    .as_ref()
+                    .and_then(|turn| match &turn.kind {
+                        ActiveTurnKind::Task { task } => Some(task.clone()),
+                        ActiveTurnKind::Message { .. } => None,
+                    }),
+                current_task_state: agent.active_turn.as_ref().map(|_| "running".to_string()),
+                last_task_state: agent.last_task_state.clone(),
+                queued_tasks: agent
+                    .queued_turns
+                    .iter()
+                    .filter(|turn| matches!(turn, QueuedTurn::Task(_)))
+                    .count(),
+                queued_messages: agent
+                    .queued_turns
+                    .iter()
+                    .filter(|turn| matches!(turn, QueuedTurn::Message(_)))
+                    .count(),
                 model: agent.model.clone(),
                 model_variant: agent.model_variant.clone(),
             })
@@ -1193,21 +1392,109 @@ impl SubagentHost for LocalSubagentHost {
 fn event_matches(event: &WaitAgentEvent, current_path: &str, targets: &[String]) -> bool {
     if targets.is_empty() {
         return match event {
-            WaitAgentEvent::TaskStarted { path, .. }
-            | WaitAgentEvent::TaskCompleted { path, .. }
-            | WaitAgentEvent::AgentClosed { path } => is_same_or_descendant(path, current_path),
+            WaitAgentEvent::TaskStarted { target, .. }
+            | WaitAgentEvent::TaskCompleted { target, .. }
+            | WaitAgentEvent::AgentClosed { target } => is_same_or_descendant(target, current_path),
             WaitAgentEvent::Message { from, to, .. } => {
-                to == current_path || is_same_or_descendant(from, current_path)
+                to == current_path || is_descendant(from, current_path)
             }
         };
     }
 
     targets.iter().any(|target| match event {
-        WaitAgentEvent::TaskStarted { path, .. }
-        | WaitAgentEvent::TaskCompleted { path, .. }
-        | WaitAgentEvent::AgentClosed { path } => path == target,
-        WaitAgentEvent::Message { from, to, .. } => from == target || to == target,
+        WaitAgentEvent::TaskStarted {
+            target: event_target,
+            ..
+        }
+        | WaitAgentEvent::TaskCompleted {
+            target: event_target,
+            ..
+        }
+        | WaitAgentEvent::AgentClosed {
+            target: event_target,
+        } => event_target == target,
+        WaitAgentEvent::Message { from, .. } => from == target,
     })
+}
+
+fn wait_until_satisfied(events: &[WaitAgentEvent], until: WaitUntil) -> bool {
+    events
+        .iter()
+        .any(|event| event_visible_for_until(event, until))
+}
+
+fn event_visible_for_until(event: &WaitAgentEvent, until: WaitUntil) -> bool {
+    match until {
+        WaitUntil::TaskCompleted => matches!(event, WaitAgentEvent::TaskCompleted { .. }),
+        WaitUntil::Terminal => {
+            matches!(
+                event,
+                WaitAgentEvent::TaskCompleted { .. } | WaitAgentEvent::AgentClosed { .. }
+            )
+        }
+        WaitUntil::Message => matches!(event, WaitAgentEvent::Message { .. }),
+        WaitUntil::AnyResult => {
+            matches!(
+                event,
+                WaitAgentEvent::Message { .. }
+                    | WaitAgentEvent::TaskCompleted { .. }
+                    | WaitAgentEvent::AgentClosed { .. }
+            )
+        }
+        WaitUntil::AnyEvent => true,
+    }
+}
+
+fn wait_response(timed_out: bool, events: Vec<WaitAgentEvent>) -> WaitAgentResponse {
+    let completion = events.iter().find_map(|event| {
+        if let WaitAgentEvent::TaskCompleted {
+            target,
+            task,
+            status,
+            result,
+            error,
+            session,
+        } = event
+        {
+            Some(WaitAgentCompletion {
+                target: target.clone(),
+                task: task.clone(),
+                status: status.clone(),
+                result: result.clone(),
+                error: error.clone(),
+                session: session.clone(),
+            })
+        } else {
+            None
+        }
+    });
+    let message = events.iter().find_map(|event| {
+        if let WaitAgentEvent::Message { from, to, message } = event {
+            Some(WaitAgentMessage {
+                from: from.clone(),
+                to: to.clone(),
+                message: message.clone(),
+            })
+        } else {
+            None
+        }
+    });
+    let closed = events.iter().find_map(|event| {
+        if let WaitAgentEvent::AgentClosed { target } = event {
+            Some(WaitAgentClosed {
+                target: target.clone(),
+            })
+        } else {
+            None
+        }
+    });
+    WaitAgentResponse {
+        timed_out,
+        completion,
+        message,
+        closed,
+        events,
+    }
 }
 
 fn build_session_summary(
@@ -1221,16 +1508,6 @@ fn build_session_summary(
         task: task.to_string(),
         iterations: turn.state.iteration,
         tool_calls: turn.state.projected_tool_calls().len(),
-        tool_call_details: turn
-            .state
-            .projected_tool_calls()
-            .iter()
-            .map(|tool_call| TaskToolCallSummary {
-                tool: tool_call.tool.clone(),
-                success: tool_call.success,
-                duration_ms: tool_call.duration_ms,
-            })
-            .collect(),
         model: turn.state.policy.model.clone(),
         model_variant: turn.state.policy.model_variant.clone(),
         token_usage: json!({
@@ -1253,41 +1530,98 @@ fn task_result_value(turn: &AssembledTurn) -> Value {
     json!(turn.assistant_output.raw_text.trim().to_string())
 }
 
+fn task_result_text(turn: &AssembledTurn) -> String {
+    match task_result_value(turn) {
+        Value::String(text) => text,
+        value => serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+fn task_completion_event(
+    agent: &mut AgentRecord,
+    path: &str,
+    task: String,
+    outcome: &Result<AssembledTurn, lash::PluginError>,
+) -> WaitAgentEvent {
+    match outcome {
+        Ok(turn) => {
+            let status = turn_status_label(&turn.status);
+            agent.last_task_state = Some(status.to_string());
+            let session = build_session_summary(agent, &task, turn);
+            WaitAgentEvent::TaskCompleted {
+                target: path.to_string(),
+                task,
+                status: status.to_string(),
+                result: task_result_value(turn),
+                error: None,
+                session,
+            }
+        }
+        Err(_) => {
+            agent.last_task_state = Some("failed".to_string());
+            WaitAgentEvent::TaskCompleted {
+                target: path.to_string(),
+                task: task.clone(),
+                status: "failed".to_string(),
+                result: Value::Null,
+                error: Some("Subagent failed while executing its task.".to_string()),
+                session: WaitAgentSessionSummary {
+                    id: agent.session_id.clone(),
+                    parent_session_id: agent.parent_session_id.clone(),
+                    task,
+                    iterations: 0,
+                    tool_calls: 0,
+                    model: agent.model.clone(),
+                    model_variant: agent.model_variant.clone(),
+                    token_usage: json!({
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cached_input_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "total_tokens": 0,
+                    }),
+                },
+            }
+        }
+    }
+}
+
+fn message_response_event(
+    path: &str,
+    to: String,
+    outcome: &Result<AssembledTurn, lash::PluginError>,
+) -> WaitAgentEvent {
+    let message = match outcome {
+        Ok(turn) => task_result_text(turn),
+        Err(_) => "Subagent failed while handling the message.".to_string(),
+    };
+    WaitAgentEvent::Message {
+        from: path.to_string(),
+        to,
+        message,
+    }
+}
+
+fn message_turn_input(from: &str, message: &str) -> TurnInput {
+    TurnInput {
+        items: vec![InputItem::Text {
+            text: format!(
+                "## Message from {from}\n\n{message}\n\nRespond to this message directly. If no reply is needed, briefly acknowledge it."
+            ),
+        }],
+        image_blobs: HashMap::new(),
+        user_input: None,
+        mode: None,
+        rlm_termination_override: Some(lash::RlmTermination::ProseWithoutFence),
+    }
+}
+
 fn turn_status_label(status: &TurnStatus) -> &'static str {
     match status {
         TurnStatus::Completed => "completed",
         TurnStatus::Interrupted => "interrupted",
         TurnStatus::Failed => "failed",
     }
-}
-
-fn merge_inbox_into_turn_input(mut turn_input: TurnInput, inbox: &[InboxMessage]) -> TurnInput {
-    if inbox.is_empty() {
-        return turn_input;
-    }
-    let mailbox_text = inbox
-        .iter()
-        .map(|message| format!("- from {}: {}", message.from, message.message))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let section = format!("## Inbox\n\n{mailbox_text}");
-    let mut merged = false;
-    for item in &mut turn_input.items {
-        if let InputItem::Text { text } = item {
-            if !text.trim().is_empty() {
-                text.push_str("\n\n");
-            }
-            text.push_str(&section);
-            merged = true;
-            break;
-        }
-    }
-    if !merged {
-        turn_input
-            .items
-            .insert(0, InputItem::Text { text: section });
-    }
-    turn_input
 }
 
 fn normalize_relative_path(value: &str) -> Result<String, String> {
@@ -1342,6 +1676,10 @@ fn is_same_or_descendant(path: &str, prefix: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
+fn is_descendant(path: &str, prefix: &str) -> bool {
+    path.starts_with(&format!("{prefix}/"))
+}
+
 pub fn truncate_snapshot_to_recent_turns(
     mut snapshot: lash::SessionSnapshot,
     turns: usize,
@@ -1382,7 +1720,326 @@ pub fn truncate_snapshot_to_recent_turns(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_relative_path, validate_segment};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    struct NoopSessionManager;
+
+    #[async_trait]
+    impl lash::SessionManager for NoopSessionManager {
+        async fn snapshot_current(&self) -> Result<lash::SessionSnapshot, lash::PluginError> {
+            Ok(lash::PersistedSessionState::default())
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<lash::SessionSnapshot, lash::PluginError> {
+            Ok(lash::PersistedSessionState::default())
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            request: lash::SessionCreateRequest,
+        ) -> Result<lash::SessionHandle, lash::PluginError> {
+            Ok(lash::SessionHandle {
+                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
+                parent_session_id: request.parent_session_id,
+                policy: request.policy.unwrap_or_default(),
+            })
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
+            Ok(())
+        }
+
+        async fn start_turn_stream(
+            &self,
+            session_id: &str,
+            _input: lash::TurnInput,
+        ) -> Result<lash::SessionTurnHandle, lash::PluginError> {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(lash::SessionTurnHandle {
+                turn_id: format!("{session_id}-turn"),
+                session_id: session_id.to_string(),
+                policy: lash::SessionPolicy::default(),
+                events: rx,
+            })
+        }
+
+        async fn await_turn(
+            &self,
+            _turn_id: &str,
+        ) -> Result<lash::AssembledTurn, lash::PluginError> {
+            Err(lash::PluginError::Session("not used".to_string()))
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::PluginError> {
+            Ok(())
+        }
+    }
+
+    struct BlockingInjectManager {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl lash::SessionManager for BlockingInjectManager {
+        async fn snapshot_current(&self) -> Result<lash::PersistedSessionState, lash::PluginError> {
+            Ok(lash::PersistedSessionState::default())
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<lash::PersistedSessionState, lash::PluginError> {
+            Ok(lash::PersistedSessionState::default())
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            request: lash::SessionCreateRequest,
+        ) -> Result<lash::plugin::SessionHandle, lash::PluginError> {
+            Ok(lash::plugin::SessionHandle {
+                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
+                parent_session_id: request.parent_session_id,
+                policy: request.policy.unwrap_or_default(),
+            })
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
+            Ok(())
+        }
+
+        async fn start_turn_stream(
+            &self,
+            session_id: &str,
+            _input: lash::TurnInput,
+        ) -> Result<lash::SessionTurnHandle, lash::PluginError> {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(lash::SessionTurnHandle {
+                turn_id: format!("{session_id}-turn"),
+                session_id: session_id.to_string(),
+                policy: lash::SessionPolicy::default(),
+                events: rx,
+            })
+        }
+
+        async fn await_turn(
+            &self,
+            _turn_id: &str,
+        ) -> Result<lash::AssembledTurn, lash::PluginError> {
+            std::future::pending().await
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::PluginError> {
+            Ok(())
+        }
+
+        async fn inject_turn_input(
+            &self,
+            _session_id: &str,
+            _message: PluginMessage,
+        ) -> Result<(), lash::PluginError> {
+            self.started.notify_waiters();
+            self.release.notified().await;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingStartManager {
+        inputs: StdMutex<Vec<TurnInput>>,
+    }
+
+    #[async_trait]
+    impl lash::SessionManager for RecordingStartManager {
+        async fn snapshot_current(&self) -> Result<lash::PersistedSessionState, lash::PluginError> {
+            Ok(lash::PersistedSessionState::default())
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<lash::PersistedSessionState, lash::PluginError> {
+            Ok(lash::PersistedSessionState::default())
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            request: lash::SessionCreateRequest,
+        ) -> Result<lash::plugin::SessionHandle, lash::PluginError> {
+            Ok(lash::plugin::SessionHandle {
+                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
+                parent_session_id: request.parent_session_id,
+                policy: request.policy.unwrap_or_default(),
+            })
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
+            Ok(())
+        }
+
+        async fn start_turn_stream(
+            &self,
+            session_id: &str,
+            input: lash::TurnInput,
+        ) -> Result<lash::SessionTurnHandle, lash::PluginError> {
+            self.inputs.lock().expect("inputs").push(input);
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(lash::SessionTurnHandle {
+                turn_id: format!("{session_id}-turn"),
+                session_id: session_id.to_string(),
+                policy: lash::SessionPolicy::default(),
+                events: rx,
+            })
+        }
+
+        async fn await_turn(
+            &self,
+            _turn_id: &str,
+        ) -> Result<lash::AssembledTurn, lash::PluginError> {
+            std::future::pending().await
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::PluginError> {
+            Ok(())
+        }
+    }
+
+    fn test_context() -> lash::ToolExecutionContext {
+        test_context_with_host(Arc::new(NoopSessionManager))
+    }
+
+    fn test_context_with_host(host: Arc<dyn lash::SessionManager>) -> lash::ToolExecutionContext {
+        test_context_for_session("root", host)
+    }
+
+    fn test_context_for_session(
+        session_id: &str,
+        host: Arc<dyn lash::SessionManager>,
+    ) -> lash::ToolExecutionContext {
+        lash::ToolExecutionContext {
+            session_id: session_id.to_string(),
+            host,
+            cancellation_token: None,
+            async_task_id: None,
+        }
+    }
+
+    fn test_agent(
+        session_id: &str,
+        parent_path: Option<&str>,
+        active_turn: Option<ActiveTurn>,
+    ) -> AgentRecord {
+        AgentRecord {
+            session_id: session_id.to_string(),
+            parent_session_id: parent_path.map(|_| "root".to_string()),
+            parent_path: parent_path.map(str::to_string),
+            capability: parent_path.map(|_| "low".to_string()),
+            model: "mock-model".to_string(),
+            model_variant: None,
+            active_turn,
+            queued_turns: VecDeque::new(),
+            closing: false,
+            last_task_state: None,
+            owner_session_id: "root".to_string(),
+        }
+    }
+
+    fn test_completed_event(path: &str) -> WaitAgentEvent {
+        WaitAgentEvent::TaskCompleted {
+            target: path.to_string(),
+            task: "work".to_string(),
+            status: "completed".to_string(),
+            result: Value::String("done".to_string()),
+            error: None,
+            session: WaitAgentSessionSummary {
+                id: "worker-session".to_string(),
+                parent_session_id: Some("root".to_string()),
+                task: "work".to_string(),
+                iterations: 1,
+                tool_calls: 0,
+                model: "mock-model".to_string(),
+                model_variant: None,
+                token_usage: json!({
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 0,
+                }),
+            },
+        }
+    }
+
+    fn seed_started_worker(host: &LocalSubagentHost) {
+        let mut state = host.state_lock().expect("state");
+        let mut tree = AgentTree::default();
+        tree.agents
+            .insert("/root".to_string(), test_agent("root", None, None));
+        tree.agents.insert(
+            "/root/worker".to_string(),
+            test_agent(
+                "worker-session",
+                Some("/root"),
+                Some(ActiveTurn {
+                    kind: ActiveTurnKind::Task {
+                        task: "work".to_string(),
+                    },
+                    turn_id: "turn-1".to_string(),
+                }),
+            ),
+        );
+        tree.events.push_back(WaitAgentEvent::TaskStarted {
+            target: "/root/worker".to_string(),
+            task: "work".to_string(),
+            session_id: "worker-session".to_string(),
+            capability: "low".to_string(),
+            model: "mock-model".to_string(),
+            model_variant: None,
+        });
+        state.trees.insert("root".to_string(), tree);
+        state.session_agents.insert(
+            "root".to_string(),
+            AgentLocator {
+                root_session_id: "root".to_string(),
+                path: "/root".to_string(),
+            },
+        );
+        state.session_agents.insert(
+            "worker-session".to_string(),
+            AgentLocator {
+                root_session_id: "root".to_string(),
+                path: "/root/worker".to_string(),
+            },
+        );
+    }
 
     #[test]
     fn slugifies_mixed_case_and_hyphens() {
@@ -1411,6 +2068,450 @@ mod tests {
         assert_eq!(
             normalize_relative_path("Auth Flow/Stage 1").unwrap(),
             "auth_flow/stage_1"
+        );
+    }
+
+    #[test]
+    fn wait_until_defaults_to_task_completed() {
+        assert_eq!(WaitUntil::parse(None).unwrap(), WaitUntil::TaskCompleted);
+        assert_eq!(
+            WaitUntil::parse(Some("task_completed")).unwrap(),
+            WaitUntil::TaskCompleted
+        );
+        assert!(WaitUntil::parse(Some("started")).is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_agent_does_not_complete_on_task_started_only() {
+        let host = LocalSubagentHost::default();
+        seed_started_worker(&host);
+
+        let response = host
+            .wait_agent(
+                &test_context(),
+                WaitAgentRequest {
+                    targets: vec!["/root/worker".to_string()],
+                    until: WaitUntil::TaskCompleted,
+                    timeout_ms: Some(1),
+                },
+            )
+            .await
+            .expect("wait response");
+
+        assert!(response.timed_out);
+        assert!(response.events.is_empty());
+        assert!(response.completion.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_agent_defaults_to_task_completion_not_message() {
+        let host = LocalSubagentHost::default();
+        seed_started_worker(&host);
+        {
+            let mut state = host.state_lock().expect("state");
+            let tree = state.trees.get_mut("root").expect("tree");
+            LocalSubagentHost::queue_event(
+                tree,
+                WaitAgentEvent::Message {
+                    from: "/root/worker".to_string(),
+                    to: "/root".to_string(),
+                    message: "progress".to_string(),
+                },
+            );
+        }
+
+        let response = host
+            .wait_agent(
+                &test_context(),
+                WaitAgentRequest {
+                    targets: vec!["/root/worker".to_string()],
+                    until: WaitUntil::TaskCompleted,
+                    timeout_ms: Some(1),
+                },
+            )
+            .await
+            .expect("wait response");
+
+        assert!(response.timed_out);
+        assert!(response.events.is_empty());
+        assert!(response.completion.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_agent_message_target_ignores_callers_outbound_echo() {
+        let host = LocalSubagentHost::default();
+        seed_started_worker(&host);
+        {
+            let mut state = host.state_lock().expect("state");
+            let tree = state.trees.get_mut("root").expect("tree");
+            LocalSubagentHost::queue_event(
+                tree,
+                WaitAgentEvent::Message {
+                    from: "/root".to_string(),
+                    to: "/root/worker".to_string(),
+                    message: "outbound".to_string(),
+                },
+            );
+        }
+
+        let response = host
+            .wait_agent(
+                &test_context(),
+                WaitAgentRequest {
+                    targets: vec!["/root/worker".to_string()],
+                    until: WaitUntil::Message,
+                    timeout_ms: Some(1),
+                },
+            )
+            .await
+            .expect("wait response");
+
+        assert!(response.timed_out);
+        assert!(response.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_agent_message_recipient_receives_inbound_message() {
+        let host = LocalSubagentHost::default();
+        seed_started_worker(&host);
+        {
+            let mut state = host.state_lock().expect("state");
+            let tree = state.trees.get_mut("root").expect("tree");
+            LocalSubagentHost::queue_event(
+                tree,
+                WaitAgentEvent::Message {
+                    from: "/root".to_string(),
+                    to: "/root/worker".to_string(),
+                    message: "inbound".to_string(),
+                },
+            );
+        }
+
+        let response = host
+            .wait_agent(
+                &test_context_for_session("worker-session", Arc::new(NoopSessionManager)),
+                WaitAgentRequest {
+                    targets: Vec::new(),
+                    until: WaitUntil::Message,
+                    timeout_ms: Some(1),
+                },
+            )
+            .await
+            .expect("wait response");
+
+        assert!(!response.timed_out);
+        assert_eq!(
+            response
+                .message
+                .as_ref()
+                .map(|message| message.message.as_str()),
+            Some("inbound")
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_agent_returns_started_with_later_completion() {
+        let host = LocalSubagentHost::default();
+        seed_started_worker(&host);
+        let notifier = {
+            let state = host.state_lock().expect("state");
+            state.trees.get("root").expect("tree").notify.clone()
+        };
+        let finishing_host = host.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let mut state = finishing_host.state_lock().expect("state");
+            let tree = state.trees.get_mut("root").expect("tree");
+            LocalSubagentHost::queue_event(tree, test_completed_event("/root/worker"));
+            notifier.notify_waiters();
+        });
+
+        let response = host
+            .wait_agent(
+                &test_context(),
+                WaitAgentRequest {
+                    targets: vec!["/root/worker".to_string()],
+                    until: WaitUntil::TaskCompleted,
+                    timeout_ms: Some(500),
+                },
+            )
+            .await
+            .expect("wait response");
+
+        assert!(!response.timed_out);
+        assert_eq!(response.events.len(), 1);
+        assert!(matches!(
+            response.events[0],
+            WaitAgentEvent::TaskCompleted { .. }
+        ));
+        assert_eq!(
+            response
+                .completion
+                .as_ref()
+                .map(|completion| &completion.result),
+            Some(&Value::String("done".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_agent_any_event_keeps_intermediate_events() {
+        let host = LocalSubagentHost::default();
+        seed_started_worker(&host);
+
+        let response = host
+            .wait_agent(
+                &test_context(),
+                WaitAgentRequest {
+                    targets: vec!["/root/worker".to_string()],
+                    until: WaitUntil::AnyEvent,
+                    timeout_ms: Some(1),
+                },
+            )
+            .await
+            .expect("wait response");
+
+        assert!(!response.timed_out);
+        assert_eq!(response.events.len(), 1);
+        assert!(matches!(
+            response.events[0],
+            WaitAgentEvent::TaskStarted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_message_next_possible_does_not_wait_for_active_target_injection() {
+        let host = LocalSubagentHost::default();
+        seed_started_worker(&host);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let context = test_context_with_host(Arc::new(BlockingInjectManager {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        }));
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            host.send_message(
+                &context,
+                SendMessageRequest {
+                    target: "/root/worker".to_string(),
+                    message: "status?".to_string(),
+                    delivery: DeliveryMode::NextPossible,
+                },
+            ),
+        )
+        .await
+        .expect("send_message should not wait for injection")
+        .expect("send response");
+
+        assert_eq!(response.status, "delivering");
+        tokio::time::timeout(std::time::Duration::from_millis(50), started.notified())
+            .await
+            .expect("injection attempted in background");
+        release.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn send_message_wakes_idle_subagent_with_message_turn() {
+        let host = LocalSubagentHost::default();
+        {
+            let mut state = host.state_lock().expect("state");
+            let mut tree = AgentTree::default();
+            tree.agents
+                .insert("/root".to_string(), test_agent("root", None, None));
+            tree.agents.insert(
+                "/root/worker".to_string(),
+                test_agent("worker-session", Some("/root"), None),
+            );
+            state.trees.insert("root".to_string(), tree);
+            state.session_agents.insert(
+                "root".to_string(),
+                AgentLocator {
+                    root_session_id: "root".to_string(),
+                    path: "/root".to_string(),
+                },
+            );
+        }
+        let manager = Arc::new(RecordingStartManager::default());
+        let context = test_context_with_host(manager.clone());
+
+        let response = host
+            .send_message(
+                &context,
+                SendMessageRequest {
+                    target: "/root/worker".to_string(),
+                    message: "new note".to_string(),
+                    delivery: DeliveryMode::NextPossible,
+                },
+            )
+            .await
+            .expect("send response");
+
+        assert_eq!(response.status, "started");
+        let response = host
+            .list_agents(&context, ListAgentsRequest { path_prefix: None })
+            .await
+            .expect("list response");
+        let worker = response
+            .agents
+            .iter()
+            .find(|agent| agent.target == "/root/worker")
+            .expect("worker");
+        assert_eq!(worker.agent_state, "running");
+        assert_eq!(worker.current_task, None);
+        assert_eq!(worker.queued_messages, 0);
+
+        let inputs = manager.inputs.lock().expect("inputs");
+        assert_eq!(inputs.len(), 1);
+        let InputItem::Text { text } = &inputs[0].items[0] else {
+            panic!("expected text input");
+        };
+        assert!(text.contains("## Message from /root"));
+        assert!(text.contains("new note"));
+    }
+
+    #[tokio::test]
+    async fn followup_task_next_turn_queues_without_waking_idle_agent() {
+        let host = LocalSubagentHost::default();
+        {
+            let mut state = host.state_lock().expect("state");
+            let mut tree = AgentTree::default();
+            tree.agents
+                .insert("/root".to_string(), test_agent("root", None, None));
+            tree.agents.insert(
+                "/root/worker".to_string(),
+                test_agent("worker-session", Some("/root"), None),
+            );
+            state.trees.insert("root".to_string(), tree);
+            state.session_agents.insert(
+                "root".to_string(),
+                AgentLocator {
+                    root_session_id: "root".to_string(),
+                    path: "/root".to_string(),
+                },
+            );
+        }
+
+        let response = host
+            .followup_task(
+                &test_context(),
+                FollowupTaskRequest {
+                    target: "/root/worker".to_string(),
+                    task: "later".to_string(),
+                    turn_input: TurnInput {
+                        items: vec![InputItem::Text {
+                            text: "later".to_string(),
+                        }],
+                        image_blobs: HashMap::new(),
+                        user_input: None,
+                        mode: None,
+                        rlm_termination_override: None,
+                    },
+                    delivery: DeliveryMode::NextTurn,
+                },
+            )
+            .await
+            .expect("followup response");
+
+        assert_eq!(response.status, "queued");
+        let listed = host
+            .list_agents(&test_context(), ListAgentsRequest { path_prefix: None })
+            .await
+            .expect("list response");
+        let worker = listed
+            .agents
+            .iter()
+            .find(|agent| agent.target == "/root/worker")
+            .expect("worker");
+        assert_eq!(worker.agent_state, "idle");
+        assert_eq!(worker.queued_tasks, 1);
+    }
+
+    #[tokio::test]
+    async fn list_agents_separates_agent_state_from_last_task_state() {
+        let host = LocalSubagentHost::default();
+        {
+            let mut state = host.state_lock().expect("state");
+            let mut tree = AgentTree::default();
+            tree.agents
+                .insert("/root".to_string(), test_agent("root", None, None));
+            let mut worker = test_agent("worker-session", Some("/root"), None);
+            worker.last_task_state = Some("completed".to_string());
+            tree.agents.insert("/root/worker".to_string(), worker);
+            state.trees.insert("root".to_string(), tree);
+            state.session_agents.insert(
+                "root".to_string(),
+                AgentLocator {
+                    root_session_id: "root".to_string(),
+                    path: "/root".to_string(),
+                },
+            );
+        }
+
+        let response = host
+            .list_agents(&test_context(), ListAgentsRequest { path_prefix: None })
+            .await
+            .expect("list response");
+        let worker = response
+            .agents
+            .iter()
+            .find(|agent| agent.target == "/root/worker")
+            .expect("worker agent");
+
+        assert_eq!(worker.agent_state, "idle");
+        assert_eq!(worker.current_task_state, None);
+        assert_eq!(worker.last_task_state.as_deref(), Some("completed"));
+        assert_eq!(worker.task_id, "subagent:/root/worker");
+    }
+
+    /// Regression: `followup_task` on an idle agent used to leave the
+    /// prior `TaskCompleted` in the per-tree event queue, so the next
+    /// `wait_agent` drained that stale event and returned immediately
+    /// instead of waiting for the follow-up. Queueing a new
+    /// `TaskStarted` for a target must purge any stale terminal events
+    /// for that target.
+    #[test]
+    fn queue_event_task_started_purges_stale_completion_for_same_target() {
+        let mut tree = AgentTree::default();
+        tree.events.push_back(test_completed_event("/root/worker"));
+        tree.events.push_back(WaitAgentEvent::AgentClosed {
+            target: "/root/worker".to_string(),
+        });
+        // Events for a different agent must NOT be purged.
+        tree.events.push_back(test_completed_event("/root/other"));
+
+        LocalSubagentHost::queue_event(
+            &mut tree,
+            WaitAgentEvent::TaskStarted {
+                target: "/root/worker".to_string(),
+                task: "follow-up".to_string(),
+                session_id: "worker-session".to_string(),
+                capability: "low".to_string(),
+                model: "mock-model".to_string(),
+                model_variant: None,
+            },
+        );
+
+        let remaining: Vec<_> = tree
+            .events
+            .iter()
+            .map(|event| match event {
+                WaitAgentEvent::TaskCompleted { target, .. } => format!("completed:{target}"),
+                WaitAgentEvent::AgentClosed { target } => format!("closed:{target}"),
+                WaitAgentEvent::TaskStarted { target, .. } => format!("started:{target}"),
+                WaitAgentEvent::Message { from, to, .. } => format!("message:{from}->{to}"),
+            })
+            .collect();
+
+        assert_eq!(
+            remaining,
+            vec![
+                "completed:/root/other".to_string(),
+                "started:/root/worker".to_string(),
+            ],
+            "stale terminal events for /root/worker should be purged; \
+             events for other agents must survive",
         );
     }
 }

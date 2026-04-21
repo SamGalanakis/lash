@@ -14,7 +14,7 @@ use chrono::Utc;
 use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
-use lash::provider::{AgentModels, OPENROUTER_BASE_URL};
+use lash::provider::OPENROUTER_BASE_URL;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinObservationalMemoryPluginFactory,
     BuiltinRollingHistoryPluginFactory, BuiltinToolResultProjectionPluginFactory, ContextApproach,
@@ -25,7 +25,7 @@ use lash::{
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
-use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentToolConfig, SubagentsPluginFactory};
+use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -750,16 +750,18 @@ fn build_plugin_session(
             factories.push(Arc::new(BuiltinObservationalMemoryPluginFactory));
         }
     }
-    let subagent_models = Some(AgentModels {
-        low: Some(session_policy.model.clone()),
-        medium: Some(session_policy.model.clone()),
-        high: Some(session_policy.model.clone()),
-    });
+    let mut subagent_models = std::collections::BTreeMap::new();
+    subagent_models.insert("low".to_string(), session_policy.model.clone());
+    subagent_models.insert("medium".to_string(), session_policy.model.clone());
+    subagent_models.insert("high".to_string(), session_policy.model.clone());
+    let registry = std::sync::Arc::new(lash_subagents::default_registry(
+        &subagent_models,
+        ExecutionMode::Standard,
+    ));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
     factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy.clone(),
-        SubagentToolConfig::default(),
-        subagent_models,
+        registry,
         subagent_host,
     )));
     if session_tools {

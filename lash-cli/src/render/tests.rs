@@ -78,7 +78,7 @@ fn exploration_multi_op_shows_explored_header_with_ops_below() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(rendered[0], "· Explored");
+    assert_eq!(rendered[0], "• Explored");
     assert_eq!(rendered[1], "    Read README.md");
     assert_eq!(rendered[2], "    Read Cargo.toml");
 }
@@ -107,7 +107,7 @@ fn single_op_exploration_renders_as_one_line() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(rendered[0], "· Read README.md");
+    assert_eq!(rendered[0], "• Read README.md");
     assert_eq!(rendered.len(), 1, "single-op should not emit detail lines");
 }
 
@@ -122,7 +122,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
         }),
         serde_json::json!({
             "task_name":"probe_repo_shape",
-            "path":"/root/probe_repo_shape",
+            "target":"/root/probe_repo_shape",
             "capability":"low",
             "model":"gpt-5.4-mini",
             "model_variant":"low"
@@ -156,7 +156,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
     assert!(
         rendered
             .iter()
-            .any(|line| line == "    Path /root/probe_repo_shape")
+            .any(|line| line == "    Target /root/probe_repo_shape")
     );
     assert!(
         rendered
@@ -463,7 +463,7 @@ fn activity_block_indents_show_snippet_to_user_preview_under_summary() {
         .collect::<Vec<_>>();
 
     assert!(rendered.iter().any(|line| {
-        line.starts_with("· show lash/src/plugin_builtin/plan_mode.rs:780-786 to user")
+        line.starts_with("• show lash/src/plugin_builtin/plan_mode.rs:780-786 to user")
     }));
     assert!(
         rendered
@@ -866,6 +866,83 @@ fn plugin_panel_renders_as_section_header_without_box() {
 }
 
 #[test]
+fn plan_dock_renders_as_checklist_without_header_or_scribe_rule() {
+    use crate::app::{App, PlanDockItem, PlanDockItemStatus, PlanDockState};
+    let mut app = App::new("test-model".into(), "test".into());
+    app.plan_dock = Some(PlanDockState {
+        title: "PLAN".into(),
+        meta: None,
+        items: vec![
+            PlanDockItem {
+                text: "already done".into(),
+                status: PlanDockItemStatus::Done,
+            },
+            PlanDockItem {
+                text: "in flight".into(),
+                status: PlanDockItemStatus::Active,
+            },
+            PlanDockItem {
+                text: "not yet".into(),
+                status: PlanDockItemStatus::Pending,
+            },
+        ],
+    });
+
+    let lines = crate::render::plan_dock_lines_snapshot(&app, 80)
+        .expect("plan dock should render when items are present");
+    let text: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+
+    // Gutter row + 3 items = 4 rows. No `PLAN` header. No scribe rule.
+    assert_eq!(text.len(), 4, "expected 1 gutter + 3 items, got {text:?}");
+    assert!(
+        text[0].trim().is_empty(),
+        "first row should be gutter blank"
+    );
+    assert!(text[1].contains("✓") && text[1].contains("already done"));
+    assert!(text[2].contains("▶") && text[2].contains("in flight"));
+    assert!(text[3].contains("□") && text[3].contains("not yet"));
+    assert!(
+        !text.iter().any(|line| line.contains("PLAN")),
+        "no PLAN header expected, got {text:?}",
+    );
+    assert!(
+        !text.iter().any(|line| line.contains("─")),
+        "no scribe rule expected, got {text:?}",
+    );
+}
+
+#[test]
+fn plan_dock_trailing_height_includes_gutter_plus_items() {
+    use crate::app::{App, PlanDockItem, PlanDockItemStatus, PlanDockState};
+    let mut app = App::new("test-model".into(), "test".into());
+    assert_eq!(crate::render::plan_dock_trailing_height(&app), 0);
+
+    app.plan_dock = Some(PlanDockState {
+        title: String::new(),
+        meta: None,
+        items: vec![
+            PlanDockItem {
+                text: "a".into(),
+                status: PlanDockItemStatus::Pending,
+            },
+            PlanDockItem {
+                text: "b".into(),
+                status: PlanDockItemStatus::Pending,
+            },
+        ],
+    });
+    assert_eq!(crate::render::plan_dock_trailing_height(&app), 3);
+}
+
+#[test]
 fn styled_snippet_chunk_highlights_code_tokens() {
     let spans = artifact::styled_snippet_chunk_for_test(
         "12 │ fn main() { let name = \"sam\"; // note",
@@ -1012,6 +1089,159 @@ fn lashlang_code_block_is_hidden_below_full_expand() {
             "expected no output at expand_level {level}, got {rendered:?}",
         );
     }
+}
+
+// ── Expansion-level mapping (see docs/design-language.html) ──────────
+//
+// L0 (default)   — summary · detail lines · QuestionPanel · compact
+//                  patch (no diffs) · snippet preview.
+// L1 (Ctrl+O)    — above · inline patch diffs · shell output.
+// L2 (Alt+O)     — above · DiffPreview/TextPreview/SourceList · full
+//                  reasoning · uncapped patch diffs · lashlang code.
+
+#[test]
+fn activity_detail_lines_are_visible_at_l0() {
+    let mut state = ActivityState::default();
+    let blocks = state.blocks_for_tool_call(
+        "monitor",
+        serde_json::json!({
+            "description": "build",
+            "command": "cargo build",
+        }),
+        serde_json::json!({
+            "description": "build",
+            "command": "cargo build",
+            "persistent": false,
+            "timeout_ms": 300000,
+            "run_state": "running",
+        }),
+        true,
+        3,
+    );
+    let display = vec![DisplayBlock::Activity(Box::new(blocks[0].clone()))];
+    let rendered = render_block(&display, 0, 0, 80, 10);
+    let text: Vec<String> = rendered
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        text.iter().any(|line| line.contains("running · build")),
+        "detail lines should render at L0; got {text:?}",
+    );
+}
+
+#[test]
+fn shell_output_is_hidden_at_l0_and_visible_at_l1() {
+    let blocks = vec![DisplayBlock::ShellOutput {
+        command: "echo hi".into(),
+        output: "hi\nworld".into(),
+        error: None,
+    }];
+
+    let l0 = render_block(&blocks, 0, 0, 40, 10);
+    let l0_text: Vec<String> = l0
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        !l0_text.iter().any(|line| line.contains("world")),
+        "shell body must stay hidden at L0; got {l0_text:?}",
+    );
+
+    let l1 = render_block(&blocks, 0, 1, 40, 10);
+    let l1_text: Vec<String> = l1
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        l1_text.iter().any(|line| line.contains("world")),
+        "shell body must render at L1; got {l1_text:?}",
+    );
+}
+
+#[test]
+fn reasoning_is_compact_below_l2_and_full_at_l2() {
+    let blocks = vec![
+        DisplayBlock::UserInput("x".into()),
+        DisplayBlock::AssistantReasoning("**Planning the push**\n\nThinking body line.".into()),
+        DisplayBlock::AssistantText("Answer.".into()),
+    ];
+
+    let l0 = render_block(&blocks, 1, 0, 60, 10);
+    let l0_text: Vec<String> = l0
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        l0_text
+            .iter()
+            .any(|line| line.contains("Planning the push")),
+        "L0 reasoning should show compact preview; got {l0_text:?}",
+    );
+    assert!(
+        !l0_text.iter().any(|line| line.contains("alt+o")),
+        "L0 reasoning should not repeat expansion key hints; got {l0_text:?}",
+    );
+    assert!(
+        !l0_text
+            .iter()
+            .any(|line| line.contains("Thinking body line")),
+        "L0 must hide the reasoning body; got {l0_text:?}",
+    );
+
+    let l1 = render_block(&blocks, 1, 1, 60, 10);
+    let l1_text: Vec<String> = l1
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        !l1_text
+            .iter()
+            .any(|line| line.contains("Thinking body line")),
+        "L1 must still hide the reasoning body; got {l1_text:?}",
+    );
+
+    let l2 = render_block(&blocks, 1, 2, 60, 10);
+    let l2_text: Vec<String> = l2
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        l2_text
+            .iter()
+            .any(|line| line.contains("Thinking body line")),
+        "L2 should render the reasoning body; got {l2_text:?}",
+    );
 }
 
 #[test]

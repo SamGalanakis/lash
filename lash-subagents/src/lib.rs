@@ -1,11 +1,17 @@
+mod capability;
 mod host;
 mod policy;
 
+pub use capability::{
+    Capability, CapabilityContext, CapabilityRegistry, CapabilitySpec, DenyList, TierCapability,
+    TierExecutionMode, default_registry,
+};
+
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash::plugin::{PluginError, PluginFactory, PluginSessionContext, ToolSurfaceOverride};
-use lash::provider::AgentModels;
 use lash::{
     InputItem, ModeExtras, PluginSpec, PluginSpecFactory, ProgressSender, RlmCreateExtras,
     RlmTermination, SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionStartPoint,
@@ -15,28 +21,14 @@ use lash::{
 use serde_json::{Value, json};
 
 pub use host::{
-    AgentSummary, Capability, CloseAgentRequest, CloseAgentResponse, FollowupTaskRequest,
+    AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode, FollowupTaskRequest,
     FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse, LocalSubagentHost,
     SendMessageRequest, SendMessageResponse, SessionAgentInfo, SpawnAgentRequest,
-    SpawnAgentResponse, SubagentHost, TaskToolCallSummary, WaitAgentEvent, WaitAgentRequest,
-    WaitAgentResponse, WaitAgentSessionSummary, truncate_snapshot_to_recent_turns,
+    SpawnAgentResponse, SubagentHost, WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent,
+    WaitAgentMessage, WaitAgentRequest, WaitAgentResponse, WaitAgentSessionSummary, WaitUntil,
+    truncate_snapshot_to_recent_turns,
 };
-use policy::{
-    denied_tools, pick_model_and_variant, subagent_prompt_contributions, subagent_tool_definitions,
-};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SubagentToolConfig {
-    pub low_tier_execution_mode: lash::ExecutionMode,
-}
-
-impl Default for SubagentToolConfig {
-    fn default() -> Self {
-        Self {
-            low_tier_execution_mode: lash::ExecutionMode::Standard,
-        }
-    }
-}
+use policy::{subagent_prompt_contributions, subagent_tool_definitions};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ForkTurns {
@@ -47,8 +39,7 @@ enum ForkTurns {
 
 struct SubagentToolsProvider {
     execution_mode: lash::ExecutionMode,
-    tool_config: SubagentToolConfig,
-    agent_models: Option<AgentModels>,
+    registry: Arc<CapabilityRegistry>,
     host: Arc<dyn SubagentHost>,
 }
 
@@ -56,28 +47,43 @@ impl SubagentToolsProvider {
     fn build_session_policy(
         &self,
         current_policy: &SessionPolicy,
-        capability: Capability,
-    ) -> SessionPolicy {
-        let (model, model_variant) =
-            pick_model_and_variant(current_policy, &self.agent_models, capability);
-        SessionPolicy {
-            model,
-            model_variant,
+        capability_name: &str,
+    ) -> Result<SessionPolicy, String> {
+        let capability = self
+            .registry
+            .get(capability_name)
+            .ok_or_else(|| unknown_capability_message(capability_name, &self.registry))?;
+        // Subagent denylist semantics today never read the parent's denylist
+        // (TierCapability returns DenyList::Replace), so passing an empty
+        // parent set is correct. When a future Capability uses
+        // DenyList::AddTo, this is the right hook to thread the parent's
+        // actual denylist through.
+        let parent_denied: HashSet<String> = HashSet::new();
+        let spec = capability.resolve(&CapabilityContext {
+            parent_policy: current_policy,
+            parent_denied_tools: &parent_denied,
+        });
+        Ok(SessionPolicy {
+            model: spec
+                .model
+                .clone()
+                .unwrap_or_else(|| current_policy.model.clone()),
+            model_variant: spec
+                .model_variant
+                .clone()
+                .or_else(|| current_policy.model_variant.clone()),
             provider: current_policy.provider.clone(),
             max_context_tokens: current_policy.max_context_tokens,
             max_turns: None,
-            execution_mode: match capability {
-                Capability::Low => self.tool_config.low_tier_execution_mode,
-                Capability::Medium | Capability::High => current_policy.execution_mode,
-            },
+            execution_mode: spec.execution_mode.unwrap_or(current_policy.execution_mode),
             ..Default::default()
-        }
+        })
     }
 
     async fn build_spawn_create_request(
         &self,
         context: &ToolExecutionContext,
-        capability: Capability,
+        capability_name: &str,
         fork_turns: ForkTurns,
         output_schema: Option<Value>,
     ) -> Result<SessionCreateRequest, String> {
@@ -86,7 +92,7 @@ impl SubagentToolsProvider {
             .snapshot_session(&context.session_id)
             .await
             .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-        let mut policy = self.build_session_policy(&current_snapshot.policy, capability);
+        let mut policy = self.build_session_policy(&current_snapshot.policy, capability_name)?;
         let mut mode_extras = ModeExtras::default();
         if let Some(schema) = output_schema.clone() {
             policy.execution_mode = lash::ExecutionMode::Rlm;
@@ -126,13 +132,19 @@ impl SubagentToolsProvider {
     ) -> Result<Value, String> {
         let task_name = required_string(args, "task_name")?;
         let task = required_string(args, "task")?;
-        let capability = required_string(args, "capability")?
-            .parse::<Capability>()
-            .map_err(|_| "invalid capability: expected `low`, `medium`, or `high`".to_string())?;
+        let capability_name = required_string(args, "capability")?;
+        if self.registry.get(&capability_name).is_none() {
+            return Err(unknown_capability_message(&capability_name, &self.registry));
+        }
         let fork_turns = parse_fork_turns(args.get("fork_turns"))?;
         let output_schema = parse_output_schema(args.get("output"))?;
         let create_request = self
-            .build_spawn_create_request(context, capability, fork_turns, output_schema.clone())
+            .build_spawn_create_request(
+                context,
+                &capability_name,
+                fork_turns,
+                output_schema.clone(),
+            )
             .await?;
         let turn_input = TurnInput {
             items: vec![InputItem::Text {
@@ -150,7 +162,7 @@ impl SubagentToolsProvider {
                 SpawnAgentRequest {
                     task_name,
                     task,
-                    capability,
+                    capability: capability_name,
                     create_request,
                     turn_input,
                 },
@@ -171,6 +183,7 @@ impl SubagentToolsProvider {
                 SendMessageRequest {
                     target: required_string(args, "target")?,
                     message: required_string(args, "message")?,
+                    delivery: DeliveryMode::parse(args.get("delivery").and_then(Value::as_str))?,
                 },
             )
             .await?;
@@ -215,7 +228,7 @@ impl SubagentToolsProvider {
                         rlm_termination_override,
                     },
                     task,
-                    interrupt: optional_bool(args, "interrupt").unwrap_or(false),
+                    delivery: DeliveryMode::parse(args.get("delivery").and_then(Value::as_str))?,
                 },
             )
             .await?;
@@ -233,6 +246,7 @@ impl SubagentToolsProvider {
                 context,
                 WaitAgentRequest {
                     targets: optional_string_list(args, "targets")?,
+                    until: WaitUntil::parse(args.get("until").and_then(|value| value.as_str()))?,
                     timeout_ms: optional_u64(args, "timeout_ms")?,
                 },
             )
@@ -278,7 +292,7 @@ impl SubagentToolsProvider {
 #[async_trait]
 impl ToolProvider for SubagentToolsProvider {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        subagent_tool_definitions(self.execution_mode)
+        subagent_tool_definitions(self.execution_mode, &self.registry)
     }
 
     async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
@@ -321,22 +335,19 @@ impl ToolProvider for SubagentToolsProvider {
 
 pub struct SubagentsPluginFactory {
     policy: SessionPolicy,
-    tool_config: SubagentToolConfig,
-    agent_models: Option<AgentModels>,
+    registry: Arc<CapabilityRegistry>,
     host: Arc<dyn SubagentHost>,
 }
 
 impl SubagentsPluginFactory {
     pub fn new(
         policy: SessionPolicy,
-        tool_config: SubagentToolConfig,
-        agent_models: Option<AgentModels>,
+        registry: Arc<CapabilityRegistry>,
         host: Arc<dyn SubagentHost>,
     ) -> Self {
         Self {
             policy,
-            tool_config,
-            agent_models,
+            registry,
             host,
         }
     }
@@ -355,17 +366,18 @@ impl PluginFactory for SubagentsPluginFactory {
         policy.execution_mode = ctx.execution_mode;
         let provider = Arc::new(SubagentToolsProvider {
             execution_mode: ctx.execution_mode,
-            tool_config: self.tool_config,
-            agent_models: self.agent_models.clone(),
+            registry: Arc::clone(&self.registry),
             host: Arc::clone(&self.host),
         });
         let prompt_contributions = subagent_prompt_contributions();
         let host = Arc::clone(&self.host);
+        let registry = Arc::clone(&self.registry);
         PluginSpecFactory::new(
             "subagents",
             Arc::new(move |_ctx| {
                 let provider = Arc::clone(&provider);
                 let host = Arc::clone(&host);
+                let registry = Arc::clone(&registry);
                 let contributions = prompt_contributions.clone();
                 Ok(PluginSpec::new()
                     .with_tool_provider(provider as Arc<dyn ToolProvider>)
@@ -374,7 +386,7 @@ impl PluginFactory for SubagentsPluginFactory {
                         Box::pin(async move { Ok(contributions) })
                     }))
                     .with_tool_surface_contributor(Arc::new(move |ctx| {
-                        subagent_surface_contribution(&host, ctx)
+                        subagent_surface_contribution(&host, &registry, ctx)
                     })))
             }),
         )
@@ -384,15 +396,29 @@ impl PluginFactory for SubagentsPluginFactory {
 
 fn subagent_surface_contribution(
     host: &Arc<dyn SubagentHost>,
+    registry: &Arc<CapabilityRegistry>,
     ctx: lash::plugin::ToolSurfaceContext,
 ) -> Result<ToolSurfaceContribution, PluginError> {
     let Some(info) = host.session_info(&ctx.session_id) else {
         return Ok(ToolSurfaceContribution::default());
     };
-    let Some(capability) = info.capability else {
+    let Some(capability_name) = info.capability else {
         return Ok(ToolSurfaceContribution::default());
     };
-    let denied = denied_tools(capability);
+    let Some(capability) = registry.get(&capability_name) else {
+        return Ok(ToolSurfaceContribution::default());
+    };
+    // Resolve only to read denied_tools; we don't have a parent policy
+    // here (we're shaping this subagent's own surface) so use a minimal
+    // dummy policy. If a future Capability needs the parent for surface
+    // shaping, this is the place to thread it through.
+    let dummy_policy = SessionPolicy::default();
+    let parent_denied: HashSet<String> = HashSet::new();
+    let spec = capability.resolve(&CapabilityContext {
+        parent_policy: &dummy_policy,
+        parent_denied_tools: &parent_denied,
+    });
+    let denied = spec.denied_tools.apply(&parent_denied);
     let overrides = ctx
         .tools
         .iter()
@@ -404,14 +430,29 @@ fn subagent_surface_contribution(
         })
         .collect::<Vec<_>>();
     let tool_list_notes = vec![format!(
-        "Subagent path: {}. Capability: {}.",
-        info.path,
-        capability.as_str()
+        "Subagent target: {}. Capability: {}.",
+        info.path, capability_name
     )];
     Ok(ToolSurfaceContribution {
         overrides,
         tool_list_notes,
     })
+}
+
+fn unknown_capability_message(name: &str, registry: &CapabilityRegistry) -> String {
+    let known = registry.names();
+    if known.is_empty() {
+        format!("unknown capability `{name}`: no capabilities registered")
+    } else {
+        format!(
+            "unknown capability `{name}`: expected one of {}",
+            known
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 }
 
 fn parse_fork_turns(value: Option<&Value>) -> Result<ForkTurns, String> {
@@ -597,10 +638,6 @@ fn optional_string_list(args: &Value, key: &str) -> Result<Vec<String>, String> 
         .collect()
 }
 
-fn optional_bool(args: &Value, key: &str) -> Option<bool> {
-    args.get(key).and_then(Value::as_bool)
-}
-
 fn optional_u64(args: &Value, key: &str) -> Result<Option<u64>, String> {
     let Some(value) = args.get(key) else {
         return Ok(None);
@@ -693,8 +730,12 @@ mod tests {
 
     #[test]
     fn tool_definitions_are_mode_specific_but_mode_neutral_in_description() {
-        let standard = subagent_tool_definitions(lash::ExecutionMode::Standard);
-        let rlm = subagent_tool_definitions(lash::ExecutionMode::Rlm);
+        let registry = default_registry(
+            &std::collections::BTreeMap::new(),
+            lash::ExecutionMode::Standard,
+        );
+        let standard = subagent_tool_definitions(lash::ExecutionMode::Standard, &registry);
+        let rlm = subagent_tool_definitions(lash::ExecutionMode::Rlm, &registry);
 
         let standard_spawn = standard
             .iter()
@@ -821,10 +862,13 @@ mod tests {
             max_context_tokens: Some(1234),
             ..SessionPolicy::default()
         };
+        let registry = Arc::new(default_registry(
+            &std::collections::BTreeMap::new(),
+            lash::ExecutionMode::Standard,
+        ));
         let provider = SubagentToolsProvider {
             execution_mode: lash::ExecutionMode::Standard,
-            tool_config: SubagentToolConfig::default(),
-            agent_models: None,
+            registry: Arc::clone(&registry),
             host: Arc::new(LocalSubagentHost::default()),
         };
         let context = ToolExecutionContext {
@@ -840,12 +884,19 @@ mod tests {
         };
 
         let request = provider
-            .build_spawn_create_request(&context, Capability::Low, ForkTurns::None, None)
+            .build_spawn_create_request(&context, "low", ForkTurns::None, None)
             .await
             .expect("spawn request");
         let child_policy = request.policy.expect("child policy");
 
-        let stale_choice = pick_model_and_variant(&stale_policy, &None, Capability::Low).0;
+        // The capability looked up the live policy's provider (Google), not
+        // the stale Codex policy. This pins the behaviour where the spawn
+        // pipeline always resolves models against the *current* session
+        // policy snapshot, even when the factory was built earlier.
+        let stale_choice = provider
+            .build_session_policy(&stale_policy, "low")
+            .expect("stale policy")
+            .model;
         assert_eq!(child_policy.provider, live_policy.provider);
         assert_eq!(
             child_policy.max_context_tokens,

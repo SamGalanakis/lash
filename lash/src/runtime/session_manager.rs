@@ -638,8 +638,9 @@ impl SessionManager for RuntimeSessionManager {
             crate::SessionPluginMode::Fresh => self
                 .current_plugins
                 .host()
-                .build_session(
+                .build_session_with_parent(
                     &session_id,
+                    request.parent_session_id.clone(),
                     policy.execution_mode,
                     policy.context_approach.clone(),
                     None,

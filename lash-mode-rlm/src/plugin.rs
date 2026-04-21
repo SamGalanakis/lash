@@ -6,7 +6,7 @@ use lash::plugin::{
 };
 use lash::{
     ExecutionMode, ModeBuildInput, ModePreamble, PromptContribution, SessionError,
-    ToolResultProjectionMode, ToolResultProjectionPluginConfig,
+    ToolResultProjectionPluginConfig,
 };
 
 use crate::driver::build_rlm_preamble;
@@ -74,6 +74,15 @@ impl SessionPlugin for RlmModePlugin {
             Box::pin(async move { Ok(bound_variables_prompt_contributions(&ctx)) })
         });
         reg.prompt().contribute(bound_vars_hook);
+        let root_final_response_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
+            Box::pin(async move {
+                Ok(root_final_response_prompt_contribution(
+                    &ctx.state,
+                    &ctx.rlm_termination,
+                ))
+            })
+        });
+        reg.prompt().contribute(root_final_response_hook);
         let projection_config = self.config.observe_projection.clone();
         let print_output_hook: lash::plugin::PromptContributor = Arc::new(move |_ctx| {
             let projection_config = projection_config.clone();
@@ -98,19 +107,35 @@ impl ModeProtocolDriverPlugin for RlmProtocolDriver {
 }
 
 fn print_output_prompt_contribution(
-    config: &ToolResultProjectionPluginConfig,
+    _config: &ToolResultProjectionPluginConfig,
 ) -> PromptContribution {
-    let mode_label = match config.mode {
-        ToolResultProjectionMode::Bytes => "bytes",
-        ToolResultProjectionMode::Tokens => "tokens",
-    };
+    // The concrete cap numbers (bytes/tokens/max_lines) change per
+    // session and the model has no way to act on them. Keep the prompt
+    // focused on the recovery rule.
     PromptContribution::execution(
         "Print Output",
-        format!(
-            "`print` output is capped before reinjection using the current RLM print limit (mode: `{}`, limit: {}, max_lines: {}). If you see a cap/truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
-            mode_label, config.limit, config.max_lines,
-        ),
+        "`print` output is capped before reinjection. If you see a cap/truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
     )
+}
+
+fn root_final_response_prompt_contribution(
+    state: &lash::SessionReadView,
+    termination: &lash::RlmTermination,
+) -> Vec<PromptContribution> {
+    let is_root_chat_session = state.policy().execution_mode == ExecutionMode::Rlm
+        && state.policy().session_id.is_none()
+        && matches!(termination, lash::RlmTermination::ProseWithoutFence);
+    if !is_root_chat_session {
+        return Vec::new();
+    }
+
+    vec![
+        PromptContribution::guidance(
+            "Final Response Formatting",
+            "This is the root session and the final reply is rendered directly to the user. When there is no Required output schema, finish with prose or `submit` a polished Markdown string. Do not `submit` records, lists, raw tool results, or JSON-shaped diagnostics as the final root answer; use `print` for inspection and summarize the result instead. Structured records are appropriate for subagents and typed output schemas, not for untyped root replies.",
+        )
+        .with_priority(100),
+    ]
 }
 
 struct RlmModeSession {
@@ -177,5 +202,57 @@ impl ModeSessionPlugin for RlmModeSession {
         if let lash::ModeExtras::Rlm(extras) = &request.mode_extras {
             ctx.set_termination_mode(extras.termination.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(execution_mode: ExecutionMode, run_session_id: Option<&str>) -> lash::SessionReadView {
+        lash::SessionReadView::new(lash::SessionStateEnvelope {
+            policy: lash::SessionPolicy {
+                execution_mode,
+                session_id: run_session_id.map(str::to_string),
+                ..lash::SessionPolicy::default()
+            },
+            ..lash::SessionStateEnvelope::default()
+        })
+    }
+
+    #[test]
+    fn root_final_response_guidance_is_root_untyped_only() {
+        let contribution = root_final_response_prompt_contribution(
+            &state(ExecutionMode::Rlm, None),
+            &lash::RlmTermination::ProseWithoutFence,
+        );
+        assert_eq!(contribution.len(), 1);
+        assert_eq!(
+            contribution[0].title.as_deref(),
+            Some("Final Response Formatting")
+        );
+        assert!(contribution[0].content.contains("polished Markdown string"));
+
+        assert!(
+            root_final_response_prompt_contribution(
+                &state(ExecutionMode::Rlm, Some("child-session")),
+                &lash::RlmTermination::ProseWithoutFence,
+            )
+            .is_empty()
+        );
+        assert!(
+            root_final_response_prompt_contribution(
+                &state(ExecutionMode::Rlm, None),
+                &lash::RlmTermination::Finish { schema: None },
+            )
+            .is_empty()
+        );
+        assert!(
+            root_final_response_prompt_contribution(
+                &state(ExecutionMode::Standard, None),
+                &lash::RlmTermination::ProseWithoutFence,
+            )
+            .is_empty()
+        );
     }
 }

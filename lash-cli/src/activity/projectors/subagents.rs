@@ -43,7 +43,7 @@ fn project_spawn_agent(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
         .unwrap_or_default();
     let path = ctx
         .result
-        .get("path")
+        .get("target")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     let name = subagent_name(
@@ -54,7 +54,7 @@ fn project_spawn_agent(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
     let mut detail_lines = Vec::new();
     detail_lines.push(format!("Task {}", inline_text(&task)));
     if !path.is_empty() {
-        detail_lines.push(format!("Path {}", inline_text(path)));
+        detail_lines.push(format!("Target {}", inline_text(path)));
     }
     if let Some(profile) = profile_line((!capability.is_empty()).then_some(capability), &ctx.result)
     {
@@ -76,6 +76,9 @@ fn project_send_message(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
     detail_lines.push(format!("Target {}", inline_text(&target)));
     if let Some(message) = tool_arg_str(&ctx.args, "message") {
         detail_lines.push(format!("Message {}", inline_text(message)));
+    }
+    if let Some(delivery) = ctx.result.get("delivery").and_then(|value| value.as_str()) {
+        detail_lines.push(format!("Delivery {delivery}"));
     }
     block(
         ctx,
@@ -101,6 +104,9 @@ fn project_followup_task(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
         && !status.is_empty()
     {
         detail_lines.push(format!("Status {status}"));
+    }
+    if let Some(delivery) = ctx.result.get("delivery").and_then(|value| value.as_str()) {
+        detail_lines.push(format!("Delivery {delivery}"));
     }
     block(
         ctx,
@@ -254,9 +260,9 @@ fn project_list_agents(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
             items
                 .iter()
                 .filter_map(|item| {
-                    let path = item.get("path").and_then(|value| value.as_str())?;
+                    let path = item.get("target").and_then(|value| value.as_str())?;
                     let status = item
-                        .get("status")
+                        .get("agent_state")
                         .and_then(|value| value.as_str())
                         .unwrap_or("unknown");
                     let capability = item
@@ -267,8 +273,8 @@ fn project_list_agents(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
                         .get("queued_tasks")
                         .and_then(|value| value.as_u64())
                         .unwrap_or(0);
-                    let inbox = item
-                        .get("inbox_messages")
+                    let messages = item
+                        .get("queued_messages")
                         .and_then(|value| value.as_u64())
                         .unwrap_or(0);
                     let mut parts = vec![inline_text(path), status.to_string()];
@@ -278,8 +284,8 @@ fn project_list_agents(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
                     if queued > 0 {
                         parts.push(format!("{queued} queued"));
                     }
-                    if inbox > 0 {
-                        parts.push(format!("{inbox} inbox"));
+                    if messages > 0 {
+                        parts.push(format!("{messages} messages"));
                     }
                     Some(parts.join(" · "))
                 })

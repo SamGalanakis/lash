@@ -9,34 +9,53 @@ fn activity_style(status: ActivityStatus) -> Style {
 }
 
 /// True if the activity has content that the current `expand_level` is
-/// NOT rendering. Drives the `▸` indicator on the call line so the reader
-/// can tell when they're looking at a compact view.
+/// NOT rendering. Drives the `▸` indicator on the call line so the
+/// reader can tell when they're looking at a compact view.
+///
+/// Level mapping (see `docs/design-language.html`):
+/// * L0 shows summary + detail lines + QuestionPanel + compact patch
+///   (filename + `+/-` counts, no diff body) + snippet preview.
+/// * L1 adds full patch diffs (capped by file count).
+/// * L2 adds DiffPreview / TextPreview / SourceList / reasoning /
+///   shell output / full patch diffs without a file cap.
 fn has_hidden_content_at(activity: &ActivityBlock, expand_level: u8) -> bool {
     if expand_level >= 2 {
         return false;
     }
-    if expand_level == 0 {
-        return !activity.result.detail_lines.is_empty() || activity.result.artifact.is_some();
-    }
-    // Level 1 shows detail lines and the compact artifact path for
-    // PatchPreview / SnippetPreview / QuestionPanel. Other artifact
-    // kinds (DiffPreview, TextPreview, SourceList) only appear at
-    // level 2 — those are what we need to signal as hidden.
-    matches!(
-        activity.result.artifact.as_ref(),
+    match activity.result.artifact.as_ref() {
+        Some(ActivityArtifact::PatchPreview { files, .. }) => {
+            let non_empty_diffs = files.iter().any(|file| !file.diff.trim().is_empty());
+            let over_cap = files.len() > COMPACT_PATCH_PREVIEW_MAX_FILES;
+            if expand_level >= 1 {
+                // L1 renders diffs but caps files; hidden only when
+                // there are more files than the cap.
+                over_cap
+            } else {
+                // L0 drops diffs entirely; hidden when either diffs
+                // exist or the file list is truncated.
+                non_empty_diffs || over_cap
+            }
+        }
         Some(
             ActivityArtifact::DiffPreview { .. }
-                | ActivityArtifact::TextPreview { .. }
-                | ActivityArtifact::SourceList { .. }
-        )
-    )
+            | ActivityArtifact::TextPreview { .. }
+            | ActivityArtifact::SourceList { .. },
+        ) => true,
+        Some(ActivityArtifact::SnippetPreview(_) | ActivityArtifact::QuestionPanel(_)) | None => {
+            false
+        }
+    }
 }
 
 fn activity_prefix(activity: &ActivityBlock) -> (&'static str, Style, Style) {
+    // Weight note: generic activity rows use the bullet (`•`) rather
+    // than the middle-dot (`·`) so a completed tool call pops against
+    // reasoning's `┊` gutter and the dock's `▶`/`■`/`□` glyphs. The
+    // middle dot is too visually light to read as "a thing happened".
     match activity.call.kind {
-        ActivityKind::Exploration => ("· ", theme::explore_marker(), theme::explore_label()),
+        ActivityKind::Exploration => ("• ", theme::explore_marker(), theme::explore_label()),
         ActivityKind::Edit => (
-            "· ",
+            "• ",
             theme::edit_lane_bold(),
             theme::assistant_text().add_modifier(Modifier::Bold),
         ),
@@ -54,7 +73,7 @@ fn activity_prefix(activity: &ActivityBlock) -> (&'static str, Style, Style) {
         ),
         _ => match activity.result.status {
             ActivityStatus::Completed => (
-                "· ",
+                "• ",
                 theme::tool_success(),
                 activity_style(activity.result.status),
             ),
@@ -82,9 +101,10 @@ pub(super) fn render_activity_block(
         return;
     }
 
-    if expand_level >= 1
-        && let Some(ActivityArtifact::QuestionPanel(panel)) = activity.result.artifact.as_ref()
-    {
+    // QuestionPanel takes over the activity row with its own
+    // interactive panel and is always shown — it's the ask dialog
+    // the user already answered, not something to fold away.
+    if let Some(ActivityArtifact::QuestionPanel(panel)) = activity.result.artifact.as_ref() {
         render_question_panel_artifact(panel, lines, viewport_width);
         return;
     }
@@ -143,95 +163,102 @@ pub(super) fn render_activity_block(
     let detail_prefix = "    ";
     let detail_prefix_width = UnicodeWidthStr::width(detail_prefix);
 
-    if expand_level >= 1 {
-        if activity.call.kind == ActivityKind::Exploration {
-            render_recent_activity_feed_lines(
+    // ── L0+: detail lines, parallel/subagent children, compact
+    //        patch (no diffs) + snippet preview.
+    if activity.call.kind == ActivityKind::Exploration {
+        render_recent_activity_feed_lines(
+            lines,
+            &activity.result.detail_lines,
+            viewport_width,
+            detail_prefix,
+            theme::explore_marker(),
+            "exploration step",
+        );
+    } else {
+        // Wrap-continuation gets two extra columns so a long detail
+        // that spills onto the next row can't be confused with a
+        // fresh detail item starting at the prefix column.
+        let continuation_prefix = format!("{detail_prefix}  ");
+        for detail in &activity.result.detail_lines {
+            push_wrapped_prefixed(
                 lines,
-                &activity.result.detail_lines,
-                viewport_width,
-                detail_prefix,
-                theme::explore_marker(),
-                "exploration step",
+                detail_prefix.to_string(),
+                continuation_prefix.clone(),
+                detail,
+                Style::default().fg(theme::text_faint()),
+                viewport_width.saturating_sub(detail_prefix_width) + detail_prefix_width,
             );
-        } else {
-            for detail in &activity.result.detail_lines {
-                push_wrapped_prefixed(
-                    lines,
-                    detail_prefix.to_string(),
-                    detail_prefix.to_string(),
-                    detail,
-                    Style::default().fg(theme::text_faint()),
-                    viewport_width.saturating_sub(detail_prefix_width) + detail_prefix_width,
-                );
-            }
-        }
-
-        if activity.call.kind == ActivityKind::Parallel {
-            for child in &activity.children {
-                push_wrapped_prefixed(
-                    lines,
-                    "      ".to_string(),
-                    "      ".to_string(),
-                    &child.call.summary,
-                    activity_style(child.result.status),
-                    viewport_width,
-                );
-            }
-        }
-
-        if activity.call.kind == ActivityKind::Subagent {
-            for child in &activity.children {
-                push_wrapped_prefixed(
-                    lines,
-                    detail_prefix.to_string(),
-                    detail_prefix.to_string(),
-                    &child.call.summary,
-                    if child.result.status == ActivityStatus::Failed {
-                        theme::error()
-                    } else {
-                        theme::subagent_child()
-                    },
-                    viewport_width,
-                );
-            }
-        }
-
-        if expand_level == 1
-            && let Some(artifact) = &activity.result.artifact
-        {
-            match artifact {
-                ActivityArtifact::PatchPreview { files, .. } => {
-                    render_patch_artifact(
-                        lines,
-                        files,
-                        viewport_width,
-                        detail_prefix,
-                        true,
-                        Some(COMPACT_PATCH_PREVIEW_MAX_FILES),
-                    );
-                }
-                ActivityArtifact::SnippetPreview(preview) => {
-                    render_snippet_preview_with_indent(
-                        preview,
-                        lines,
-                        viewport_width,
-                        detail_prefix,
-                    );
-                }
-                _ => {}
-            }
         }
     }
 
-    if expand_level >= 2
-        && let Some(artifact) = &activity.result.artifact
-    {
+    if activity.call.kind == ActivityKind::Parallel {
+        for child in &activity.children {
+            push_wrapped_prefixed(
+                lines,
+                "      ".to_string(),
+                "      ".to_string(),
+                &child.call.summary,
+                activity_style(child.result.status),
+                viewport_width,
+            );
+        }
+    }
+
+    if activity.call.kind == ActivityKind::Subagent {
+        for child in &activity.children {
+            push_wrapped_prefixed(
+                lines,
+                detail_prefix.to_string(),
+                detail_prefix.to_string(),
+                &child.call.summary,
+                if child.result.status == ActivityStatus::Failed {
+                    theme::error()
+                } else {
+                    theme::subagent_child()
+                },
+                viewport_width,
+            );
+        }
+    }
+
+    if let Some(artifact) = &activity.result.artifact {
         match artifact {
             ActivityArtifact::PatchPreview { files, .. } => {
-                render_patch_artifact(lines, files, viewport_width, detail_prefix, true, None);
+                // L0: file summaries only (no diff body). L1: add
+                // inline diffs, capped by file count. L2: no cap.
+                let include_diffs = expand_level >= 1;
+                let max_files = if expand_level >= 2 {
+                    None
+                } else {
+                    Some(COMPACT_PATCH_PREVIEW_MAX_FILES)
+                };
+                render_patch_artifact(
+                    lines,
+                    files,
+                    viewport_width,
+                    detail_prefix,
+                    include_diffs,
+                    max_files,
+                );
             }
-            _ => render_activity_artifact(lines, artifact, viewport_width, detail_prefix),
+            ActivityArtifact::SnippetPreview(preview) => {
+                render_snippet_preview_with_indent(preview, lines, viewport_width, detail_prefix);
+            }
+            _ => {}
         }
+    }
+
+    // ── L2+: heavy artifact bodies (inline diffs, captured text,
+    //        source lists). Patch/snippet are already rendered above
+    //        at their level-appropriate form.
+    if expand_level >= 2
+        && let Some(
+            artifact @ (ActivityArtifact::DiffPreview { .. }
+            | ActivityArtifact::TextPreview { .. }
+            | ActivityArtifact::SourceList { .. }),
+        ) = activity.result.artifact.as_ref()
+    {
+        render_activity_artifact(lines, artifact, viewport_width, detail_prefix);
     }
 }
 

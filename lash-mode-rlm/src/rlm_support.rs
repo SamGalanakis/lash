@@ -712,6 +712,7 @@ mod tests {
             host: Arc::new(MockSessionManager::default()),
             prompt: lash::PromptContext::default(),
             state: lash::SessionReadView::new(snapshot),
+            rlm_termination: lash::RlmTermination::default(),
         };
 
         let contributions = bound_variables_prompt_contributions(&ctx);

@@ -1087,6 +1087,7 @@ pub struct PromptHookContext {
     pub host: Arc<dyn SessionManager>,
     pub prompt: crate::PromptContext,
     pub state: SessionReadView,
+    pub rlm_termination: RlmTermination,
 }
 
 #[derive(Clone)]
@@ -1529,6 +1530,20 @@ pub struct PluginSessionContext {
     pub session_id: String,
     pub execution_mode: ExecutionMode,
     pub context_approach: crate::ContextApproach,
+    /// Session id of the caller that created this one. `None` identifies
+    /// a root session; any subagent / compaction / forked-child session
+    /// carries the parent here so plugin factories can gate themselves
+    /// on root-only behavior (e.g. `update_plan`'s sticky plan dock).
+    pub parent_session_id: Option<String>,
+}
+
+impl PluginSessionContext {
+    /// Returns `true` when this context represents a root session, not a
+    /// subagent or internal child. Plugins that should only surface in
+    /// user-facing top-level turns check this in their `build`.
+    pub fn is_root_session(&self) -> bool {
+        self.parent_session_id.is_none()
+    }
 }
 
 #[derive(Clone)]
@@ -1753,7 +1768,8 @@ mod builtin;
 #[cfg(feature = "sqlite-store")]
 pub use builtin::{
     BuiltinPlanModePluginFactory, BuiltinPromptContextPluginFactory,
-    BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
+    BuiltinUiActivityPluginFactory, BuiltinUpdatePlanPluginFactory, PromptContextPluginConfig,
+    UpdatePlanItem, UpdatePlanSnapshot,
 };
 
 #[cfg(test)]
@@ -1871,6 +1887,7 @@ mod tests {
                 host: Arc::new(MockSessionManager::default()),
                 prompt: crate::PromptContext::default(),
                 state: SessionReadView::new(SessionStateEnvelope::default()),
+                rlm_termination: RlmTermination::default(),
             })
             .await
             .expect("prompt contributions");

@@ -102,10 +102,17 @@ pub enum TypeExpr {
     Float,
     Bool,
     Dict,
+    /// The literal `null` type; usually only useful as part of a
+    /// `Union` (e.g. `str | null` for a nullable field).
+    Null,
     Enum(Vec<AstString>),
     List(Box<TypeExpr>),
     Object(Vec<TypeField>),
     Ref(AstString),
+    /// Union of alternative type shapes, e.g. `str | int | null`.
+    /// Always has two or more variants; single-variant parses collapse
+    /// to the underlying `TypeExpr` in the parser.
+    Union(Vec<TypeExpr>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
