@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use crate::PromptContribution;
-use crate::instructions::InstructionSource;
-use crate::plugin::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext};
+use lash::PromptContribution;
+use lash::instructions::InstructionSource;
+use lash::plugin::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromptContextPluginConfig {
@@ -46,7 +46,7 @@ impl PluginFactory for PromptContextPluginFactory {
     fn build(
         &self,
         _ctx: &PluginSessionContext,
-    ) -> Result<Arc<dyn crate::SessionPlugin>, PluginError> {
+    ) -> Result<Arc<dyn lash::SessionPlugin>, PluginError> {
         Ok(Arc::new(PromptContextPlugin {
             instruction_source: Arc::clone(&self.instruction_source),
             config: self.config.clone(),
@@ -59,7 +59,7 @@ struct PromptContextPlugin {
     config: PromptContextPluginConfig,
 }
 
-impl crate::SessionPlugin for PromptContextPlugin {
+impl lash::SessionPlugin for PromptContextPlugin {
     fn id(&self) -> &'static str {
         "prompt_context"
     }

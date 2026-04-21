@@ -14,16 +14,17 @@ use dataset::{LongCoTQuestion, load_questions};
 use lash::plugin::PluginFactory;
 use lash::provider::OPENROUTER_BASE_URL;
 use lash::{
-    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinRollingHistoryPluginFactory,
-    BuiltinToolResultProjectionPluginFactory, ContextApproach, EmbeddedRuntimeHost, EventSink,
-    ExecutionMode, InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices,
-    PluginHost, PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, Provider, ProviderOptions, RlmGlobalsPatchPluginBody, RuntimeCoreConfig,
-    RuntimeStore, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
-    diff_usage_reports,
+    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
+    ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
+    PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot,
+    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, Provider, ProviderOptions,
+    RlmGlobalsPatchPluginBody, RuntimeCoreConfig, RuntimeStore, SessionAppendNode, SessionEvent,
+    SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
+    TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_export::{ExportFormat, SessionSelector, export};
+use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
+use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -820,10 +821,10 @@ fn build_plugin_session(
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
     match context_approach {
         ContextApproach::RollingHistory(_) => {
-            factories.push(Arc::new(BuiltinRollingHistoryPluginFactory::default()));
+            factories.push(Arc::new(RollingHistoryPluginFactory::default()));
         }
         ContextApproach::ObservationalMemory(_) => {
-            factories.push(Arc::new(lash::BuiltinObservationalMemoryPluginFactory));
+            factories.push(Arc::new(ObservationalMemoryPluginFactory));
         }
     }
     // The RLM runtime refuses to start without mode-session plugins

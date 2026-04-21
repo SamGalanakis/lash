@@ -4,21 +4,20 @@ use std::sync::{Arc, OnceLock};
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use super::plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
-use super::*;
-use crate::instructions::InstructionSource;
-use crate::plugin::{
-    PluginDirective, PluginError, PromptHookContext, PromptRequestHookContext, SessionPluginMode,
-    SessionStartPoint, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContext,
+use lash_plugin_plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
+
+use lash::plugin::{
+    PluginDirective, PluginError, SessionPluginMode, SessionStartPoint, ToolCallHookContext,
+    ToolResultHookContext, ToolSurfaceContext,
 };
-use crate::{
+use lash::{
     AssembledTurn, DynamicToolProvider, ExecutionMode, MessageRole, PersistedSessionState,
-    PluginHost, PluginSurfaceEvent, PromptSlot, SessionCreateRequest, SessionHandle,
-    SessionManager, SessionPolicy, SessionReadView, SessionSnapshot, SessionStateEnvelope,
-    ToolDefinition, ToolProvider, ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
+    PluginHost, SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy,
+    SessionReadView, SessionSnapshot, SessionStateEnvelope, ToolDefinition, ToolProvider,
+    ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
 };
 
-use crate::test_support::{MockSessionManager, mock_assembled_turn};
+use lash::testing::{MockSessionManager, mock_assembled_turn};
 
 fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
     PersistedSessionState::from_state(SessionStateEnvelope {
@@ -52,7 +51,7 @@ impl ToolProvider for PlanModeDynamicTools {
             injected: false,
             input_schema_override: None,
             output_schema_override: None,
-            execution_mode: crate::ToolExecutionMode::Parallel,
+            execution_mode: lash::ToolExecutionMode::Parallel,
         }]
     }
 
@@ -69,11 +68,6 @@ fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
             DynamicToolProvider::from_tool_provider(Arc::new(PlanModeDynamicTools))
                 .expect("plan mode dynamic tools"),
         )
-}
-
-struct StaticInstructionSource {
-    text: String,
-    read_text: String,
 }
 
 fn plan_mode_env_lock() -> &'static Mutex<()> {
@@ -129,236 +123,14 @@ fn ready_plan_markdown() -> &'static str {
 "#
 }
 
-impl InstructionSource for StaticInstructionSource {
-    fn system_instructions(&self) -> String {
-        self.text.clone()
-    }
-
-    fn context_instructions_for_reads(&self, _read_paths: &[String]) -> String {
-        self.read_text.clone()
-    }
-}
-
 fn empty_turn(session_id: &str) -> AssembledTurn {
     mock_assembled_turn(session_id, "")
 }
 
-#[tokio::test]
-async fn ui_activity_plugin_emits_done_notification_surface_event() {
-    let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
-    let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
-
-    let events = session
-        .after_turn(TurnResultHookContext {
-            session_id: "root".to_string(),
-            turn: Arc::new(crate::TurnResultSummary::from_assembled(&empty_turn(
-                "root",
-            ))),
-            host: manager,
-        })
-        .await
-        .expect("after turn");
-
-    assert!(events.iter().any(|emitted| {
-        matches!(
-            &emitted.value,
-            PluginDirective::EmitEvents { events }
-                if events.iter().any(|event| matches!(
-                    event,
-                    PluginSurfaceEvent::Custom { name, payload }
-                        if name == "desktop_notification"
-                            && payload.get("body").and_then(|value| value.as_str())
-                                == Some("Response complete")
-                ))
-        )
-    }));
-}
-
-#[tokio::test]
-async fn ui_activity_plugin_emits_prompt_notification_surface_event() {
-    let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
-    let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
-
-    let events = session
-        .on_prompt_request(PromptRequestHookContext {
-            session_id: "root".to_string(),
-            request: crate::PromptRequest::single(
-                "Need approval?",
-                vec!["yes".to_string(), "no".to_string()],
-            ),
-            host: manager,
-        })
-        .await
-        .expect("prompt hooks");
-
-    assert!(events.iter().any(|emitted| {
-        matches!(
-            &emitted.value,
-            PluginSurfaceEvent::Custom { name, payload }
-                if name == "desktop_notification"
-                    && payload.get("body").and_then(|value| value.as_str()) == Some("Need approval?")
-        )
-    }));
-}
-
-#[tokio::test]
-async fn prompt_context_plugin_contributes_environment_and_project_instruction_sections() {
-    let host = PluginHost::new(vec![Arc::new(BuiltinPromptContextPluginFactory::new(
-        Arc::new(StaticInstructionSource {
-            text: "Repo rules".to_string(),
-            read_text: String::new(),
-        }),
-        PromptContextPluginConfig::default(),
-    ))]);
-    let session = host.build_standard_session("root", None).expect("session");
-    let contributions = session
-        .collect_prompt_contributions(PromptHookContext {
-            session_id: "root".to_string(),
-            host: Arc::new(mock_session_manager("run-session")),
-            state: SessionReadView::new(SessionStateEnvelope::default()),
-            rlm_termination: crate::RlmTermination::default(),
-        })
-        .await
-        .expect("prompt contributions");
-
-    assert!(contributions.iter().any(|contribution| {
-        contribution.slot == PromptSlot::RuntimeContext
-            && contribution.content.contains("Working directory:")
-    }));
-    assert!(contributions.iter().any(|contribution| {
-        contribution.slot == PromptSlot::RuntimeContext
-            && contribution.content.contains("Current date (UTC):")
-    }));
-    assert!(contributions.iter().any(|contribution| {
-        contribution.slot == PromptSlot::ProjectInstructions
-            && contribution.title.as_deref() == Some("Project Instructions")
-            && contribution.content == "Repo rules"
-    }));
-}
-
-#[test]
-fn rlm_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
-    let host = PluginHost::new(vec![]);
-    let session = host
-        .build_session(
-            "root",
-            ExecutionMode::Rlm,
-            crate::ContextApproach::default(),
-            None,
-        )
-        .expect("session");
-
-    let surface = session
-        .resolve_tool_surface(ToolSurfaceContext {
-            session_id: "root".to_string(),
-            mode: ExecutionMode::Rlm,
-            tools: vec![
-                ToolDefinition {
-                    name: "search_tools".to_string(),
-                    description: "Discover tools".to_string(),
-                    params: vec![],
-                    returns: "list".to_string(),
-                    examples: vec![],
-                    enabled: true,
-                    injected: false,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "read_file".to_string(),
-                    description: "Read files".to_string(),
-                    params: vec![],
-                    returns: "str".to_string(),
-                    examples: vec![],
-                    enabled: true,
-                    injected: true,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "apply_patch".to_string(),
-                    description: "Apply patches".to_string(),
-                    params: vec![],
-                    returns: "str".to_string(),
-                    examples: vec![],
-                    enabled: true,
-                    injected: false,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Serial,
-                },
-            ],
-        })
-        .expect("tool surface");
-
-    assert!(
-        surface
-            .tools
-            .iter()
-            .any(|tool| tool.name == "search_tools" && tool.enabled && tool.injected)
-    );
-    assert!(surface.tool_list_notes.iter().any(|note| {
-        note.contains("additional tool(s) are available but omitted from this prompt")
-    }));
-}
-
-#[test]
-fn rlm_tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
-    let host = PluginHost::new(vec![]);
-    let session = host
-        .build_session(
-            "root",
-            ExecutionMode::Rlm,
-            crate::ContextApproach::default(),
-            None,
-        )
-        .expect("session");
-
-    let surface = session
-        .resolve_tool_surface(ToolSurfaceContext {
-            session_id: "root".to_string(),
-            mode: ExecutionMode::Rlm,
-            tools: vec![
-                ToolDefinition {
-                    name: "search_tools".to_string(),
-                    description: "Discover tools".to_string(),
-                    params: vec![],
-                    returns: "list".to_string(),
-                    examples: vec![],
-                    enabled: true,
-                    injected: false,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "read_file".to_string(),
-                    description: "Read files".to_string(),
-                    params: vec![],
-                    returns: "str".to_string(),
-                    examples: vec![],
-                    enabled: true,
-                    injected: true,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
-            ],
-        })
-        .expect("tool surface");
-
-    assert_eq!(surface.tools.len(), 2);
-    assert!(
-        surface
-            .tools
-            .iter()
-            .any(|tool| tool.name == "search_tools" && !tool.enabled && !tool.injected)
-    );
-    assert!(surface.tool_list_notes.is_empty());
+fn plan_mode_host(plan_factory: PlanModePluginFactory) -> PluginHost {
+    let mut factories = lash::testing::test_mode_factories();
+    factories.push(Arc::new(plan_factory));
+    PluginHost::new(factories)
 }
 
 #[tokio::test]
@@ -366,7 +138,7 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
@@ -427,7 +199,7 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
     );
 
     restored
-        .restore(&crate::PluginSessionSnapshot::default())
+        .restore(&lash::PluginSessionSnapshot::default())
         .expect("reset restore");
     let reset_status = restored
         .invoke_external(
@@ -450,7 +222,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
     let manager_host: Arc<dyn SessionManager> = manager.clone();
@@ -512,7 +284,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
@@ -553,7 +325,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 PluginDirective::EmitEvents { events }
                     if events.iter().any(|event| matches!(
                         event,
-                        crate::plugin::PluginSurfaceEvent::ModeIndicatorUpsert { label, .. }
+                        lash::plugin::PluginSurfaceEvent::ModeIndicatorUpsert { label, .. }
                             if label == "plan"
                     ))
             )
@@ -565,7 +337,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 PluginDirective::EmitEvents { events }
                     if events.iter().any(|event| matches!(
                         event,
-                        crate::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
+                        lash::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
                             if title == "PLAN"
                                 && content.contains("Path: `.lash/plans/run-session.md`")
                     ))
@@ -610,7 +382,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
+                    execution_mode: lash::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "show_snippet_to_user".to_string(),
@@ -622,7 +394,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
+                    execution_mode: lash::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "read_file".to_string(),
@@ -634,7 +406,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
+                    execution_mode: lash::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "search_web".to_string(),
@@ -646,7 +418,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
+                    execution_mode: lash::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
                     name: "apply_patch".to_string(),
@@ -658,7 +430,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: true,
                     input_schema_override: None,
                     output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Serial,
+                    execution_mode: lash::ToolExecutionMode::Serial,
                 },
                 ToolDefinition {
                     name: "plan_exit".to_string(),
@@ -670,7 +442,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     injected: false,
                     input_schema_override: None,
                     output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
+                    execution_mode: lash::ToolExecutionMode::Parallel,
                 },
             ],
         })
@@ -800,9 +572,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .expect("enable");
 
     let checkpoint = session
-        .at_checkpoint(crate::CheckpointHookContext {
+        .at_checkpoint(lash::CheckpointHookContext {
             session_id: "root".to_string(),
-            checkpoint: crate::CheckpointKind::AfterWork,
+            checkpoint: lash::CheckpointKind::AfterWork,
             state: mock_read_view("run-session"),
             host: Arc::clone(&manager),
         })
@@ -821,7 +593,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(crate::TurnResultSummary::from_assembled(&empty_turn(
+            turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn(
                 "root",
             ))),
             host: manager,
@@ -835,7 +607,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
@@ -867,7 +639,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(crate::TurnResultSummary::from_assembled(&empty_turn(
+            turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn(
                 "root",
             ))),
             host: Arc::clone(&manager),
@@ -891,9 +663,9 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
+    let host = plan_mode_host(PlanModePluginFactory::new(
         PlanModePluginConfig::default().with_allowed_tools(["apply_patch", "read_file"]),
-    ))]);
+    ));
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
@@ -977,14 +749,14 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         async fn dynamic_tool_state(
             &self,
             session_id: &str,
-        ) -> Result<crate::DynamicStateSnapshot, PluginError> {
+        ) -> Result<lash::DynamicStateSnapshot, PluginError> {
             self.base.dynamic_tool_state(session_id).await
         }
 
         async fn apply_dynamic_tool_state(
             &self,
             session_id: &str,
-            snapshot: crate::DynamicStateSnapshot,
+            snapshot: lash::DynamicStateSnapshot,
         ) -> Result<u64, PluginError> {
             self.base
                 .apply_dynamic_tool_state(session_id, snapshot)
@@ -1006,7 +778,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             &self,
             session_id: &str,
             input: TurnInput,
-        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+        ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
             self.base.start_turn_stream(session_id, input).await
         }
 
@@ -1020,14 +792,14 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
 
         async fn prompt_user(
             &self,
-            request: crate::PromptRequest,
-        ) -> Result<crate::PromptResponse, PluginError> {
+            request: lash::PromptRequest,
+        ) -> Result<lash::PromptResponse, PluginError> {
             assert!(request.question.contains(".lash/plans/run-session.md"));
             assert!(request.allows_note());
             let panel = request.panel.expect("plan review panel");
             assert_eq!(panel.title, "PLAN");
             assert_eq!(panel.markdown, ready_plan_markdown().trim_end());
-            Ok(crate::PromptResponse::Single {
+            Ok(lash::PromptResponse::Single {
                 selection: "Start implementing now".to_string(),
                 note: Some("start with the safe slice".to_string()),
             })
@@ -1049,9 +821,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     )
     .expect("write plan");
 
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
-        PlanModePluginConfig::default(),
-    ))]);
+    let host = plan_mode_host(PlanModePluginFactory::new(PlanModePluginConfig::default()));
     let session = host.build_standard_session("root", None).expect("session");
     let manager = Arc::new(PromptingSessionManager {
         base: mock_session_manager("run-session"),
@@ -1082,7 +852,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         .execute_with_context(
             "plan_exit",
             &json!({}),
-            &crate::ToolExecutionContext {
+            &lash::ToolExecutionContext {
                 session_id: "root".to_string(),
                 host: Arc::clone(&manager_host),
                 cancellation_token: None,
@@ -1176,7 +946,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             &self,
             session_id: &str,
             input: TurnInput,
-        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+        ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
             let base = mock_session_manager("run-session");
             base.start_turn_stream(session_id, input).await
         }
@@ -1193,8 +963,8 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
 
         async fn prompt_user(
             &self,
-            request: crate::PromptRequest,
-        ) -> Result<crate::PromptResponse, PluginError> {
+            request: lash::PromptRequest,
+        ) -> Result<lash::PromptResponse, PluginError> {
             assert_eq!(
                 request.question,
                 "Review the plan in `.lash/plans/run-session.md`. What next?"
@@ -1202,7 +972,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             let panel = request.panel.expect("plan review panel");
             assert_eq!(panel.title, "PLAN");
             assert!(panel.markdown.contains("# Plan"));
-            Ok(crate::PromptResponse::Single {
+            Ok(lash::PromptResponse::Single {
                 selection: "Start implementing now".to_string(),
                 note: None,
             })
@@ -1212,7 +982,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(PromptingSessionManager);
 
@@ -1241,7 +1011,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
         .execute_with_context(
             "plan_exit",
             &json!({}),
-            &crate::ToolExecutionContext {
+            &lash::ToolExecutionContext {
                 session_id: "root".to_string(),
                 host: Arc::clone(&manager),
                 cancellation_token: None,
@@ -1307,7 +1077,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             &self,
             session_id: &str,
             input: TurnInput,
-        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+        ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
             let base = mock_session_manager("run-session");
             base.start_turn_stream(session_id, input).await
         }
@@ -1324,9 +1094,9 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
 
         async fn prompt_user(
             &self,
-            _request: crate::PromptRequest,
-        ) -> Result<crate::PromptResponse, PluginError> {
-            Ok(crate::PromptResponse::Single {
+            _request: lash::PromptRequest,
+        ) -> Result<lash::PromptResponse, PluginError> {
+            Ok(lash::PromptResponse::Single {
                 selection: "Start in fresh context".to_string(),
                 note: None,
             })
@@ -1336,7 +1106,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(PromptingSessionManager);
 
@@ -1365,7 +1135,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
         .execute_with_context(
             "plan_exit",
             &json!({}),
-            &crate::ToolExecutionContext {
+            &lash::ToolExecutionContext {
                 session_id: "root".to_string(),
                 host: Arc::clone(&manager),
                 cancellation_token: None,
@@ -1440,7 +1210,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
             &self,
             _session_id: &str,
             _input: TurnInput,
-        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+        ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
             Err(PluginError::Session("unused".to_string()))
         }
 
@@ -1456,7 +1226,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager = Arc::new(CapturingSessionManager::default());
 
@@ -1494,7 +1264,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     assert_eq!(create_request.plugin_mode, SessionPluginMode::Fresh);
     assert_eq!(create_request.initial_nodes.len(), 1);
     match &create_request.initial_nodes[0] {
-        crate::SessionAppendNode::Message { message } => {
+        lash::SessionAppendNode::Message { message } => {
             assert_eq!(
                 message.content,
                 "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
@@ -1514,7 +1284,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
@@ -1542,13 +1312,13 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let response = session
         .transform_assistant_response(
             "root",
-            crate::llm::types::LlmResponse {
+            lash::llm::types::LlmResponse {
                 full_text: "Keep this text exactly.".into(),
                 deltas: Vec::new(),
-                parts: vec![crate::llm::types::LlmOutputPart::Text {
+                parts: vec![lash::llm::types::LlmOutputPart::Text {
                     text: "Keep this text exactly.".into(),
                 }],
-                usage: crate::llm::types::LlmUsage::default(),
+                usage: lash::llm::types::LlmUsage::default(),
                 provider_usage: None,
                 request_body: None,
                 http_summary: None,

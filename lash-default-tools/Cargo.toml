@@ -10,3 +10,5 @@ fff-zlob = ["lash/fff-zlob"]
 
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full"] }
+lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory" }
+lash-plugin-rolling-history = { path = "../lash-plugin-rolling-history" }

@@ -897,7 +897,7 @@ fn record_monitor_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::MockSessionManager;
+    use crate::testing::MockSessionManager;
 
     fn seeded_monitor_state(spec: &MonitorSpec) -> Arc<Mutex<MonitorPluginState>> {
         let mut monitors = BTreeMap::new();

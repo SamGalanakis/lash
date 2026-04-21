@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
-use crate::plugin::{
+use lash::plugin::{
     ExternalOpDef, ExternalOpKind, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
     PluginSessionContext, PluginSnapshotMeta, SessionParam, SessionPlugin, SnapshotReader,
     SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
 };
-use crate::tools::{PatchAction, inspect_patch_ops};
-use crate::{
+use lash::tools::{PatchAction, inspect_patch_ops};
+use lash::{
     MessageRole, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
     SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolDefinition,
     ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
@@ -106,7 +106,7 @@ fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
         .join(format!("{run_session_id}.md")))
 }
 
-fn effective_run_session_id<'a>(session_id: &'a str, policy: &'a crate::SessionPolicy) -> &'a str {
+fn effective_run_session_id<'a>(session_id: &'a str, policy: &'a lash::SessionPolicy) -> &'a str {
     policy.session_id.as_deref().unwrap_or(session_id)
 }
 
@@ -173,16 +173,16 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     })
 }
 
-fn plan_panel_event(report: &PlanReport) -> crate::plugin::PluginSurfaceEvent {
-    crate::plugin::PluginSurfaceEvent::PanelUpsert {
+fn plan_panel_event(report: &PlanReport) -> lash::plugin::PluginSurfaceEvent {
+    lash::plugin::PluginSurfaceEvent::PanelUpsert {
         key: PLAN_MODE_PANEL_KEY.to_string(),
         title: PLAN_MODE_PANEL_TITLE.to_string(),
         content: report.preview_content(),
     }
 }
 
-fn clear_plan_panel_event() -> crate::plugin::PluginSurfaceEvent {
-    crate::plugin::PluginSurfaceEvent::PanelClear {
+fn clear_plan_panel_event() -> lash::plugin::PluginSurfaceEvent {
+    lash::plugin::PluginSurfaceEvent::PanelClear {
         key: PLAN_MODE_PANEL_KEY.to_string(),
     }
 }
@@ -190,7 +190,7 @@ fn clear_plan_panel_event() -> crate::plugin::PluginSurfaceEvent {
 fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     let display = plan_display_path(plan_path);
     PluginMessage::text(
-        crate::MessageRole::System,
+        lash::MessageRole::System,
         format!(
             "Plan mode: use `{display}` as the single source of truth. Read/search/list, web, and `ask(...)` as needed, and update only that file with `apply_patch`. Do not present the plan with snippets, showcases, or prose checklists; the panel only shows the file path while planning. When the plan is ready for review, call `plan_exit()`."
         ),
@@ -292,15 +292,15 @@ impl PlanModeState {
 
     fn finish_turn(&mut self) {}
 
-    fn badge_event(&self) -> crate::plugin::PluginSurfaceEvent {
-        crate::plugin::PluginSurfaceEvent::ModeIndicatorUpsert {
+    fn badge_event(&self) -> lash::plugin::PluginSurfaceEvent {
+        lash::plugin::PluginSurfaceEvent::ModeIndicatorUpsert {
             key: PLAN_MODE_BADGE_KEY.to_string(),
             label: PLAN_MODE_BADGE_LABEL.to_string(),
         }
     }
 
-    fn clear_badge_event(&self) -> crate::plugin::PluginSurfaceEvent {
-        crate::plugin::PluginSurfaceEvent::ModeIndicatorClear {
+    fn clear_badge_event(&self) -> lash::plugin::PluginSurfaceEvent {
+        lash::plugin::PluginSurfaceEvent::ModeIndicatorClear {
             key: PLAN_MODE_BADGE_KEY.to_string(),
         }
     }
@@ -311,7 +311,7 @@ impl PlanModeState {
 
     fn ensure_plan_path_from_state(
         &mut self,
-        state: &crate::SessionStateEnvelope,
+        state: &lash::SessionStateEnvelope,
     ) -> Result<PathBuf, PluginError> {
         if let Some(path) = self.plan_path() {
             return Ok(path);
@@ -337,7 +337,7 @@ impl PlanModeState {
 async fn ensure_plan_path(
     state: &Arc<Mutex<PlanModeState>>,
     session_id: &str,
-    host: &Arc<dyn crate::SessionManager>,
+    host: &Arc<dyn lash::SessionManager>,
 ) -> Result<PathBuf, PluginError> {
     if let Some(path) = state
         .lock()
@@ -361,7 +361,7 @@ async fn ensure_plan_path(
 async fn ensure_plan_report(
     state: &Arc<Mutex<PlanModeState>>,
     session_id: &str,
-    host: &Arc<dyn crate::SessionManager>,
+    host: &Arc<dyn lash::SessionManager>,
     seed_if_missing: bool,
 ) -> Result<PlanReport, PluginError> {
     let path = ensure_plan_path(state, session_id, host).await?;
@@ -376,7 +376,7 @@ fn dynamic_tool_state_unavailable(err: &PluginError) -> bool {
 }
 
 async fn sync_plan_exit_tool_state(
-    host: &Arc<dyn crate::SessionManager>,
+    host: &Arc<dyn lash::SessionManager>,
     session_id: &str,
     enabled: bool,
 ) -> Result<(), PluginError> {
@@ -393,7 +393,7 @@ async fn sync_plan_exit_tool_state(
 async fn set_plan_mode_enabled_state(
     state: &Arc<Mutex<PlanModeState>>,
     session_id: &str,
-    host: &Arc<dyn crate::SessionManager>,
+    host: &Arc<dyn lash::SessionManager>,
     enabled: bool,
 ) -> Result<bool, PluginError> {
     let previous = {
@@ -595,7 +595,7 @@ impl ToolProvider for PlanModeTools {
         name: &str,
         args: &serde_json::Value,
         context: &ToolExecutionContext,
-        _progress: Option<&crate::ProgressSender>,
+        _progress: Option<&lash::ProgressSender>,
     ) -> ToolResult {
         self.execute_with_context(name, args, context).await
     }
@@ -808,11 +808,11 @@ impl SessionPlugin for PlanModePlugin {
                                 start: SessionStartPoint::Empty,
                                 policy: None,
                                 plugin_mode: SessionPluginMode::Fresh,
-                                initial_nodes: vec![crate::SessionAppendNode::message(
+                                initial_nodes: vec![lash::SessionAppendNode::message(
                                     PluginMessage::text(MessageRole::User, seed),
                                 )],
                                 context_surface: SessionContextSurface::default(),
-                                mode_extras: crate::ModeExtras::default(),
+                                mode_extras: lash::ModeExtras::default(),
                                 usage_source: Some("plan_execution".to_string()),
                             }),
                         });

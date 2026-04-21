@@ -16,14 +16,15 @@ use dataset::{SweBenchInstance, load_instances};
 use lash::plugin::PluginFactory;
 use lash::provider::LashConfig;
 use lash::{
-    BackgroundRuntimeHost, BuiltinObservationalMemoryPluginFactory,
-    BuiltinRollingHistoryPluginFactory, BuiltinToolResultProjectionPluginFactory, ContextApproach,
+    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, ContextApproach,
     EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
     PersistentRuntimeServices, PluginHost, Provider, RuntimeCoreConfig, RuntimeStore, SessionEvent,
     SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
     TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
+use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
+use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -889,10 +890,10 @@ fn build_plugin_session(
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
     match context_approach {
         ContextApproach::RollingHistory(_) => {
-            factories.push(Arc::new(BuiltinRollingHistoryPluginFactory::default()));
+            factories.push(Arc::new(RollingHistoryPluginFactory::default()));
         }
         ContextApproach::ObservationalMemory(_) => {
-            factories.push(Arc::new(BuiltinObservationalMemoryPluginFactory));
+            factories.push(Arc::new(ObservationalMemoryPluginFactory));
         }
     }
     factories.push(Arc::new(

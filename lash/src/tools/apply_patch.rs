@@ -54,7 +54,7 @@ pub struct ApplyPatchTool;
 
 #[cfg(feature = "sqlite-store")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PatchAction {
+pub enum PatchAction {
     Add,
     Delete,
     Update,
@@ -62,7 +62,7 @@ pub(crate) enum PatchAction {
 
 #[cfg(feature = "sqlite-store")]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PatchFileOp {
+pub struct PatchFileOp {
     pub action: PatchAction,
     pub path: PathBuf,
     pub move_path: Option<PathBuf>,
@@ -189,10 +189,7 @@ fn execute_apply_patch_sync(input: &str, workdir: Option<&str>) -> ToolResult {
 }
 
 #[cfg(feature = "sqlite-store")]
-pub(crate) fn inspect_patch_ops(
-    input: &str,
-    workdir: Option<&str>,
-) -> Result<Vec<PatchFileOp>, String> {
+pub fn inspect_patch_ops(input: &str, workdir: Option<&str>) -> Result<Vec<PatchFileOp>, String> {
     let patch = parse_patch(input)?;
     let cwd = resolve_patch_workdir(workdir)?;
     Ok(patch

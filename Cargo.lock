@@ -231,6 +231,8 @@ dependencies = [
  "lash-export",
  "lash-mode-rlm",
  "lash-mode-standard",
+ "lash-plugin-observational-memory",
+ "lash-plugin-rolling-history",
  "lash-subagents",
  "regex",
  "serde",
@@ -249,6 +251,8 @@ dependencies = [
  "clap",
  "dotenvy",
  "lash",
+ "lash-plugin-observational-memory",
+ "lash-plugin-rolling-history",
  "lash-subagents",
  "regex",
  "reqwest",
@@ -272,6 +276,8 @@ dependencies = [
  "lash-default-tools",
  "lash-mode-rlm",
  "lash-mode-standard",
+ "lash-plugin-observational-memory",
+ "lash-plugin-rolling-history",
  "lash-subagents",
  "serde",
  "serde_json",
@@ -1904,6 +1910,9 @@ dependencies = [
  "lash-export",
  "lash-mode-rlm",
  "lash-mode-standard",
+ "lash-plugin-plan-mode",
+ "lash-plugin-prompt-context",
+ "lash-plugin-ui-activity",
  "lash-subagents",
  "lash-tui",
  "lash-ui",
@@ -1929,6 +1938,8 @@ name = "lash-default-tools"
 version = "0.2.62"
 dependencies = [
  "lash",
+ "lash-plugin-observational-memory",
+ "lash-plugin-rolling-history",
 ]
 
 [[package]]
@@ -1964,6 +1975,65 @@ dependencies = [
  "async-trait",
  "lash",
  "lash-sansio",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "lash-plugin-observational-memory"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "lash",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lash-plugin-plan-mode"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "lash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lash-plugin-prompt-context"
+version = "0.2.61"
+dependencies = [
+ "chrono",
+ "lash",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "lash-plugin-rolling-history"
+version = "0.2.61"
+dependencies = [
+ "async-trait",
+ "lash",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "lash-plugin-ui-activity"
+version = "0.2.61"
+dependencies = [
+ "lash",
  "serde_json",
  "tokio",
 ]

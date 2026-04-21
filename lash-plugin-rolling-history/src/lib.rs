@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use crate::plugin::{
+use lash::plugin::{
     CommandDef, CommandHandler, CommandInvocation, CommandOutcome,
     DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
     HistoryError, HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory,
@@ -25,9 +25,9 @@ use crate::plugin::{
     SessionCreateRequest, SessionManager, SessionPlugin, SessionPluginMode, SessionStartPoint,
     TurnContextTransform, TurnTransformContext,
 };
-use crate::session_model::context::PreparedContext;
-use crate::session_model::format_tool_result_content;
-use crate::{
+use lash::session_model::context::PreparedContext;
+use lash::session_model::format_tool_result_content;
+use lash::{
     ContextApproach, ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind,
     PromptUsage, RollingHistoryConfig, SessionStateEnvelope, ToolCallRecord, TurnInput,
 };
@@ -318,10 +318,10 @@ fn hydrate_tool_result_parts(
             if !matches!(part.kind, PartKind::ToolResult) {
                 continue;
             }
-            if matches!(part.prune_state, crate::PruneState::Cleared) {
+            if matches!(part.prune_state, lash::PruneState::Cleared) {
                 continue;
             }
-            if !matches!(part.prune_state, crate::PruneState::Intact) {
+            if !matches!(part.prune_state, lash::PruneState::Intact) {
                 continue;
             }
             let Some(call_id) = part.tool_call_id.as_deref() else {
@@ -359,10 +359,10 @@ fn prune_old_tool_results(
             if !matches!(part.kind, PartKind::ToolResult) {
                 continue;
             }
-            if matches!(part.prune_state, crate::PruneState::Cleared) {
+            if matches!(part.prune_state, lash::PruneState::Cleared) {
                 break 'scan;
             }
-            if !matches!(part.prune_state, crate::PruneState::Intact) {
+            if !matches!(part.prune_state, lash::PruneState::Intact) {
                 continue;
             }
             let Some(call_id) = part.tool_call_id.as_deref() else {
@@ -388,7 +388,7 @@ fn prune_old_tool_results(
     }
 
     for (msg_idx, part_idx) in to_prune {
-        messages[msg_idx].parts[part_idx].prune_state = crate::PruneState::Cleared;
+        messages[msg_idx].parts[part_idx].prune_state = lash::PruneState::Cleared;
         messages[msg_idx].parts[part_idx].content.clear();
     }
     true
@@ -534,7 +534,7 @@ async fn summarize_compaction_prefix(
         return Ok(None);
     }
 
-    let mut snapshot = crate::PersistedSessionState::from_state(state.clone());
+    let mut snapshot = lash::PersistedSessionState::from_state(state.clone());
     snapshot.policy.execution_mode = ExecutionMode::Standard;
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;
@@ -627,7 +627,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
             tool_name: None,
             tool_item_id: None,
             tool_signature: None,
-            prune_state: crate::PruneState::Intact,
+            prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
         }],
         user_input: None,
@@ -684,8 +684,8 @@ impl PluginFactory for RollingHistoryPluginFactory {
         ROLLING_HISTORY_PLUGIN_ID
     }
 
-    fn supported_context_approaches(&self) -> &'static [crate::ContextApproachKind] {
-        &[crate::ContextApproachKind::RollingHistory]
+    fn supported_context_approaches(&self) -> &'static [lash::ContextApproachKind] {
+        &[lash::ContextApproachKind::RollingHistory]
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
@@ -888,9 +888,9 @@ impl HistoryRewriter for RollingHistoryRewriter {
                             }
                             for part in &mut input.messages[msg_idx].parts {
                                 if matches!(part.kind, PartKind::ToolResult)
-                                    && matches!(part.prune_state, crate::PruneState::Intact)
+                                    && matches!(part.prune_state, lash::PruneState::Intact)
                                 {
-                                    part.prune_state = crate::PruneState::Cleared;
+                                    part.prune_state = lash::PruneState::Cleared;
                                     part.content.clear();
                                 }
                             }
@@ -977,7 +977,7 @@ async fn handle_compact_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SessionPolicy;
+    use lash::SessionPolicy;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -994,7 +994,7 @@ mod tests {
                 tool_name: None,
                 tool_item_id: None,
                 tool_signature: None,
-                prune_state: crate::PruneState::Intact,
+                prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
             }],
             user_input: None,
@@ -1010,16 +1010,16 @@ mod tests {
                 id: format!("{id}.p0"),
                 kind: PartKind::Image,
                 content: String::new(),
-                attachment: Some(crate::session_model::message::PartAttachment {
+                attachment: Some(lash::session_model::message::PartAttachment {
                     mime: "image/png".to_string(),
-                    url: crate::session_model::message::data_url_for_bytes("image/png", bytes),
+                    url: lash::session_model::message::data_url_for_bytes("image/png", bytes),
                     filename: None,
                 }),
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
                 tool_signature: None,
-                prune_state: crate::PruneState::Intact,
+                prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
             }],
             user_input: None,
@@ -1074,7 +1074,7 @@ mod tests {
         assert!(preview.contains("Full output saved to: /tmp/existing-shell-output.log"));
     }
 
-    use crate::test_support::{MockSessionManager, mock_assembled_turn as empty_turn};
+    use lash::testing::{MockSessionManager, mock_assembled_turn as empty_turn};
 
     fn mock_manager() -> MockSessionManager {
         MockSessionManager::default()
@@ -1136,7 +1136,7 @@ mod tests {
                     tool_name: Some(record.tool.clone()),
                     tool_item_id: None,
                     tool_signature: None,
-                    prune_state: crate::PruneState::Intact,
+                    prune_state: lash::PruneState::Intact,
                     reasoning_meta: None,
                 })
                 .collect(),
@@ -1178,7 +1178,7 @@ mod tests {
         let cleared = built
             .iter()
             .flat_map(|message| message.parts.iter())
-            .filter(|part| matches!(part.prune_state, crate::PruneState::Cleared))
+            .filter(|part| matches!(part.prune_state, lash::PruneState::Cleared))
             .count();
         assert!(cleared > 0);
     }

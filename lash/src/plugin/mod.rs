@@ -853,21 +853,12 @@ pub use registry::{
     SessionPlugin, SessionReadyContext, StaticPluginFactory,
 };
 
+mod monitor;
 mod registrar;
 mod runtime_impl;
 mod services;
 mod session_obj;
 mod tool_result_projection_builtin;
-
-#[path = "../plugin_builtin/monitor.rs"]
-mod monitor;
-#[path = "../plugin_builtin/observational_memory.rs"]
-mod observational_memory;
-#[path = "../plugin_builtin/rolling_history.rs"]
-mod rolling_history;
-
-pub use observational_memory::ObservationalMemoryPluginFactory;
-pub use rolling_history::RollingHistoryPluginFactory;
 
 pub use registrar::{
     CommandRegistrations, ExternalRegistrations, HistoryRegistrations, ModeRegistrations,
@@ -881,36 +872,22 @@ pub(crate) use services::NoopSessionManager;
 pub use services::{ExternalInvokeError, PersistentRuntimeServices, RuntimeServices};
 pub use session_obj::PluginSession;
 pub use tool_result_projection_builtin::{
-    BuiltinToolResultProjectionPluginFactory, ToolResultProjectionMode,
-    ToolResultProjectionPluginConfig,
-};
-pub(crate) use tool_result_projection_builtin::{
-    DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
-    truncate_observation_text,
+    BuiltinToolResultProjectionPluginFactory, DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES,
+    DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES, ToolResultProjectionMode,
+    ToolResultProjectionPluginConfig, truncate_observation_text,
 };
 
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // Mode plugins (`lash-mode-standard`, `lash-mode-rlm`) must be
     // registered by the embedder before calling `PluginHost::build_session`.
-    // lash's own test suite uses an in-tree fake (`test_support::test_mode_factories()`)
+    // lash's own test suite uses an in-tree fake (`testing::test_mode_factories()`)
     // to avoid a dev-dep cycle through the mode crates.
     #[allow(unused_mut)]
     let mut factories: Vec<Arc<dyn PluginFactory>> = vec![Arc::new(monitor::MonitorPluginFactory)];
     #[cfg(test)]
-    factories.extend(crate::test_support::test_mode_factories());
+    factories.extend(crate::testing::test_mode_factories());
     factories
 }
-
-#[cfg(feature = "sqlite-store")]
-#[path = "../plugin_builtin.rs"]
-mod builtin;
-
-#[cfg(feature = "sqlite-store")]
-pub use builtin::{
-    BuiltinPlanModePluginFactory, BuiltinPromptContextPluginFactory,
-    BuiltinUiActivityPluginFactory, BuiltinUpdatePlanPluginFactory, PromptContextPluginConfig,
-    UpdatePlanItem, UpdatePlanSnapshot,
-};
 
 #[cfg(test)]
 mod tests {
@@ -961,7 +938,7 @@ mod tests {
         session_id: String,
     }
 
-    use crate::test_support::MockSessionManager;
+    use crate::testing::MockSessionManager;
 
     impl SessionPlugin for MockPlugin {
         fn id(&self) -> &'static str {

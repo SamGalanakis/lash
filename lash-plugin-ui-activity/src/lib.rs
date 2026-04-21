@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::plugin::{PluginError, PluginFactory, PluginSessionContext, PluginSpecFactory};
+use lash::plugin::{PluginError, PluginFactory, PluginSessionContext, PluginSpecFactory};
 
 pub struct UiActivityPluginFactory;
 
@@ -12,25 +12,25 @@ impl PluginFactory for UiActivityPluginFactory {
     fn build(
         &self,
         _ctx: &PluginSessionContext,
-    ) -> Result<Arc<dyn crate::plugin::SessionPlugin>, PluginError> {
+    ) -> Result<Arc<dyn lash::plugin::SessionPlugin>, PluginError> {
         PluginSpecFactory::new(
             "ui_activity",
             Arc::new(|_ctx| {
-                Ok(crate::plugin::PluginSpec::new()
+                Ok(lash::plugin::PluginSpec::new()
                     .with_after_turn(Arc::new(|ctx| {
                         Box::pin(async move {
                             let body = match ctx.turn.status {
-                                crate::TurnStatus::Completed => {
+                                lash::TurnStatus::Completed => {
                                     Some("Response complete".to_string())
                                 }
-                                crate::TurnStatus::Interrupted => None,
-                                crate::TurnStatus::Failed => None,
+                                lash::TurnStatus::Interrupted => None,
+                                lash::TurnStatus::Failed => None,
                             };
                             let Some(body) = body else {
                                 return Ok(Vec::new());
                             };
-                            Ok(vec![crate::plugin::PluginDirective::emit_events(vec![
-                                crate::PluginSurfaceEvent::Custom {
+                            Ok(vec![lash::plugin::PluginDirective::emit_events(vec![
+                                lash::PluginSurfaceEvent::Custom {
                                     name: "desktop_notification".to_string(),
                                     payload: serde_json::json!({
                                         "title": "lash",
@@ -43,7 +43,7 @@ impl PluginFactory for UiActivityPluginFactory {
                     }))
                     .with_prompt_request(Arc::new(|ctx| {
                         Box::pin(async move {
-                            Ok(vec![crate::PluginSurfaceEvent::Custom {
+                            Ok(vec![lash::PluginSurfaceEvent::Custom {
                                 name: "desktop_notification".to_string(),
                                 payload: serde_json::json!({
                                     "title": "lash",

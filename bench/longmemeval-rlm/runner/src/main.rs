@@ -16,15 +16,16 @@ use dataset::{LongMemEvalQuestion, load_questions};
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::provider::OPENROUTER_BASE_URL;
 use lash::{
-    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinObservationalMemoryPluginFactory,
-    BuiltinRollingHistoryPluginFactory, BuiltinToolResultProjectionPluginFactory, ContextApproach,
-    EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, Provider, ProviderOptions, RlmGlobalsPatchPluginBody, RuntimeCoreConfig,
-    RuntimeStore, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
-    diff_usage_reports,
+    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
+    ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
+    PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, Provider, ProviderOptions,
+    RlmGlobalsPatchPluginBody, RuntimeCoreConfig, RuntimeStore, SessionAppendNode, SessionEvent,
+    SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
+    TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
+use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
+use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -744,10 +745,10 @@ fn build_plugin_session(
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
     match context_approach {
         ContextApproach::RollingHistory(_) => {
-            factories.push(Arc::new(BuiltinRollingHistoryPluginFactory::default()));
+            factories.push(Arc::new(RollingHistoryPluginFactory::default()));
         }
         ContextApproach::ObservationalMemory(_) => {
-            factories.push(Arc::new(BuiltinObservationalMemoryPluginFactory));
+            factories.push(Arc::new(ObservationalMemoryPluginFactory));
         }
     }
     let mut subagent_models = std::collections::BTreeMap::new();

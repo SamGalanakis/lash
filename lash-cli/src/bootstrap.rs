@@ -5,6 +5,9 @@ use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
+use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
+use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
+use lash_plugin_ui_activity::UiActivityPluginFactory;
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -55,20 +58,18 @@ fn plugin_factories_for_surface(
         },
         instruction_source: Some(Arc::clone(&instruction_source)),
     });
-    plugin_factories.push(Arc::new(BuiltinPromptContextPluginFactory::new(
+    plugin_factories.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
     )) as Arc<dyn PluginFactory>);
     if profile.interactive_extras {
-        plugin_factories.push(Arc::new(BuiltinPlanModePluginFactory::new(
-            Default::default(),
-        )));
-        plugin_factories.push(Arc::new(lash::BuiltinUiActivityPluginFactory));
+        plugin_factories.push(Arc::new(PlanModePluginFactory::new(Default::default())));
+        plugin_factories.push(Arc::new(UiActivityPluginFactory));
         // `update_plan` drives the sticky plan dock at the bottom of
         // the TUI. Interactive-only here; root-only inside the plugin
         // itself (the factory returns an inert plugin for subagent
         // / compaction / other non-root sessions).
-        plugin_factories.push(Arc::new(lash::BuiltinUpdatePlanPluginFactory));
+        plugin_factories.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_factories.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
     plugin_factories.push(Arc::new(

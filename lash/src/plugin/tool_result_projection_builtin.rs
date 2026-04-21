@@ -253,10 +253,7 @@ fn formatted_truncate_text(
     truncate_text_with_hint(text, config, direction, truncation_hint(ctx, text))
 }
 
-pub(crate) fn truncate_observation_text(
-    text: &str,
-    config: &ToolResultProjectionPluginConfig,
-) -> String {
+pub fn truncate_observation_text(text: &str, config: &ToolResultProjectionPluginConfig) -> String {
     if !needs_truncation(text, config) {
         return text.to_string();
     }

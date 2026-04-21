@@ -16,6 +16,9 @@ tool-impls = [
     "dep:portable-pty",
 ]
 fff-zlob = ["tool-impls", "fff-search/zlob"]
+# Expose `lash::testing` for downstream plugin crates to share mock
+# session-manager/turn fixtures with lash's own tests.
+testing = []
 # Convenience umbrella for first-party consumers (e.g. lash-cli).
 full = ["sqlite-store", "tool-impls"]
 

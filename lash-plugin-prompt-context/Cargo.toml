@@ -1,0 +1,14 @@
+[package]
+name = "lash-plugin-prompt-context"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash" }
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+lash = { path = "../lash", features = ["testing"] }
+tokio = { version = "1", features = ["full"] }

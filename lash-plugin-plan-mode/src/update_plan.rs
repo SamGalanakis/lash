@@ -23,11 +23,11 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
-use crate::plugin::{
+use lash::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     PluginSurfaceEvent, SessionPlugin,
 };
-use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
 
 const PLUGIN_ID: &str = "update_plan";
 const PANEL_KEY: &str = "plan";
@@ -374,14 +374,14 @@ mod tests {
         let factory = UpdatePlanPluginFactory::new();
         let root_ctx = PluginSessionContext {
             session_id: "root".into(),
-            execution_mode: crate::ExecutionMode::Standard,
-            context_approach: crate::ContextApproach::default(),
+            execution_mode: lash::ExecutionMode::Standard,
+            context_approach: lash::ContextApproach::default(),
             parent_session_id: None,
         };
         let child_ctx = PluginSessionContext {
             session_id: "child".into(),
-            execution_mode: crate::ExecutionMode::Standard,
-            context_approach: crate::ContextApproach::default(),
+            execution_mode: lash::ExecutionMode::Standard,
+            context_approach: lash::ContextApproach::default(),
             parent_session_id: Some("root".into()),
         };
         assert!(root_ctx.is_root_session());

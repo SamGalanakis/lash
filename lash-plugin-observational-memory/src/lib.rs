@@ -4,13 +4,13 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::plugin::{
+use lash::plugin::{
     HistoryError, PluginError, PluginFactory, PluginRegistrar, PluginRuntimeEvent,
     PluginSessionContext, SessionManager, SessionPlugin, TurnContextTransform,
     TurnTransformContext,
 };
-use crate::session_model::context::PreparedContext;
-use crate::{
+use lash::session_model::context::PreparedContext;
+use lash::{
     AppendSessionNodesRequest, AppendSessionNodesResult, ContextApproach, DirectMessage,
     DirectOutputSpec, DirectPart, DirectRequest, DirectRole, Message, MessageOrigin, MessageRole,
     ObservationalMemoryConfig, Part, PartKind, SessionAppendNode, SessionGraph,
@@ -321,8 +321,8 @@ impl PluginFactory for ObservationalMemoryPluginFactory {
         OBSERVATIONAL_MEMORY_PLUGIN_ID
     }
 
-    fn supported_context_approaches(&self) -> &'static [crate::ContextApproachKind] {
-        &[crate::ContextApproachKind::ObservationalMemory]
+    fn supported_context_approaches(&self) -> &'static [lash::ContextApproachKind] {
+        &[lash::ContextApproachKind::ObservationalMemory]
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
@@ -477,7 +477,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         messages.extend_from_slice(&input_messages[tail_start..]);
 
         Ok(PreparedContext {
-            messages: crate::MessageSequence::from_owned(messages),
+            messages: lash::MessageSequence::from_owned(messages),
             ..input
         })
     }
@@ -540,7 +540,7 @@ async fn maybe_advance_memory_state(
     config: &ObservationalMemoryConfig,
     session_id: &str,
     host: &Arc<dyn SessionManager>,
-    policy: &crate::SessionPolicy,
+    policy: &lash::SessionPolicy,
     mut graph: SessionGraph,
 ) -> Result<SessionGraph, PluginError> {
     for _ in 0..6 {
@@ -599,7 +599,7 @@ async fn maybe_buffer_observations(
     config: &ObservationalMemoryConfig,
     session_id: &str,
     host: &Arc<dyn SessionManager>,
-    policy: &crate::SessionPolicy,
+    policy: &lash::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<(), PluginError> {
     let om_state = build_graph_state(graph);
@@ -688,7 +688,7 @@ async fn maybe_buffer_reflection(
     config: &ObservationalMemoryConfig,
     session_id: &str,
     host: &Arc<dyn SessionManager>,
-    policy: &crate::SessionPolicy,
+    policy: &lash::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<(), PluginError> {
     let om_state = build_graph_state(graph);
@@ -853,7 +853,7 @@ async fn sync_observe_pending_messages(
     config: &ObservationalMemoryConfig,
     session_id: &str,
     host: &Arc<dyn SessionManager>,
-    policy: &crate::SessionPolicy,
+    policy: &lash::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
     let om_state = build_graph_state(graph);
@@ -933,7 +933,7 @@ async fn sync_observe_pending_messages(
 async fn sync_reflect_active_memory(
     session_id: &str,
     host: &Arc<dyn SessionManager>,
-    policy: &crate::SessionPolicy,
+    policy: &lash::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
     let om_state = build_graph_state(graph);
@@ -1109,7 +1109,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
             tool_name: None,
             tool_item_id: None,
             tool_signature: None,
-            prune_state: crate::PruneState::Intact,
+            prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
         }],
         user_input: None,
@@ -1312,7 +1312,7 @@ async fn run_observer_batch(
     config: &ObservationalMemoryConfig,
     session_id: &str,
     host: &Arc<dyn SessionManager>,
-    policy: crate::SessionPolicy,
+    policy: lash::SessionPolicy,
     active: Option<&ActiveMemoryState>,
     batch: &[impl ObservedMessageNode],
 ) -> Result<ParsedMemoryOutput, PluginError> {
@@ -1343,7 +1343,7 @@ async fn run_observer_batch(
 async fn run_reflector(
     session_id: &str,
     host: &Arc<dyn SessionManager>,
-    policy: crate::SessionPolicy,
+    policy: lash::SessionPolicy,
     observations: &str,
 ) -> Result<ParsedMemoryOutput, PluginError> {
     let prompt = build_reflector_prompt(observations);
@@ -1361,7 +1361,7 @@ async fn run_reflector(
 async fn run_worker_turn(
     session_id: &str,
     host: &Arc<dyn SessionManager>,
-    policy: crate::SessionPolicy,
+    policy: lash::SessionPolicy,
     worker_kind: &str,
     system_prompt: &str,
     prompt: &str,
@@ -1532,7 +1532,7 @@ mod tests {
                     tool_name: None,
                     tool_item_id: None,
                     tool_signature: None,
-                    prune_state: crate::PruneState::Intact,
+                    prune_state: lash::PruneState::Intact,
                     reasoning_meta: None,
                 }],
                 user_input: None,

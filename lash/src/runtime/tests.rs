@@ -1,55 +1,3 @@
-async fn drain_standard_stream_queue(
-    event_tx: &mpsc::Sender<SessionEvent>,
-    llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
-    text_streamed: &mut bool,
-    streamed_usage: &mut LlmUsage,
-) {
-    while let Ok(stream_event) = llm_stream_rx.try_recv() {
-        match stream_event {
-            LlmStreamEvent::Delta(delta) => {
-                if !delta.is_empty() {
-                    *text_streamed = true;
-                    crate::session_model::send_event(
-                        event_tx,
-                        SessionEvent::TextDelta { content: delta },
-                    )
-                    .await;
-                }
-            }
-            LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
-                if !text.is_empty() {
-                    *text_streamed = true;
-                    crate::session_model::send_event(
-                        event_tx,
-                        SessionEvent::TextDelta { content: text },
-                    )
-                    .await;
-                }
-            }
-            LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
-            LlmStreamEvent::Part(LlmOutputPart::Reasoning { text, .. }) => {
-                if !text.is_empty() {
-                    crate::session_model::send_event(
-                        event_tx,
-                        SessionEvent::ReasoningDelta { content: text },
-                    )
-                    .await;
-                }
-            }
-            LlmStreamEvent::ReasoningDelta(delta) => {
-                if !delta.is_empty() {
-                    crate::session_model::send_event(
-                        event_tx,
-                        SessionEvent::ReasoningDelta { content: delta },
-                    )
-                    .await;
-                }
-            }
-            LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
-        }
-    }
-}
-
 use super::*;
 use serde_json::json;
 use sha2::Digest;
@@ -63,7 +11,6 @@ use crate::llm::types::{LlmRequest, LlmUsage};
 use crate::plugin::StaticPluginFactory;
 use crate::provider::Provider;
 use crate::store::RuntimeStore;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 fn default_state() -> PersistedSessionState {
@@ -96,28 +43,16 @@ impl ProjectionState for PersistedSessionState {
 }
 
 trait ProjectionStateMut: ProjectionState {
-    #[cfg(feature = "sqlite-store")]
-    fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]);
     fn append_message(&mut self, message: Message);
 }
 
 impl ProjectionStateMut for SessionStateEnvelope {
-    #[cfg(feature = "sqlite-store")]
-    fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
-        self.replace_projection(messages, tool_calls);
-    }
-
     fn append_message(&mut self, message: Message) {
         self.session_graph.append_message(message);
     }
 }
 
 impl ProjectionStateMut for PersistedSessionState {
-    #[cfg(feature = "sqlite-store")]
-    fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
-        self.replace_projection(messages, tool_calls);
-    }
-
     fn append_message(&mut self, message: Message) {
         self.session_graph.append_message(message);
     }
@@ -131,39 +66,8 @@ fn projected_tool_calls(state: &impl ProjectionState) -> &[ToolCallRecord] {
     state.projected_tool_calls()
 }
 
-#[cfg(feature = "sqlite-store")]
-fn set_projection(
-    state: &mut impl ProjectionStateMut,
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-) {
-    state.replace_projection(messages, tool_calls);
-}
-
 fn append_message(state: &mut impl ProjectionStateMut, message: Message) {
     state.append_message(message);
-}
-
-#[cfg(feature = "sqlite-store")]
-fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
-    Message {
-        id: id.to_string(),
-        role,
-        parts: vec![Part {
-            id: format!("{id}.p0"),
-            kind: PartKind::Text,
-            content: content.to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-        }],
-        user_input: None,
-        origin: None,
-    }
 }
 
 #[derive(Clone, Default)]
@@ -404,8 +308,8 @@ fn default_tool_session(
 ) -> Arc<crate::PluginSession> {
     let mut factories: Vec<Arc<dyn crate::PluginFactory>> = vec![
         Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
-        Arc::new(crate::BuiltinObservationalMemoryPluginFactory),
+        Arc::new(crate::testing::FakeContextApproachPluginFactory::rolling_history()),
+        Arc::new(crate::testing::FakeContextApproachPluginFactory::observational_memory()),
         Arc::new(StaticPluginFactory::new(
             "shell",
             crate::PluginSpec::new()
@@ -482,7 +386,7 @@ async fn standard_runtime_with_transport(transport: MockTransport) -> LashRuntim
 #[test]
 fn plugin_host_rejects_observational_memory_without_supporting_plugin() {
     let host = crate::PluginHost::new(vec![Arc::new(
-        crate::BuiltinRollingHistoryPluginFactory::default(),
+        crate::testing::FakeContextApproachPluginFactory::rolling_history(),
     )]);
     let result = host.build_session(
         "root",
@@ -544,58 +448,6 @@ async fn standard_runtime_with_shared_background_executor(
     .expect("runtime");
     runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
     runtime
-}
-
-#[cfg(feature = "sqlite-store")]
-async fn om_runtime_with_transport_and_background(
-    transport: MockTransport,
-    config: crate::ObservationalMemoryConfig,
-) -> (LashRuntime, Arc<crate::store::Store>) {
-    let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let host = BackgroundRuntimeHost::new(
-        test_host_config(),
-        Arc::new(TokioSessionTaskExecutor::default()),
-    );
-    let plugin_host = crate::PluginHost::new(vec![
-        Arc::new(crate::BuiltinObservationalMemoryPluginFactory),
-        Arc::new(StaticPluginFactory::new(
-            "test_tools",
-            crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
-        )),
-    ]);
-    let plugins = plugin_host
-        .build_session(
-            "root",
-            ExecutionMode::Standard,
-            crate::ContextApproach::ObservationalMemory(config.clone()),
-            None,
-        )
-        .expect("plugins");
-    let store = Arc::new(crate::store::Store::memory().expect("store"));
-    let mut runtime = LashRuntime::from_persistent_background_state(
-        SessionPolicy {
-            execution_mode: ExecutionMode::Standard,
-            provider: Provider::OpenAiGeneric {
-                api_key: "test-key".to_string(),
-                base_url: "https://example.invalid/v1".to_string(),
-                options: crate::provider::ProviderOptions::default(),
-            },
-            model: "mock-model".to_string(),
-            max_context_tokens: Some(200_000),
-            context_approach: crate::ContextApproach::ObservationalMemory(config),
-            ..SessionPolicy::default()
-        },
-        host,
-        crate::PersistentRuntimeServices::new(
-            plugins,
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        ),
-        PersistedSessionState::default(),
-    )
-    .await
-    .expect("runtime");
-    runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
-    (runtime, store)
 }
 
 async fn standard_runtime_with_transport_and_host(
@@ -3177,111 +3029,6 @@ fn normalize_prompt_usage_uses_input_tokens_for_openai_compatible() {
     assert_eq!(prompt_usage.context_budget_tokens, 80);
 }
 
-#[cfg(feature = "sqlite-store")]
-#[tokio::test]
-async fn history_plugin_compacts_using_previous_prompt_usage_across_turns() {
-    let transport = MockTransport::new(vec![MockCall {
-        stream_events: Vec::new(),
-        response: Ok(LlmResponse {
-            full_text: "compacted".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "compacted".to_string(),
-            }],
-            usage: LlmUsage {
-                input_tokens: 20,
-                output_tokens: 5,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
-            },
-            ..LlmResponse::default()
-        }),
-    }]);
-    let store = Arc::new(crate::store::Store::memory().expect("store"));
-    let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let base_provider_factory = Arc::clone(&base_provider);
-    let plugin_host = crate::PluginHost::new(vec![
-        Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
-        Arc::new(StaticPluginFactory::new(
-            "base_tools",
-            crate::PluginSpec::new().with_tool_provider(Arc::clone(&base_provider_factory)),
-        )),
-    ]);
-    let plugins = plugin_host
-        .build_standard_session("root", None)
-        .expect("plugins");
-    let mut runtime = LashRuntime::from_persistent_embedded_state(
-        standard_test_policy(),
-        test_host_config(),
-        crate::PersistentRuntimeServices::new(
-            Arc::clone(&plugins),
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        ),
-        PersistedSessionState::default(),
-    )
-    .await
-    .expect("runtime");
-    runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
-    let history = vec![
-        text_message("u1", MessageRole::User, &"oldest user".repeat(20)),
-        text_message("a1", MessageRole::Assistant, &"oldest assistant".repeat(20)),
-        text_message("u2", MessageRole::User, &"older user".repeat(20)),
-        text_message("a2", MessageRole::Assistant, &"older assistant".repeat(20)),
-        text_message("u3", MessageRole::User, &"recent user".repeat(20)),
-        text_message("a3", MessageRole::Assistant, &"recent assistant".repeat(20)),
-        text_message("u4", MessageRole::User, &"latest user".repeat(20)),
-        text_message("a4", MessageRole::Assistant, &"latest assistant".repeat(20)),
-    ];
-    let mut state = PersistedSessionState {
-        session_id: "root".to_string(),
-        policy: SessionPolicy {
-            execution_mode: ExecutionMode::Standard,
-            ..runtime.policy.clone()
-        },
-        iteration: 4,
-        token_usage: TokenUsage::default(),
-        last_prompt_usage: Some(PromptUsage {
-            prompt_context_tokens: 70,
-            input_tokens: 70,
-            cached_input_tokens: 0,
-            context_budget_tokens: 70,
-        }),
-        ..PersistedSessionState::default()
-    };
-    set_projection(&mut state, &history, &[]);
-    runtime.set_persisted_state(state);
-    runtime.policy.max_context_tokens = Some(100);
-    runtime.state.policy.max_context_tokens = Some(100);
-
-    let turn = runtime
-        .run_turn_assembled(
-            TurnInput {
-                items: vec![InputItem::Text {
-                    text: "new request".to_string(),
-                }],
-                image_blobs: HashMap::new(),
-                user_input: None,
-                mode: None,
-                rlm_termination_override: None,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect("turn");
-
-    assert!(!projected_messages(&turn.state).iter().any(|message| {
-        message
-            .parts
-            .iter()
-            .any(|part| part.content.contains("oldest user"))
-    }));
-    assert!(projected_messages(&turn.state).iter().any(|message| {
-        message
-            .parts
-            .iter()
-            .any(|part| part.content.contains("new request"))
-    }));
-}
-
 #[tokio::test]
 async fn tool_result_projectors_split_state_model_and_history_views() {
     let committed_results = Arc::new(tokio::sync::Mutex::new(Vec::<(
@@ -3874,271 +3621,6 @@ async fn await_background_work_does_not_cross_runtime_sessions_with_same_logical
     assert!(observed.load(Ordering::SeqCst));
 }
 
-#[cfg(feature = "sqlite-store")]
-#[tokio::test]
-async fn observational_memory_background_work_appends_buffered_nodes() {
-    let transport = MockTransport::new(vec![
-        MockCall {
-            stream_events: vec![LlmStreamEvent::Delta("stored".to_string())],
-            response: Ok(LlmResponse {
-                full_text: "stored".to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: "stored".to_string(),
-                }],
-                usage: LlmUsage {
-                    input_tokens: 100,
-                    output_tokens: 1,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
-                },
-                ..LlmResponse::default()
-            }),
-        },
-        MockCall {
-            stream_events: Vec::new(),
-            response: Ok(LlmResponse {
-                full_text: "<observations>\nDate: Apr 14, 2026\n* 🔴 User stated they graduated with a degree in Business Administration.\n</observations>\n<current-task>\nPrimary: retain user memory\n</current-task>\n<suggested-response>\nAcknowledge storage.\n</suggested-response>"
-                    .to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: "<observations>\nDate: Apr 14, 2026\n* 🔴 User stated they graduated with a degree in Business Administration.\n</observations>\n<current-task>\nPrimary: retain user memory\n</current-task>\n<suggested-response>\nAcknowledge storage.\n</suggested-response>"
-                        .to_string(),
-                }],
-                usage: LlmUsage {
-                    input_tokens: 80,
-                    output_tokens: 40,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
-                },
-                ..LlmResponse::default()
-            }),
-        },
-    ]);
-    let (mut runtime, store) = om_runtime_with_transport_and_background(
-        transport.clone(),
-        crate::ObservationalMemoryConfig {
-            observation_message_tokens: 40,
-            observation_buffer_tokens: 20,
-            observation_block_after_tokens: 60,
-            observation_max_tokens_per_batch: 200,
-            previous_observer_tokens: 50,
-            reflection_observation_tokens: 10_000,
-            reflection_buffer_activation_bps: 5_000,
-            reflection_block_after_tokens: 12_000,
-        },
-    )
-    .await;
-
-    runtime
-        .stream_turn(
-            TurnInput {
-                items: vec![InputItem::Text {
-                    text: "I graduated with a degree in Business Administration, please remember that."
-                        .to_string(),
-                }],
-                image_blobs: HashMap::new(),
-                user_input: None,
-                mode: None,
-        rlm_termination_override: None,
-            },
-            &NoopEventSink,
-            CancellationToken::new(),
-        )
-        .await
-        .expect("turn");
-    runtime
-        .await_background_work()
-        .await
-        .expect("await background work");
-
-    let graph = runtime.export_state().session_graph;
-    let usage_sources = runtime
-        .usage_report()
-        .by_source
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    let plugin_types = graph
-        .active_path_nodes()
-        .into_iter()
-        .filter_map(|node| node.plugin().map(|(kind, _)| kind.to_string()))
-        .collect::<Vec<_>>();
-    let persisted_plugin_types = store
-        .load_session_head()
-        .expect("head")
-        .graph
-        .active_path_nodes()
-        .into_iter()
-        .filter_map(|node| node.plugin().map(|(kind, _)| kind.to_string()))
-        .collect::<Vec<_>>();
-    assert!(
-        plugin_types
-            .iter()
-            .any(|kind| kind == "lash.context.observational_memory.buffered_observation"),
-        "expected OM buffered observation node, got runtime={plugin_types:?}; persisted={persisted_plugin_types:?}; usage_sources={usage_sources:?}; remaining_calls={}",
-        transport.calls.lock().expect("transport calls").len()
-    );
-}
-
-#[cfg(feature = "sqlite-store")]
-#[tokio::test]
-async fn history_plugin_compacts_messages_when_model_change_shrinks_context_window() {
-    let transport = MockTransport::new(vec![MockCall {
-        stream_events: Vec::new(),
-        response: Ok(LlmResponse {
-            full_text: "compacted summary".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "compacted summary".to_string(),
-            }],
-            usage: LlmUsage {
-                input_tokens: 20,
-                output_tokens: 5,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
-            },
-            ..LlmResponse::default()
-        }),
-    }]);
-    let store = Arc::new(crate::store::Store::memory().expect("store"));
-    let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let base_provider_factory = Arc::clone(&base_provider);
-    let plugin_host = crate::PluginHost::new(vec![
-        Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
-        Arc::new(StaticPluginFactory::new(
-            "base_tools",
-            crate::PluginSpec::new().with_tool_provider(Arc::clone(&base_provider_factory)),
-        )),
-    ]);
-    let plugins = plugin_host
-        .build_standard_session("root", None)
-        .expect("plugins");
-    let mut runtime = LashRuntime::from_persistent_embedded_state(
-        standard_test_policy(),
-        test_host_config(),
-        crate::PersistentRuntimeServices::new(
-            Arc::clone(&plugins),
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
-        ),
-        {
-            let history = vec![
-                text_message("u1", MessageRole::User, &"oldest user".repeat(20)),
-                text_message("a1", MessageRole::Assistant, &"oldest assistant".repeat(20)),
-                text_message("u2", MessageRole::User, &"older user".repeat(20)),
-                text_message("a2", MessageRole::Assistant, &"older assistant".repeat(20)),
-                text_message("u3", MessageRole::User, &"recent user".repeat(20)),
-                text_message("a3", MessageRole::Assistant, &"recent assistant".repeat(20)),
-                text_message("u4", MessageRole::User, &"latest user".repeat(20)),
-                text_message("a4", MessageRole::Assistant, &"latest assistant".repeat(20)),
-            ];
-            let mut state = PersistedSessionState {
-                session_id: "root".to_string(),
-                policy: SessionPolicy {
-                    execution_mode: ExecutionMode::Standard,
-                    ..Default::default()
-                },
-                iteration: 4,
-                token_usage: TokenUsage::default(),
-                last_prompt_usage: Some(PromptUsage {
-                    prompt_context_tokens: 70_000,
-                    input_tokens: 70_000,
-                    cached_input_tokens: 0,
-                    context_budget_tokens: 70_000,
-                }),
-                ..PersistedSessionState::default()
-            };
-            set_projection(&mut state, &history, &[]);
-            state
-        },
-    )
-    .await
-    .expect("runtime");
-    runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
-
-    runtime
-        .update_session_config(
-            Some(crate::Provider::GoogleOAuth {
-                access_token: "tok".into(),
-                refresh_token: "ref".into(),
-                expires_at: u64::MAX,
-                project_id: None,
-                options: crate::provider::ProviderOptions::default(),
-            }),
-            Some("gemini-2.5-flash-image".to_string()),
-            None,
-            Some(32_768),
-        )
-        .await;
-
-    assert!(!projected_messages(&runtime.state).iter().any(|message| {
-        message
-            .parts
-            .iter()
-            .any(|part| part.content.contains("oldest user"))
-    }));
-    assert_eq!(runtime.session_policy().max_context_tokens, Some(32_768));
-}
-
-#[tokio::test]
-async fn drain_standard_stream_queue_forwards_prequeued_text() {
-    let (event_tx, mut event_rx) = mpsc::channel(8);
-    let (llm_stream_tx, mut llm_stream_rx) =
-        tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
-    llm_stream_tx
-        .send(LlmStreamEvent::Delta("Hello".to_string()))
-        .expect("delta");
-    llm_stream_tx
-        .send(LlmStreamEvent::Part(LlmOutputPart::Text {
-            text: " there".to_string(),
-        }))
-        .expect("part");
-    drop(llm_stream_tx);
-
-    let mut text_streamed = false;
-    let mut streamed_usage = LlmUsage::default();
-    drain_standard_stream_queue(
-        &event_tx,
-        &mut llm_stream_rx,
-        &mut text_streamed,
-        &mut streamed_usage,
-    )
-    .await;
-    drop(event_tx);
-
-    let mut streamed_text = String::new();
-    while let Some(event) = event_rx.recv().await {
-        if let SessionEvent::TextDelta { content } = event {
-            streamed_text.push_str(&content);
-        }
-    }
-
-    assert!(text_streamed);
-    assert_eq!(streamed_text, "Hello there");
-}
-
-#[tokio::test]
-async fn set_state_syncs_runtime_policy_with_restored_state_policy() {
-    let plugins = crate::PluginHost::new(Vec::new())
-        .build_standard_session("root", None)
-        .expect("plugins");
-    let mut runtime = LashRuntime::from_embedded_state(
-        standard_test_policy(),
-        test_host_config(),
-        crate::RuntimeServices::new(plugins),
-        PersistedSessionState::default(),
-    )
-    .await
-    .expect("runtime");
-
-    let mut state = runtime.state.clone();
-    state.policy.model = "restored-model".to_string();
-    state.policy.execution_mode = ExecutionMode::Rlm;
-    runtime.set_persisted_state(state);
-
-    assert_eq!(runtime.state.policy.model, "restored-model");
-    assert_eq!(runtime.policy.model, "restored-model");
-    assert_eq!(runtime.state.policy.execution_mode, ExecutionMode::Rlm);
-    assert_eq!(runtime.policy.execution_mode, ExecutionMode::Rlm);
-}
-
 #[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
 #[tokio::test]
 async fn environment_park_resume_preserves_active_path() {
@@ -4146,7 +3628,7 @@ async fn environment_park_resume_preserves_active_path() {
     // Residency::ActivePathOnly (webserver pattern; host owns disk).
     let factories: Vec<Arc<dyn crate::PluginFactory>> = vec![
         Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
+        Arc::new(crate::testing::FakeContextApproachPluginFactory::rolling_history()),
         Arc::new(StaticPluginFactory::new(
             "shell",
             crate::PluginSpec::new()

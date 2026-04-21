@@ -21,8 +21,8 @@ pub mod session_model;
 pub mod skill_catalog;
 pub mod skill_prompt;
 pub mod store;
-#[cfg(test)]
-pub(crate) mod test_support;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod tool_dispatch;
 mod tool_provider;
 pub mod tools;
@@ -71,8 +71,6 @@ pub use monitor::{
     MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorEvent, MonitorRunState, MonitorSnapshot,
     MonitorSpec, MonitorStatus, MonitorUpdateBatch, MonitorWakePolicy,
 };
-pub use plugin::ObservationalMemoryPluginFactory as BuiltinObservationalMemoryPluginFactory;
-pub use plugin::RollingHistoryPluginFactory as BuiltinRollingHistoryPluginFactory;
 pub use plugin::{
     AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
@@ -93,12 +91,6 @@ pub use plugin::{
     ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
     ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
     TurnResultSummary, TurnTransformContext, plugin_surface_event_renders_visible_output,
-};
-#[cfg(feature = "sqlite-store")]
-pub use plugin::{
-    BuiltinPlanModePluginFactory, BuiltinPromptContextPluginFactory,
-    BuiltinUiActivityPluginFactory, BuiltinUpdatePlanPluginFactory, PromptContextPluginConfig,
-    UpdatePlanItem, UpdatePlanSnapshot,
 };
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
