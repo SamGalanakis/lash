@@ -251,16 +251,6 @@ impl GoogleOAuthProvider {
         out
     }
 
-    #[cfg(test)]
-    fn build_contents(req: &LlmRequest) -> Vec<Value> {
-        let attachment_parts = req
-            .attachments
-            .iter()
-            .map(Self::inline_attachment_part)
-            .collect::<Vec<_>>();
-        Self::build_contents_with_attachment_parts(req, &attachment_parts)
-    }
-
     fn uses_legacy_tool_parameters(model: &str) -> bool {
         model.starts_with("claude-")
     }

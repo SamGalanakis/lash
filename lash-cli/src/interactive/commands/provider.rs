@@ -353,13 +353,9 @@ pub(super) async fn handle_change_provider(
 }
 
 fn kind_cli_label(kind: &str) -> &'static str {
-    match kind {
-        "anthropic" => "Anthropic API (Claude)",
-        "openai-compatible" => "OpenAI-compatible (API key)",
-        "codex" => "OpenAI Codex OAuth",
-        "google_oauth" => "Google OAuth (Gemini)",
-        _ => "Provider",
-    }
+    lash::provider_factory(kind)
+        .map(|f| f.cli_label())
+        .unwrap_or("Provider")
 }
 
 pub(super) fn handle_logout(app: &mut App, provider: &ProviderHandle) -> anyhow::Result<bool> {

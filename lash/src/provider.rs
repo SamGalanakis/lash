@@ -22,6 +22,7 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::llm::timeouts::{DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts};
+
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::mcp::McpServerConfig;
@@ -222,10 +223,6 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     fn options(&self) -> &ProviderOptions;
     fn options_mut(&mut self) -> &mut ProviderOptions;
 
-    fn llm_timeouts(&self) -> LlmTimeouts {
-        self.options().llm_timeouts()
-    }
-
     fn requires_streaming(&self) -> bool {
         false
     }
@@ -303,16 +300,8 @@ impl ProviderHandle {
         Self { inner: provider }
     }
 
-    pub fn into_inner(self) -> Box<dyn Provider> {
-        self.inner
-    }
-
     pub fn as_dyn(&self) -> &dyn Provider {
         &*self.inner
-    }
-
-    pub fn as_dyn_mut(&mut self) -> &mut dyn Provider {
-        &mut *self.inner
     }
 
     pub fn to_spec(&self) -> ProviderSpec {
@@ -551,16 +540,8 @@ impl ProviderRegistry {
         factory.deserialize(spec.config.clone())
     }
 
-    pub fn kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.factories.keys().copied()
-    }
-
     pub fn factory(&self, kind: &str) -> Option<&Arc<dyn ProviderFactory>> {
         self.factories.get(kind)
-    }
-
-    pub fn factories(&self) -> impl Iterator<Item = &Arc<dyn ProviderFactory>> {
-        self.factories.values()
     }
 }
 
@@ -574,16 +555,18 @@ pub fn register_provider_factory(factory: Arc<dyn ProviderFactory>) {
     PROVIDER_REGISTRY.write().unwrap().register(factory);
 }
 
-/// Snapshot of the global registry. Useful for enumerating registered
-/// kinds from UI code.
-pub fn global_provider_registry() -> ProviderRegistry {
-    PROVIDER_REGISTRY.read().unwrap().clone()
-}
-
 /// Materialize a provider from its serialized form using the global
 /// registry. Returns `Err` if no factory is registered for `spec.kind`.
 pub fn build_provider(spec: &ProviderSpec) -> Result<Box<dyn Provider>, String> {
     PROVIDER_REGISTRY.read().unwrap().build_from_spec(spec)
+}
+
+/// Look up a registered provider factory by kind. Returns `None` if no
+/// factory with that kind is registered. Hosts use this to render UI
+/// labels / descriptions (`cli_label`, `setup_name`, …) without
+/// hard-coding per-kind strings.
+pub fn provider_factory(kind: &str) -> Option<Arc<dyn ProviderFactory>> {
+    PROVIDER_REGISTRY.read().unwrap().factory(kind).cloned()
 }
 
 /// Stored configuration: provider credentials + service API keys.
@@ -640,12 +623,6 @@ impl LashConfig {
     pub fn active_provider_spec(&self) -> &ProviderSpec {
         self.providers
             .get(&self.active_provider)
-            .expect("active provider missing from config")
-    }
-
-    pub fn active_provider_spec_mut(&mut self) -> &mut ProviderSpec {
-        self.providers
-            .get_mut(&self.active_provider)
             .expect("active provider missing from config")
     }
 

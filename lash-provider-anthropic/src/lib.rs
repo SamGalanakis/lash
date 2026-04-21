@@ -899,10 +899,6 @@ impl Provider for AnthropicProvider {
         }
     }
 
-    fn resolve_model(&self, model: &str) -> String {
-        model.to_string()
-    }
-
     fn context_lookup_model(&self, model: &str) -> String {
         if model.starts_with("anthropic/") {
             model.to_string()

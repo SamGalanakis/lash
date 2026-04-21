@@ -25,23 +25,15 @@ fn kind_index(kind: &str) -> Option<usize> {
 }
 
 fn kind_setup_name(kind: &str) -> &'static str {
-    match kind {
-        "anthropic" => "Anthropic API",
-        "openai-compatible" => "OpenAI-compatible",
-        "codex" => "Codex",
-        "google_oauth" => "Google OAuth",
-        _ => "Unknown",
-    }
+    lash::provider_factory(kind)
+        .map(|f| f.setup_name())
+        .unwrap_or("Unknown")
 }
 
 fn kind_setup_description(kind: &str) -> &'static str {
-    match kind {
-        "anthropic" => "Claude via Anthropic API key",
-        "openai-compatible" => "Any OpenAI-compatible API endpoint",
-        "codex" => "ChatGPT Plus/Pro/Team",
-        "google_oauth" => "Gemini via Google account",
-        _ => "",
-    }
+    lash::provider_factory(kind)
+        .map(|f| f.setup_description())
+        .unwrap_or("")
 }
 
 enum SetupStep {

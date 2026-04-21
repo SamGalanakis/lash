@@ -1494,10 +1494,6 @@ impl Provider for CodexProvider {
         }
     }
 
-    fn resolve_model(&self, model: &str) -> String {
-        model.to_string()
-    }
-
     fn context_lookup_model(&self, model: &str) -> String {
         if model.contains('/') {
             model.to_string()

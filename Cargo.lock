@@ -2055,12 +2055,9 @@ dependencies = [
  "async-trait",
  "base64",
  "lash",
- "lash-sansio",
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
- "tokio",
  "uuid",
 ]
 
@@ -2071,11 +2068,9 @@ dependencies = [
  "async-trait",
  "base64",
  "lash",
- "lash-sansio",
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -2088,14 +2083,11 @@ dependencies = [
  "async-trait",
  "base64",
  "lash",
- "lash-sansio",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.18",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -2106,13 +2098,9 @@ dependencies = [
  "async-trait",
  "base64",
  "lash",
- "lash-sansio",
- "regex",
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
- "tokio",
  "uuid",
 ]
 

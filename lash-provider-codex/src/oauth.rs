@@ -3,7 +3,7 @@
 
 use base64::Engine;
 
-use lash::oauth::{OAuthError, form_escape, now_secs, url_form_encode};
+use lash::oauth::{OAuthError, now_secs, url_form_encode};
 
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -251,9 +251,4 @@ fn extract_account_id(jwt: &str) -> Option<String> {
         return Some(id.to_string());
     }
     None
-}
-
-#[allow(dead_code)]
-fn _keep_form_escape_link() {
-    let _ = form_escape;
 }

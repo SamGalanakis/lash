@@ -915,21 +915,6 @@ impl OpenAiGenericProvider {
         Some(piece.to_string())
     }
 
-    #[cfg(test)]
-    fn process_sse_event(
-        raw: &str,
-        full: &mut String,
-        deltas: &mut Vec<String>,
-        usage: &mut LlmUsage,
-    ) -> Result<(), LlmTransportError> {
-        let prev_usage = LlmUsage::default();
-        Self::process_sse_event_with_tools(
-            raw,
-            SseEventState::new(full, usage, &prev_usage).with_retained_deltas_opt(Some(deltas)),
-        )?;
-        Ok(())
-    }
-
     fn process_sse_event_with_tools(
         raw: &str,
         mut state: SseEventState<'_>,
@@ -1314,10 +1299,6 @@ impl Provider for OpenAiGenericProvider {
             }),
             _ => None,
         }
-    }
-
-    fn resolve_model(&self, model: &str) -> String {
-        model.to_string()
     }
 
     fn context_lookup_model(&self, model: &str) -> String {

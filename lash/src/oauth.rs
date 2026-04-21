@@ -60,7 +60,7 @@ pub fn url_form_encode(pairs: &[(&str, &str)]) -> String {
 }
 
 /// Percent-encode a value for `application/x-www-form-urlencoded`.
-pub fn form_escape(s: &str) -> String {
+fn form_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

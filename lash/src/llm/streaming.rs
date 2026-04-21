@@ -3,26 +3,20 @@ use crate::llm::types::{LlmEventSender, LlmStreamEvent, LlmUsage};
 
 use std::time::Duration;
 
-pub struct SseBuffer {
+struct SseBuffer {
     pending: String,
     event_lines: Vec<String>,
 }
 
-impl Default for SseBuffer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SseBuffer {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             pending: String::new(),
             event_lines: Vec::new(),
         }
     }
 
-    pub fn push_chunk<F>(&mut self, chunk: &[u8], mut on_event: F) -> Result<(), LlmTransportError>
+    fn push_chunk<F>(&mut self, chunk: &[u8], mut on_event: F) -> Result<(), LlmTransportError>
     where
         F: FnMut(String) -> Result<(), LlmTransportError>,
     {
@@ -38,7 +32,7 @@ impl SseBuffer {
         Ok(())
     }
 
-    pub fn finish<F>(&mut self, mut on_event: F) -> Result<(), LlmTransportError>
+    fn finish<F>(&mut self, mut on_event: F) -> Result<(), LlmTransportError>
     where
         F: FnMut(String) -> Result<(), LlmTransportError>,
     {
@@ -115,7 +109,7 @@ pub fn emit_progress(
     emit_delta_progress(tx, &deltas[prev_len..], usage, prev_usage);
 }
 
-pub fn emit_delta_progress(
+fn emit_delta_progress(
     tx: Option<&LlmEventSender>,
     added_deltas: &[String],
     usage: &LlmUsage,
