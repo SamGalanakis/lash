@@ -395,6 +395,9 @@ enum CompiledSchemaKind {
         required: Box<[CompiledSchemaField]>,
         properties: Box<[CompiledSchemaField]>,
     },
+    /// Union of alternative shapes (`str | null`, `int | str`, …).
+    /// A value matches the union if it matches any of the variants.
+    Union(Box<[CompiledSchema]>),
 }
 
 #[derive(Clone)]
@@ -1193,6 +1196,8 @@ impl Compiler {
             } => {
                 self.compile_expr(iterable);
                 let binding = self.push_slot(binding);
+                self.clear_const_slots();
+                self.set_const_slot(binding, None);
                 self.code.push(Instruction::BeginIter(binding));
                 let loop_start = self.code.len();
                 let iter_next = self.code.len();
@@ -1906,12 +1911,24 @@ impl Compiler {
                 );
                 self.code.push(Instruction::BuildRecord(obj_keys));
             }
+            TypeExpr::Union(variants) => {
+                // Union reaches this arm only when at least one variant
+                // contains a `Ref` that couldn't const-fold. Compile
+                // each variant and pack them into an `anyOf` list.
+                for variant in variants {
+                    self.compile_type_expr(variant);
+                }
+                self.code.push(Instruction::BuildList(variants.len()));
+                let keys = self.push_key_list(["anyOf"].into_iter());
+                self.code.push(Instruction::BuildRecord(keys));
+            }
             TypeExpr::Any
             | TypeExpr::Str
             | TypeExpr::Int
             | TypeExpr::Float
             | TypeExpr::Bool
             | TypeExpr::Dict
+            | TypeExpr::Null
             | TypeExpr::Enum(_) => {
                 unreachable!("scalar/enum types must const-fold")
             }
@@ -3484,6 +3501,7 @@ fn fold_type(ty: &TypeExpr) -> Option<Value> {
         TypeExpr::Float => Some(interned_scalar_schema(ScalarSchemaKind::Float)),
         TypeExpr::Bool => Some(interned_scalar_schema(ScalarSchemaKind::Bool)),
         TypeExpr::Dict => Some(interned_scalar_schema(ScalarSchemaKind::Dict)),
+        TypeExpr::Null => Some(interned_scalar_schema(ScalarSchemaKind::Null)),
         TypeExpr::Enum(values) => {
             let mut rec = record_with_capacity(2);
             rec.insert("type".into(), Value::String("string".into()));
@@ -3515,6 +3533,13 @@ fn fold_type(ty: &TypeExpr) -> Option<Value> {
             rec.insert("additionalProperties".into(), Value::Bool(false));
             Some(Value::Record(Arc::new(rec)))
         }
+        TypeExpr::Union(variants) => {
+            let folded: Option<Vec<Value>> = variants.iter().map(fold_type).collect();
+            let folded = folded?;
+            let mut rec = record_with_capacity(1);
+            rec.insert("anyOf".into(), Value::List(folded.into()));
+            Some(Value::Record(Arc::new(rec)))
+        }
         TypeExpr::Ref(_) => None,
     }
 }
@@ -3527,13 +3552,14 @@ enum ScalarSchemaKind {
     Float,
     Bool,
     Dict,
+    Null,
 }
 
 /// Returns an `Arc`-shared schema for a scalar. All sites referencing `str`
 /// point at the same `Arc<Record>`, so emitting a Type literal with N string
 /// fields allocates one record, not N.
 fn interned_scalar_schema(kind: ScalarSchemaKind) -> Value {
-    static CACHE: OnceLock<[Value; 6]> = OnceLock::new();
+    static CACHE: OnceLock<[Value; 7]> = OnceLock::new();
     let cache = CACHE.get_or_init(|| {
         let build = |ty: &str| {
             let mut rec = record_with_capacity(1);
@@ -3547,6 +3573,7 @@ fn interned_scalar_schema(kind: ScalarSchemaKind) -> Value {
             build("number"),
             build("boolean"),
             build("object"),
+            build("null"),
         ]
     });
     cache[kind as usize].clone()
@@ -3971,6 +3998,17 @@ fn compile_schema_value(schema: &Value) -> CompiledSchema {
         };
     };
 
+    if let Some(Value::List(variants)) = schema_obj.get("anyOf") {
+        let compiled: Box<[CompiledSchema]> = variants
+            .iter()
+            .map(compile_schema_value)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        return CompiledSchema {
+            kind: CompiledSchemaKind::Union(compiled),
+        };
+    }
+
     if let Some(Value::List(allowed)) = schema_obj.get("enum") {
         return CompiledSchema {
             kind: CompiledSchemaKind::Enum(allowed.iter().cloned().collect::<Vec<_>>().into()),
@@ -4117,6 +4155,27 @@ fn validate_compiled_schema_node<'a>(
 ) -> Result<(), String> {
     match &schema.kind {
         CompiledSchemaKind::Any => Ok(()),
+        CompiledSchemaKind::Union(variants) => {
+            // Union matches if any variant matches. We report the
+            // first-variant error when nothing matches, which is
+            // consistent with how a reader would debug "this didn't
+            // fit any of the shapes I declared".
+            for variant in variants.iter() {
+                if validate_compiled_schema_node(value, variant, path).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(format!(
+                "{}: expected one of [{}], got {}",
+                format_schema_path(path),
+                variants
+                    .iter()
+                    .map(describe_compiled_schema)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                schema_value_type_name(value)
+            ))
+        }
         CompiledSchemaKind::Type(expected) => validate_compiled_schema_type(value, *expected, path),
         CompiledSchemaKind::Enum(allowed) => {
             validate_compiled_schema_type(value, SchemaType::String, path)?;
@@ -4174,6 +4233,30 @@ fn validate_compiled_schema_node<'a>(
     }
 }
 
+/// Short human-readable label for a compiled schema, used in union
+/// error messages ("expected one of [string, null]").
+fn describe_compiled_schema(schema: &CompiledSchema) -> String {
+    match &schema.kind {
+        CompiledSchemaKind::Any => "any".to_string(),
+        CompiledSchemaKind::Type(kind) => kind.schema_name().to_string(),
+        CompiledSchemaKind::Enum(values) => format!(
+            "enum[{}]",
+            values
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        CompiledSchemaKind::List(_) => "array".to_string(),
+        CompiledSchemaKind::Object { .. } => "object".to_string(),
+        CompiledSchemaKind::Union(variants) => variants
+            .iter()
+            .map(describe_compiled_schema)
+            .collect::<Vec<_>>()
+            .join(" | "),
+    }
+}
+
 fn format_schema_path(path: &[PathSegment<'_>]) -> String {
     let mut formatted = "$".to_string();
     for segment in path {
@@ -4194,6 +4277,18 @@ fn validate_schema_node(value: &Value, schema: &Value, path: &mut String) -> Res
     let Some(schema_obj) = schema.as_record() else {
         return Ok(());
     };
+
+    if let Some(Value::List(variants)) = schema_obj.get("anyOf") {
+        for variant in variants.iter() {
+            let mut scratch = path.clone();
+            if validate_schema_node(value, variant, &mut scratch).is_ok() {
+                return Ok(());
+            }
+        }
+        return Err(format!(
+            "{path}: value does not match any variant of the union",
+        ));
+    }
 
     if let Some(Value::String(expected)) = schema_obj.get("type")
         && !matches_schema_type(value, expected)

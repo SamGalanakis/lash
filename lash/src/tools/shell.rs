@@ -39,11 +39,11 @@ pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
     vec![
         PromptContribution::guidance(
             "Command Execution",
-            "Use `exec_command` for one-shot commands and for starting long-lived processes. If it returns `session_id`, continue that same process with `write_stdin`; otherwise the command already exited. For services or background daemons, prefer startup patterns that survive after the tool call returns, then verify readiness from a fresh command before concluding.",
+            "Use `exec_command` for one-shot commands and to start long-lived processes. Use `write_stdin` only when the prior `exec_command` is still alive (it returned a `session_id`) — e.g. feeding a REPL or responding to a prompt; otherwise start a fresh `exec_command`. For services or background daemons, prefer startup patterns that survive after the tool call returns, then verify readiness from a fresh command before concluding.",
         ),
         PromptContribution::guidance(
             "Git Safety",
-            "Do not revert user changes you did not make. Avoid destructive git commands unless explicitly requested.",
+            "Avoid destructive git commands unless explicitly requested.",
         ),
     ]
 }
@@ -315,6 +315,7 @@ impl ShellRuntime {
             }
             rendered.push_str("[truncated]");
         }
+        let rendered = clean_terminal_output(&rendered);
         let (rendered, original_token_count, token_truncated) =
             truncate_exec_output(rendered, max_output_tokens);
         let mut spill_guard = spill.lock().unwrap();
@@ -364,7 +365,7 @@ impl ShellRuntime {
                             chunk.push_str("[truncated]");
                         }
                         sent_len = buffer_end;
-                        Some(chunk)
+                        Some(clean_terminal_output(&chunk))
                     } else {
                         None
                     }
@@ -585,7 +586,7 @@ impl StandardShell {
         let login = args
             .get("login")
             .and_then(|value| value.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let yield_time_ms = args
             .get("yield_time_ms")
             .and_then(|value| value.as_u64())
@@ -777,7 +778,7 @@ impl ToolProvider for StandardShell {
         vec![
             ToolDefinition {
                 name: "exec_command".into(),
-                description: "Run a command in a PTY. Completed commands return `output` and `exit_code`; longer-running commands return `session_id` so you can continue the same process with `write_stdin`. Large or truncated output may also include `full_output_path` pointing at the saved full stream.".into(),
+                description: "Run a command in a PTY. Completed commands return cleaned `output` and `exit_code`; longer-running commands return `session_id` so you can continue the same process with `write_stdin`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.".into(),
                 params: vec![
                     ToolParam {
                         name: "cmd".into(),
@@ -804,8 +805,8 @@ impl ToolProvider for StandardShell {
                     ToolParam {
                         name: "login".into(),
                         r#type: "bool".into(),
-                        description: "Whether to run the shell with -l/-i semantics. Defaults to true.".into(),
-                        default_value: Some(serde_json::json!(true)),
+                        description: "Whether to run the shell with -l semantics. Defaults to false to avoid startup prompts and shell init noise.".into(),
+                        default_value: Some(serde_json::json!(false)),
                         required: false,
                     },
                     ToolParam {
@@ -836,7 +837,7 @@ impl ToolProvider for StandardShell {
             },
             ToolDefinition {
                 name: "write_stdin".into(),
-                description: "Write bytes to a running command handle and wait briefly for the next settled output chunk. Use `close_stdin: true` to send EOF. Large or truncated output may also include `full_output_path` pointing at the saved full stream.".into(),
+                description: "Write bytes to a running command handle and wait briefly for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.".into(),
                 params: vec![
                     ToolParam {
                         name: "session_id".into(),
@@ -1043,6 +1044,53 @@ fn activate_spill(
         file,
     });
     Some(path)
+}
+
+fn clean_terminal_output(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    let mut previous_was_escape = false;
+                    for next in chars.by_ref() {
+                        if next == '\x07' || (previous_was_escape && next == '\\') {
+                            break;
+                        }
+                        previous_was_escape = next == '\x1b';
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+        match ch {
+            '\r' => {
+                if !matches!(chars.peek(), Some('\n')) {
+                    out.push('\n');
+                }
+            }
+            '\x08' => {
+                out.pop();
+            }
+            ch if ch.is_control() && ch != '\n' && ch != '\t' => {}
+            ch => out.push(ch),
+        }
+    }
+    out
 }
 
 fn truncate_exec_output(
@@ -1346,6 +1394,23 @@ mod tests {
         let defs = shell.definitions();
         assert_eq!(defs.len(), 2);
         assert!(defs.iter().all(|def| !def.description.is_empty()));
+    }
+
+    #[test]
+    fn exec_command_defaults_to_non_login_shell() {
+        let shell = StandardShell::default();
+        let params = shell
+            .parse_exec_command_params(&json!({"cmd": "echo hello"}))
+            .expect("params");
+
+        assert!(!params.login);
+    }
+
+    #[test]
+    fn clean_terminal_output_strips_ansi_and_controls() {
+        let raw = "\x1b[?2004h\x1b[31mred\x1b[0m\r\nab\x08c\x1b]0;title\x07\x00";
+
+        assert_eq!(clean_terminal_output(raw), "red\nac");
     }
 
     #[tokio::test]

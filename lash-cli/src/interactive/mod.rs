@@ -840,8 +840,10 @@ pub(crate) async fn run_app(
                         );
                         let mut ui_resume_state = app.ui_resume_state();
                         ui_resume_state.interrupted_assistant_text =
-                            (!done.result.assistant_output.safe_text.trim().is_empty())
-                                .then(|| done.result.assistant_output.safe_text.clone());
+                            app::interrupted_assistant_tail(
+                                &app.blocks,
+                                &done.result.assistant_output.safe_text,
+                            );
                         if let Some(rt) = runtime.as_mut() {
                             persist_runtime_turn_state(
                                 rt,

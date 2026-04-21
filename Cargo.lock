@@ -219,6 +219,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bench-longcot"
+version = "0.2.61"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dotenvy",
+ "lash",
+ "lash-export",
+ "lash-mode-rlm",
+ "lash-mode-standard",
+ "lash-subagents",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "bench-longmemeval-rlm"
 version = "0.2.61"
 dependencies = [
@@ -231,6 +252,27 @@ dependencies = [
  "lash-subagents",
  "regex",
  "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "bench-swebench"
+version = "0.2.61"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dotenvy",
+ "lash",
+ "lash-default-tools",
+ "lash-export",
+ "lash-mode-rlm",
+ "lash-mode-standard",
+ "lash-subagents",
  "serde",
  "serde_json",
  "tokio",

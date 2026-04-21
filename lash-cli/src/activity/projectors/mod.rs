@@ -21,6 +21,7 @@ pub(crate) mod monitor;
 pub(crate) mod shell;
 pub(crate) mod snippet;
 pub(crate) mod subagents;
+pub(crate) mod update_plan;
 pub(crate) mod web;
 
 /// Register every built-in projector with the given `ActivityState`.
@@ -39,5 +40,6 @@ pub(super) fn register_builtins(state: &mut ActivityState) {
     state.register(shell::ShellProjector);
     state.register(snippet::SnippetProjector);
     state.register(subagents::SubagentProjector);
+    state.register(update_plan::UpdatePlanProjector);
     state.register(web::WebProjector);
 }

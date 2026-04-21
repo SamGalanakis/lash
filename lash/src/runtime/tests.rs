@@ -692,7 +692,7 @@ async fn rlm_runtime_with_transport(transport: MockTransport) -> LashRuntime {
     runtime
 }
 
-#[cfg(feature = "tool-impls")]
+#[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
 async fn rlm_runtime_with_transport_and_store(
     transport: MockTransport,
     store: Arc<dyn crate::store::RuntimeStore>,

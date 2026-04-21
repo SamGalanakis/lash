@@ -33,9 +33,57 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
         move |ctx: lash::plugin::AssistantResponseHookContext| {
             let state = Arc::clone(&response_state);
             Box::pin(async move {
-                state.lock().expect("fence detector lock").reset();
+                let mut response = ctx.response;
+                // The stream hook suppresses the fence body from every
+                // delta chunk so the UI doesn't see the raw code scroll
+                // past. But the driver then inspects `response.full_text`
+                // to decide whether to execute a block — and a suppressed
+                // body leaves that text fence-free, so the driver would
+                // fall into the "no fence → finish turn" branch. Before
+                // we reset the detector for the next response, splice the
+                // captured fence body back into the response so the
+                // driver sees a complete ` ```lashlang … ``` ` block.
+                {
+                    let mut detector = state.lock().expect("fence detector lock");
+                    if detector.inside_fence {
+                        let mut spliced = response.full_text.clone();
+                        if !spliced.is_empty() && !spliced.ends_with('\n') {
+                            spliced.push('\n');
+                        }
+                        spliced.push_str("```lashlang\n");
+                        spliced.push_str(&detector.fence_body);
+                        if !detector.fence_closed {
+                            // Stream aborted or ended before we saw a
+                            // closing fence — append one ourselves so
+                            // the driver can still parse and execute.
+                            if !spliced.ends_with('\n') {
+                                spliced.push('\n');
+                            }
+                            spliced.push_str("```");
+                        }
+                        response.full_text = spliced.clone();
+                        // The RLM driver reads `response.parts` (not
+                        // `full_text`) when it builds the assistant_text
+                        // it parses for a fence. Mirror the spliced
+                        // content into parts so a fenced-only reply
+                        // (no prose lead-in) still carries a Text part;
+                        // otherwise the driver trips its
+                        // "Model returned no assistant text" guard on
+                        // turn 2+ responses that are just a fence.
+                        let needs_text_part = !response
+                            .parts
+                            .iter()
+                            .any(|part| matches!(part, lash::LlmOutputPart::Text { .. }));
+                        if needs_text_part {
+                            response
+                                .parts
+                                .push(lash::LlmOutputPart::Text { text: spliced });
+                        }
+                    }
+                    detector.reset();
+                }
                 Ok(lash::plugin::AssistantResponseTransform {
-                    response: ctx.response,
+                    response,
                     events: Vec::new(),
                 })
             })
@@ -46,8 +94,11 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
 }
 
 /// Tracks whether the accumulated stream has entered a ` ```lashlang `
-/// or ` ```rlm ` fenced block. Accumulates a pending buffer across
-/// streaming chunks to detect fence openers that are split across
+/// fenced block. Only the `lashlang` opener is canonical — other
+/// labels (e.g. `rlm`, `lash`) stream through as plain prose so the
+/// prompt contract ("write one ` ```lashlang ` block") is unambiguous.
+/// Accumulates a pending buffer across streaming chunks to detect
+/// openers that are split across
 /// token boundaries (e.g. `` ``` `` → `lash` → `lang` → `\n`).
 /// The `AssistantResponseHook` calls `reset()` between LLM responses
 /// to prevent cross-response leakage.
@@ -175,32 +226,20 @@ impl FenceDetector {
 /// closing ` ``` ` on its own line. A fence close is any ` ``` ` that
 /// either starts at byte 0 of the body or is immediately preceded by
 /// `\n`.
+/// Any `\`\`\`` closes the fence body, regardless of position. Must
+/// stay in lockstep with `first_lashlang_fence_span` in `driver.rs`.
 fn has_closing_fence(text: &str) -> bool {
-    let mut cursor = 0;
-    while let Some(rel) = text[cursor..].find("```") {
-        let pos = cursor + rel;
-        let at_line_start = pos == 0 || text.as_bytes().get(pos - 1).copied() == Some(b'\n');
-        if at_line_start {
-            return true;
-        }
-        cursor = pos + 3;
-    }
-    false
+    text.contains("```")
 }
 
 fn find_fence_opener(text: &str) -> Option<usize> {
     let mut search_from = 0usize;
     while let Some(rel) = text[search_from..].find("```") {
         let pos = search_from + rel;
-        let preceded_by_newline = pos == 0 || text.as_bytes().get(pos - 1).copied() == Some(b'\n');
-        if !preceded_by_newline {
-            search_from = pos + 3;
-            continue;
-        }
         let after = &text[pos + 3..];
         let line_end = after.find('\n').unwrap_or(after.len());
         let lang = after[..line_end].trim();
-        if matches!(lang, "lashlang" | "rlm") {
+        if lang == "lashlang" {
             return Some(pos);
         }
         search_from = pos + 3;
@@ -279,11 +318,14 @@ mod tests {
     }
 
     #[test]
-    fn rlm_alias_triggers_masking() {
+    fn rlm_alias_does_not_trigger_masking() {
+        // Only ` ```lashlang ` is the canonical fence. `rlm` / `lash`
+        // aliases were dropped so the prompt and the parser agree on
+        // exactly one opener.
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Check:\n\n```rlm\nprint x\n```\n");
-        assert_eq!(t.chunk, "Check:\n\n");
-        assert_eq!(t.events.len(), 1);
+        assert!(t.chunk.contains("```rlm"));
+        assert!(t.events.is_empty());
     }
 
     #[test]

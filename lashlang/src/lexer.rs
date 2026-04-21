@@ -35,6 +35,7 @@ pub enum TokenKind {
     BangEqual,
     AndAnd,
     OrOr,
+    Pipe,
     Less,
     LessEqual,
     Greater,
@@ -135,7 +136,7 @@ impl<'a> Lexer<'a> {
                 '=' => self.double_or_single('=', TokenKind::DoubleEqual, TokenKind::Equal),
                 '!' => self.double_or_single('=', TokenKind::BangEqual, TokenKind::Bang),
                 '&' => self.required_double('&', TokenKind::AndAnd)?,
-                '|' => self.required_double('|', TokenKind::OrOr)?,
+                '|' => self.double_or_single('|', TokenKind::OrOr, TokenKind::Pipe),
                 '<' => self.double_or_single('=', TokenKind::LessEqual, TokenKind::Less),
                 '>' => self.double_or_single('=', TokenKind::GreaterEqual, TokenKind::Greater),
                 '"' => self.string()?,
@@ -362,7 +363,7 @@ mod tests {
             # comment
             // comment
             if else for in parallel submit print call and or not true false null
-            name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : ? . ! = == != && || < <= > >= + - * / %
+            name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : ? . ! = == != && || | < <= > >= + - * / %
             "#)
         .expect("lexing should succeed");
 
@@ -406,6 +407,7 @@ mod tests {
                 TokenKind::BangEqual,
                 TokenKind::AndAnd,
                 TokenKind::OrOr,
+                TokenKind::Pipe,
                 TokenKind::Less,
                 TokenKind::LessEqual,
                 TokenKind::Greater,

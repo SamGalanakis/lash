@@ -1,0 +1,26 @@
+[package]
+name = "bench-longcot"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[[bin]]
+name = "bench-longcot"
+path = "src/main.rs"
+
+[dependencies]
+lash = { path = "../../../lash", default-features = false, features = ["full"] }
+lash-export = { path = "../../../lash-export" }
+lash-mode-rlm = { path = "../../../lash-mode-rlm" }
+lash-mode-standard = { path = "../../../lash-mode-standard" }
+lash-subagents = { path = "../../../lash-subagents" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+async-trait = "0.1"
+dotenvy = "0.15"

@@ -70,9 +70,15 @@ impl ToolHost for MockHost {
                         _ => None,
                     })
                     .unwrap_or_default();
+                let target = format!("/root/{name}");
                 let mut record = Record::default();
-                record.insert("path".into(), Value::String(format!("/root/{name}").into()));
+                record.insert("target".into(), Value::String(target.clone().into()));
+                record.insert(
+                    "task_id".into(),
+                    Value::String(format!("subagent:{target}").into()),
+                );
                 record.insert("task_name".into(), Value::String(name.into()));
+                record.insert("run_state".into(), Value::String("running".into()));
                 Ok(Value::Record(record.into()))
             }
             "wait_agent" => {
@@ -96,7 +102,9 @@ impl ToolHost for MockHost {
                         Value::Record(ev.into())
                     })
                     .collect();
+                let completion = events.first().cloned().unwrap_or(Value::Null);
                 let mut out = Record::default();
+                out.insert("completion".into(), completion);
                 out.insert("events".into(), Value::List(events.into()));
                 Ok(Value::Record(out.into()))
             }
@@ -793,10 +801,10 @@ fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
         r#"a = (call spawn_agent { task_name: "chunk_1", task: "x", capability: "low" })?
 b = (call spawn_agent { task_name: "chunk_2", task: "y", capability: "low" })?
 events = await {
-  a: start call wait_agent { targets: [a.path] },
-  b: start call wait_agent { targets: [b.path] },
+  a: start call wait_agent { targets: [a.target] },
+  b: start call wait_agent { targets: [b.target] },
 }
-submit [events.a?.events[0].result, events.b?.events[0].result]"#,
+submit [events.a?.completion.result, events.b?.completion.result]"#,
     ) else {
         panic!("expected list");
     };

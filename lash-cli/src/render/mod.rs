@@ -89,6 +89,17 @@ fn turn_status_height(app: &App) -> u16 {
     if app.live_turn.is_some() { 1 } else { 0 }
 }
 
+/// Rows the plan checklist contributes to the trailing end of the
+/// transcript: 1 blank gutter + N items. Drops the `PLAN` header and
+/// the scribe rule that were dock-chrome when the panel was pinned —
+/// inline in scrollable history neither earns its row.
+pub fn plan_dock_trailing_height(app: &App) -> usize {
+    match app.plan_dock.as_ref() {
+        Some(plan) if !plan.is_empty() => 1 + plan.items.len(),
+        _ => 0,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ChromeLayout {
     history_height: u16,
@@ -201,6 +212,66 @@ fn input_content_area_from_frame(area: Rect) -> Rect {
         area.width.saturating_sub(INPUT_HORIZONTAL_PADDING * 2),
         area.height.saturating_sub(2),
     )
+}
+
+/// Render the plan checklist as trailing transcript content: one blank
+/// gutter row for visual separation from the prior block, then one row
+/// per step. No `PLAN` header (the glyphs are self-explanatory) and no
+/// scribe rule (that was dock-chrome — inline the checklist just reads
+/// like a regular block). Returns `None` when no plan is active.
+pub fn plan_dock_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'static>>> {
+    use crate::app::PlanDockItemStatus;
+
+    let plan = app.plan_dock.as_ref()?;
+    if plan.is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── gutter: one blank row above the plan so it reads as its own
+    //    block rather than glomming onto the previous activity.
+    lines.push(Line::from(""));
+
+    // ── items
+    for item in &plan.items {
+        let (glyph, glyph_style, text_style) = match item.status {
+            PlanDockItemStatus::Done => (
+                "✓ ",
+                Style::default()
+                    .fg(theme::state_ok())
+                    .add_modifier(Modifier::Bold),
+                Style::default()
+                    .fg(theme::text_faint())
+                    .add_modifier(Modifier::Dim),
+            ),
+            PlanDockItemStatus::Active => (
+                // `▶` — the `■` glyph is reserved for the live
+                // assistant-text marker. Using a distinct arrow here
+                // keeps "current plan step" visually orthogonal from
+                // "model is speaking right now."
+                "▶ ",
+                Style::default()
+                    .fg(theme::brand())
+                    .add_modifier(Modifier::Bold),
+                Style::default()
+                    .fg(theme::text_primary())
+                    .add_modifier(Modifier::Bold),
+            ),
+            PlanDockItemStatus::Pending => (
+                "□ ",
+                Style::default().fg(theme::text_subtle()),
+                Style::default().fg(theme::text_muted()),
+            ),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(glyph, glyph_style),
+            Span::styled(item.text.clone(), text_style),
+        ]));
+    }
+
+    Some(lines)
 }
 
 pub(crate) fn extract_history_selection_text(
@@ -959,11 +1030,16 @@ fn render_block_into(
             }
         }
         DisplayBlock::AssistantText(text) => {
+            // Insert a blank row before the assistant's spoken text
+            // unless it directly follows other spoken text (where the
+            // gap would be noise). Reasoning used to be in this list,
+            // but gluing a compact `┊ thinking …` line straight into
+            // `■ I'll do X` reads as one block — the eye can't find
+            // the seam.
             let add_spacing_before = idx > 0
                 && !matches!(
                     blocks[idx - 1],
                     DisplayBlock::AssistantText(_)
-                        | DisplayBlock::AssistantReasoning(_)
                         | DisplayBlock::Splash
                         | DisplayBlock::TurnStart(_)
                 );
@@ -981,11 +1057,28 @@ fn render_block_into(
                         | DisplayBlock::Splash
                         | DisplayBlock::TurnStart(_)
                 );
-            lines.extend(assistant_text::render_assistant_reasoning_block(
-                text,
-                viewport_width,
-                add_spacing_before,
-            ));
+            // Show full reasoning only when either (a) the user has
+            // opted into full expansion (Alt+O → level 2), or (b) this
+            // is the live tail of a running turn so the stream stays
+            // visible as it arrives. Reasoning is the heaviest block
+            // in the transcript and lives at L2 alongside full
+            // artifacts and shell output — not at L1 with activity
+            // detail lines.
+            let is_live_tail = idx + 1 == blocks.len() && app.running;
+            let should_expand = expand_level >= 2 || is_live_tail;
+            if should_expand {
+                lines.extend(assistant_text::render_assistant_reasoning_block(
+                    text,
+                    viewport_width,
+                    add_spacing_before,
+                ));
+            } else {
+                lines.extend(assistant_text::render_assistant_reasoning_block_compact(
+                    text,
+                    viewport_width,
+                    add_spacing_before,
+                ));
+            }
         }
         DisplayBlock::Activity(activity) => {
             render_activity_block(activity, expand_level, lines, viewport_width);
@@ -1002,7 +1095,7 @@ fn render_block_into(
                 format!("$ {command}"),
                 theme::code_chrome(),
             )));
-            if expand_level >= 2 {
+            if expand_level >= 1 {
                 for line in output.lines() {
                     lines.push(Line::from(vec![
                         Span::styled("│ ", theme::code_chrome()),
@@ -1334,7 +1427,13 @@ fn push_wrapped_prefixed(
     style: Style,
     width: usize,
 ) {
-    let available = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+    // Wrap against the widest prefix so no rendered line — first
+    // segment or continuation — can overflow `width`. Budget based on
+    // just the leading prefix would let a wider continuation push the
+    // second row past the viewport boundary.
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    let continuation_width = UnicodeWidthStr::width(continuation.as_str());
+    let available = width.saturating_sub(prefix_width.max(continuation_width));
     if available == 0 {
         lines.push(Line::from(Span::styled(prefix, style)));
         return;

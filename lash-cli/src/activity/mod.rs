@@ -790,7 +790,7 @@ mod tests {
             }),
             json!({
                 "task_name":"probe_repo_shape",
-                "path":"/root/probe_repo_shape",
+                "target":"/root/probe_repo_shape",
                 "capability":"low",
                 "model":"gpt-5.4-mini",
                 "model_variant":"low"
@@ -805,7 +805,7 @@ mod tests {
             blocks[0].result.detail_lines,
             vec![
                 "Task In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary.".to_string(),
-                "Path /root/probe_repo_shape".to_string(),
+                "Target /root/probe_repo_shape".to_string(),
                 "Profile low capability · gpt-5.4-mini".to_string(),
             ]
         );

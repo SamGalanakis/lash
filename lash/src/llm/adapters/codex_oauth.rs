@@ -436,9 +436,9 @@ impl Default for CodexOAuthAdapter {
 impl CodexOAuthAdapter {
     const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
     const CODEX_RESPONSES_URL: &'static str = "https://chatgpt.com/backend-api/codex/responses";
-    /// Maximum number of submission attempts (1 initial + up to 2 retries).
-    /// Mirrors pi's `MAX_RETRIES = 3` semantics (pi iterates `attempt <= MAX_RETRIES`).
-    const MAX_ATTEMPTS: u32 = 3;
+    /// Maximum number of submission attempts (1 initial + up to 3 retries).
+    /// Mirrors pi's `MAX_RETRIES = 3` loop, which iterates `attempt <= MAX_RETRIES`.
+    const MAX_ATTEMPTS: u32 = 4;
     /// Base delay for exponential backoff between retries (ms).
     /// Matches pi-mono `BASE_DELAY_MS` at `openai-codex-responses.ts:47`.
     const BASE_DELAY_MS: u64 = 1000;
@@ -541,6 +541,33 @@ impl CodexOAuthAdapter {
     /// `BASE_DELAY_MS * 2 ** attempt`).
     fn backoff_delay(attempt: u32) -> Duration {
         Duration::from_millis(Self::BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(16)))
+    }
+
+    fn should_parse_stream(stream_requested: bool, content_type: Option<&str>) -> bool {
+        stream_requested
+            || content_type
+                .map(|ct| ct.contains("text/event-stream"))
+                .unwrap_or(false)
+    }
+
+    fn non_sse_body_read_error(
+        status: u16,
+        content_type: Option<&str>,
+        err: LlmTransportError,
+    ) -> LlmTransportError {
+        let content_type_detail = content_type
+            .map(|ct| format!(" ({ct})"))
+            .unwrap_or_default();
+        let code = err
+            .code
+            .clone()
+            .unwrap_or_else(|| "body_read_failed".to_string());
+        LlmTransportError::new(format!(
+            "Codex returned HTTP {status} with non-SSE body{content_type_detail} but it could not be read: {}",
+            err.message
+        ))
+        .retryable(err.retryable)
+        .with_code(code)
     }
 
     fn input_image_part(att: &crate::llm::types::LlmAttachment) -> Value {
@@ -939,7 +966,10 @@ impl CodexOAuthAdapter {
             "parallel_tool_calls": !req.tools.is_empty(),
             "stream": stream,
             "store": false,
-            "include": [],
+            "include": ["reasoning.encrypted_content"],
+            "text": {
+                "verbosity": "medium",
+            },
         });
         // `tool_choice` is only meaningful when the request advertises tools.
         // In RLM mode we intentionally send `tools: []` because tools are
@@ -961,17 +991,15 @@ impl CodexOAuthAdapter {
             body["prompt_cache_key"] = json!(session_id);
         }
         if let Some(output_spec) = &req.output_spec {
-            body["text"] = json!({
-                "format": match output_spec {
-                    LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
-                    LlmOutputSpec::JsonSchema(schema) => json!({
-                        "type": "json_schema",
-                        "name": schema.name,
-                        "schema": schema.schema,
-                        "strict": schema.strict,
-                    }),
-                }
-            });
+            body["text"]["format"] = match output_spec {
+                LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
+                LlmOutputSpec::JsonSchema(schema) => json!({
+                    "type": "json_schema",
+                    "name": schema.name,
+                    "schema": schema.schema,
+                    "strict": schema.strict,
+                }),
+            };
         }
         body
     }
@@ -1436,6 +1464,7 @@ impl LlmTransport for CodexOAuthAdapter {
                 .header("Authorization", format!("Bearer {}", access_token))
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream")
+                .header("OpenAI-Beta", "responses=experimental")
                 .header("originator", Self::CODEX_ORIGINATOR)
                 .header("User-Agent", Self::codex_user_agent())
                 .json(&body);
@@ -1457,7 +1486,7 @@ impl LlmTransport for CodexOAuthAdapter {
         // keeps working for non-Codex providers; this loop just cuts down
         // round-trips the user has to endure.
         let mut attempt: u32 = 0;
-        let (resp, _status, content_type) = loop {
+        let (resp, status, content_type) = loop {
             let http = build_request();
             let send_result = send_request(
                 http,
@@ -1569,26 +1598,15 @@ impl LlmTransport for CodexOAuthAdapter {
             .as_deref()
             .map(|ct| ct.contains("text/event-stream"))
             .unwrap_or(false);
+        let parse_stream =
+            Self::should_parse_stream(stream_events.is_some(), content_type.as_deref());
 
-        if !is_sse {
+        if !parse_stream {
             let text =
                 read_response_text(resp, self.request_timeout, "Codex response body timed out")
                     .await
                     .map_err(|err| {
-                        LlmTransportError::new(format!(
-                            "Codex returned non-SSE body{} but it could not be read: {}",
-                            content_type
-                                .as_deref()
-                                .map(|ct| format!(" ({ct})"))
-                                .unwrap_or_default(),
-                            err.message
-                        ))
-                        .retryable(err.retryable)
-                        .with_code(
-                            err.code
-                                .clone()
-                                .unwrap_or_else(|| "body_read_failed".to_string()),
-                        )
+                        Self::non_sse_body_read_error(status.as_u16(), content_type.as_deref(), err)
                     })?;
             if Self::looks_like_sse_payload(&text) {
                 let mut state = CodexStreamState::default();
@@ -1650,6 +1668,15 @@ impl LlmTransport for CodexOAuthAdapter {
             });
         }
 
+        if stream_events.is_some() && !is_sse {
+            tracing::debug!(
+                target: "lash::llm::codex_oauth",
+                status = status.as_u16(),
+                content_type = content_type.as_deref().unwrap_or("<missing>"),
+                "Codex streaming response did not advertise SSE; parsing as stream because stream=true was requested"
+            );
+        }
+
         let mut state = CodexStreamState::default();
         drive_sse_response(
             resp,
@@ -1679,6 +1706,19 @@ impl LlmTransport for CodexOAuthAdapter {
             },
         )
         .await?;
+
+        if state.final_response.is_none() && state.parts.is_empty() && state.deltas.is_empty() {
+            return Err(LlmTransportError::new(format!(
+                "Codex stream ended without SSE events (HTTP {}{})",
+                status.as_u16(),
+                content_type
+                    .as_deref()
+                    .map(|ct| format!(", content-type {ct}"))
+                    .unwrap_or_else(|| ", missing content-type".to_string())
+            ))
+            .retryable(true)
+            .with_code("empty_stream"));
+        }
 
         Ok(Self::response_from_stream_state(
             state,
@@ -2220,7 +2260,8 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         assert_eq!(body["prompt_cache_key"], "sess-123");
         assert_eq!(body["store"], false);
         assert_eq!(body["instructions"], "sys");
-        assert_eq!(body["include"], json!([]));
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["text"]["verbosity"], "medium");
     }
 
     #[test]
@@ -2315,12 +2356,30 @@ data: {"type":"response.completed","response":{"output":[],"usage":{"input_token
         assert_eq!(body["text"]["format"]["type"], "json_schema");
         assert_eq!(body["text"]["format"]["name"], "shape");
         assert_eq!(body["text"]["format"]["strict"], true);
+        assert_eq!(body["text"]["verbosity"], "medium");
     }
 
     #[test]
     fn codex_transport_requires_streaming() {
         let adapter = CodexOAuthAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
         assert!(LlmTransport::requires_streaming(&adapter));
+    }
+
+    #[test]
+    fn codex_streaming_requests_parse_stream_even_without_sse_content_type() {
+        assert!(CodexOAuthAdapter::should_parse_stream(true, None));
+        assert!(CodexOAuthAdapter::should_parse_stream(
+            true,
+            Some("application/octet-stream")
+        ));
+        assert!(CodexOAuthAdapter::should_parse_stream(
+            false,
+            Some("text/event-stream; charset=utf-8")
+        ));
+        assert!(!CodexOAuthAdapter::should_parse_stream(
+            false,
+            Some("application/json")
+        ));
     }
 
     #[test]
@@ -2668,6 +2727,7 @@ data: {"type":"response.completed","response":{"output_text":"Done.","usage":{"i
         let body = r#"{"error":{"type":"rate_limit_exceeded","message":"Too many requests"}}"#;
         assert!(CodexOAuthAdapter::should_retry(429, body, 0));
         assert!(CodexOAuthAdapter::should_retry(429, body, 1));
+        assert!(CodexOAuthAdapter::should_retry(429, body, 2));
         // The final attempt must not retry (we've used all attempts).
         assert!(!CodexOAuthAdapter::should_retry(
             429,

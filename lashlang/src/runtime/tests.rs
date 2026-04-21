@@ -675,6 +675,41 @@ fn validate_reports_precise_shape_errors() {
 }
 
 #[test]
+fn validate_union_accepts_any_variant() {
+    // `str | null` must accept both a string and a null.
+    let out = exec(r#"submit validate({ email: "a@b" }, Type { email: str | null })"#)
+        .expect("string-branch validate should succeed");
+    assert_eq!(
+        out,
+        Value::Record(Arc::new({
+            let mut rec = record_with_capacity(1);
+            rec.insert("email".into(), Value::String("a@b".into()));
+            rec
+        }))
+    );
+
+    let out = exec(r#"submit validate({ email: null }, Type { email: str | null })"#)
+        .expect("null-branch validate should succeed");
+    let Value::Record(rec) = &out else {
+        panic!("expected record");
+    };
+    assert!(matches!(rec.get("email"), Some(Value::Null)));
+}
+
+#[test]
+fn validate_union_rejects_value_matching_no_variant() {
+    let err = exec(r#"submit validate({ email: 42 }, Type { email: str | null })"#)
+        .expect_err("number should not match str | null");
+    let RuntimeError::ValueError { message } = err else {
+        panic!("expected ValueError");
+    };
+    assert!(
+        message.contains("$.email"),
+        "error should point at the failing field: {message}",
+    );
+}
+
+#[test]
 fn helper_functions_are_covered_directly() {
     assert!(expect_arg_count("x", &[Value::Null], 1).is_ok());
     assert!(expect_arg_count("x", &[], 1).is_err());

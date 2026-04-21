@@ -29,26 +29,53 @@ REMOTE_LASH_CONFIG = f"{REMOTE_LASH_HOME}/config.json"
 REMOTE_CA_CERT_DIR = "/etc/ssl/certs"
 REMOTE_CA_CERT_BUNDLE = f"{REMOTE_CA_CERT_DIR}/ca-certificates.crt"
 
-BENCHMARK_GUIDELINES_APPEND = """## Benchmark Constraints
+BENCHMARK_GUIDELINES_APPEND = """## Benchmark run context
 
-- You are being graded by exact verifier checks, not by partial progress.
-- Do exactly what the task asks. Match required filenames, file contents, output formats, ports, protocols, process state, and side effects exactly.
-- Do not stop at an approximate solution. If the task asks for a concrete final state, keep going until that exact state exists.
-- Treat extra files, leftover build products, debug artifacts, temporary scripts, and stray outputs as failures unless the task explicitly requires them.
-- Work in phases: inspect briefly, make the smallest plausible change, then verify the exact required outcome.
-- Avoid broad rewrites or speculative reimplementation unless the task clearly requires them.
-- Prefer the shortest path to a passing verifier over a more ambitious or polished solution.
-- Before finishing, remove temporary/debug artifacts that are not part of the required final state.
-- Do not restore, reset, or clean away the required final state after you have verified it. The verifier checks the environment you leave behind.
-- If verification requires creating the exact final artifact or service state, leave that successful state intact.
-- Before finishing, re-read the task and verify each concrete requirement against the current environment.
-- If the task implies that a service, VM, server, or port must be reachable, verify it yourself before stopping.
-- If a service, VM, or port must be reachable, do not stop until you have confirmed the exact port/protocol works from the environment.
-- Prefer direct verification over assumption. Re-open files, re-run checks, and inspect the exact final outputs before returning.
-- Use web/search tools only when the task clearly requires outside information. Prefer local inspection, editing, and verification.
-- Avoid repeated rereads and repeated searches unless new evidence justifies them.
-- When close to timeout, stop exploring, simplify the plan, verify the minimum required final state, and finish.
-- Optimize for correctness and task completion, not for narration.
+You are running autonomously in a benchmark harness. There is no user
+watching this session and no one to ask for clarification. You have a
+bounded wall-clock budget — make concrete progress continuously and
+stop promptly once the required end state exists.
+
+## What "finishing" means for this task
+
+Most terminal-bench tasks are graded by inspecting the environment
+after you stop — files, services, running processes, configuration
+state — NOT by reading a value you `submit`. For these tasks:
+
+- Make the required changes directly to the filesystem / services.
+- Verify the end state from inside lashlang (re-open files, re-run the
+  service's own check, probe the port, read the expected output).
+- **Stop without `submit`**: let your last lashlang block finish with
+  its verifying `call`/`exec` and no `submit`, or reply in plain prose
+  once you've confirmed the state. The verifier reads the environment
+  after you stop.
+
+Only `submit <value>` when the task explicitly asks you to return a
+computed value (e.g. "print the total count"). Never submit
+exploration output (file listings, version strings, tree dumps) as if
+it were the answer — the grader is not reading your response.
+
+## Strict verifier rules
+
+- You are graded by exact checks. Match required filenames, file
+  contents, output formats, ports, protocols, and process state
+  precisely. Approximate solutions fail.
+- Treat leftover build products, temp scripts, debug artifacts, and
+  stray outputs as failures unless the task explicitly requires them.
+  Clean up before finishing — but do not clean away the required end
+  state.
+- If the task implies a service or port must be reachable, confirm it
+  yourself (curl / nc / the service's own healthcheck) before stopping.
+- Prefer direct verification over assumption. Re-open the exact file
+  and check the exact bytes; re-run the check the task describes.
+
+## Budget discipline
+
+- Inspect briefly, make the smallest plausible change, verify, stop.
+  Avoid broad rewrites or speculative reimplementation.
+- Don't re-grep or re-read the same artifact without new evidence.
+- When close to timeout, stop exploring, pick the simplest plan, make
+  the minimum required end state exist, verify it, and finish.
 """
 
 INSTALL_GNU_TIME_COMMAND = """
@@ -231,33 +258,22 @@ class LashAgent(BaseInstalledAgent):
             rlm_task_var_flag = (
                 f"--rlm-var {shlex.quote(f'task={json.dumps(instruction)}')} "
             )
-        prompt_flags = ""
-        for env_key, section in (
-            ("LASH_PROMPT_REPLACE_IDENTITY", "intro"),
-            ("LASH_PROMPT_REPLACE_GUIDELINES", "guidance"),
-            ("LASH_PROMPT_REPLACE_TOOL_GUIDES", "available_tools"),
-        ):
-            value = os.environ.get(env_key)
-            if value:
-                prompt_flags += (
-                    f"--prompt-replace {shlex.quote(f'{section}={value}')} "
-                )
-
-        benchmark_guidelines = os.environ.get(
+        # The old `--prompt-replace` / `--prompt-append` /
+        # `--prompt-disable` flags were removed from the lash CLI.
+        # Instead, we own one benchmark-specific guidance block
+        # (`BENCHMARK_GUIDELINES_APPEND`) and fold it into the user
+        # prompt. The block covers run-context, the terminal-bench
+        # task shape (environment-state, not submit-value), strict
+        # verifier rules, and budget discipline in one place.
+        # `LASH_BENCH_PROMPT_APPEND_GUIDELINES` overrides the default
+        # for ad-hoc runs.
+        bench_guidelines = os.environ.get(
             "LASH_BENCH_PROMPT_APPEND_GUIDELINES", BENCHMARK_GUIDELINES_APPEND
+        ).strip()
+        augmented_instruction = (
+            f"{instruction}\n\n{bench_guidelines}" if bench_guidelines else instruction
         )
-        if benchmark_guidelines.strip():
-            prompt_flags += (
-                f"--prompt-append {shlex.quote(f'guidance={benchmark_guidelines}')} "
-            )
-
-        disable_sections = os.environ.get("LASH_PROMPT_DISABLE", "").strip()
-        if disable_sections:
-            for section in disable_sections.split(","):
-                sec = section.strip()
-                if sec:
-                    prompt_flags += f"--prompt-disable {shlex.quote(sec)} "
-        prompt = shlex.quote(instruction)
+        prompt = shlex.quote(augmented_instruction)
 
         lash_binary = "/installed-agent/lash"
 
@@ -267,7 +283,7 @@ class LashAgent(BaseInstalledAgent):
                     f"chmod +x {shlex.quote(lash_binary)} && "
                     f"{shlex.quote(lash_binary)} {provider_flag}{model_flag}{variant_flag}"
                     f"{context_approach_flag}{execution_mode_flag}{rlm_task_var_flag}"
-                    f"{prompt_flags}--print {prompt}"
+                    f"--print {prompt}"
                 ),
                 env=env,
                 timeout_sec=None,

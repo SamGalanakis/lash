@@ -37,11 +37,12 @@ Never `submit` a raw tool-result dump to end the turn. If you need to look at so
 
 ### Turn shape
 
-- **Exactly one ` ```lashlang ` fenced block per response.** The runtime aborts the LLM stream the instant your first block closes (` ``` ` on its own line) and runs it immediately. Anything you try to emit after that point is dropped — including a second fenced block or trailing prose. Do not speculate about what the block will return; that's what the next turn is for.
+**Exactly one ` ```lashlang ` fenced block per response.** The runtime aborts the LLM stream the instant your first block closes (` ``` ` on its own line) and runs it immediately. A second fenced block, or trailing prose after the first one, is silently dropped. Only ` ```lashlang ` is recognised — `rlm` and other labels are treated as plain prose. Do not speculate about what the block will return; that's what the next turn is for.
+
 - **Write small blocks.** Each block should do one focused step: call a tool or two, `print` what you need to see, then stop. Do not paste a whole program that reads five files and submits them.
 - Keep prose around the block to one or two sentences of reasoning. Do not describe an action in prose instead of executing it; if you say you will read a file, the block must contain the `call read_file`.
 - After each result, decide: another fenced block (more work), or `submit <final>` / a prose-only reply (done).
-- In interactive chat you may also end by replying with prose and no fenced block — useful for streamed text. Either way the turn ends.
+- In interactive chat you may also end by replying with prose and no fenced block — useful for streamed text. Either way the turn ends. Root-session `submit` values are rendered as-is; formatting requirements (Markdown, schema) are covered below.
 
 Example — inspect, then submit:
 
@@ -91,6 +92,17 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces
 - `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error
 
+### Type literals
+
+`Type { field: shape, ... }` describes a record shape. Field separators are commas (trailing comma OK).
+
+- Scalars: `str`, `int`, `float`, `bool`, `dict`, `any`, `null`.
+- Collections: `list[shape]`, `enum["a", "b"]`, nested `Type { ... }`.
+- **Optional field** — put `?` after the type: `email: str?` means the field may be absent from the record. If the field IS present, its value must be a string; `null` is **not** allowed.
+- **Nullable field** — use a union with `null`: `email: str | null` means the field is required and its value is either a string or null.
+- **Unions** — `a | b | c`, e.g. `status: str | int`, `value: str | null`.
+- Nested shapes require the `Type` keyword: `nested: Type { ok: bool }` (bare `{ ok: bool }` is rejected — that's a record value, not a type).
+
 ### Decomposition
 
 - Break big tasks into small steps. Prefer narrow `print`-then-continue checks over brute-force scans.
@@ -103,10 +115,10 @@ Example fanout to two subagents (use `?` for fail-fast unwrapping):
 a = (call spawn_agent { task_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "low", output: { claim: "str" } })?
 b = (call spawn_agent { task_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "low", output: { claim: "str" } })?
 events = await {
-  a: start call wait_agent { targets: [a.path], timeout_ms: 30000 },
-  b: start call wait_agent { targets: [b.path], timeout_ms: 30000 },
+  a: start call wait_agent { targets: [a.target], timeout_ms: 30000 },
+  b: start call wait_agent { targets: [b.target], timeout_ms: 30000 },
 }
-submit [events.a?.events[0].result, events.b?.events[0].result]
+submit [events.a?.completion.result, events.b?.completion.result]
 ```"#;
 
 /// Build the RLM-mode preamble. Called by the plugin factory from
@@ -122,7 +134,7 @@ pub fn build_rlm_preamble(input: ModeBuildInput) -> ModePreamble {
     if omitted_tool_count > 0 {
         prompt_contributions.push(PromptContribution::guidance(
             "Tool Discovery",
-            "Use `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.",
+            "Use `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. Call `search_tools()` with no query to browse the full catalog, or `search_tools(query: \"git\")` to filter by keyword when you know the kind of tool you need.",
         ));
     }
     prompt_contributions.extend(input.extra_prompt_contributions);
@@ -385,7 +397,7 @@ impl ProtocolDriverHandle for RlmDriver {
             .map(|code| serde_json::json!({ "code": code }))
             .unwrap_or_else(|| serde_json::json!({}));
         actions.push(DriverAction::Emit(SessionEvent::ToolCall {
-            call_id: Some(result_call_id),
+            call_id: Some(result_call_id.clone()),
             name: "execute_lashlang".to_string(),
             args: execute_args,
             result: result_payload.clone(),
@@ -393,6 +405,7 @@ impl ProtocolDriverHandle for RlmDriver {
             duration_ms: 0,
         }));
         actions.push(DriverAction::AppendMessages(vec![rlm_result_message(
+            &result_call_id,
             success,
             &result_payload,
             &state.images,
@@ -416,9 +429,9 @@ impl ProtocolDriverHandle for RlmDriver {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Return `true` when `text` contains a complete ` ```lashlang ` (or
-/// `rlm`/`lash`) fenced block — i.e. a fence opener followed by a
-/// matching closing ` ``` ` on its own line. Exposed for the stream
-/// mask, which raises `abort_stream` as soon as this is true.
+/// `rlm`/`lash`) fenced block — opener followed by a closing ` ``` `
+/// anywhere (no newline requirement on either side). Exposed for the
+/// stream mask, which raises `abort_stream` as soon as this is true.
 pub fn contains_closed_lashlang_fence(text: &str) -> bool {
     let Some((_, _body_start, body_end)) = first_lashlang_fence_span(text) else {
         return false;
@@ -430,12 +443,13 @@ fn first_lashlang_fence_span(text: &str) -> Option<(usize, usize, usize)> {
     let mut search_from = 0usize;
     while let Some(rel) = text[search_from..].find("```") {
         let open = search_from + rel;
-        let preceded_by_newline =
-            open == 0 || text.as_bytes().get(open - 1).copied() == Some(b'\n');
-        if !preceded_by_newline {
-            search_from = open + 3;
-            continue;
-        }
+        // The opening `\`\`\`` doesn't have to be on its own line —
+        // reasoning models commonly emit `…required shape.\`\`\`lashlang\n`
+        // inline after prose. The language tag is distinctive enough
+        // (`lashlang`/`rlm`/`lash`) that collisions with inline prose
+        // are essentially impossible. The *closer* still has to live
+        // on its own line (newline-preceded) — that's the real
+        // structural signal, enforced in the inner loop below.
         let after_open = open + 3;
         let rest = &text[after_open..];
         let lang_end = rest.find('\n').unwrap_or(rest.len());
@@ -449,19 +463,16 @@ fn first_lashlang_fence_span(text: &str) -> Option<(usize, usize, usize)> {
             return None;
         }
 
-        let mut cursor = body_start;
-        loop {
-            let Some(rel) = text[cursor..].find("```") else {
-                return Some((open, body_start, text.len()));
-            };
-            let close = cursor + rel;
-            let preceded_by_newline =
-                close == 0 || text.as_bytes().get(close - 1).copied() == Some(b'\n');
-            if preceded_by_newline {
-                return Some((open, body_start, close));
-            }
-            cursor = close + 3;
-        }
+        // The first `\`\`\`` after the opener closes the block, no
+        // matter where it sits on the line. Lashlang strings use `"`,
+        // so the risk of a backtick-triple inside otherwise-valid
+        // code is essentially zero, and this matches the mental model
+        // the prompt describes: `\`\`\`` starts, `\`\`\`` stops.
+        let close = text[body_start..]
+            .find("```")
+            .map(|rel| body_start + rel)
+            .unwrap_or(text.len());
+        return Some((open, body_start, close));
     }
     None
 }
@@ -547,15 +558,37 @@ fn typed_rlm_schema_error_message(error_text: &str) -> Message {
     }
 }
 
-fn rlm_result_message(success: bool, result_payload: &Value, images: &[ToolImage]) -> Message {
+fn rlm_result_message(
+    result_call_id: &str,
+    success: bool,
+    result_payload: &Value,
+    images: &[ToolImage],
+) -> Message {
+    // Emit the exec output as a plain `PartKind::Text` under a
+    // user-role message instead of a synthetic `PartKind::ToolResult`
+    // tied to a `tool_call_id` the model never produced. Providers
+    // that strictly enforce tool_call ↔ tool_result pairing (e.g.
+    // Azure's OpenAI endpoint) reject the orphan `role=tool` message
+    // the adapter would otherwise emit. This matches dspy.RLM's
+    // semantic: the exec output is an observation the runtime feeds
+    // back as user content, not a response to a tool the model
+    // called.
+    //
+    // We keep `tool_call_id` + `tool_name` on the Text part so the
+    // interrupted-session projection (see `project_interrupted_blocks`)
+    // can still identify these messages as RLM exec results and
+    // render them as activities rather than raw user input. The
+    // Part→LlmContentBlock mapping ignores both fields when
+    // `kind == Text`, so the wire format is `role=user, content=…`
+    // with no tool-call fakery.
     let id = fresh_message_id();
     let mut parts = vec![Part {
         id: format!("{id}.p0"),
         kind: PartKind::Text,
         content: format_repl_result_text(success, result_payload),
         attachment: None,
-        tool_call_id: None,
-        tool_name: None,
+        tool_call_id: Some(result_call_id.to_string()),
+        tool_name: Some("execute_lashlang".to_string()),
         tool_item_id: None,
         tool_signature: None,
         prune_state: PruneState::Intact,
@@ -717,4 +750,61 @@ fn validate_finish_value(value: &Value, schema: &Value) -> Result<(), String> {
     }
 
     check(value, schema, "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fence_detector_accepts_inline_opener_after_prose() {
+        // Regression: reasoning models emit the opening fence mid-line:
+        // `…required output shape.```lashlang\n…`. Requiring newline
+        // before ``` caused the detector to miss the block entirely,
+        // which made the RLM turn terminate after one iteration
+        // without executing anything.
+        let text = "I'll inspect the prompt.```lashlang\nprint slice(input.prompt, 0, 10)\n```";
+        let extraction = extract_first_lashlang_fence(text)
+            .expect("inline opener with newline-terminated closer should parse");
+        assert_eq!(extraction.code, "print slice(input.prompt, 0, 10)");
+        assert!(contains_closed_lashlang_fence(text));
+    }
+
+    #[test]
+    fn fence_detector_still_accepts_newline_preceded_opener() {
+        let text = "prose\n\n```lashlang\nsubmit 1\n```";
+        let extraction = extract_first_lashlang_fence(text).expect("should parse");
+        assert_eq!(extraction.code, "submit 1");
+    }
+
+    #[test]
+    fn fence_detector_closer_matches_anywhere() {
+        // `\`\`\`` closes the block wherever it appears. Simpler mental
+        // model: `\`\`\`lashlang` starts, `\`\`\`` stops. No newline
+        // requirement on either side.
+        let text = "```lashlang\nsubmit 1``` more prose";
+        let extraction = extract_first_lashlang_fence(text).expect("should extract");
+        assert_eq!(extraction.code, "submit 1");
+    }
+
+    #[test]
+    fn fence_detector_recovers_from_double_triple_concatenation() {
+        // Reasoning-mode output sometimes emits ``` ``` back-to-back
+        // (closer of one block immediately followed by opener of the
+        // next with no prose between). The detector should still find
+        // the first valid block.
+        let text = "lead-in.```lashlang\nprint 1\n``````lashlang\nprint 2\n```";
+        let extraction = extract_first_lashlang_fence(text)
+            .expect("should extract the first block even with glued-on second block");
+        assert_eq!(extraction.code, "print 1");
+        assert!(extraction.had_extra_fences);
+    }
+
+    #[test]
+    fn fence_detector_ignores_unknown_lang_tag() {
+        // `python` is not lashlang — the detector must look further.
+        let text = "```python\nprint('x')\n```\n\n```lashlang\nsubmit 1\n```";
+        let extraction = extract_first_lashlang_fence(text).expect("should skip python block");
+        assert_eq!(extraction.code, "submit 1");
+    }
 }

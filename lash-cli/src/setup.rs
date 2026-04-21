@@ -91,7 +91,9 @@ async fn run_setup_inner(
     let mut app = SetupApp::new(existing_config.as_ref());
     let mut provider: Option<Provider> = None;
     let mut tavily_key = existing.and_then(|cfg| cfg.tavily_api_key().map(str::to_string));
-    let existing_agent_models = existing.and_then(|cfg| cfg.agent_models.clone());
+    let existing_agent_models = existing
+        .map(|cfg| cfg.agent_models.clone())
+        .unwrap_or_default();
 
     loop {
         terminal.draw(|frame| draw_setup(frame, &app))?;

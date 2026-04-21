@@ -62,9 +62,9 @@ Examples:
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,fix-code-vulnerability --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --context-approach rolling_history --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --execution-mode rlm --task chess-best-move --model gpt-5.3-codex --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode rlm --task chess-best-move --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --agent opencode --sample --model openai/gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --agent codex --sample --model o3 --variant high
+  scripts/run-terminalbench.sh --agent codex --sample --model gpt-5.4 --variant high
 EOF
 }
 
@@ -500,16 +500,10 @@ if [[ "${AGENT}" == "lash" ]]; then
   export LASH_BENCH_MODEL_VARIANT="${VARIANT}"
   export LASH_BENCH_CONTEXT_APPROACH="${CONTEXT_APPROACH}"
 
-  if [[ -z "${LASH_PROMPT_REPLACE_IDENTITY:-}" ]]; then
-    export LASH_PROMPT_REPLACE_IDENTITY="$(cat <<EOF
-You are running inside a benchmark harness with an enforced wall-clock time budget.
-Work autonomously and prioritize passing the verifier over polish.
-Do not ask the user questions; there is no interactive user in this run.
-Make concrete progress continuously: inspect, edit, run checks, and converge quickly.
-If you are blocked or near timeout, return the best valid result you can with a concise status and remaining risks.
-EOF
-)"
-  fi
+  # Benchmark-harness guidance is owned by harbor_lash_agent.py
+  # (`BENCHMARK_GUIDELINES_APPEND`) and folded into the user prompt.
+  # The old `LASH_PROMPT_REPLACE_IDENTITY` env was removed once the
+  # agent consolidated the two prompt-additions into a single block.
 
   # Always capture LLM request/response traces for benchmark debugging.
   export LASH_LOG="debug"

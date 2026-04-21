@@ -33,13 +33,10 @@ pub(crate) fn project_interrupted_blocks(
     blocks
 }
 
-fn append_interrupted_assistant_block(blocks: &mut Vec<DisplayBlock>, ui_state: &UiResumeState) {
-    let Some(text) = ui_state.interrupted_assistant_text.as_deref() else {
-        return;
-    };
+pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) -> Option<String> {
     let cleaned = normalize_assistant_text(text);
     if cleaned.is_empty() {
-        return;
+        return None;
     }
     // Providers like codex emit prose between tool calls and commit each
     // chunk as its own assistant message, so the transcript already
@@ -82,23 +79,30 @@ fn append_interrupted_assistant_block(blocks: &mut Vec<DisplayBlock>, ui_state: 
     }
     if peeled_count > 0 && !peel_failed {
         let trailing = remaining.trim();
-        if !trailing.is_empty() {
-            let _ = push_assistant_text_block(blocks, trailing);
+        return (!trailing.is_empty()).then(|| trailing.to_string());
+    }
+
+    if let Some(DisplayBlock::AssistantText(existing)) = blocks.last() {
+        let normalized = normalize_assistant_text(existing);
+        if cleaned.starts_with(normalized.as_str()) {
+            let trailing = cleaned[normalized.len()..].trim_start_matches('\n').trim();
+            return (!trailing.is_empty()).then(|| trailing.to_string());
         }
+        if normalized.starts_with(cleaned.as_str()) {
+            return None;
+        }
+    }
+
+    Some(cleaned)
+}
+
+fn append_interrupted_assistant_block(blocks: &mut Vec<DisplayBlock>, ui_state: &UiResumeState) {
+    let Some(text) = ui_state.interrupted_assistant_text.as_deref() else {
         return;
+    };
+    if let Some(tail) = interrupted_assistant_tail(blocks, text) {
+        let _ = push_assistant_text_block(blocks, &tail);
     }
-    if let Some(DisplayBlock::AssistantText(existing)) = blocks.last_mut() {
-        if cleaned.starts_with(existing.as_str()) {
-            if *existing != cleaned {
-                *existing = cleaned;
-            }
-            return;
-        }
-        if existing.starts_with(cleaned.as_str()) {
-            return;
-        }
-    }
-    let _ = push_assistant_text_block(blocks, &cleaned);
 }
 
 pub(crate) fn push_system_message_block_if_new(blocks: &mut Vec<DisplayBlock>, message: String) {
@@ -302,11 +306,9 @@ fn append_transcript_blocks(
 ) {
     match message.role {
         MessageRole::User => {
-            if message
-                .parts
-                .iter()
-                .any(|part| matches!(part.kind, PartKind::ToolResult))
-            {
+            if message.parts.iter().any(|part| {
+                part_is_rlm_exec_result(part) || matches!(part.kind, PartKind::ToolResult)
+            }) {
                 for part in &message.parts {
                     append_tool_result_blocks(blocks, part, tool_calls, activity_state);
                 }
@@ -366,13 +368,25 @@ fn append_transcript_blocks(
     }
 }
 
+/// True when a user-message part carries an RLM exec result. The
+/// driver writes these as `PartKind::Text` (not `ToolResult`) so the
+/// wire format is a clean `role=user` observation — see
+/// `rlm_result_message` in `lash-mode-rlm/src/driver.rs`. The part
+/// still keeps `tool_call_id` + `tool_name="execute_lashlang"` for
+/// projection to detect them.
+fn part_is_rlm_exec_result(part: &lash::Part) -> bool {
+    matches!(part.kind, PartKind::Text)
+        && part.tool_call_id.is_some()
+        && part.tool_name.as_deref() == Some("execute_lashlang")
+}
+
 fn append_tool_result_blocks(
     blocks: &mut Vec<DisplayBlock>,
     part: &lash::Part,
     tool_calls: &HashMap<&str, ToolCallRecord>,
     activity_state: &mut ActivityState,
 ) {
-    if !matches!(part.kind, PartKind::ToolResult) {
+    if !matches!(part.kind, PartKind::ToolResult) && !part_is_rlm_exec_result(part) {
         return;
     }
 

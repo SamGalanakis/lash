@@ -171,6 +171,63 @@ pub fn render_assistant_reasoning_block(
     lines
 }
 
+/// One-line collapsed form of a reasoning block used in history when
+/// the turn has moved on. Shows the first meaningful line (stripped of
+/// bold markdown wrappers) truncated to fit.
+pub fn render_assistant_reasoning_block_compact(
+    text: &str,
+    viewport_width: usize,
+    add_spacing_before: bool,
+) -> Vec<Line<'static>> {
+    let cleaned = normalize_assistant_text(text);
+    if cleaned.is_empty() {
+        return Vec::new();
+    }
+
+    let prefix = "┊ ";
+    let prefix_w = UnicodeWidthStr::width(prefix);
+    let preview_budget = viewport_width.saturating_sub(prefix_w);
+    let preview = compact_reasoning_preview(&cleaned, preview_budget);
+
+    let mut lines = Vec::new();
+    if add_spacing_before {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(prefix.to_string(), theme::assistant_reasoning_bar()),
+        Span::styled(preview, theme::assistant_reasoning()),
+    ]));
+    lines
+}
+
+/// Extract a compact one-line preview from reasoning text. Strips
+/// leading `**bold**` wrappers, takes the first non-empty line, and
+/// truncates to `max_chars` with an ellipsis.
+fn compact_reasoning_preview(text: &str, max_chars: usize) -> String {
+    let first_line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("thinking");
+
+    let stripped = first_line
+        .strip_prefix("**")
+        .and_then(|rest| rest.strip_suffix("**").or_else(|| rest.split("**").next()))
+        .unwrap_or(first_line);
+
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = stripped.chars().count();
+    if char_count <= max_chars {
+        return stripped.to_string();
+    }
+    let budget = max_chars.saturating_sub(1);
+    let mut out: String = stripped.chars().take(budget).collect();
+    out.push('…');
+    out
+}
+
 pub fn render_live_assistant_text_block(text: &str, viewport_width: usize) -> Vec<Line<'static>> {
     let cleaned = normalize_assistant_text(text);
     if cleaned.is_empty() {
@@ -278,6 +335,36 @@ mod tests {
         assert!(lines.iter().any(|line| line == "  Heading"));
         assert!(lines.iter().any(String::is_empty));
         assert!(lines.iter().any(|line| line.contains("• item one")));
+    }
+
+    #[test]
+    fn compact_reasoning_preview_strips_bold_wrappers() {
+        assert_eq!(
+            compact_reasoning_preview("**Evaluating Git commands**\n\nbody text", 80),
+            "Evaluating Git commands"
+        );
+    }
+
+    #[test]
+    fn compact_reasoning_preview_truncates_long_first_line() {
+        let text =
+            "Planning the push after inspecting a dozen git commits before deciding what to do";
+        let preview = compact_reasoning_preview(text, 24);
+        assert!(preview.ends_with('…'));
+        assert!(preview.chars().count() <= 24);
+    }
+
+    #[test]
+    fn render_assistant_reasoning_block_compact_emits_single_line() {
+        let text = "**Evaluating Git commands**\n\nLong rambling paragraph that goes on and on.";
+        let rendered = render_assistant_reasoning_block_compact(text, 60, false);
+        assert_eq!(rendered.len(), 1);
+        let content: String = rendered[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(content, "┊ Evaluating Git commands");
     }
 
     #[test]

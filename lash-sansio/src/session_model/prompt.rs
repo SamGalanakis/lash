@@ -133,10 +133,40 @@ pub fn default_prompt_template() -> PromptTemplate {
 
 pub const MAIN_AGENT_INTRO: &str = "You are an AI coding assistant piloting the lash harness.";
 
+/// Core guidance delivered in the `## Guidance` section. Rendered
+/// through [`render_core_guidance`] rather than inlined as a `const`
+/// so we can drop interactive-only advice when the session has no
+/// `ask` tool (autonomous `--print` runs, benchmarks, etc.). Rules that
+/// depend on being able to talk to a user only make sense when that
+/// channel exists.
+const CORE_GUIDANCE_BASE: &[&str] = &[
+    "- Be concise. Avoid filler, hedging, and performative tone.",
+    "- Do not restate a conclusion you already stated. Once a fix location is identified, act on it in the same turn.",
+    "- Prefer the simplest correct solution over cleverness or unnecessary abstraction.",
+];
+
+const CORE_GUIDANCE_INTERACTIVE_ONLY: &str =
+    "- Take initiative when the user's intent is clear. Ask only when progress is blocked.";
+
+pub fn render_core_guidance(prompt: &PromptContext) -> String {
+    let mut bullets: Vec<&str> = CORE_GUIDANCE_BASE.to_vec();
+    if prompt.has_tool("ask") {
+        // Insert after the "Be concise" lead-in so the interactive-
+        // only rule sits alongside the other core directives instead
+        // of at the end.
+        bullets.insert(1, CORE_GUIDANCE_INTERACTIVE_ONLY);
+    }
+    bullets.join("\n")
+}
+
+/// Back-compat constant for callers that render the full interactive
+/// guidance block outside the prompt template (tests, docs). Matches
+/// the *interactive* path of [`render_core_guidance`] (i.e. includes
+/// the "Ask only when progress is blocked" line that autonomous runs
+/// filter out). Prefer [`render_core_guidance`] in any new call site.
 pub const CORE_GUIDANCE_SECTION: &str = r#"- Be concise. Avoid filler, hedging, and performative tone.
 - Take initiative when the user's intent is clear. Ask only when progress is blocked.
 - Do not restate a conclusion you already stated. Once a fix location is identified, act on it in the same turn.
-- Stop exploring once you have enough to act. A second confirming read is waste.
 - Prefer the simplest correct solution over cleverness or unnecessary abstraction."#;
 
 fn grouped_contributions(prompt: &PromptContext) -> HashMap<PromptSlot, Vec<PromptContribution>> {
@@ -205,7 +235,7 @@ fn render_builtin(builtin: PromptBuiltin, prompt: &PromptContext) -> String {
     match builtin {
         PromptBuiltin::MainAgentIntro => MAIN_AGENT_INTRO.to_string(),
         PromptBuiltin::ExecutionInstructions => prompt.execution_prompt.clone(),
-        PromptBuiltin::CoreGuidance => CORE_GUIDANCE_SECTION.to_string(),
+        PromptBuiltin::CoreGuidance => render_core_guidance(prompt),
     }
 }
 
@@ -239,12 +269,37 @@ mod tests {
 
     #[test]
     fn default_template_renders_builtin_sections() {
-        let text = default_prompt_template().render(&prompt(crate::ExecutionMode::Rlm));
+        let mut ctx = prompt(crate::ExecutionMode::Rlm);
+        ctx.tool_names = vec!["ask".to_string()];
+        let text = default_prompt_template().render(&ctx);
         assert!(text.contains(MAIN_AGENT_INTRO));
         assert!(text.contains("## Execution"));
         assert!(text.contains("mode execution"));
         assert!(text.contains("## Guidance"));
-        assert!(text.contains("Stop exploring once you have enough to act"));
+        // Interactive context: the "ask when blocked" guidance is in play.
+        assert!(text.contains("Ask only when progress is blocked"));
+    }
+
+    #[test]
+    fn core_guidance_drops_ask_line_when_ask_tool_absent() {
+        // Autonomous `--print` / benchmark sessions filter out the
+        // `ask` tool, so the guidance line telling the model "Ask
+        // only when progress is blocked" would contradict the
+        // run-time constraint. `render_core_guidance` must drop it.
+        let ctx = prompt(crate::ExecutionMode::Rlm);
+        assert!(!ctx.has_tool("ask"));
+        let rendered = render_core_guidance(&ctx);
+        assert!(rendered.contains("Be concise"));
+        assert!(rendered.contains("Prefer the simplest correct solution"));
+        assert!(!rendered.contains("Ask only when progress is blocked"));
+    }
+
+    #[test]
+    fn core_guidance_keeps_ask_line_when_ask_tool_present() {
+        let mut ctx = prompt(crate::ExecutionMode::Rlm);
+        ctx.tool_names = vec!["ask".to_string()];
+        let rendered = render_core_guidance(&ctx);
+        assert!(rendered.contains("Ask only when progress is blocked"));
     }
 
     #[test]
@@ -271,7 +326,9 @@ mod tests {
         let text = template.render(&prompt);
         assert!(text.contains("## Guidance"));
         assert!(text.contains("### Custom"));
-        assert!(!text.contains("Stop exploring once you have enough to act"));
+        // Template with no `CoreGuidance` builtin omits the baked-in
+        // guidance lines — only plugin contributions should land.
+        assert!(!text.contains("Be concise. Avoid filler"));
     }
 
     #[test]

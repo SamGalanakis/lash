@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -17,12 +17,8 @@ use super::require_str;
 
 const DEFAULT_MAX_RESULTS: usize = 20;
 const MAX_CURSORS: usize = 20;
-const LARGE_FILE_BYTES: u64 = 20_000;
-const MAX_PREVIEW: usize = 120;
 const MAX_LINE_LEN: usize = 180;
-const MAX_DEF_EXPAND_FIRST: usize = 8;
-const MAX_DEF_EXPAND: usize = 5;
-const MAX_FIRST_MATCH_EXPAND: usize = 8;
+const MAX_FFF_FUZZY_QUERY_BYTES: usize = (u16::MAX as usize) / (16 * 50);
 
 /// Search file contents using an indexed fff-search backend.
 pub struct Grep {
@@ -89,14 +85,12 @@ impl Grep {
         mode: GrepMode,
         max_results: usize,
         cursor_id: Option<&str>,
-        output_mode: OutputMode,
-    ) -> Result<String, ToolResult> {
+    ) -> Result<serde_json::Value, ToolResult> {
         let file_offset = cursor_id
             .and_then(|id| self.cursor_store.lock().ok()?.get(id))
             .unwrap_or(0);
 
-        let (options, auto_expand) = make_grep_options(output_mode, mode, file_offset);
-        let show_context = options.before_context > 0;
+        let (options, auto_expand) = make_grep_options(mode, file_offset);
 
         let guard = backend.picker.read().map_err(|err| {
             ToolResult::err_fmt(format_args!("Failed to acquire picker lock: {err}"))
@@ -126,52 +120,55 @@ impl Grep {
                     } else {
                         mode
                     };
-                    let (retry_options, _) = make_grep_options(output_mode, retry_mode, 0);
+                    let (retry_options, retry_auto_expand) = make_grep_options(retry_mode, 0);
                     let retry_result = picker.grep(&rest_parsed, &retry_options);
 
                     if !retry_result.matches.is_empty() && retry_result.matches.len() <= 10 {
                         let mut cursors = self.lock_cursors()?;
-                        let text = GrepFormatter {
-                            matches: &retry_result.matches,
-                            files: &retry_result.files,
-                            total_matched: retry_result.matches.len(),
-                            next_file_offset: retry_result.next_file_offset,
-                            regex_fallback_error: retry_result.regex_fallback_error.as_deref(),
-                            output_mode,
-                            max_results,
-                            show_context,
-                            auto_expand_defs: auto_expand,
-                        }
-                        .format(&mut cursors);
-                        return Ok(format!(
-                            "0 matches for '{query}'. Auto-broadened to '{rest_query}':\n{text}"
+                        return Ok(structured_grep_result(
+                            StructuredGrepInput {
+                                query,
+                                query_used: &rest_query,
+                                matches: &retry_result.matches,
+                                files: &retry_result.files,
+                                total_matched: retry_result.matches.len(),
+                                files_with_matches: retry_result.files_with_matches,
+                                next_file_offset: retry_result.next_file_offset,
+                                regex_fallback_error: retry_result.regex_fallback_error.as_deref(),
+                                max_results,
+                                auto_expand_defs: retry_auto_expand,
+                                broadened_from: Some(query),
+                                approximate: false,
+                            },
+                            &mut cursors,
                         ));
                     }
                 }
             }
 
             let fuzzy_query = cleanup_fuzzy_query(query);
-            let (fuzzy_options, _) = make_grep_options(output_mode, GrepMode::Fuzzy, 0);
+            let (fuzzy_options, fuzzy_auto_expand) = make_grep_options(GrepMode::Fuzzy, 0);
             let fuzzy_parsed = parser.parse(&fuzzy_query);
             let fuzzy_result = picker.grep(&fuzzy_parsed, &fuzzy_options);
             if !fuzzy_result.matches.is_empty() {
-                let mut lines = vec![format!(
-                    "0 exact matches. {} approximate:",
-                    fuzzy_result.matches.len()
-                )];
-                let mut current_file = "";
-                for matched in fuzzy_result.matches.iter().take(3) {
-                    let file = fuzzy_result.files[matched.file_index];
-                    if file.relative_path.as_str() != current_file {
-                        current_file = file.relative_path.as_str();
-                        lines.push(current_file.to_string());
-                    }
-                    lines.push(format!(
-                        " {}: {}",
-                        matched.line_number, matched.line_content
-                    ));
-                }
-                return Ok(lines.join("\n"));
+                let mut cursors = self.lock_cursors()?;
+                return Ok(structured_grep_result(
+                    StructuredGrepInput {
+                        query,
+                        query_used: &fuzzy_query,
+                        matches: &fuzzy_result.matches,
+                        files: &fuzzy_result.files,
+                        total_matched: fuzzy_result.matches.len(),
+                        files_with_matches: fuzzy_result.files_with_matches,
+                        next_file_offset: fuzzy_result.next_file_offset,
+                        regex_fallback_error: fuzzy_result.regex_fallback_error.as_deref(),
+                        max_results,
+                        auto_expand_defs: fuzzy_auto_expand,
+                        broadened_from: None,
+                        approximate: true,
+                    },
+                    &mut cursors,
+                ));
             }
 
             if query.contains('/') {
@@ -197,34 +194,47 @@ impl Grep {
                 {
                     let query_len = query.len() as i32;
                     if score.base_score > query_len * 10 {
-                        return Ok(format!(
-                            "0 content matches. But there is a relevant file path: {}",
-                            top.relative_path
-                        ));
+                        return Ok(json!({
+                            "query": query,
+                            "query_used": query,
+                            "matches": [],
+                            "files": [],
+                            "count": 0,
+                            "files_with_matches": 0,
+                            "truncated": false,
+                            "cursor": null,
+                            "suggested_path": top.relative_path,
+                            "approximate": false,
+                        }));
                     }
                 }
             }
 
-            return Ok("0 matches.".to_string());
+            return Ok(empty_grep_result(query));
         }
 
         if result.matches.is_empty() {
-            return Ok("0 matches.".to_string());
+            return Ok(empty_grep_result(query));
         }
 
         let mut cursors = self.lock_cursors()?;
-        Ok(GrepFormatter {
-            matches: &result.matches,
-            files: &result.files,
-            total_matched: result.matches.len(),
-            next_file_offset: result.next_file_offset,
-            regex_fallback_error: result.regex_fallback_error.as_deref(),
-            output_mode,
-            max_results,
-            show_context,
-            auto_expand_defs: auto_expand,
-        }
-        .format(&mut cursors))
+        Ok(structured_grep_result(
+            StructuredGrepInput {
+                query,
+                query_used: query,
+                matches: &result.matches,
+                files: &result.files,
+                total_matched: result.matches.len(),
+                files_with_matches: result.files_with_matches,
+                next_file_offset: result.next_file_offset,
+                regex_fallback_error: result.regex_fallback_error.as_deref(),
+                max_results,
+                auto_expand_defs: auto_expand,
+                broadened_from: None,
+                approximate: false,
+            },
+            &mut cursors,
+        ))
     }
 }
 
@@ -239,12 +249,12 @@ impl ToolProvider for Grep {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "grep".into(),
-            description: "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. By default searches the current workspace. Pass `path` to point the search at a specific file or directory anywhere on the filesystem (including outside the workspace). Within a search root, use inline constraints in the query to further narrow (e.g. '*.rs query', 'src/ query'). See server instructions for constraint syntax and core rules.".into(),
+            description: "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. By default searches the current workspace. Pass `path` to point the search at a specific file or directory anywhere on the filesystem (including outside the workspace). If `query` accidentally starts with an obvious filesystem path followed by search text, grep treats that prefix as `path`. Within a search root, use inline constraints in the query to further narrow (e.g. '*.rs query', 'src/ query'). See server instructions for constraint syntax and core rules.".into(),
             params: vec![
                 ToolParam {
                     name: "query".into(),
                     r#type: "str".into(),
-                    description: "Search text or regex query with optional constraint prefixes. Matches within single lines only; use one specific term, not multiple words.".into(),
+                    description: "Search text or regex query with optional constraint prefixes. Pattern is matched within a single line (no cross-line matches). Use a literal token, a short phrase, or a regex — not a multi-clause natural-language query.".into(),
                     default_value: None,
                     required: true,
                 },
@@ -271,17 +281,8 @@ impl ToolProvider for Grep {
                     default_value: None,
                     required: false,
                 },
-                ToolParam {
-                    name: "output_mode".into(),
-                    r#type: "str".into(),
-                    description:
-                        "Output format. Use 'content' (default), 'files_with_matches', 'count', or 'usage'."
-                            .into(),
-                    default_value: Some(json!("content")),
-                    required: false,
-                },
             ],
-            returns: "str".into(),
+            returns: "dict".into(),
             examples: vec![],
             enabled: true,
             injected: true,
@@ -301,7 +302,6 @@ impl ToolProvider for Grep {
             Err(err) => return err,
         };
         let cursor = args.get("cursor").and_then(|value| value.as_str());
-        let output_mode = OutputMode::new(args.get("output_mode").and_then(|value| value.as_str()));
         let path_arg = args
             .get("path")
             .and_then(|value| value.as_str())
@@ -309,6 +309,19 @@ impl ToolProvider for Grep {
             .filter(|value| !value.is_empty());
 
         let default_base = self.base_path.as_ref().cloned().ok();
+        let inferred_scope = path_arg
+            .is_none()
+            .then(|| infer_path_prefix(default_base.as_deref(), raw_query))
+            .flatten();
+        let path_arg_owned;
+        let query_owned;
+        let (path_arg, raw_query) = if let Some((path, query)) = inferred_scope {
+            path_arg_owned = path;
+            query_owned = query;
+            (Some(path_arg_owned.as_str()), query_owned.as_str())
+        } else {
+            (path_arg, raw_query)
+        };
 
         let (backend, query) = match path_arg {
             Some(path) => match resolve_path_scope(default_base.as_deref(), path) {
@@ -344,8 +357,8 @@ impl ToolProvider for Grep {
             GrepMode::PlainText
         };
 
-        match self.perform_grep(&backend, &query, mode, max_results, cursor, output_mode) {
-            Ok(text) => ToolResult::ok(json!(text)),
+        match self.perform_grep(&backend, &query, mode, max_results, cursor) {
+            Ok(value) => ToolResult::ok(value),
             Err(err) => err,
         }
     }
@@ -402,6 +415,51 @@ fn resolve_path_scope(
             file_constraint: Some(filename),
         })
     }
+}
+
+fn infer_path_prefix(default_base: Option<&Path>, query: &str) -> Option<(String, String)> {
+    let trimmed = query.trim();
+    let (candidate, rest) = split_first_query_token(trimmed)?;
+    let candidate = candidate.trim_matches(['"', '\'']);
+    if candidate.is_empty() || rest.trim().is_empty() || !looks_like_path(candidate) {
+        return None;
+    }
+
+    let path = Path::new(candidate);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        default_base?.join(path)
+    };
+    absolute
+        .exists()
+        .then(|| (candidate.to_string(), rest.trim().to_string()))
+}
+
+fn split_first_query_token(query: &str) -> Option<(&str, &str)> {
+    let mut chars = query.char_indices();
+    let (_, first) = chars.next()?;
+    if first == '"' || first == '\'' {
+        for (index, ch) in chars {
+            if ch == first {
+                let rest = query[index + ch.len_utf8()..].trim_start();
+                return Some((&query[..=index], rest));
+            }
+        }
+        return None;
+    }
+
+    query
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, _)| (&query[..index], query[index..].trim_start()))
+}
+
+fn looks_like_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.contains('/')
 }
 
 /// Look up — or create — a shared fff-search backend rooted at
@@ -472,28 +530,25 @@ fn parse_max_results(args: &serde_json::Value) -> Result<usize, ToolResult> {
 }
 
 fn cleanup_fuzzy_query(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
+    let mut output = String::with_capacity(input.len().min(MAX_FFF_FUZZY_QUERY_BYTES));
     for ch in input.chars() {
         if !matches!(ch, ':' | '-' | '_') {
-            output.extend(ch.to_lowercase());
+            for lower in ch.to_lowercase() {
+                let next_len = output.len() + lower.len_utf8();
+                if next_len > MAX_FFF_FUZZY_QUERY_BYTES {
+                    return output;
+                }
+                output.push(lower);
+            }
         }
     }
     output
 }
 
-fn make_grep_options(
-    output_mode: OutputMode,
-    mode: GrepMode,
-    file_offset: usize,
-) -> (GrepSearchOptions, bool) {
-    let is_usage = output_mode == OutputMode::Usage;
-    let max_matches_per_file = match output_mode {
-        OutputMode::FilesWithMatches => 1,
-        _ if is_usage => 8,
-        _ => 10,
-    };
-    let before_context = if is_usage { 1 } else { 0 };
-    let auto_expand_defs = !is_usage && before_context == 0;
+fn make_grep_options(mode: GrepMode, file_offset: usize) -> (GrepSearchOptions, bool) {
+    let max_matches_per_file = 10;
+    let before_context = 0;
+    let auto_expand_defs = before_context == 0;
     let after_context = if auto_expand_defs { 8 } else { before_context };
 
     (
@@ -540,58 +595,6 @@ impl CursorStore {
 
     fn get(&self, id: &str) -> Option<usize> {
         self.cursors.get(id).copied()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OutputMode {
-    Content,
-    FilesWithMatches,
-    Count,
-    Usage,
-}
-
-impl OutputMode {
-    fn new(value: Option<&str>) -> Self {
-        match value {
-            Some("files_with_matches") => Self::FilesWithMatches,
-            Some("count") => Self::Count,
-            Some("usage") => Self::Usage,
-            _ => Self::Content,
-        }
-    }
-}
-
-fn frecency_word(score: i32) -> Option<&'static str> {
-    if score >= 100 {
-        Some("hot")
-    } else if score >= 50 {
-        Some("warm")
-    } else if score >= 10 {
-        Some("frequent")
-    } else {
-        None
-    }
-}
-
-fn file_suffix(file: &FileItem) -> String {
-    match (
-        frecency_word(file.total_frecency_score),
-        format_git_status_opt(file.git_status),
-    ) {
-        (Some(frecency), Some(git)) => format!(" - {frecency} git:{git}"),
-        (Some(frecency), None) => format!(" - {frecency}"),
-        (None, Some(git)) => format!(" git:{git}"),
-        (None, None) => String::new(),
-    }
-}
-
-fn size_tag(bytes: u64) -> String {
-    if bytes < LARGE_FILE_BYTES {
-        String::new()
-    } else {
-        let kb = (bytes + 512) / 1024;
-        format!(" ({}KB - use offset to read relevant section)", kb)
     }
 }
 
@@ -652,375 +655,144 @@ fn ceil_char_boundary(text: &str, index: usize) -> usize {
     idx
 }
 
-struct FileMeta<'a> {
-    file: &'a FileItem,
-    line_number: u64,
-    line_content: String,
-    is_definition: bool,
-    match_ranges: Vec<(u32, u32)>,
-    context_after: Vec<String>,
-}
-
-struct GrepFormatter<'a> {
+struct StructuredGrepInput<'a> {
+    query: &'a str,
+    query_used: &'a str,
     matches: &'a [GrepMatch],
     files: &'a [&'a FileItem],
     total_matched: usize,
+    files_with_matches: usize,
     next_file_offset: usize,
     regex_fallback_error: Option<&'a str>,
-    output_mode: OutputMode,
     max_results: usize,
-    show_context: bool,
     auto_expand_defs: bool,
+    broadened_from: Option<&'a str>,
+    approximate: bool,
 }
 
-impl GrepFormatter<'_> {
-    fn format(&self, cursor_store: &mut CursorStore) -> String {
-        let items = if self.matches.len() > self.max_results {
-            &self.matches[..self.max_results]
-        } else {
-            self.matches
-        };
-
-        match self.output_mode {
-            OutputMode::FilesWithMatches => {
-                return format_files_with_matches(
-                    items,
-                    self.files,
-                    self.next_file_offset,
-                    self.auto_expand_defs,
-                    cursor_store,
-                );
+fn structured_grep_result(
+    input: StructuredGrepInput<'_>,
+    cursor_store: &mut CursorStore,
+) -> serde_json::Value {
+    let mut indices = (0..input.matches.len()).collect::<Vec<_>>();
+    if input.auto_expand_defs {
+        indices.sort_unstable_by_key(|&index| {
+            if input.matches[index].is_definition {
+                0
+            } else if is_import_line(&input.matches[index].line_content) {
+                2
+            } else {
+                1
             }
-            OutputMode::Count => {
-                return format_count(items, self.files, self.next_file_offset, cursor_store);
-            }
-            OutputMode::Content | OutputMode::Usage => {}
-        }
+        });
+    }
+    indices.truncate(input.max_results);
 
-        let mut lines = Vec::new();
-        let unique_files = items
-            .iter()
-            .map(|matched| matched.file_index)
-            .collect::<HashSet<_>>()
-            .len();
-        let max_output_chars = if self.output_mode == OutputMode::Usage || unique_files <= 3 {
-            5_000
-        } else if unique_files <= 8 {
-            3_500
-        } else {
-            2_500
-        };
-
-        if let Some(err) = self.regex_fallback_error {
-            lines.push(format!("! regex failed: {err}, using literal match"));
-        }
-
-        let file_preview = collect_file_preview(items, self.files);
-        let mut content_def_file = "";
-        let mut content_first_file = "";
-        for meta in &file_preview {
-            if content_first_file.is_empty() {
-                content_first_file = meta.file.relative_path.as_str();
-            }
-            if content_def_file.is_empty() && meta.is_definition {
-                content_def_file = meta.file.relative_path.as_str();
-            }
-        }
-
-        let content_suggest = if !content_def_file.is_empty() {
-            content_def_file
-        } else {
-            content_first_file
-        };
-        if !content_suggest.is_empty() {
-            let file_count = file_preview.len();
-            if file_count == 1 {
-                lines.push(format!("-> Read {content_suggest} (only match)"));
-            } else if !content_def_file.is_empty() {
-                lines.push(format!("-> Read {content_suggest} [def]"));
-            } else if file_count <= 3 {
-                lines.push(format!("-> Read {content_suggest} (best match)"));
-            }
-        }
-
-        if self.total_matched > items.len() {
-            lines.push(format!(
-                "{}/{} matches shown",
-                items.len(),
-                self.total_matched
-            ));
-        }
-
-        let mut expanded_definitions = HashSet::new();
-        let mut char_count = 0usize;
-        let mut shown_count = 0usize;
-        let mut current_file = "";
-
-        let mut sorted_indices = (0..items.len()).collect::<Vec<_>>();
-        if self.auto_expand_defs {
-            sorted_indices.sort_unstable_by_key(|&index| {
-                if items[index].is_definition {
-                    0
-                } else if is_import_line(&items[index].line_content) {
-                    2
-                } else {
-                    1
-                }
+    let cursor = (input.next_file_offset > 0).then(|| cursor_store.store(input.next_file_offset));
+    let mut per_file: HashMap<&str, usize> = HashMap::new();
+    let mut file_order: Vec<&str> = Vec::new();
+    let mut suggested_path = None::<&str>;
+    let matches = indices
+        .iter()
+        .map(|&index| {
+            let matched = &input.matches[index];
+            let file = input.files[matched.file_index];
+            let path = file.relative_path.as_str();
+            let count = per_file.entry(path).or_insert_with(|| {
+                file_order.push(path);
+                0
             });
-        }
-
-        for index in sorted_indices {
-            let matched = &items[index];
-            let file = self.files[matched.file_index];
-            let mut chunk_lines = Vec::new();
-
-            if file.relative_path.as_str() != current_file {
-                current_file = file.relative_path.as_str();
-                chunk_lines.push(current_file.to_string());
+            *count += 1;
+            if suggested_path.is_none() || matched.is_definition {
+                suggested_path = Some(path);
             }
-
-            if self.auto_expand_defs
-                && is_import_line(&matched.line_content)
-                && !expanded_definitions.is_empty()
-            {
-                continue;
-            }
-
-            if self.show_context && !matched.context_before.is_empty() {
-                let start_line = matched
-                    .line_number
-                    .saturating_sub(matched.context_before.len() as u64);
-                for (offset, context) in matched.context_before.iter().enumerate() {
-                    chunk_lines.push(format!(
-                        " {}-{}",
-                        start_line + offset as u64,
-                        truncate_line_for_ai(context, None, MAX_LINE_LEN)
-                    ));
-                }
-            }
-
-            chunk_lines.push(format!(
-                " {}: {}",
-                matched.line_number,
-                truncate_line_for_ai(
+            let ranges = matched
+                .match_byte_offsets
+                .iter()
+                .map(|(start, end)| {
+                    json!({
+                        "start": start,
+                        "end": end,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "path": path,
+                "line": matched.line_number,
+                "column": matched.col.saturating_add(1),
+                "byte_column": matched.col,
+                "excerpt": truncate_line_for_ai(
                     &matched.line_content,
                     Some(matched.match_byte_offsets.as_ref()),
                     MAX_LINE_LEN
-                )
-            ));
-
-            if self.show_context && !matched.context_after.is_empty() {
-                let start_line = matched.line_number + 1;
-                for (offset, context) in matched.context_after.iter().enumerate() {
-                    chunk_lines.push(format!(
-                        " {}-{}",
-                        start_line + offset as u64,
-                        truncate_line_for_ai(context, None, MAX_LINE_LEN)
-                    ));
-                }
-                chunk_lines.push("--".to_string());
-            }
-
-            if self.auto_expand_defs
-                && !self.show_context
-                && matched.is_definition
-                && !matched.context_after.is_empty()
-                && !expanded_definitions.contains(file.relative_path.as_str())
-            {
-                let expand_limit = if expanded_definitions.is_empty() {
-                    MAX_DEF_EXPAND_FIRST
-                } else {
-                    MAX_DEF_EXPAND
-                };
-                expanded_definitions.insert(file.relative_path.clone());
-                let start_line = matched.line_number + 1;
-                for (offset, context) in matched.context_after.iter().take(expand_limit).enumerate()
-                {
-                    if context.trim().is_empty() {
-                        break;
-                    }
-                    chunk_lines.push(format!(
-                        "  {}| {}",
-                        start_line + offset as u64,
-                        truncate_line_for_ai(context, None, MAX_LINE_LEN)
-                    ));
-                }
-            }
-
-            let chunk = chunk_lines.join("\n");
-            if char_count + chunk.len() > max_output_chars && shown_count > 0 {
-                break;
-            }
-            char_count += chunk.len();
-            lines.push(chunk);
-            shown_count += 1;
-        }
-
-        if self.next_file_offset > 0 {
-            let cursor = cursor_store.store(self.next_file_offset);
-            lines.push(format!("\ncursor: {cursor}"));
-        }
-
-        lines.join("\n")
-    }
-}
-
-fn format_files_with_matches(
-    items: &[GrepMatch],
-    files: &[&FileItem],
-    next_file_offset: usize,
-    auto_expand_defs: bool,
-    cursor_store: &mut CursorStore,
-) -> String {
-    let file_preview = collect_file_preview(items, files);
-    let mut lines = Vec::new();
-    let file_count = file_preview.len();
-
-    let mut first_def_file = "";
-    let mut first_file = "";
-    for meta in &file_preview {
-        if first_file.is_empty() {
-            first_file = meta.file.relative_path.as_str();
-        }
-        if first_def_file.is_empty() && meta.is_definition {
-            first_def_file = meta.file.relative_path.as_str();
-        }
-    }
-    let suggested_path = if !first_def_file.is_empty() {
-        first_def_file
-    } else {
-        first_file
-    };
-
-    if !suggested_path.is_empty() {
-        if file_count == 1 {
-            lines.push(format!(
-                "-> Read {suggested_path} (only match - no need to search further)"
-            ));
-        } else if !first_def_file.is_empty() && file_count <= 5 {
-            lines.push(format!("-> Read {suggested_path} (definition found)"));
-        } else if !first_def_file.is_empty() {
-            lines.push(format!("-> Read {suggested_path} (definition)"));
-        } else if file_count <= 3 {
-            lines.push(format!("-> Read {suggested_path} (best match)"));
-        } else {
-            lines.push(format!("-> Read {suggested_path}"));
-        }
-    }
-
-    let is_small_set = file_count <= 5;
-    let mut expanded_definitions = 0usize;
-    for (index, meta) in file_preview.iter().enumerate() {
-        let def_tag = if meta.is_definition { " [def]" } else { "" };
-        lines.push(format!(
-            "{}{}{}{}",
-            meta.file.relative_path.as_str(),
-            def_tag,
-            size_tag(meta.file.size),
-            file_suffix(meta.file)
-        ));
-
-        if !meta.line_content.is_empty() && (meta.is_definition || index == 0 || is_small_set) {
-            let ranges = if meta.match_ranges.is_empty() {
-                None
-            } else {
-                Some(meta.match_ranges.as_slice())
-            };
-            lines.push(format!(
-                "  {}: {}",
-                meta.line_number,
-                truncate_line_for_ai(&meta.line_content, ranges, MAX_PREVIEW)
-            ));
-
-            if auto_expand_defs && !meta.context_after.is_empty() {
-                let expand_limit = if meta.is_definition {
-                    let limit = if expanded_definitions == 0 {
-                        MAX_DEF_EXPAND_FIRST
-                    } else {
-                        MAX_DEF_EXPAND
-                    };
-                    expanded_definitions += 1;
-                    limit
-                } else if is_small_set && index == 0 {
-                    MAX_FIRST_MATCH_EXPAND
-                } else if is_small_set {
-                    MAX_DEF_EXPAND
-                } else {
-                    0
-                };
-
-                if expand_limit > 0 {
-                    let start_line = meta.line_number + 1;
-                    for (offset, context) in
-                        meta.context_after.iter().take(expand_limit).enumerate()
-                    {
-                        if context.trim().is_empty() {
-                            break;
-                        }
-                        lines.push(format!(
-                            "  {}| {}",
-                            start_line + offset as u64,
-                            truncate_line_for_ai(context, None, MAX_PREVIEW)
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    if next_file_offset > 0 {
-        let cursor = cursor_store.store(next_file_offset);
-        lines.push(format!("\ncursor: {cursor}"));
-    }
-
-    lines.join("\n")
-}
-
-fn format_count(
-    items: &[GrepMatch],
-    files: &[&FileItem],
-    next_file_offset: usize,
-    cursor_store: &mut CursorStore,
-) -> String {
-    let mut counts = HashMap::new();
-    let mut order = Vec::new();
-    for matched in items {
-        let path = files[matched.file_index].relative_path.as_str();
-        let count = counts.entry(path).or_insert_with(|| {
-            order.push(path);
-            0usize
-        });
-        *count += 1;
-    }
-
-    let mut lines = order
-        .into_iter()
-        .map(|path| format!("{path}: {}", counts[path]))
+                ),
+                "match": first_match_text(matched),
+                "ranges": ranges,
+                "is_definition": matched.is_definition,
+            })
+        })
         .collect::<Vec<_>>();
-    if next_file_offset > 0 {
-        let cursor = cursor_store.store(next_file_offset);
-        lines.push(format!("\ncursor: {cursor}"));
-    }
-    lines.join("\n")
+
+    let files = file_order
+        .into_iter()
+        .map(|path| {
+            let file = input
+                .files
+                .iter()
+                .find(|file| file.relative_path == path)
+                .expect("file_order only contains known files");
+            json!({
+                "path": path,
+                "count": per_file[path],
+                "size_bytes": file.size,
+                "is_binary": file.is_binary,
+                "git_status": format_git_status_opt(file.git_status),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "query": input.query,
+        "query_used": input.query_used,
+        "broadened_from": input.broadened_from,
+        "approximate": input.approximate,
+        "matches": matches,
+        "files": files,
+        "count": input.total_matched,
+        "shown": indices.len(),
+        "files_with_matches": input.files_with_matches,
+        "truncated": input.total_matched > indices.len() || input.next_file_offset > 0,
+        "cursor": cursor,
+        "suggested_path": suggested_path,
+        "regex_fallback_error": input.regex_fallback_error,
+    })
 }
 
-fn collect_file_preview<'a>(items: &[GrepMatch], files: &[&'a FileItem]) -> Vec<FileMeta<'a>> {
-    let mut preview = Vec::new();
-    let mut seen = HashSet::new();
-    for matched in items {
-        let file = files[matched.file_index];
-        if seen.insert(file.relative_path.clone()) {
-            preview.push(FileMeta {
-                file,
-                line_number: matched.line_number,
-                line_content: matched.line_content.clone(),
-                is_definition: matched.is_definition,
-                match_ranges: matched.match_byte_offsets.iter().copied().collect(),
-                context_after: matched.context_after.clone(),
-            });
-        }
-    }
-    preview
+fn empty_grep_result(query: &str) -> serde_json::Value {
+    json!({
+        "query": query,
+        "query_used": query,
+        "broadened_from": null,
+        "regex_fallback_error": null,
+        "matches": [],
+        "files": [],
+        "count": 0,
+        "shown": 0,
+        "files_with_matches": 0,
+        "truncated": false,
+        "cursor": null,
+        "suggested_path": null,
+        "approximate": false,
+    })
+}
+
+fn first_match_text(matched: &GrepMatch) -> String {
+    let Some((start, end)) = matched.match_byte_offsets.first().copied() else {
+        return String::new();
+    };
+    let start = floor_char_boundary(&matched.line_content, start as usize);
+    let end = ceil_char_boundary(&matched.line_content, end as usize);
+    matched.line_content[start..end].to_string()
 }
 
 #[cfg(test)]
@@ -1041,42 +813,73 @@ mod tests {
         let tool = Grep::with_base_path(dir.path().to_path_buf());
         let result = tool.execute("grep", &json!({"query": "hello"})).await;
         assert!(result.success);
-        let text = result.result.as_str().unwrap_or("");
-        assert!(text.contains("test.txt"));
-        assert!(text.contains("hello world"));
-        assert!(text.contains("hello again"));
+        assert_eq!(result.result["count"], 2);
+        assert_eq!(result.result["matches"][0]["path"], "test.txt");
+        assert_eq!(result.result["matches"][0]["excerpt"], "hello world");
+        assert_eq!(result.result["matches"][1]["excerpt"], "hello again");
     }
 
     #[tokio::test]
-    async fn test_grep_files_with_matches_output_mode() {
+    async fn test_grep_returns_structured_file_summaries() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("alpha.rs"), "fn thing() {}\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = tool
-            .execute(
-                "grep",
-                &json!({"query": "thing", "output_mode": "files_with_matches"}),
-            )
-            .await;
+        let result = tool.execute("grep", &json!({"query": "thing"})).await;
         assert!(result.success);
-        let text = result.result.as_str().unwrap_or("");
-        assert!(text.contains("alpha.rs"));
-        assert!(text.contains("Read"));
+        assert_eq!(result.result["files"][0]["path"], "alpha.rs");
+        assert_eq!(result.result["files"][0]["count"], 1);
+        assert_eq!(result.result["suggested_path"], "alpha.rs");
     }
 
     #[tokio::test]
-    async fn test_grep_count_output_mode() {
+    async fn test_grep_structured_counts() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("alpha.rs"), "ctx\nctx\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = tool
-            .execute("grep", &json!({"query": "ctx", "output_mode": "count"}))
-            .await;
+        let result = tool.execute("grep", &json!({"query": "ctx"})).await;
         assert!(result.success);
-        let text = result.result.as_str().unwrap_or("");
-        assert!(text.contains("alpha.rs: 2"));
+        assert_eq!(result.result["count"], 2);
+        assert_eq!(result.result["files"][0]["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_grep_empty_result_keeps_structured_metadata() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("alpha.rs"), "ctx\n").unwrap();
+
+        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let result = tool.execute("grep", &json!({"query": "missing"})).await;
+        assert!(result.success);
+        assert_eq!(result.result["matches"].as_array().unwrap().len(), 0);
+        assert!(result.result["broadened_from"].is_null());
+        assert!(result.result["regex_fallback_error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_grep_long_query_does_not_panic_in_fuzzy_fallback() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("alpha.rs"), "short searchable content\n").unwrap();
+
+        let query = "definitely missing ".repeat(20);
+        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let result = tool.execute("grep", &json!({"query": query})).await;
+
+        assert!(
+            result.success,
+            "long query should not panic or fail: {:?}",
+            result.result
+        );
+    }
+
+    #[test]
+    fn test_cleanup_fuzzy_query_caps_to_fff_score_limit() {
+        let query = "Ä".repeat(MAX_FFF_FUZZY_QUERY_BYTES + 10);
+        let cleaned = cleanup_fuzzy_query(&query);
+
+        assert!(cleaned.len() <= MAX_FFF_FUZZY_QUERY_BYTES);
+        assert!(cleaned.is_char_boundary(cleaned.len()));
     }
 
     #[tokio::test]
@@ -1104,14 +907,23 @@ mod tests {
             .execute("grep", &json!({"query": "banana", "path": "inner"}))
             .await;
         assert!(result.success);
-        let text = result.result.as_str().unwrap_or("");
         assert!(
-            text.contains("inner.txt"),
-            "expected inner.txt match, got {text:?}"
+            result.result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["path"] == "inner.txt"),
+            "expected inner.txt match, got {:?}",
+            result.result
         );
         assert!(
-            !text.contains("outer.txt"),
-            "path scope should exclude outer.txt, got {text:?}"
+            !result.result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["path"] == "outer.txt"),
+            "path scope should exclude outer.txt, got {:?}",
+            result.result
         );
     }
 
@@ -1126,13 +938,21 @@ mod tests {
             .execute("grep", &json!({"query": "banana", "path": "notes.txt"}))
             .await;
         assert!(result.success);
-        let text = result.result.as_str().unwrap_or("");
         assert!(
-            text.contains("notes.txt"),
-            "expected notes.txt match, got {text:?}"
+            result.result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["path"] == "notes.txt"),
+            "expected notes.txt match, got {:?}",
+            result.result
         );
         assert!(
-            !text.contains("other.txt"),
+            !result.result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["path"] == "other.txt"),
             "file path should exclude other.txt"
         );
     }
@@ -1158,10 +978,39 @@ mod tests {
             "expected search outside workspace to succeed, got {:?}",
             result.result
         );
-        let text = result.result.as_str().unwrap_or("");
         assert!(
-            text.contains("external.txt"),
-            "expected external.txt match, got {text:?}"
+            result.result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["path"] == "external.txt"),
+            "expected external.txt match, got {:?}",
+            result.result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_infers_obvious_path_prefix_from_query() {
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("external.txt"), "banana\n").unwrap();
+
+        let tool = Grep::with_base_path(workspace.path().to_path_buf());
+        let result = tool
+            .execute(
+                "grep",
+                &json!({"query": format!("{} banana", outside.path().display())}),
+            )
+            .await;
+        assert!(result.success);
+        assert!(
+            result.result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["path"] == "external.txt"),
+            "expected inferred path search to find external.txt, got {:?}",
+            result.result
         );
     }
 

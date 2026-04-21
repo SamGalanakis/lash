@@ -5,7 +5,7 @@ use lash::sansio::{self, Effect, ProtocolDriverHandle, Response, TurnMachine, Tu
 use lash_mode_rlm::RlmDriver;
 use lash_mode_standard::StandardDriver;
 use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
-use lash_sansio::{CheckpointKind, Message, MessageRole, Part, PartKind, PruneState};
+use lash_sansio::{CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent};
 
 fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
     test_config_with_termination(mode, sansio::RlmTermination::default())
@@ -203,6 +203,92 @@ fn standard_tool_calls_produce_effects_and_loop() {
 }
 
 #[test]
+fn standard_empty_final_after_tool_result_finishes_without_error() {
+    let config = test_config(ExecutionMode::Standard);
+    let msgs = vec![user_message("update the plan and do nothing else")];
+    let mut machine = TurnMachine::new(config, msgs, 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            parts: vec![LlmOutputPart::ToolCall {
+                call_id: "tc1".to_string(),
+                tool_name: "update_plan".to_string(),
+                input_json: r#"{"plan":[{"step":"done","status":"completed"}]}"#.to_string(),
+                item_id: None,
+                signature: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let tool_id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::ToolCalls { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("tool call");
+    machine.handle_response(Response::ToolResults {
+        id: tool_id,
+        results: vec![sansio::CompletedToolCall {
+            call_id: "tc1".to_string(),
+            tool_name: "update_plan".to_string(),
+            args: serde_json::json!({"plan":[{"step":"done","status":"completed"}]}),
+            state_result: lash_sansio::ToolResult::ok(serde_json::json!("Plan updated")),
+            model_result: lash_sansio::ToolResult::ok(serde_json::json!("Plan updated")),
+            duration_ms: 1,
+            item_id: None,
+        }],
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("after-work checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::AfterWork);
+    machine.handle_response(Response::Checkpoint {
+        id: checkpoint_id,
+        messages: Vec::new(),
+        transient_messages: Vec::new(),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("follow-up llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse::default()),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Emit(SessionEvent::Error { .. })))
+    );
+    let (checkpoint_id, checkpoint) =
+        find_checkpoint(&effects).expect("before-completion checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+    machine.handle_response(Response::Checkpoint {
+        id: checkpoint_id,
+        messages: Vec::new(),
+        transient_messages: Vec::new(),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Emit(SessionEvent::Error { .. })))
+    );
+    assert!(find_done(&effects).is_some());
+    assert!(machine.is_done());
+}
+
+#[test]
 fn standard_max_turns_stops_iteration() {
     let mut config = test_config(ExecutionMode::Standard);
     config.max_turns = Some(1);
@@ -328,6 +414,34 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
     });
 
     let effects = drain_effects(&mut machine);
+    let messages = machine.messages();
+    let rlm_result = messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == MessageRole::User
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| part.content.contains("[Lashlang execution result]"))
+        })
+        .expect("rlm result message");
+    let result_part = rlm_result
+        .parts
+        .iter()
+        .find(|part| part.content.contains("[Lashlang execution result]"))
+        .expect("result part");
+    // Post-fix: RLM exec output is a plain user-role text
+    // observation (not a synthetic `role=tool` pairing), so providers
+    // that enforce tool_call ↔ tool_result pairing accept the
+    // message. `tool_call_id` + `tool_name` stay on the Text part so
+    // the interrupted-session projection can still render it as an
+    // `execute_lashlang` activity — the Part→LlmContentBlock mapping
+    // ignores both fields when `kind == Text`.
+    assert!(matches!(result_part.kind, PartKind::Text));
+    assert_eq!(result_part.tool_call_id.as_deref(), Some("rlm_exec_0"));
+    assert_eq!(result_part.tool_name.as_deref(), Some("execute_lashlang"),);
+
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     machine.handle_response(Response::Checkpoint {
