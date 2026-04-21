@@ -451,6 +451,17 @@ impl CodexOAuthAdapter {
         }
     }
 
+    /// Use an embedder-provided `reqwest::Client` instead of building a
+    /// fresh one. Shares the TLS stack + connection pool across every
+    /// adapter constructed from the same pool.
+    pub fn with_client(client: std::sync::Arc<reqwest::Client>, timeouts: LlmTimeouts) -> Self {
+        Self {
+            client: (*client).clone(),
+            request_timeout: timeouts.request_timeout,
+            chunk_timeout: timeouts.chunk_timeout,
+        }
+    }
+
     /// Decide whether an HTTP failure should be retried.
     ///
     /// Mirrors the rules in pi-mono (`openai-codex-responses.ts:94-99`, `:229`):

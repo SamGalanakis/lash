@@ -9,6 +9,12 @@ pub struct InstructionLoaderConfig {
     pub enabled: bool,
     pub global_filenames: Vec<String>,
     pub local_filenames: Vec<String>,
+    /// Root directory where global instruction files are searched.
+    /// When `None`, the global search is skipped entirely. Host-provided
+    /// (e.g. lash-cli passes `paths::lash_home()`); lash core has no
+    /// opinion on where global files live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_root: Option<PathBuf>,
 }
 
 impl Default for InstructionLoaderConfig {
@@ -17,6 +23,7 @@ impl Default for InstructionLoaderConfig {
             enabled: true,
             global_filenames: vec!["AGENT.md".to_string()],
             local_filenames: vec!["AGENTS.md".to_string(), "CLAUDE.md".to_string()],
+            global_root: None,
         }
     }
 }
@@ -109,12 +116,14 @@ impl InstructionLoader {
         let mut parts = Vec::new();
 
         if config.enabled {
-            for filename in &config.global_filenames {
-                let global = crate::lash_home().join(filename);
-                if let Some(text) = load_with_prefix(&global) {
-                    system_paths.insert(global);
-                    parts.push(text);
-                    break;
+            if let Some(global_root) = config.global_root.as_ref() {
+                for filename in &config.global_filenames {
+                    let global = global_root.join(filename);
+                    if let Some(text) = load_with_prefix(&global) {
+                        system_paths.insert(global);
+                        parts.push(text);
+                        break;
+                    }
                 }
             }
 

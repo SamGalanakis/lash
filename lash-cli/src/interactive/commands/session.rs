@@ -290,7 +290,7 @@ pub(super) async fn handle_resume(
 }
 
 pub(super) fn handle_skills(app: &mut App) -> anyhow::Result<bool> {
-    app.skills = SkillCatalog::load();
+    app.skills = SkillCatalog::from_dirs(&crate::paths::default_skill_dirs());
     let items: Vec<(String, String)> = app
         .skills
         .iter()

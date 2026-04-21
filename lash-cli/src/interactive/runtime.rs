@@ -325,7 +325,7 @@ pub(super) async fn send_user_message(
 }
 
 pub(crate) fn notify_desktop(title: &str, body: &str) {
-    let icon_path = lash::lash_home().join("icon.svg");
+    let icon_path = crate::paths::lash_home().join("icon.svg");
     if !icon_path.exists() {
         let _ = std::fs::write(&icon_path, include_bytes!("../../assets/icon.svg"));
     }

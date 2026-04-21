@@ -5,7 +5,6 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 use crate::ToolResult;
-use crate::lash_cache_dir;
 use crate::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     ToolResultProjectionContext, ToolResultProjectionHook,
@@ -443,7 +442,7 @@ fn spill_tool_output(
     args: &serde_json::Value,
     full_output: &str,
 ) -> Option<PathBuf> {
-    let dir = lash_cache_dir().join("tool-output");
+    let dir = std::env::temp_dir().join("lash-tool-output");
     if fs::create_dir_all(&dir).is_err() {
         return None;
     }

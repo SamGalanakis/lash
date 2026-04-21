@@ -4138,3 +4138,75 @@ async fn set_state_syncs_runtime_policy_with_restored_state_policy() {
     assert_eq!(runtime.state.policy.execution_mode, ExecutionMode::Rlm);
     assert_eq!(runtime.policy.execution_mode, ExecutionMode::Rlm);
 }
+
+#[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
+#[tokio::test]
+async fn environment_park_resume_preserves_active_path() {
+    // Build a RuntimeEnvironment with the usual test tool factories +
+    // Residency::ActivePathOnly (webserver pattern; host owns disk).
+    let factories: Vec<Arc<dyn crate::PluginFactory>> = vec![
+        Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
+        Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
+        Arc::new(StaticPluginFactory::new(
+            "shell",
+            crate::PluginSpec::new()
+                .with_tool_provider(Arc::new(crate::tools::StandardShell::new())),
+        )),
+    ];
+    let plugin_host = Arc::new(crate::PluginHost::new(factories));
+
+    let env = crate::RuntimeEnvironment::builder()
+        .with_plugin_host(plugin_host)
+        .with_residency(crate::Residency::ActivePathOnly)
+        .build();
+
+    // In-memory SQLite store — shared across park/resume.
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::Store::memory().expect("in-memory store"));
+
+    // Initial state: one user message. Force the active leaf to this
+    // node so later reads find it.
+    let mut initial_state = PersistedSessionState::default();
+    initial_state.session_id = "integration-park-resume".to_string();
+    initial_state.policy = rlm_test_policy();
+    // Borrow the existing plugin-message helper to construct a
+    // minimal Message without touching sansio's Message struct
+    // directly (its shape may change).
+    let first_msg = crate::session_model::plugin_message_to_message(
+        &crate::PluginMessage::text(crate::session_model::MessageRole::User, "hello"),
+        None,
+    );
+    let first_id = initial_state.session_graph.append_message(first_msg);
+
+    // Build runtime via from_environment.
+    let runtime = LashRuntime::from_environment(
+        &env,
+        rlm_test_policy(),
+        initial_state,
+        Some(Arc::clone(&store)),
+    )
+    .await
+    .expect("runtime from environment");
+
+    // Under ActivePathOnly, the resident graph is already trimmed to
+    // the active path. The leaf node must still be there.
+    assert!(runtime.state.session_graph.find_node(&first_id).is_some());
+
+    // Park — flushes to store, returns a lightweight handle.
+    let parked = runtime.park().await.expect("park");
+    assert_eq!(parked.session_id(), "integration-park-resume");
+
+    // Resume — loads from the same store.
+    let resumed = LashRuntime::resume(parked, &env).await.expect("resume");
+    assert_eq!(resumed.state.session_id, "integration-park-resume");
+    // Active path preserved through park/resume.
+    assert!(resumed.state.session_graph.find_node(&first_id).is_some());
+
+    // Host-driven cleanup primitives: orphaned_node_ids() + vacuum().
+    // No orphans in this test (only one node on active path), so both
+    // paths return empty / zero.
+    let orphans = resumed.orphaned_node_ids().await.expect("orphans");
+    assert!(orphans.is_empty());
+    let report = store.vacuum().await;
+    assert_eq!(report.removed_node_count, 0);
+}

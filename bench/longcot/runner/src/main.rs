@@ -737,6 +737,7 @@ async fn run_question(
     let trace_path = question_dir.join("trace.html");
     if let Err(err) = export(
         SessionSelector::Path(&store_path),
+        std::path::Path::new(""),
         ExportFormat::Html,
         Some(&trace_path),
     ) {

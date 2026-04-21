@@ -364,6 +364,17 @@ impl OpenAiGenericAdapter {
         }
     }
 
+    /// Use an embedder-provided `reqwest::Client` instead of building a
+    /// fresh one. Shares the TLS stack + connection pool across every
+    /// adapter constructed from the same pool.
+    pub fn with_client(client: std::sync::Arc<reqwest::Client>, timeouts: LlmTimeouts) -> Self {
+        Self {
+            client: (*client).clone(),
+            request_timeout: timeouts.request_timeout,
+            chunk_timeout: timeouts.chunk_timeout,
+        }
+    }
+
     fn role_name(role: &LlmRole) -> &'static str {
         match role {
             LlmRole::User => "user",

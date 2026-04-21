@@ -14,6 +14,7 @@ mod input_items;
 mod interactive;
 mod markdown;
 mod overlay;
+mod paths;
 mod persistence;
 mod plugin_surface;
 mod render;
@@ -354,7 +355,8 @@ fn run_export(session: &str, format: &str, out: Option<&std::path::Path>) -> any
     } else {
         lash_export::SessionSelector::Id(session)
     };
-    let rendered = lash_export::export(selector, format, out)?;
+    let sessions_dir = crate::paths::lash_home().join("sessions");
+    let rendered = lash_export::export(selector, &sessions_dir, format, out)?;
     if out.is_none() {
         print!("{rendered}");
     }
@@ -408,7 +410,7 @@ async fn main() -> anyhow::Result<()> {
     }
     // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {
-        let log_dir = lash::lash_home();
+        let log_dir = crate::paths::lash_home();
         std::fs::create_dir_all(&log_dir).ok();
         let log_file = std::fs::File::create(log_dir.join("lash.log"))?;
         let filter_text = effective_lash_log_filter(args.debug);

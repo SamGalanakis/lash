@@ -16,9 +16,9 @@ use crate::llm::types::{
 };
 use crate::session_model::message::{MessageOrigin, PartAttachment, data_url_for_bytes};
 use crate::session_model::{
-    LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, MessageSequence, Part, PartKind,
-    PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, fresh_message_id,
-    make_error_envelope, make_error_event, reassign_part_ids,
+    Message, MessageRole, MessageSequence, Part, PartKind, PruneState, RetryPolicy, SessionEvent,
+    TokenUsage, TurnTerminationPolicyState, fresh_message_id, make_error_envelope,
+    make_error_event, reassign_part_ids,
 };
 use crate::{CheckpointKind, PluginMessage, ToolResult};
 
@@ -325,6 +325,7 @@ pub struct TurnMachineConfig {
     pub session_id: String,
     pub emit_llm_debug_log: bool,
     pub rlm_termination: RlmTermination,
+    pub retry_policy: RetryPolicy,
 }
 
 /// How a RLM session terminates. Mirrors `lash::RlmTermination`;
@@ -806,7 +807,9 @@ impl TurnMachine {
         };
         match result {
             Err(error) => {
-                if error.retryable && waiting.retry_attempt < LLM_MAX_RETRIES {
+                if error.retryable
+                    && waiting.retry_attempt < self.config.retry_policy.max_retries
+                {
                     self.schedule_llm_retry(
                         waiting.retry_attempt,
                         error,
@@ -837,12 +840,12 @@ impl TurnMachine {
         driver_state: Option<DriverState>,
     ) {
         self.record_llm_error(&error);
-        let delay = LLM_RETRY_DELAYS[retry_attempt];
+        let delay = self.config.retry_policy.delay_for_attempt(retry_attempt);
         let reason = error.message.clone();
         self.emit(SessionEvent::RetryStatus {
             wait_seconds: delay.as_secs(),
             attempt: retry_attempt + 2,
-            max_attempts: LLM_MAX_RETRIES + 1,
+            max_attempts: self.config.retry_policy.max_retries + 1,
             reason: reason.clone(),
             envelope: Some(make_error_envelope(
                 "llm_provider",

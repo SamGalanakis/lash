@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::de::{self, Visitor};
@@ -495,14 +494,11 @@ impl LashConfig {
         self.providers.len()
     }
 
-    fn config_path() -> PathBuf {
-        crate::lash_home().join("config.json")
-    }
-
-    /// Load from ~/.lash/config.json.
-    pub fn load() -> Option<Self> {
-        let path = Self::config_path();
-        if let Ok(data) = std::fs::read_to_string(&path)
+    /// Load from the given config path. Returns `None` if missing or
+    /// malformed. Host decides where the file lives (e.g. lash-cli uses
+    /// `~/.lash/config.json`).
+    pub fn load(path: &std::path::Path) -> Option<Self> {
+        if let Ok(data) = std::fs::read_to_string(path)
             && let Ok(config) = serde_json::from_str::<Self>(&data)
             && config.providers.contains_key(&config.active_provider)
         {
@@ -512,19 +508,18 @@ impl LashConfig {
         None
     }
 
-    /// Save to ~/.lash/config.json (mode 0o600)
-    pub fn save(&self) -> Result<(), std::io::Error> {
-        let path = Self::config_path();
+    /// Save to the given config path (mode 0o600 on Unix).
+    pub fn save(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let data = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(&path, &data)?;
+        std::fs::write(path, &data)?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
 
         Ok(())
@@ -546,11 +541,10 @@ impl LashConfig {
         self.mcp_servers = servers;
     }
 
-    /// Delete ~/.lash/config.json
-    pub fn clear() -> Result<(), std::io::Error> {
-        let path = Self::config_path();
+    /// Delete the config file at `path`.
+    pub fn clear(path: &std::path::Path) -> Result<(), std::io::Error> {
         if path.exists() {
-            std::fs::remove_file(&path)?;
+            std::fs::remove_file(path)?;
         }
         Ok(())
     }
@@ -558,8 +552,8 @@ impl LashConfig {
 
 /// Save just the provider portion (preserves other config fields like API keys).
 /// Used by the agent loop after token refresh.
-pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
-    let mut config = LashConfig::load().unwrap_or_else(|| LashConfig {
+pub fn save_provider(path: &std::path::Path, provider: &Provider) -> Result<(), std::io::Error> {
+    let mut config = LashConfig::load(path).unwrap_or_else(|| LashConfig {
         active_provider: provider.kind(),
         providers: BTreeMap::from([(provider.kind(), provider.clone())]),
         auxiliary_secrets: AuxiliarySecrets::default(),
@@ -569,7 +563,7 @@ pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
     });
     config.upsert_provider(provider.clone());
     config.active_provider = provider.kind();
-    config.save()
+    config.save(path)
 }
 
 #[cfg(test)]

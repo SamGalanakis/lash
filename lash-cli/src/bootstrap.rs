@@ -174,8 +174,8 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         const BOLD: &str = "\x1b[1m";
         const RESET: &str = "\x1b[0m";
 
-        let lash_dir = lash::lash_home();
-        let cache_dir = lash::lash_cache_dir();
+        let lash_dir = crate::paths::lash_home();
+        let cache_dir = crate::paths::lash_cache_dir();
 
         eprintln!();
         eprintln!("  {SODIUM}{BOLD}/ reset{RESET}");
@@ -222,7 +222,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     }
 
     // Resolve config before TUI init (may need interactive terminal)
-    let existing_config = LashConfig::load();
+    let existing_config = LashConfig::load(&crate::paths::config_file());
     if args.info && existing_config.is_none() && args.api_key.is_none() {
         let execution_mode =
             ensure_supported_execution_mode(match args.execution_mode.as_deref() {
@@ -261,7 +261,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         #[allow(clippy::unnecessary_unwrap)]
         let mut c = existing_config.unwrap();
         match c.active_provider_mut().ensure_fresh().await {
-            Ok(true) => c.save()?, // persist refreshed tokens
+            Ok(true) => c.save(&crate::paths::config_file())?, // persist refreshed tokens
             Ok(false) => {}
             Err(err) => {
                 if interactive_startup {
@@ -283,7 +283,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         lash_config.set_tavily_api_key(Some(key.clone()));
     }
     if args.print_prompt.is_none() {
-        lash_config.save()?;
+        lash_config.save(&crate::paths::config_file())?;
     }
     let model_catalog = models_dev_catalog().map_err(anyhow::Error::msg)?;
     if let Err(err) = model_catalog
@@ -314,7 +314,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     )
     .map_err(anyhow::Error::msg)?;
     let llm_log_path = if crate::detailed_debug_logging_enabled(args.debug) {
-        let dir = lash::lash_home().join("sessions");
+        let dir = crate::paths::lash_home().join("sessions");
         Some(dir.join(format!(
             "{}.llm.jsonl",
             chrono::Local::now().format("%Y%m%d_%H%M%S")
@@ -323,7 +323,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         None
     };
 
-    let sessions_dir = lash::lash_home().join("sessions");
+    let sessions_dir = crate::paths::lash_home().join("sessions");
     std::fs::create_dir_all(&sessions_dir)?;
     let session_filename = args
         .resume
@@ -419,7 +419,11 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         ));
     }
 
-    let instruction_source: Arc<dyn InstructionSource> = Arc::new(FsInstructionSource::new());
+    let instruction_source: Arc<dyn InstructionSource> =
+        Arc::new(FsInstructionSource::with_config(InstructionLoaderConfig {
+            global_root: Some(crate::paths::lash_home()),
+            ..Default::default()
+        }));
     let session_policy = SessionPolicy {
         model: model.clone(),
         provider: lash_config.active_provider().clone(),
@@ -432,7 +436,8 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     };
     let host_core = RuntimeCoreConfig::default()
         .with_prompt_template(prompt_template)
-        .with_llm_log_path(llm_log_path);
+        .with_llm_log_path(llm_log_path)
+        .with_credential_store_path(Some(crate::paths::config_file()));
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let turn_injection_bridge = TurnInjectionBridge::new();
@@ -556,7 +561,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         return run_autonomous(
             runtime,
             prompt,
-            SkillCatalog::load(),
+            SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
             AutonomousPersistenceContext {
                 store: Arc::clone(&store),
                 await_background_work: args.await_background_work,

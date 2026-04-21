@@ -1010,7 +1010,7 @@ fn shell_supports_login(shell_name: &str) -> bool {
 }
 
 fn shell_output_dir() -> std::io::Result<PathBuf> {
-    let dir = crate::lash_cache_dir().join("tool-output");
+    let dir = std::env::temp_dir().join("lash-tool-output");
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }

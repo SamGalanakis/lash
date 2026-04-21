@@ -100,7 +100,7 @@ impl Drop for CurrentDirGuard {
 }
 
 fn plan_file_path(root: &Path, run_session_id: &str) -> PathBuf {
-    root.join(crate::legacy_repo_local_lash_dir())
+    root.join(".lash")
         .join("plans")
         .join(format!("{run_session_id}.md"))
 }

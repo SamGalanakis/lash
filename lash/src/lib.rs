@@ -9,7 +9,6 @@ pub mod model_info;
 pub mod model_variant;
 pub mod monitor;
 pub mod oauth;
-mod paths;
 pub mod plugin;
 pub mod provider;
 pub mod runtime;
@@ -72,9 +71,6 @@ pub use monitor::{
     MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorEvent, MonitorRunState, MonitorSnapshot,
     MonitorSpec, MonitorStatus, MonitorUpdateBatch, MonitorWakePolicy,
 };
-pub use paths::{
-    default_skill_dirs, lash_cache_dir, lash_home, legacy_repo_local_lash_dir, repo_local_lash_dir,
-};
 pub use plugin::ObservationalMemoryPluginFactory as BuiltinObservationalMemoryPluginFactory;
 pub use plugin::RollingHistoryPluginFactory as BuiltinRollingHistoryPluginFactory;
 pub use plugin::{
@@ -108,12 +104,13 @@ pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
     DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
-    InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
-    ManagedTaskStatus, NoopEventSink, OutputState, PathResolver, PersistedSessionState,
-    PromptUsage, RunMode, RuntimeCoreConfig, RuntimeError, SanitizerPolicy, SessionStateEnvelope,
-    SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, SessionUsageReport,
-    TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
-    TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
+    FileLlmCallLogger, InputItem, LashRuntime, LlmCallLogger, ManagedRunState, ManagedTaskCancel,
+    ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, NoopEventSink, OutputState, ParkedSession,
+    PathResolver, PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig,
+    RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy,
+    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor,
+    SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput,
+    TurnIssue, TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use session::{
     InjectedTurnInput, Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,
@@ -134,7 +131,8 @@ pub use store::{
     HydratedSessionCheckpoint, LiveResumeCommit, LiveResumeDelta, LiveResumeSnapshot,
     PersistedArtifactKind, PersistedStateCommit, PersistedStateCommitResult, RetainedArtifactRef,
     RuntimeCommit, RuntimeCommitResult, RuntimeStore, SessionCheckpoint, SessionGraphCommit,
-    SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo, materialize_live_resume_graph,
+    SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo, VacuumReport,
+    materialize_live_resume_graph,
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{BuiltinBlobProfile, SqliteStore, Store, StoreGcPolicy, StoreOptions};

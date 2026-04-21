@@ -18,6 +18,7 @@ fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineCon
         session_id: "test".to_string(),
         emit_llm_debug_log: false,
         rlm_termination: RlmTermination::default(),
+        retry_policy: RetryPolicy::default(),
     }
 }
 

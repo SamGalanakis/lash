@@ -192,7 +192,7 @@ impl SessionInfo {
 }
 
 pub fn sessions_dir() -> PathBuf {
-    lash::lash_home().join("sessions")
+    crate::paths::lash_home().join("sessions")
 }
 
 pub fn new_session_filename() -> String {

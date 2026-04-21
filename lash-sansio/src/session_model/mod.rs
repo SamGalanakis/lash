@@ -274,6 +274,49 @@ pub const LLM_RETRY_DELAYS: [std::time::Duration; 3] = [
     std::time::Duration::from_secs(10),
 ];
 
+/// Retry policy for LLM calls that return `retryable: true` errors.
+/// Hosts configure this via `RuntimeEnvironment::with_retry_policy` or
+/// `TurnMachineConfig.retry_policy` directly. Defaults preserve legacy
+/// behaviour: 3 retries at 2s / 5s / 10s.
+#[derive(Clone, Debug)]
+pub struct RetryPolicy {
+    /// Number of retries *after* the initial attempt. Total attempts
+    /// equals `max_retries + 1`.
+    pub max_retries: usize,
+    /// Delay before each retry. When `max_retries` exceeds `delays.len()`,
+    /// the last delay is reused (or zero if `delays` is empty).
+    pub delays: Vec<std::time::Duration>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: LLM_MAX_RETRIES,
+            delays: LLM_RETRY_DELAYS.to_vec(),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Disable retries. Any retryable error bubbles up on the first try.
+    pub fn disabled() -> Self {
+        Self {
+            max_retries: 0,
+            delays: Vec::new(),
+        }
+    }
+
+    /// Delay before attempt `attempt_index` (0-based among retries).
+    /// Returns zero if `delays` is empty.
+    pub fn delay_for_attempt(&self, attempt_index: usize) -> std::time::Duration {
+        self.delays
+            .get(attempt_index)
+            .or_else(|| self.delays.last())
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
 pub struct TurnTerminationPolicyState {
     max_steps_final: bool,
 }

@@ -84,8 +84,71 @@ pub type ManagedTaskCancel =
 
 pub(crate) type LlmFactory = Arc<dyn Fn(&Provider) -> Box<dyn LlmTransport> + Send + Sync>;
 
-fn default_llm_factory() -> LlmFactory {
+pub(super) fn default_llm_factory() -> LlmFactory {
     Arc::new(|provider| adapter_for(provider))
+}
+
+/// Destination for LLM request/response/stream debug entries. Lash
+/// emits structured JSON entries at several turn-loop checkpoints; the
+/// host decides where they go.
+///
+/// Default: none (lash emits nothing). lash-cli wires a
+/// [`FileLlmCallLogger`] pointing at a rotating file. Webserver
+/// embedders typically provide their own impl that routes entries to
+/// an observability pipeline (OTel, Datadog, in-memory ring buffer).
+pub trait LlmCallLogger: Send + Sync {
+    /// Append a structured entry. Implementations should not block the
+    /// caller for long; buffer + flush asynchronously if needed.
+    fn append(&self, entry: &serde_json::Value);
+}
+
+/// File-backed [`LlmCallLogger`] that writes one JSON line per entry.
+/// Uses an internal mutex so concurrent turn drivers don't interleave
+/// lines. Failures log at warn-level and are otherwise silent.
+pub struct FileLlmCallLogger {
+    path: PathBuf,
+    lock: StdMutex<()>,
+}
+
+impl FileLlmCallLogger {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            lock: StdMutex::new(()),
+        }
+    }
+}
+
+impl LlmCallLogger for FileLlmCallLogger {
+    fn append(&self, entry: &serde_json::Value) {
+        use std::io::Write;
+        let Ok(line) = serde_json::to_string(entry) else {
+            return;
+        };
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path);
+        match file {
+            Ok(mut file) => {
+                let _guard = self.lock.lock().ok();
+                if let Err(err) = writeln!(file, "{}", line) {
+                    tracing::warn!(
+                        error = %err,
+                        path = %self.path.display(),
+                        "failed to append llm debug log"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %self.path.display(),
+                    "failed to open llm debug log"
+                );
+            }
+        }
+    }
 }
 
 /// Default resolver for file and directory references.
@@ -407,11 +470,17 @@ pub struct RuntimeCoreConfig {
     pub base_dir: PathBuf,
     pub path_resolver: Arc<dyn PathResolver>,
     pub prompt_template: crate::PromptTemplate,
-    pub llm_log_path: Option<PathBuf>,
-    pub(crate) llm_log_lock: Arc<StdMutex<()>>,
+    pub llm_logger: Option<Arc<dyn LlmCallLogger>>,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
     pub(crate) llm_factory: LlmFactory,
+    pub retry_policy: lash_sansio::RetryPolicy,
+    /// Host-owned destination for refreshed OAuth credentials. When
+    /// `Some`, lash writes refreshed provider tokens here so they
+    /// persist across runs. When `None`, token refresh succeeds but
+    /// nothing is written — the host either doesn't need persistence
+    /// (tests, one-shot calls) or handles it via a different channel.
+    pub credential_store_path: Option<PathBuf>,
 }
 
 impl Default for RuntimeCoreConfig {
@@ -420,11 +489,12 @@ impl Default for RuntimeCoreConfig {
             base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path_resolver: Arc::new(DefaultPathResolver),
             prompt_template: crate::default_prompt_template(),
-            llm_log_path: None,
-            llm_log_lock: Arc::new(StdMutex::new(())),
+            llm_logger: None,
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
             llm_factory: default_llm_factory(),
+            retry_policy: lash_sansio::RetryPolicy::default(),
+            credential_store_path: None,
         }
     }
 }
@@ -446,7 +516,13 @@ impl RuntimeCoreConfig {
     }
 
     pub fn with_llm_log_path(mut self, llm_log_path: Option<PathBuf>) -> Self {
-        self.llm_log_path = llm_log_path;
+        self.llm_logger = llm_log_path
+            .map(|path| Arc::new(FileLlmCallLogger::new(path)) as Arc<dyn LlmCallLogger>);
+        self
+    }
+
+    pub fn with_llm_logger(mut self, logger: Option<Arc<dyn LlmCallLogger>>) -> Self {
+        self.llm_logger = logger;
         self
     }
 
@@ -465,6 +541,16 @@ impl RuntimeCoreConfig {
         F: Fn(&Provider) -> Box<dyn LlmTransport> + Send + Sync + 'static,
     {
         self.llm_factory = Arc::new(factory);
+        self
+    }
+
+    pub fn with_retry_policy(mut self, policy: lash_sansio::RetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
+    }
+
+    pub fn with_credential_store_path(mut self, path: Option<PathBuf>) -> Self {
+        self.credential_store_path = path;
         self
     }
 }

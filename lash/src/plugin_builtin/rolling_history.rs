@@ -30,8 +30,11 @@ use crate::session_model::format_tool_result_content;
 use crate::{
     ContextApproach, ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind,
     PromptUsage, RollingHistoryConfig, SessionStateEnvelope, ToolCallRecord, TurnInput,
-    lash_cache_dir,
 };
+
+fn tool_spill_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("lash-tool-output")
+}
 
 const TOOL_RESULT_MAX_LINES: usize = DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES;
 const TOOL_RESULT_MAX_BYTES: usize = DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES;
@@ -280,7 +283,7 @@ fn render_tool_result_preview_for_session(record: &ToolCallRecord) -> String {
     let existing_output_path = existing_tool_output_path(record);
     if tool_result_needs_truncation(&normalized) {
         let output_path = existing_output_path
-            .or_else(|| spill_tool_output_to_dir(&lash_cache_dir(), record, &normalized));
+            .or_else(|| spill_tool_output_to_dir(&tool_spill_dir(), record, &normalized));
         return truncate_tool_result_preview(
             &normalized,
             tool_result_truncation_direction(&record.tool),

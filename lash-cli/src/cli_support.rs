@@ -174,7 +174,9 @@ fn render_shortcut_lines(ui_extensions: &UiExtensions, spaced_history_arrows: bo
 
 pub(crate) fn models_dev_catalog() -> Result<Arc<CachedModelCatalog>, String> {
     CachedModelCatalog::models_dev(
-        Arc::new(FileModelCatalogStore::default_models_dev()),
+        Arc::new(FileModelCatalogStore::new(
+            crate::paths::model_catalog_cache_file(),
+        )),
         Some(Arc::new(ModelsDevHttpSource::default_models_dev())),
     )
     .map(Arc::new)

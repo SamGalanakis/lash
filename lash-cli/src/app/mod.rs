@@ -736,7 +736,7 @@ impl App {
             streaming_output: Vec::new(),
             streaming_output_hidden: 0,
             streaming_output_partial: String::new(),
-            skills: SkillCatalog::load(),
+            skills: SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
             plugin_commands: Vec::new(),
             pending_steers: VecDeque::new(),
             queued_turns: VecDeque::new(),

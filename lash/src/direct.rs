@@ -106,19 +106,23 @@ impl From<LlmTransportError> for DirectLlmError {
 
 pub struct DirectLlmClient {
     provider: Provider,
-    persist_provider_updates: bool,
+    credential_store_path: Option<std::path::PathBuf>,
 }
 
 impl DirectLlmClient {
     pub fn new(provider: Provider) -> Self {
         Self {
             provider,
-            persist_provider_updates: false,
+            credential_store_path: None,
         }
     }
 
-    pub fn with_persisted_provider(mut self, persist: bool) -> Self {
-        self.persist_provider_updates = persist;
+    /// Write refreshed OAuth credentials to `path` after each successful
+    /// token refresh. When `None`, refresh still happens but nothing is
+    /// written. Host decides the file location (lash-cli uses
+    /// `paths::config_file()`).
+    pub fn with_credential_store_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.credential_store_path = path;
         self
     }
 
@@ -139,8 +143,8 @@ impl DirectLlmClient {
             .ensure_fresh()
             .await
             .map_err(|err| DirectLlmError::OAuth(err.to_string()))?;
-        if refreshed && self.persist_provider_updates {
-            let _ = save_provider(&self.provider);
+        if refreshed && let Some(path) = self.credential_store_path.as_ref() {
+            let _ = save_provider(path, &self.provider);
         }
 
         let llm = adapter_for(&self.provider);
@@ -155,8 +159,8 @@ impl DirectLlmClient {
             .ensure_ready(&mut self.provider)
             .await
             .map_err(|err| DirectLlmError::ProviderInit(err.message))?;
-        if changed && self.persist_provider_updates {
-            let _ = save_provider(&self.provider);
+        if changed && let Some(path) = self.credential_store_path.as_ref() {
+            let _ = save_provider(path, &self.provider);
         }
 
         let llm_request = build_llm_request(&self.provider, request, normalized_model);

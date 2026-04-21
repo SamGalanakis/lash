@@ -101,7 +101,7 @@ fn fresh_context_session_id() -> String {
 fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?;
     Ok(cwd
-        .join(crate::legacy_repo_local_lash_dir())
+        .join(".lash")
         .join("plans")
         .join(format!("{run_session_id}.md")))
 }

@@ -9,6 +9,7 @@ name = "bench-swebench"
 path = "src/main.rs"
 
 [dependencies]
+dirs = "6"
 lash = { path = "../../../lash", default-features = false, features = ["full"] }
 lash-default-tools = { path = "../../../lash-default-tools" }
 lash-mode-rlm = { path = "../../../lash-mode-rlm" }

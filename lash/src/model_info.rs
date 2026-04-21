@@ -153,10 +153,6 @@ impl FileModelCatalogStore {
         Self { path: path.into() }
     }
 
-    pub fn default_models_dev() -> Self {
-        Self::new(crate::lash_cache_dir().join("models.json"))
-    }
-
     pub fn path(&self) -> &PathBuf {
         &self.path
     }

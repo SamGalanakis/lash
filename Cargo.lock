@@ -266,6 +266,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "dirs 6.0.0",
  "dotenvy",
  "lash",
  "lash-default-tools",
@@ -1842,7 +1843,6 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
- "dirs 6.0.0",
  "fff-search",
  "flate2",
  "futures-util",
@@ -1896,6 +1896,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dhat",
+ "dirs 6.0.0",
  "image",
  "lash",
  "lash-autoresearch",
@@ -1936,6 +1937,7 @@ version = "0.2.62"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs 6.0.0",
  "lash",
  "serde_json",
 ]

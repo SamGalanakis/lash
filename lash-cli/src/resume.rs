@@ -641,7 +641,7 @@ mod tests {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-resume-usage");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = lash::lash_home().join("sessions");
+        let sessions_dir = crate::paths::lash_home().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let db_path = sessions_dir.join("resume-usage.db");
@@ -721,7 +721,7 @@ mod tests {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-resume-live-snapshot");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = lash::lash_home().join("sessions");
+        let sessions_dir = crate::paths::lash_home().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let db_path = sessions_dir.join("resume-live.db");
@@ -831,7 +831,7 @@ mod tests {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-load-resume-live-turn");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = lash::lash_home().join("sessions");
+        let sessions_dir = crate::paths::lash_home().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let filename = "resume-ui.db";

@@ -351,8 +351,9 @@ impl RuntimeTurnDriver {
             prompt_contributions: all_prompt_contributions,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model_variant.clone(),
-            emit_llm_debug_log: self.host.core.llm_log_path.is_some(),
+            emit_llm_debug_log: self.host.core.llm_logger.is_some(),
             rlm_termination: self.rlm_termination.clone(),
+            retry_policy: self.host.core.retry_policy.clone(),
         });
         self.policy = session_policy;
         self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
@@ -485,7 +486,9 @@ impl RuntimeTurnDriver {
     ) -> Result<String, SessionEvent> {
         match policy.provider.ensure_fresh().await {
             Ok(true) => {
-                let _ = crate::provider::save_provider(&policy.provider);
+                if let Some(path) = self.host.core.credential_store_path.as_ref() {
+                    let _ = crate::provider::save_provider(path, &policy.provider);
+                }
             }
             Err(e) => {
                 return Err(make_error_event(
@@ -505,8 +508,8 @@ impl RuntimeTurnDriver {
         let model = llm.normalize_model(&policy.model);
         match llm.ensure_ready(&mut policy.provider).await {
             Ok(changed) => {
-                if changed {
-                    let _ = crate::provider::save_provider(&policy.provider);
+                if changed && let Some(path) = self.host.core.credential_store_path.as_ref() {
+                    let _ = crate::provider::save_provider(path, &policy.provider);
                 }
             }
             Err(e) => {
@@ -649,12 +652,7 @@ impl RuntimeTurnDriver {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
-        let debug_request = self
-            .host
-            .core
-            .llm_log_path
-            .as_ref()
-            .map(|_| request.clone());
+        let debug_request = self.host.core.llm_logger.as_ref().map(|_| request.clone());
         let (llm_stream_tx, mut llm_stream_rx) =
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
         let llm_request = LlmRequest {
@@ -741,7 +739,7 @@ impl RuntimeTurnDriver {
                             llm_task,
                             llm_stream_rx,
                             event_tx: event_tx.clone(),
-                            llm_log_path: self.host.core.llm_log_path.clone(),
+                            llm_logger: self.host.core.llm_logger.clone(),
                             session_id: self.session_id.clone(),
                             iteration,
                             initial_usage: streamed_usage.clone(),
@@ -981,9 +979,9 @@ impl RuntimeTurnDriver {
     }
 
     fn handle_log_event(&mut self, event: crate::sansio::LogEvent) {
-        let Some(_path) = &self.host.core.llm_log_path else {
+        if self.host.core.llm_logger.is_none() {
             return;
-        };
+        }
 
         match event {
             crate::sansio::LogEvent::LlmDebug {
@@ -1064,38 +1062,13 @@ impl RuntimeTurnDriver {
     }
 
     fn append_llm_debug_entry(&self, entry: serde_json::Value) {
-        let Some(path) = &self.host.core.llm_log_path else {
-            return;
-        };
-
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                let _log_guard = self.host.core.llm_log_lock.lock().ok();
-                if let Err(err) = writeln!(file, "{}", entry) {
-                    tracing::warn!(
-                        error = %err,
-                        path = %path.display(),
-                        "failed to append llm debug log"
-                    );
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    path = %path.display(),
-                    "failed to open llm debug log"
-                );
-            }
+        if let Some(logger) = &self.host.core.llm_logger {
+            logger.append(&entry);
         }
     }
 
     fn log_llm_stream_event(&self, debug: &mut LlmStreamDebugState, log: LlmStreamEventLog<'_>) {
-        if self.host.core.llm_log_path.is_none() {
+        if self.host.core.llm_logger.is_none() {
             return;
         }
 
@@ -1177,7 +1150,7 @@ impl RuntimeTurnDriver {
             LlmStreamEvent::Delta(delta) => {
                 if !delta.is_empty() {
                     *state.text_streamed = true;
-                    let raw_delta = self.host.core.llm_log_path.as_ref().map(|_| delta.clone());
+                    let raw_delta = self.host.core.llm_logger.as_ref().map(|_| delta.clone());
                     let outcome = self
                         .transform_assistant_stream_chunk(event_tx, delta)
                         .await?;
@@ -1235,7 +1208,7 @@ impl RuntimeTurnDriver {
             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
                 if !text.is_empty() {
                     *state.text_streamed = true;
-                    let raw_text = self.host.core.llm_log_path.as_ref().map(|_| text.clone());
+                    let raw_text = self.host.core.llm_logger.as_ref().map(|_| text.clone());
                     let outcome = self
                         .transform_assistant_stream_chunk(event_tx, text)
                         .await?;
@@ -1445,7 +1418,7 @@ struct TrailingUsageCatcher {
     )>,
     llm_stream_rx: tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
     event_tx: mpsc::Sender<RuntimeStreamEvent>,
-    llm_log_path: Option<std::path::PathBuf>,
+    llm_logger: Option<Arc<dyn crate::runtime::host::LlmCallLogger>>,
     session_id: String,
     iteration: usize,
     initial_usage: LlmUsage,
@@ -1463,7 +1436,7 @@ fn spawn_trailing_usage_catcher(args: TrailingUsageCatcher) {
         llm_task,
         mut llm_stream_rx,
         event_tx,
-        llm_log_path,
+        llm_logger,
         session_id,
         iteration,
         initial_usage,
@@ -1514,10 +1487,10 @@ fn spawn_trailing_usage_catcher(args: TrailingUsageCatcher) {
                 cumulative: token_delta.clone(),
             }))
             .await;
-        // Benchmark exporter reads usage from the LLM debug log. Append
+        // Benchmark exporter reads usage from the LLM call log. Append
         // a patch entry there so `usage` sums across trace lines stay
         // correct even when the initial request line landed with zeros.
-        if let Some(path) = llm_log_path {
+        if let Some(logger) = llm_logger {
             let entry = serde_json::json!({
                 "kind": "token_usage_patch",
                 "turn": iteration,
@@ -1530,19 +1503,10 @@ fn spawn_trailing_usage_catcher(args: TrailingUsageCatcher) {
                     "reasoning_tokens": delta.reasoning_tokens,
                 }
             });
-            if let Ok(line) = serde_json::to_string(&entry) {
-                let _ = tokio::task::spawn_blocking(move || {
-                    use std::io::Write;
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .append(true)
-                        .create(true)
-                        .open(&path)
-                    {
-                        let _ = writeln!(file, "{line}");
-                    }
-                })
-                .await;
-            }
+            let _ = tokio::task::spawn_blocking(move || {
+                logger.append(&entry);
+            })
+            .await;
         }
     });
 }

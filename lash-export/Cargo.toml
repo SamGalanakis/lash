@@ -9,6 +9,7 @@ lash = { path = "../lash", features = ["sqlite-store"] }
 anyhow = "1"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
 
 [[bin]]
 name = "lash-export"

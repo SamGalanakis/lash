@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::mode::ModePreamble;
 use crate::prompt::{PreparedPrompt, PromptBuildInput, build_prompt};
 use crate::sansio::{RlmTermination, TurnMachine, TurnMachineConfig};
+use crate::session_model::RetryPolicy;
 use crate::{MessageSequence, PromptContribution, PromptTemplate, ToolSurface};
 
 pub struct SansIoTurnInput {
@@ -20,6 +21,7 @@ pub struct SansIoTurnInput {
     pub model_variant: Option<String>,
     pub emit_llm_debug_log: bool,
     pub rlm_termination: RlmTermination,
+    pub retry_policy: RetryPolicy,
 }
 
 pub struct PreparedTurnMachine {
@@ -54,6 +56,7 @@ pub fn build_turn(input: SansIoTurnInput) -> PreparedTurnMachine {
             session_id: input.session_id,
             emit_llm_debug_log: input.emit_llm_debug_log,
             rlm_termination: input.rlm_termination,
+            retry_policy: input.retry_policy,
         },
         input.messages,
         input.run_offset,
@@ -164,6 +167,7 @@ mod tests {
             model_variant: Some("mini".to_string()),
             emit_llm_debug_log: true,
             rlm_termination: RlmTermination::default(),
+            retry_policy: RetryPolicy::default(),
         });
 
         assert_eq!(prepared.machine.iteration(), 2);

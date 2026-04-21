@@ -55,9 +55,11 @@ pub fn load_session_from_path(store_path: &Path) -> Result<LoadedSession> {
     })
 }
 
-/// Load a session by id — searches `$LASH_HOME/sessions` (or `~/.lash/sessions`).
-pub fn load_session_by_id(session_id: &str) -> Result<LoadedSession> {
-    let path = resolve_session_path_by_id(session_id)?;
+/// Load a session by id — searches `sessions_dir` for a `.db` file
+/// whose metadata matches. Host decides where sessions live (lash-cli
+/// passes `crate::paths::lash_home().join("sessions")`).
+pub fn load_session_by_id(sessions_dir: &Path, session_id: &str) -> Result<LoadedSession> {
+    let path = resolve_session_path_by_id(sessions_dir, session_id)?;
     load_session_from_path(&path)
 }
 
@@ -71,15 +73,18 @@ pub fn render(session: &LoadedSession, format: ExportFormat) -> String {
 
 /// End-to-end: load a session (by id or path) and write the rendered
 /// output to disk. If `out` is `None`, returns the rendered string
-/// instead of writing it.
+/// instead of writing it. `sessions_dir` is consulted only for
+/// `SessionSelector::Id`; pass any `Path` when the selector is
+/// `Path(...)`.
 pub fn export(
     selector: SessionSelector<'_>,
+    sessions_dir: &Path,
     format: ExportFormat,
     out: Option<&Path>,
 ) -> Result<String> {
     let session = match selector {
         SessionSelector::Path(path) => load_session_from_path(path)?,
-        SessionSelector::Id(id) => load_session_by_id(id)?,
+        SessionSelector::Id(id) => load_session_by_id(sessions_dir, id)?,
     };
     let rendered = render(&session, format);
     if let Some(path) = out {
@@ -118,9 +123,8 @@ fn load_graph(store: &Store) -> SessionGraph {
     store.load_session_graph()
 }
 
-fn resolve_session_path_by_id(session_id: &str) -> Result<PathBuf> {
-    let sessions_dir = lash::lash_home().join("sessions");
-    let entries = fs::read_dir(&sessions_dir)
+fn resolve_session_path_by_id(sessions_dir: &Path, session_id: &str) -> Result<PathBuf> {
+    let entries = fs::read_dir(sessions_dir)
         .with_context(|| format!("reading sessions dir {}", sessions_dir.display()))?;
 
     let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();

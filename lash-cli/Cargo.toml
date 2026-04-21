@@ -41,6 +41,7 @@ pulldown-cmark = "0.13"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
+dirs = "6"
 sha2 = "0.10"
 base64 = "0.22"
 stats_alloc = "0.1"

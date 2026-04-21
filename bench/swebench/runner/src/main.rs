@@ -940,7 +940,15 @@ fn build_plugin_session(
 }
 
 fn resolve_provider(args: &Args) -> Result<(Provider, String, String)> {
-    let config = LashConfig::load();
+    let config_path = std::env::var("LASH_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".lash")
+        })
+        .join("config.json");
+    let config = LashConfig::load(&config_path);
     let provider = config
         .as_ref()
         .map(|c| c.active_provider().clone())

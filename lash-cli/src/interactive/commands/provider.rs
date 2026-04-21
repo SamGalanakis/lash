@@ -200,7 +200,7 @@ pub(super) async fn handle_change_provider(
     let previous_variant = current_model_variant.clone();
 
     terminal.restore();
-    let existing_cfg = LashConfig::load();
+    let existing_cfg = LashConfig::load(&crate::paths::config_file());
     let setup_result = setup::run_setup_with_existing(existing_cfg.as_ref()).await;
     *terminal = Terminal::enter()?;
     paused.store(false, Ordering::Relaxed);
@@ -220,7 +220,7 @@ pub(super) async fn handle_change_provider(
                 app.set_model_variant(current_model_variant.clone());
                 return Ok(false);
             }
-            if let Err(e) = new_cfg.save() {
+            if let Err(e) = new_cfg.save(&crate::paths::config_file()) {
                 push_system_message(
                     app,
                     format!("Provider updated, but saving config failed: {}", e),
@@ -338,14 +338,14 @@ pub(super) async fn handle_change_provider(
 
 pub(super) fn handle_logout(app: &mut App, provider: &Provider) -> anyhow::Result<bool> {
     let active_kind = provider.kind();
-    match LashConfig::load() {
+    match LashConfig::load(&crate::paths::config_file()) {
         Some(mut cfg) => {
             if !cfg.has_provider(active_kind) {
                 push_system_message(app, "The active provider is not stored on disk.");
                 return Ok(false);
             }
             if cfg.provider_count() == 1 {
-                match LashConfig::clear() {
+                match LashConfig::clear(&crate::paths::config_file()) {
                     Ok(()) => push_system_message(
                         app,
                         format!(
@@ -360,7 +360,7 @@ pub(super) fn handle_logout(app: &mut App, provider: &Provider) -> anyhow::Resul
             } else {
                 cfg.remove_provider(active_kind);
                 let next_kind = cfg.active_provider_kind();
-                match cfg.save() {
+                match cfg.save(&crate::paths::config_file()) {
                     Ok(()) => push_system_message(
                         app,
                         format!(
