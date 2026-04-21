@@ -1,0 +1,111 @@
+2026-04-21 02:39:26,402 - INFO - Creating container for django__django-11087...
+2026-04-21 02:39:27,030 - INFO - Container for django__django-11087 created: 1cd95fdce5b8f7040fa7ebda70a71c40e493dc8c17e7e0499f2787674a2b075d
+2026-04-21 02:39:27,120 - INFO - Container for django__django-11087 started: 1cd95fdce5b8f7040fa7ebda70a71c40e493dc8c17e7e0499f2787674a2b075d
+2026-04-21 02:39:27,128 - INFO - Intermediate patch for django__django-11087 written to logs/run_evaluation/stratified-50/gpt-5.4/django__django-11087/patch.diff, now applying to container...
+2026-04-21 02:39:27,261 - INFO - >>>>> Applied Patch:
+Checking patch django/db/models/deletion.py...
+Applied patch django/db/models/deletion.py cleanly.
+
+2026-04-21 02:39:27,612 - INFO - Git diff before:
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 3a462f1c4c..1d24c1ef9e 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -1,4 +1,5 @@
+ from collections import Counter
++from itertools import chain
+ from operator import attrgetter
+
+ from django.db import IntegrityError, connections, transaction
+@@ -154,6 +155,16 @@ class Collector:
+             )
+         )
+
++    def get_del_fields(self, model):
++        """
++        Return the field names that must be loaded to delete instances of
++        `model`.
++        """
++        return set(chain.from_iterable(
++            (field.name for field in related.field.foreign_related_fields)
++            for related in get_candidate_relations_to_delete(model._meta)
++        )).union([model._meta.pk.name])
++
+     def get_del_batches(self, objs, field):
+         """
+         Return the objs in suitably sized batches for the used connection.
+@@ -188,6 +199,8 @@ class Collector:
+         if self.can_fast_delete(objs):
+             self.fast_deletes.append(objs)
+             return
++        if hasattr(objs, 'model') and hasattr(objs, 'only'):
++            objs = objs.only(*self.get_del_fields(objs.model))
+         new_objs = self.add(objs, source, nullable,
+                             reverse_dependency=reverse_dependency)
+         if not new_objs:
+@@ -234,7 +247,7 @@ class Collector:
+         """
+         return related.related_model._base_manager.using(self.using).filter(
+             **{"%s__in" % related.field.name: objs}
+-        )
++        ).only(*self.get_del_fields(related.related_model))
+
+     def instances_with_model(self):
+         for model, instances in self.data.items():
+2026-04-21 02:39:27,612 - INFO - Eval script for django__django-11087 written to logs/run_evaluation/stratified-50/gpt-5.4/django__django-11087/eval.sh; copying to container...
+2026-04-21 02:39:31,103 - INFO - Test runtime: 3.46 seconds
+2026-04-21 02:39:31,104 - INFO - Test output for django__django-11087 written to logs/run_evaluation/stratified-50/gpt-5.4/django__django-11087/test_output.txt
+2026-04-21 02:39:31,133 - INFO - Git diff after:
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 3a462f1c4c..1d24c1ef9e 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -1,4 +1,5 @@
+ from collections import Counter
++from itertools import chain
+ from operator import attrgetter
+
+ from django.db import IntegrityError, connections, transaction
+@@ -154,6 +155,16 @@ class Collector:
+             )
+         )
+
++    def get_del_fields(self, model):
++        """
++        Return the field names that must be loaded to delete instances of
++        `model`.
++        """
++        return set(chain.from_iterable(
++            (field.name for field in related.field.foreign_related_fields)
++            for related in get_candidate_relations_to_delete(model._meta)
++        )).union([model._meta.pk.name])
++
+     def get_del_batches(self, objs, field):
+         """
+         Return the objs in suitably sized batches for the used connection.
+@@ -188,6 +199,8 @@ class Collector:
+         if self.can_fast_delete(objs):
+             self.fast_deletes.append(objs)
+             return
++        if hasattr(objs, 'model') and hasattr(objs, 'only'):
++            objs = objs.only(*self.get_del_fields(objs.model))
+         new_objs = self.add(objs, source, nullable,
+                             reverse_dependency=reverse_dependency)
+         if not new_objs:
+@@ -234,7 +247,7 @@ class Collector:
+         """
+         return related.related_model._base_manager.using(self.using).filter(
+             **{"%s__in" % related.field.name: objs}
+-        )
++        ).only(*self.get_del_fields(related.related_model))
+
+     def instances_with_model(self):
+         for model, instances in self.data.items():
+2026-04-21 02:39:31,133 - INFO - Grading answer for django__django-11087...
+2026-04-21 02:39:31,136 - INFO - report: {'django__django-11087': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['test_only_referenced_fields_selected (delete.tests.DeletionTests)']}, 'PASS_TO_PASS': {'success': ['test_fast_delete_empty_no_update_can_self_select (delete.tests.FastDeleteTests)', 'test_fast_delete_fk (delete.tests.FastDeleteTests)', 'test_fast_delete_inheritance (delete.tests.FastDeleteTests)', 'test_fast_delete_instance_set_pk_none (delete.tests.FastDeleteTests)', 'test_fast_delete_joined_qs (delete.tests.FastDeleteTests)', 'test_fast_delete_large_batch (delete.tests.FastDeleteTests)', 'test_fast_delete_m2m (delete.tests.FastDeleteTests)', 'test_fast_delete_qs (delete.tests.FastDeleteTests)', 'test_fast_delete_revm2m (delete.tests.FastDeleteTests)', 'test_auto (delete.tests.OnDeleteTests)', 'test_auto_nullable (delete.tests.OnDeleteTests)', 'test_cascade (delete.tests.OnDeleteTests)', 'test_cascade_from_child (delete.tests.OnDeleteTests)', 'test_cascade_from_parent (delete.tests.OnDeleteTests)', 'test_cascade_nullable (delete.tests.OnDeleteTests)', 'test_do_nothing (delete.tests.OnDeleteTests)', 'test_do_nothing_qscount (delete.tests.OnDeleteTests)', 'test_inheritance_cascade_down (delete.tests.OnDeleteTests)', 'test_inheritance_cascade_up (delete.tests.OnDeleteTests)', 'test_o2o_setnull (delete.tests.OnDeleteTests)', 'test_protect (delete.tests.OnDeleteTests)', 'test_setdefault (delete.tests.OnDeleteTests)', 'test_setdefault_none (delete.tests.OnDeleteTests)', 'test_setnull (delete.tests.OnDeleteTests)', 'test_setnull_from_child (delete.tests.OnDeleteTests)', 'test_setnull_from_parent (delete.tests.OnDeleteTests)', 'test_setvalue (delete.tests.OnDeleteTests)', 'test_delete_with_keeping_parents (delete.tests.DeletionTests)', 'test_delete_with_keeping_parents_relationships (delete.tests.DeletionTests)', 'test_deletion_order (delete.tests.DeletionTests)', 'test_hidden_related (delete.tests.DeletionTests)', 'test_instance_update (delete.tests.DeletionTests)', 'test_large_delete (delete.tests.DeletionTests)', 'test_m2m (delete.tests.DeletionTests)', 'test_model_delete_returns_num_rows (delete.tests.DeletionTests)', 'test_queryset_delete_returns_num_rows (delete.tests.DeletionTests)'], 'failure': ['test_bulk (delete.tests.DeletionTests)', 'test_can_defer_constraint_checks (delete.tests.DeletionTests)', 'test_large_delete_related (delete.tests.DeletionTests)', 'test_proxied_model_duplicate_queries (delete.tests.DeletionTests)', 'test_relational_post_delete_signals_happen_before_parent_object (delete.tests.DeletionTests)']}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-11087: resolved: False
+2026-04-21 02:39:31,136 - INFO - Attempting to stop container sweb.eval.django__django-11087.stratified-50...
+2026-04-21 02:39:46,324 - INFO - Attempting to remove container sweb.eval.django__django-11087.stratified-50...
+2026-04-21 02:39:46,336 - INFO - Container sweb.eval.django__django-11087.stratified-50 removed.
+2026-04-21 02:39:46,336 - INFO - Attempting to remove image swebench/sweb.eval.x86_64.django_1776_django-11087:latest...
+2026-04-21 02:39:46,693 - INFO - Image swebench/sweb.eval.x86_64.django_1776_django-11087:latest removed.

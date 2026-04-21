@@ -70,17 +70,15 @@ impl AutonomousRenderer {
                 }
             }
             SessionEvent::Message { text, kind } => match kind.as_str() {
-                "tool_output" | "final" => {
-                    if !text.trim().is_empty() {
-                        if kind == "final" {
-                            self.streamed_text = true;
-                            self.wrote_stdout = true;
-                            self.stdout_text.push_str(&text);
-                            print!("{text}");
-                            let _ = io::stdout().flush();
-                        } else {
-                            eprintln!("{text}");
-                        }
+                "tool_output" | "final" if !text.trim().is_empty() => {
+                    if kind == "final" {
+                        self.streamed_text = true;
+                        self.wrote_stdout = true;
+                        self.stdout_text.push_str(&text);
+                        print!("{text}");
+                        let _ = io::stdout().flush();
+                    } else {
+                        eprintln!("{text}");
                     }
                 }
                 _ => {}

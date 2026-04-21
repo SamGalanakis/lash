@@ -61,10 +61,13 @@ fn detect_compat(base_url: &str) -> OpenAiCompat {
 
 /// Sanitize surrogates and other problematic Unicode from text content
 /// to avoid 400 errors from providers that reject lone surrogates.
-fn sanitize_surrogates(s: &str) -> String {
-    s.chars()
-        .map(|c| if c == '\u{FFFD}' { '\u{FFFD}' } else { c })
-        .collect()
+///
+/// Rust `&str` is guaranteed valid UTF-8, so unpaired surrogates cannot
+/// appear here; the returned slice is the input unchanged. Kept as a
+/// function so call sites can stay untouched if we ever need to restore
+/// non-trivial sanitization.
+fn sanitize_surrogates(s: &str) -> &str {
+    s
 }
 
 /// Extract a human-readable error detail from a JSON error response body.
@@ -1288,7 +1291,15 @@ impl LlmTransport for OpenAiGenericAdapter {
 
         let (body, base_url) = self.build_request_body(provider, &req, stream_events.is_some())?;
 
-        let request_body = serde_json::to_string(&body).ok();
+        // Serialize once. reqwest's `.json(&body)` would re-run
+        // `serde_json::to_vec` internally, wasting a ~MB+ alloc per
+        // request. We keep a clone as `request_body` for retry/error
+        // replay and trace logs; that's one allocation we can't avoid
+        // without threading `Arc<String>` through the error type.
+        let body_string = serde_json::to_string(&body).map_err(|e| {
+            LlmTransportError::new(format!("Failed to serialize OpenAI-compatible body: {e}"))
+        })?;
+        let request_body = Some(body_string.clone());
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
         let request = self
             .client
@@ -1296,7 +1307,7 @@ impl LlmTransport for OpenAiGenericAdapter {
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .json(&body);
+            .body(body_string);
         let resp = send_request(
             request,
             request_body.clone(),

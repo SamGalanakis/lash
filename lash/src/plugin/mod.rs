@@ -1,14 +1,12 @@
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::llm::types::LlmResponse;
 use crate::monitor::{MonitorSnapshot, MonitorSpec, MonitorUpdateBatch};
 use crate::runtime::{AssembledTurn, PersistedSessionState};
 use crate::{
-    ContextApproachKind, ExecutionMode, MessageRole, SessionPolicy, SessionStateEnvelope,
-    ToolDefinition, ToolProvider, ToolResult, TurnInput,
+    ExecutionMode, MessageRole, SessionPolicy, ToolDefinition, ToolProvider, ToolResult, TurnInput,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -53,473 +51,17 @@ pub type AssistantResponseHook = Arc<
 pub type CommandHandler =
     Arc<dyn Fn(CommandInvocation) -> PluginFuture<CommandOutcome> + Send + Sync>;
 
-/// Session-scoped plugin that initializes, restores, and extends mode
-/// state across a session's lifecycle. External mode crates implement
-/// this via context wrappers ([`ModeSessionContext`],
-/// [`ModeRuntimeContext`]) so they don't need direct access to
-/// `Session`/`LashRuntime` internals — the context narrows what a
-/// plugin can poke at to the capabilities any execution mode
-/// reasonably needs.
-#[async_trait::async_trait]
-pub trait ModeSessionPlugin: Send + Sync {
-    async fn initialize_session(
-        &self,
-        _ctx: ModeSessionContext<'_>,
-    ) -> Result<(), crate::SessionError> {
-        Ok(())
-    }
+mod mode;
+pub use mode::{
+    ModeExtras, ModeNativeToolsPlugin, ModeProtocolDriverPlugin, ModeRuntimeContext,
+    ModeSessionContext, ModeSessionPlugin, RlmCreateExtras, StandardCreateExtras,
+};
 
-    async fn restore_session(
-        &self,
-        _ctx: ModeSessionContext<'_>,
-        _state: &PersistedSessionState,
-    ) -> Result<(), crate::SessionError> {
-        Ok(())
-    }
-
-    async fn append_session_nodes(
-        &self,
-        _ctx: ModeSessionContext<'_>,
-        _nodes: &[SessionAppendNode],
-    ) -> Result<(), crate::SessionError> {
-        Ok(())
-    }
-
-    fn configure_runtime_from_request(
-        &self,
-        _ctx: ModeRuntimeContext<'_>,
-        _request: &SessionCreateRequest,
-    ) {
-    }
-}
-
-/// Narrow wrapper around `Session` that mode plugins use to
-/// initialize, restore, and extend their per-session state.
-///
-/// Exposes only the capabilities every mode reasonably needs
-/// (starting the lashlang execution backend, configuring output
-/// projection, restoring execution state, applying globals patches).
-/// Prevents mode plugins from reaching into unrelated `Session`
-/// internals.
-pub struct ModeSessionContext<'a> {
-    session: &'a mut crate::Session,
-    session_id: &'a str,
-}
-
-impl<'a> ModeSessionContext<'a> {
-    pub(crate) fn new(session: &'a mut crate::Session, session_id: &'a str) -> Self {
-        Self {
-            session,
-            session_id,
-        }
-    }
-
-    /// ID of the session being initialized/restored. Equivalent to the
-    /// `session_id` previously passed as a separate argument.
-    pub fn session_id(&self) -> &str {
-        self.session_id
-    }
-
-    /// Start the embedded lashlang execution backend for this session
-    /// (no-op if already running). Typically called in
-    /// `initialize_session` by modes that dispatch work via lashlang.
-    pub async fn start_lashlang_runtime(&mut self) -> Result<(), crate::SessionError> {
-        self.session.start_lashlang_runtime(self.session_id).await
-    }
-
-    /// Configure how tool-call / print output is truncated before it
-    /// flows back into the model. Mode plugins supply this from their
-    /// own config.
-    pub fn set_execution_output_projection(
-        &mut self,
-        config: crate::ToolResultProjectionPluginConfig,
-    ) {
-        self.session.set_execution_output_projection(config);
-    }
-
-    /// Restore the lashlang execution backend's globals from a
-    /// persisted snapshot.
-    pub async fn restore_execution_state(
-        &mut self,
-        data: &[u8],
-    ) -> Result<(), crate::SessionError> {
-        self.session.restore_execution_state(data).await
-    }
-
-    /// Apply an RLM globals patch (assignments + unsets) from either
-    /// the session graph or an incoming append-nodes request.
-    pub async fn apply_rlm_globals_patch(
-        &mut self,
-        patch: &crate::RlmGlobalsPatchPluginBody,
-    ) -> Result<(), crate::SessionError> {
-        self.session.apply_rlm_globals_patch(patch).await
-    }
-}
-
-/// Narrow wrapper around `LashRuntime` that mode plugins use when
-/// configuring the runtime from a fresh `SessionCreateRequest`.
-///
-/// Exposes only the runtime-level capabilities modes need to set
-/// (termination contract, etc.) so plugins don't reach into unrelated
-/// runtime internals.
-pub struct ModeRuntimeContext<'a> {
-    runtime: &'a mut crate::runtime::LashRuntime,
-}
-
-impl<'a> ModeRuntimeContext<'a> {
-    pub(crate) fn new(runtime: &'a mut crate::runtime::LashRuntime) -> Self {
-        Self { runtime }
-    }
-
-    /// Set how the session's embedded lashlang runtime terminates:
-    /// `ProseWithoutFence` for chat-style sessions, or `Finish` with
-    /// an optional output schema for typed-RLM sessions.
-    pub fn set_termination_mode(&mut self, termination: crate::RlmTermination) {
-        self.runtime.set_repl_termination(termination);
-    }
-}
-
-#[async_trait::async_trait]
-pub trait ModeNativeToolsPlugin: Send + Sync {
-    fn definitions(&self) -> Vec<ToolDefinition>;
-
-    async fn execute(
-        &self,
-        context: &crate::tool_dispatch::ToolDispatchContext,
-        name: &str,
-        args: &serde_json::Value,
-        progress: Option<&crate::ProgressSender>,
-    ) -> Option<ToolResult>;
-}
-
-/// Singleton plugin slot that owns the `ProtocolDriverHandle` and
-/// associated preamble (prompt text, tool surface, sync/async flag)
-/// for a given execution mode. Mode-specific crates
-/// (`lash-mode-standard`, `lash-mode-rlm`) register one implementation
-/// each; the runtime picks the one whose `mode_id` matches the session
-/// policy's execution mode, falling back to `build_mode_preamble`
-/// when no plugin claims the slot.
-pub trait ModeProtocolDriverPlugin: Send + Sync {
-    /// Execution-mode identifier this driver implements (e.g.
-    /// `"standard"`, `"rlm"`). Matched against
-    /// `ExecutionMode::plugin_id()` at preamble-build time.
-    fn mode_id(&self) -> &'static str;
-
-    /// Build the `ModePreamble` (driver handle + prompt text + tool
-    /// surface metadata) for a turn in this mode.
-    fn build_preamble(&self, input: crate::ModeBuildInput) -> crate::ModePreamble;
-}
-
-/// Reason the history pipeline is being invoked.
-#[derive(Clone, Debug)]
-pub enum RewriteTrigger {
-    /// User invoked `/compact` (or an equivalent plugin command).
-    Manual { instructions: Option<String> },
-    /// The previous turn overflowed the context window; retry with
-    /// compacted history.
-    OverflowRecovery,
-    /// Session config changed to a smaller context window.
-    WindowShrink {
-        old_max: Option<usize>,
-        new_max: Option<usize>,
-    },
-    /// Reserved for future scheduled compactors — not fired by any call
-    /// site today.
-    Periodic,
-}
-
-/// Metadata accumulated as a history rewrite pipeline runs.
-#[derive(Clone, Debug, Default)]
-pub struct HistoryRewriteMetadata {
-    pub summarized_token_count: Option<u64>,
-    pub pruned_message_count: u32,
-    pub produced_summary: bool,
-}
-
-/// Mutable state passed through the history rewrite pipeline.
-#[derive(Clone, Debug)]
-pub struct HistoryState {
-    pub messages: Vec<crate::Message>,
-    pub tool_calls: Vec<crate::ToolCallRecord>,
-    pub metadata: HistoryRewriteMetadata,
-}
-
-impl HistoryState {
-    pub fn from_state(state: &SessionStateEnvelope) -> Self {
-        Self {
-            messages: state.project_messages(),
-            tool_calls: state.project_tool_calls(),
-            metadata: HistoryRewriteMetadata::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct SessionReadView(Arc<SessionReadState>);
-
-#[derive(Debug)]
-struct SessionReadState {
-    meta: SessionReadMeta,
-    graph: SessionReadGraph,
-    messages: Arc<Vec<crate::Message>>,
-    tool_calls: Arc<Vec<crate::ToolCallRecord>>,
-    projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
-}
-
-#[derive(Clone, Debug)]
-struct SessionReadMeta {
-    session_id: String,
-    policy: SessionPolicy,
-    iteration: usize,
-    token_usage: crate::TokenUsage,
-    last_prompt_usage: Option<crate::runtime::PromptUsage>,
-}
-
-impl SessionReadMeta {
-    fn from_state_ref(state: &SessionStateEnvelope) -> Self {
-        Self {
-            session_id: state.session_id.clone(),
-            policy: state.policy.clone(),
-            iteration: state.iteration,
-            token_usage: state.token_usage.clone(),
-            last_prompt_usage: state.last_prompt_usage.clone(),
-        }
-    }
-
-    fn from_state_owned(state: SessionStateEnvelope) -> Self {
-        Self {
-            session_id: state.session_id,
-            policy: state.policy,
-            iteration: state.iteration,
-            token_usage: state.token_usage,
-            last_prompt_usage: state.last_prompt_usage,
-        }
-    }
-
-    fn to_owned_state(&self, session_graph: crate::SessionGraph) -> SessionStateEnvelope {
-        SessionStateEnvelope {
-            session_id: self.session_id.clone(),
-            policy: self.policy.clone(),
-            session_graph,
-            iteration: self.iteration,
-            token_usage: self.token_usage.clone(),
-            last_prompt_usage: self.last_prompt_usage.clone(),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum SessionReadGraph {
-    Owned(Arc<crate::SessionGraph>),
-    Derived {
-        cache: OnceLock<Arc<crate::SessionGraph>>,
-        base_graph: Option<Arc<crate::SessionGraph>>,
-        messages: Arc<Vec<crate::Message>>,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
-    },
-}
-
-impl SessionReadView {
-    pub fn new(state: SessionStateEnvelope) -> Self {
-        let mut state = state;
-        let graph = Arc::new(std::mem::take(&mut state.session_graph));
-        let messages = graph.shared_projected_messages();
-        let tool_calls = graph.shared_projected_tool_calls();
-        Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_owned(state),
-            graph: SessionReadGraph::Owned(Arc::clone(&graph)),
-            messages,
-            tool_calls,
-            projected_rlm_globals: graph.shared_projected_rlm_globals(),
-        }))
-    }
-
-    pub fn from_projection_state(
-        mut state: SessionStateEnvelope,
-        messages: Arc<Vec<crate::Message>>,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
-    ) -> Self {
-        Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_owned({
-                state.session_graph = crate::SessionGraph::default();
-                state
-            }),
-            graph: SessionReadGraph::Derived {
-                cache: OnceLock::new(),
-                base_graph: None,
-                messages: Arc::clone(&messages),
-                tool_calls: Arc::clone(&tool_calls),
-            },
-            messages,
-            tool_calls,
-            projected_rlm_globals: Arc::new(serde_json::Map::new()),
-        }))
-    }
-
-    pub fn from_graph_projection(
-        state: &SessionStateEnvelope,
-        base_graph: crate::SessionGraph,
-        messages: Arc<Vec<crate::Message>>,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
-    ) -> Self {
-        Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_ref(state),
-            graph: SessionReadGraph::Derived {
-                cache: OnceLock::new(),
-                base_graph: Some(Arc::new(base_graph.clone())),
-                messages: Arc::clone(&messages),
-                tool_calls: Arc::clone(&tool_calls),
-            },
-            messages,
-            tool_calls,
-            projected_rlm_globals: base_graph.shared_projected_rlm_globals(),
-        }))
-    }
-
-    pub fn from_state(state: &SessionStateEnvelope) -> Self {
-        Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_ref(state),
-            graph: SessionReadGraph::Owned(Arc::new(state.session_graph.clone())),
-            messages: state.session_graph.shared_projected_messages(),
-            tool_calls: state.session_graph.shared_projected_tool_calls(),
-            projected_rlm_globals: state.session_graph.shared_projected_rlm_globals(),
-        }))
-    }
-
-    pub fn from_persisted_state(state: &PersistedSessionState) -> Self {
-        Self::from_state(&state.export_state())
-    }
-
-    fn graph_arc(&self) -> &Arc<crate::SessionGraph> {
-        match &self.0.graph {
-            SessionReadGraph::Owned(graph) => graph,
-            SessionReadGraph::Derived {
-                cache,
-                base_graph,
-                messages,
-                tool_calls,
-            } => cache.get_or_init(|| {
-                let mut graph = base_graph
-                    .as_ref()
-                    .map(|graph| graph.as_ref().clone())
-                    .unwrap_or_default();
-                graph.merge_active_projection(messages.as_slice(), tool_calls.as_slice());
-                Arc::new(graph)
-            }),
-        }
-    }
-
-    fn messages_arc(&self) -> &Arc<Vec<crate::Message>> {
-        &self.0.messages
-    }
-
-    fn tool_calls_arc(&self) -> &Arc<Vec<crate::ToolCallRecord>> {
-        &self.0.tool_calls
-    }
-
-    fn projected_rlm_globals_arc(&self) -> &Arc<serde_json::Map<String, serde_json::Value>> {
-        &self.0.projected_rlm_globals
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.0.meta.session_id
-    }
-
-    pub fn policy(&self) -> &SessionPolicy {
-        &self.0.meta.policy
-    }
-
-    pub fn session_graph(&self) -> &crate::SessionGraph {
-        self.graph_arc().as_ref()
-    }
-
-    pub fn messages(&self) -> &[crate::Message] {
-        self.messages_arc().as_slice()
-    }
-
-    pub fn tool_calls(&self) -> &[crate::ToolCallRecord] {
-        self.tool_calls_arc().as_slice()
-    }
-
-    pub fn projected_rlm_globals(&self) -> &serde_json::Map<String, serde_json::Value> {
-        self.projected_rlm_globals_arc().as_ref()
-    }
-
-    pub fn iteration(&self) -> usize {
-        self.0.meta.iteration
-    }
-
-    pub fn token_usage(&self) -> &crate::TokenUsage {
-        &self.0.meta.token_usage
-    }
-
-    pub fn last_prompt_usage(&self) -> Option<&crate::runtime::PromptUsage> {
-        self.0.meta.last_prompt_usage.as_ref()
-    }
-
-    pub fn to_owned_state(&self) -> SessionStateEnvelope {
-        self.0.meta.to_owned_state(self.session_graph().clone())
-    }
-}
-
-/// Context passed to a turn-context transform.
-#[derive(Clone)]
-pub struct TurnTransformContext {
-    pub session_id: String,
-    pub state: SessionReadView,
-    pub prompt_usage: Option<crate::runtime::PromptUsage>,
-    pub max_context_tokens: Option<usize>,
-    pub host: Arc<dyn SessionManager>,
-}
-
-/// Context passed to a history rewriter.
-#[derive(Clone)]
-pub struct RewriteContext {
-    pub session_id: String,
-    pub trigger: RewriteTrigger,
-    pub state: SessionReadView,
-    pub host: Arc<dyn SessionManager>,
-}
-
-#[derive(Debug, thiserror::Error, Clone)]
-pub enum HistoryError {
-    #[error("history pipeline error: {0}")]
-    Pipeline(String),
-    #[error("history session error: {0}")]
-    Session(String),
-}
-
-impl From<PluginError> for HistoryError {
-    fn from(value: PluginError) -> Self {
-        Self::Session(value.to_string())
-    }
-}
-
-/// Prepares the ephemeral turn context presented to the model.
-#[async_trait::async_trait]
-pub trait TurnContextTransform: Send + Sync {
-    fn id(&self) -> &'static str;
-    async fn transform(
-        &self,
-        ctx: &TurnTransformContext,
-        input: crate::session_model::context::PreparedContext,
-    ) -> Result<crate::session_model::context::PreparedContext, HistoryError>;
-}
-
-/// Performs a permanent transform on persisted history (compaction,
-/// overflow recovery, manual `/compact`, …).
-#[async_trait::async_trait]
-pub trait HistoryRewriter: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn accepts(&self, _trigger: &RewriteTrigger) -> bool {
-        true
-    }
-    async fn rewrite(
-        &self,
-        ctx: &RewriteContext,
-        input: HistoryState,
-    ) -> Result<HistoryState, HistoryError>;
-}
+mod history;
+pub use history::{
+    HistoryError, HistoryRewriteMetadata, HistoryRewriter, HistoryState, RewriteContext,
+    RewriteTrigger, SessionReadView, TurnContextTransform, TurnTransformContext,
+};
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum PluginError {
@@ -632,34 +174,6 @@ pub struct SessionCreateRequest {
 }
 
 /// Per-execution-mode configuration carried on a `SessionCreateRequest`.
-/// Each variant matches an `ExecutionMode` value and carries the
-/// settings only that mode cares about. Adding a new mode means adding
-/// a new variant with its own struct — no mode-specific fields ever
-/// leak into the base request.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum ModeExtras {
-    Standard(StandardCreateExtras),
-    Rlm(RlmCreateExtras),
-}
-
-impl Default for ModeExtras {
-    fn default() -> Self {
-        Self::Standard(StandardCreateExtras::default())
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct StandardCreateExtras {}
-
-/// RLM-mode session config. Carries the choice of how the model
-/// terminates the session (prose vs `submit`-with-optional-schema).
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct RlmCreateExtras {
-    #[serde(default)]
-    pub termination: RlmTermination,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionAppendNode {
@@ -1085,7 +599,6 @@ pub enum AppendSessionNodesResult {
 pub struct PromptHookContext {
     pub session_id: String,
     pub host: Arc<dyn SessionManager>,
-    pub prompt: crate::PromptContext,
     pub state: SessionReadView,
     pub rlm_termination: RlmTermination,
 }
@@ -1287,73 +800,12 @@ pub struct AssistantResponseTransform {
     pub events: Vec<PluginSurfaceEvent>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PluginSessionSnapshot {
-    #[serde(default)]
-    pub plugins: BTreeMap<String, PluginSnapshotEntry>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PluginSnapshotEntry {
-    pub meta: PluginSnapshotMeta,
-    #[serde(default)]
-    pub artifacts: Vec<PluginSnapshotArtifact>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PluginSnapshotMeta {
-    pub plugin_id: String,
-    pub plugin_version: String,
-    #[serde(default)]
-    pub revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PluginSnapshotArtifact {
-    pub name: String,
-    pub data: Vec<u8>,
-}
-
-pub trait SnapshotWriter {
-    fn write_blob(&mut self, name: String, data: Vec<u8>);
-}
-
-pub trait SnapshotReader {
-    fn read_blob(&self, name: &str) -> Option<&[u8]>;
-}
-
-#[derive(Default)]
-struct InMemorySnapshotWriter {
-    artifacts: Vec<PluginSnapshotArtifact>,
-}
-
-impl InMemorySnapshotWriter {
-    fn finish(self) -> Vec<PluginSnapshotArtifact> {
-        self.artifacts
-    }
-}
-
-impl SnapshotWriter for InMemorySnapshotWriter {
-    fn write_blob(&mut self, name: String, data: Vec<u8>) {
-        self.artifacts.push(PluginSnapshotArtifact { name, data });
-    }
-}
-
-struct InMemorySnapshotReader<'a> {
-    entry: &'a PluginSnapshotEntry,
-}
-
-impl SnapshotReader for InMemorySnapshotReader<'_> {
-    fn read_blob(&self, name: &str) -> Option<&[u8]> {
-        self.entry
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.name == name)
-            .map(|artifact| artifact.data.as_slice())
-    }
-}
+mod snapshot;
+pub(crate) use snapshot::{InMemorySnapshotReader, InMemorySnapshotWriter};
+pub use snapshot::{
+    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
+    SnapshotReader, SnapshotWriter,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1390,356 +842,44 @@ pub struct ExternalInvokeContext {
 }
 
 #[derive(Clone)]
-struct RegisteredExternalOp {
-    def: ExternalOpDef,
-    handler: ExternalInvokeHandler,
+pub(crate) struct RegisteredExternalOp {
+    pub(crate) def: ExternalOpDef,
+    pub(crate) handler: ExternalInvokeHandler,
 }
 
-#[derive(Clone, Default)]
-pub struct PluginSpec {
-    pub tool_providers: Vec<Arc<dyn ToolProvider>>,
-    pub prompt_contributors: Vec<PromptContributor>,
-    pub prompt_request_hooks: Vec<PromptRequestHook>,
-    pub tool_surface_contributors: Vec<ToolSurfaceContributor>,
-    pub before_turn_hooks: Vec<BeforeTurnHook>,
-    pub before_tool_call_hooks: Vec<BeforeToolCallHook>,
-    pub after_tool_call_hooks: Vec<AfterToolCallHook>,
-    pub after_turn_hooks: Vec<AfterTurnHook>,
-    pub checkpoint_hooks: Vec<CheckpointHook>,
-    pub assistant_stream_hooks: Vec<AssistantStreamHook>,
-    pub assistant_response_hooks: Vec<AssistantResponseHook>,
-    pub tool_result_projectors: BTreeMap<ToolResultProjectionHook, ToolResultProjector>,
-    pub runtime_event_hooks: Vec<PluginRuntimeEventHook>,
-    pub session_config_mutators: Vec<SessionConfigMutator>,
-    pub external_ops: Vec<(ExternalOpDef, ExternalInvokeHandler)>,
-    pub commands: Vec<(CommandDef, CommandHandler)>,
-    pub turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
-    pub history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
-}
+mod registry;
+pub use registry::{
+    PluginFactory, PluginSessionContext, PluginSpec, PluginSpecBuilder, PluginSpecFactory,
+    SessionPlugin, SessionReadyContext, StaticPluginFactory,
+};
 
-impl PluginSpec {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_tool_provider(mut self, provider: Arc<dyn ToolProvider>) -> Self {
-        self.tool_providers.push(provider);
-        self
-    }
-
-    pub fn with_prompt_contributor(mut self, contributor: PromptContributor) -> Self {
-        self.prompt_contributors.push(contributor);
-        self
-    }
-
-    pub fn with_prompt_request(mut self, hook: PromptRequestHook) -> Self {
-        self.prompt_request_hooks.push(hook);
-        self
-    }
-
-    pub fn with_tool_surface_contributor(mut self, contributor: ToolSurfaceContributor) -> Self {
-        self.tool_surface_contributors.push(contributor);
-        self
-    }
-
-    pub fn with_before_turn(mut self, hook: BeforeTurnHook) -> Self {
-        self.before_turn_hooks.push(hook);
-        self
-    }
-
-    pub fn with_before_tool_call(mut self, hook: BeforeToolCallHook) -> Self {
-        self.before_tool_call_hooks.push(hook);
-        self
-    }
-
-    pub fn with_after_tool_call(mut self, hook: AfterToolCallHook) -> Self {
-        self.after_tool_call_hooks.push(hook);
-        self
-    }
-
-    pub fn with_after_turn(mut self, hook: AfterTurnHook) -> Self {
-        self.after_turn_hooks.push(hook);
-        self
-    }
-
-    pub fn with_checkpoint(mut self, hook: CheckpointHook) -> Self {
-        self.checkpoint_hooks.push(hook);
-        self
-    }
-
-    pub fn with_assistant_stream(mut self, hook: AssistantStreamHook) -> Self {
-        self.assistant_stream_hooks.push(hook);
-        self
-    }
-
-    pub fn with_assistant_response(mut self, hook: AssistantResponseHook) -> Self {
-        self.assistant_response_hooks.push(hook);
-        self
-    }
-
-    pub fn with_tool_result_projector(
-        mut self,
-        hook: ToolResultProjectionHook,
-        projector: ToolResultProjector,
-    ) -> Self {
-        self.tool_result_projectors.insert(hook, projector);
-        self
-    }
-
-    pub fn with_runtime_event(mut self, hook: PluginRuntimeEventHook) -> Self {
-        self.runtime_event_hooks.push(hook);
-        self
-    }
-
-    pub fn with_session_config_mutator(mut self, hook: SessionConfigMutator) -> Self {
-        self.session_config_mutators.push(hook);
-        self
-    }
-
-    pub fn with_external_op(mut self, def: ExternalOpDef, handler: ExternalInvokeHandler) -> Self {
-        self.external_ops.push((def, handler));
-        self
-    }
-
-    pub fn with_command(mut self, def: CommandDef, handler: CommandHandler) -> Self {
-        self.commands.push((def, handler));
-        self
-    }
-
-    pub fn with_turn_context_transform(
-        mut self,
-        priority: i32,
-        transform: Arc<dyn TurnContextTransform>,
-    ) -> Self {
-        self.turn_context_transforms.push((priority, transform));
-        self
-    }
-
-    pub fn with_history_rewriter(
-        mut self,
-        priority: i32,
-        rewriter: Arc<dyn HistoryRewriter>,
-    ) -> Self {
-        self.history_rewriters.push((priority, rewriter));
-        self
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct PluginSessionContext {
-    pub session_id: String,
-    pub execution_mode: ExecutionMode,
-    pub context_approach: crate::ContextApproach,
-    /// Session id of the caller that created this one. `None` identifies
-    /// a root session; any subagent / compaction / forked-child session
-    /// carries the parent here so plugin factories can gate themselves
-    /// on root-only behavior (e.g. `update_plan`'s sticky plan dock).
-    pub parent_session_id: Option<String>,
-}
-
-impl PluginSessionContext {
-    /// Returns `true` when this context represents a root session, not a
-    /// subagent or internal child. Plugins that should only surface in
-    /// user-facing top-level turns check this in their `build`.
-    pub fn is_root_session(&self) -> bool {
-        self.parent_session_id.is_none()
-    }
-}
-
-#[derive(Clone)]
-pub struct SessionReadyContext {
-    pub session_id: String,
-    pub execution_mode: ExecutionMode,
-    pub context_approach: crate::ContextApproach,
-    pub host: PluginHost,
-}
-
-pub trait SessionPlugin: Send + Sync {
-    fn id(&self) -> &'static str;
-
-    fn version(&self) -> &'static str {
-        "1"
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError>;
-
-    fn snapshot(
-        &self,
-        _writer: &mut dyn SnapshotWriter,
-    ) -> Result<PluginSnapshotMeta, PluginError> {
-        Ok(PluginSnapshotMeta {
-            plugin_id: self.id().to_string(),
-            plugin_version: self.version().to_string(),
-            revision: self.snapshot_revision(),
-            state: None,
-        })
-    }
-
-    fn snapshot_revision(&self) -> u64 {
-        0
-    }
-
-    fn restore(
-        &self,
-        _meta: &PluginSnapshotMeta,
-        _reader: &dyn SnapshotReader,
-    ) -> Result<(), PluginError> {
-        Ok(())
-    }
-
-    fn session_ready(&self, _ctx: SessionReadyContext) -> Result<(), PluginError> {
-        Ok(())
-    }
-}
-
-pub trait PluginFactory: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn supported_context_approaches(&self) -> &'static [ContextApproachKind] {
-        &[]
-    }
-    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError>;
-}
-
-pub type PluginSpecBuilder =
-    Arc<dyn Fn(&PluginSessionContext) -> Result<PluginSpec, PluginError> + Send + Sync>;
-
-pub struct PluginSpecFactory {
-    id: &'static str,
-    builder: PluginSpecBuilder,
-}
-
-impl PluginSpecFactory {
-    pub fn new(id: &'static str, builder: PluginSpecBuilder) -> Self {
-        Self { id, builder }
-    }
-}
-
-pub struct StaticPluginFactory {
-    id: &'static str,
-    spec: PluginSpec,
-}
-
-impl StaticPluginFactory {
-    pub fn new(id: &'static str, spec: PluginSpec) -> Self {
-        Self { id, spec }
-    }
-}
-
-struct SpecPlugin {
-    id: &'static str,
-    spec: PluginSpec,
-}
-
-impl PluginFactory for PluginSpecFactory {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-
-    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(SpecPlugin {
-            id: self.id,
-            spec: (self.builder)(ctx)?,
-        }))
-    }
-}
-
-impl PluginFactory for StaticPluginFactory {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(SpecPlugin {
-            id: self.id,
-            spec: self.spec.clone(),
-        }))
-    }
-}
-
-impl SessionPlugin for SpecPlugin {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        for provider in &self.spec.tool_providers {
-            reg.tools().provider(Arc::clone(provider))?;
-        }
-        for contributor in &self.spec.prompt_contributors {
-            reg.prompt().contribute(Arc::clone(contributor));
-        }
-        for hook in &self.spec.prompt_request_hooks {
-            reg.prompt().on_request(Arc::clone(hook));
-        }
-        for contributor in &self.spec.tool_surface_contributors {
-            reg.surface().contribute(Arc::clone(contributor));
-        }
-        for hook in &self.spec.before_turn_hooks {
-            reg.turn().before(Arc::clone(hook));
-        }
-        for hook in &self.spec.before_tool_call_hooks {
-            reg.tool_calls().before(Arc::clone(hook));
-        }
-        for hook in &self.spec.after_tool_call_hooks {
-            reg.tool_calls().after(Arc::clone(hook));
-        }
-        for hook in &self.spec.after_turn_hooks {
-            reg.turn().after(Arc::clone(hook));
-        }
-        for hook in &self.spec.checkpoint_hooks {
-            reg.turn().checkpoint(Arc::clone(hook));
-        }
-        for hook in &self.spec.assistant_stream_hooks {
-            reg.output().stream(Arc::clone(hook));
-        }
-        for hook in &self.spec.assistant_response_hooks {
-            reg.output().response(Arc::clone(hook));
-        }
-        for (hook, projector) in &self.spec.tool_result_projectors {
-            reg.tool_results().projector(*hook, Arc::clone(projector))?;
-        }
-        for hook in &self.spec.runtime_event_hooks {
-            reg.session().on_event(Arc::clone(hook));
-        }
-        for hook in &self.spec.session_config_mutators {
-            reg.session().config_mutator(Arc::clone(hook));
-        }
-        for (def, handler) in &self.spec.external_ops {
-            reg.external().op(def.clone(), Arc::clone(handler))?;
-        }
-        for (def, handler) in &self.spec.commands {
-            reg.commands().register(def.clone(), Arc::clone(handler))?;
-        }
-        for (priority, transform) in &self.spec.turn_context_transforms {
-            reg.history().prepare_turn(*priority, Arc::clone(transform));
-        }
-        for (priority, rewriter) in &self.spec.history_rewriters {
-            reg.history().rewrite(*priority, Arc::clone(rewriter));
-        }
-        Ok(())
-    }
-}
+mod registrar;
 mod runtime_impl;
+mod services;
+mod session_obj;
 mod tool_result_projection_builtin;
 
-#[path = "plugin_builtin/monitor.rs"]
+#[path = "../plugin_builtin/monitor.rs"]
 mod monitor;
-#[path = "plugin_builtin/observational_memory.rs"]
+#[path = "../plugin_builtin/observational_memory.rs"]
 mod observational_memory;
-#[path = "plugin_builtin/rolling_history.rs"]
+#[path = "../plugin_builtin/rolling_history.rs"]
 mod rolling_history;
 
-pub use monitor::MonitorPluginFactory as BuiltinMonitorPluginFactory;
 pub use observational_memory::ObservationalMemoryPluginFactory;
 pub use rolling_history::RollingHistoryPluginFactory;
 
-pub use runtime_impl::{
-    CommandRegistrations, ExternalInvokeError, ExternalRegistrations, HistoryRegistrations,
-    MonitorRegistrations, OutputRegistrations, PersistentRuntimeServices, PluginHost,
-    PluginRegistrar, PluginSession, PromptRegistrations, RuntimeServices, SessionRegistrations,
-    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
-    TurnRegistrations,
+pub use registrar::{
+    CommandRegistrations, ExternalRegistrations, HistoryRegistrations, ModeRegistrations,
+    MonitorRegistrations, OutputRegistrations, PluginRegistrar, PromptRegistrations,
+    SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations,
+    ToolResultRegistrations, TurnRegistrations,
 };
+pub(crate) use registrar::{RegisteredCommand, RegisteredExclusiveHook, RegisteredHook};
+pub use runtime_impl::PluginHost;
+pub(crate) use services::NoopSessionManager;
+pub use services::{ExternalInvokeError, PersistentRuntimeServices, RuntimeServices};
+pub use session_obj::PluginSession;
 pub use tool_result_projection_builtin::{
     BuiltinToolResultProjectionPluginFactory, ToolResultProjectionMode,
     ToolResultProjectionPluginConfig,
@@ -1762,7 +902,7 @@ pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
 }
 
 #[cfg(feature = "sqlite-store")]
-#[path = "plugin_builtin.rs"]
+#[path = "../plugin_builtin.rs"]
 mod builtin;
 
 #[cfg(feature = "sqlite-store")]
@@ -1885,7 +1025,6 @@ mod tests {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
-                prompt: crate::PromptContext::default(),
                 state: SessionReadView::new(SessionStateEnvelope::default()),
                 rlm_termination: RlmTermination::default(),
             })

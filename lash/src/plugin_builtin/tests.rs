@@ -217,7 +217,6 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
         .collect_prompt_contributions(PromptHookContext {
             session_id: "root".to_string(),
             host: Arc::new(mock_session_manager("run-session")),
-            prompt: crate::PromptContext::default(),
             state: SessionReadView::new(SessionStateEnvelope::default()),
             rlm_termination: crate::RlmTermination::default(),
         })

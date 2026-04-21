@@ -388,7 +388,7 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
         };
         let mut out: Vec<ManagedTaskStatus> =
             tasks.values().map(|record| record.status.clone()).collect();
-        out.sort_by(|left, right| left.started_at.cmp(&right.started_at));
+        out.sort_by_key(|left| left.started_at);
         out
     }
 

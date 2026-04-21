@@ -604,7 +604,7 @@ fn batch_child_args(batch_args: &serde_json::Value, index: usize) -> serde_json:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::runtime_impl::NoopSessionManager;
+    use crate::plugin::services::NoopSessionManager;
     use serde_json::json;
 
     #[test]

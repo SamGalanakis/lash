@@ -509,8 +509,8 @@ async fn spawn_child(
     let result_path = instance_dir.join("result.json");
     let raw = fs::read_to_string(&result_path)
         .with_context(|| format!("read {}", result_path.display()))?;
-    let result: InstanceResult = serde_json::from_str(&raw)
-        .with_context(|| format!("parse {}", result_path.display()))?;
+    let result: InstanceResult =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", result_path.display()))?;
     Ok(result)
 }
 
