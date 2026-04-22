@@ -957,7 +957,7 @@ impl GoogleOAuthProvider {
                 let prev_len = deltas.len();
                 let prev_usage = usage.clone();
                 Self::process_sse_event(
-                    &raw,
+                    raw,
                     &mut full,
                     &mut deltas,
                     &mut usage,

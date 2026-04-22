@@ -385,7 +385,7 @@ pub enum DisplayBlock {
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct UiResumeState {
+pub struct UiProjectionState {
     #[serde(default)]
     pub last_response_usage: TokenUsage,
     #[serde(default)]
@@ -400,7 +400,7 @@ pub struct UiResumeState {
     pub live_reasoning_text: Option<String>,
 }
 
-impl UiResumeState {
+impl UiProjectionState {
     pub fn from_app(app: &App) -> Self {
         Self {
             last_response_usage: app.last_response_usage.clone(),
@@ -558,18 +558,18 @@ pub struct App {
 }
 
 impl App {
-    pub fn ui_resume_state(&self) -> UiResumeState {
-        UiResumeState::from_app(self)
+    pub fn ui_projection_state(&self) -> UiProjectionState {
+        UiProjectionState::from_app(self)
     }
 
-    pub fn finish_turn_for_resume_with_output(
+    pub fn finish_turn_for_projection_with_output(
         &mut self,
         final_assistant_text: Option<&str>,
-    ) -> UiResumeState {
+    ) -> UiProjectionState {
         if let Some(text) = final_assistant_text {
             self.commit_final_assistant_text(text);
         }
-        let persisted = UiResumeState::from_app(self);
+        let persisted = UiProjectionState::from_app(self);
         self.stop_turn();
         persisted
     }

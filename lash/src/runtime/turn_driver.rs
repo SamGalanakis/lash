@@ -17,8 +17,8 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) policy: SessionPolicy,
     pub(super) host: RuntimeHost,
     pub(super) session_id: String,
-    pub(super) base_graph: Arc<crate::SessionGraph>,
-    pub(super) tool_calls: Arc<Vec<ToolCallRecord>>,
+    pub(super) progress_graph: TurnGraphOverlay,
+    pub(super) progress_state: PersistedSessionState,
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     pub(super) session_manager: Arc<dyn SessionManager>,
     pub(super) prompt_bridge: HostPromptBridge,
@@ -27,6 +27,59 @@ pub(super) struct RuntimeTurnDriver {
 }
 
 impl RuntimeTurnDriver {
+    async fn persist_progress_boundary(
+        &mut self,
+        messages: crate::MessageSequence,
+        iteration: usize,
+    ) {
+        if !crate::messages_are_prompt_resume_safe(messages.iter()) {
+            return;
+        }
+        let Some(store) = self.session.history_store() else {
+            return;
+        };
+
+        self.progress_state.policy = self.policy.clone();
+        self.progress_state.iteration = iteration;
+        if let Some(appended_messages) = self
+            .progress_graph
+            .message_delta_if_current_preserved(messages.iter())
+        {
+            self.progress_graph
+                .append_projected_messages(&appended_messages);
+        } else {
+            let projected_messages = messages.shared();
+            let tool_calls = self.progress_graph.tool_calls_arc();
+            self.progress_graph
+                .replace_projection(projected_messages.as_slice(), tool_calls.as_slice());
+        }
+
+        if let Ok(snapshot) = self.session.snapshot_execution_state().await {
+            self.progress_state.set_execution_state_snapshot(snapshot);
+        }
+        let plugins = self.session.plugins();
+        self.progress_state
+            .refresh_plugin_snapshots(plugins.as_ref());
+
+        let graph = self.progress_graph.graph_commit(
+            self.progress_state.persisted_graph_node_count,
+            self.progress_state.graph_replace_required,
+        );
+        let commit = crate::store::PersistedStateCommit::persisted_state_with_graph_commit(
+            &self.progress_state,
+            graph,
+            &[],
+        );
+        let result = match store.apply_runtime_commit(commit).await {
+            Ok(result) => result,
+            Err(err) => {
+                tracing::warn!("failed to persist runtime progress boundary: {err}");
+                return;
+            }
+        };
+        self.progress_state.apply_persisted_commit_result(result);
+    }
+
     fn mark_phase_begin(&self, phase: RuntimeTurnPhase) {
         if let Some(probe) = self.turn_phase_probe.as_ref() {
             probe.begin(phase);
@@ -65,6 +118,10 @@ impl RuntimeTurnDriver {
                 };
                 match effect {
                     Effect::Emit(event) => emit!(event),
+                    Effect::Progress {
+                        messages,
+                        iteration,
+                    } => self.persist_progress_boundary(messages, iteration).await,
                     Effect::Done {
                         messages,
                         iteration,
@@ -116,16 +173,15 @@ impl RuntimeTurnDriver {
                     }
                     Effect::ToolCalls { id, calls } => {
                         let results = self.run_tool_calls(calls, &event_tx, &cancel).await;
-                        Arc::make_mut(&mut self.tool_calls).extend(results.iter().map(|outcome| {
-                            ToolCallRecord {
+                        self.progress_graph
+                            .record_tool_calls(results.iter().map(|outcome| ToolCallRecord {
                                 call_id: Some(outcome.call_id.clone()),
                                 tool: outcome.tool_name.clone(),
                                 args: outcome.args.clone(),
                                 result: outcome.state_result.result.clone(),
                                 success: outcome.state_result.success,
                                 duration_ms: outcome.duration_ms,
-                            }
-                        }));
+                            }));
                         machine.handle_response(Response::ToolResults { id, results });
                     }
                     Effect::Sleep { id, duration } => {
@@ -181,7 +237,6 @@ impl RuntimeTurnDriver {
             }
         };
         self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
-        let tool_surface = self.session.tool_surface(&self.session_id, execution_mode);
         let mode_preamble = self.session.mode_preamble(&self.session_id, execution_mode);
         let prompt_state = SessionStateEnvelope {
             session_id: self.session_id.clone(),
@@ -197,9 +252,9 @@ impl RuntimeTurnDriver {
                 host: Arc::clone(&self.session_manager),
                 state: crate::SessionReadView::from_graph_message_sequence(
                     &prompt_state,
-                    Arc::clone(&self.base_graph),
+                    self.progress_graph.base_graph(),
                     messages.clone(),
-                    Arc::clone(&self.tool_calls),
+                    self.progress_graph.tool_calls_arc(),
                 ),
                 rlm_termination: self.rlm_termination.clone(),
             })
@@ -227,7 +282,6 @@ impl RuntimeTurnDriver {
             messages,
             run_offset,
             mode_preamble,
-            tool_surface,
             prompt_template: self.host.core.prompt_template.clone(),
             prompt_contributions: all_prompt_contributions,
             max_turns: session_policy.max_turns,
@@ -270,7 +324,7 @@ impl RuntimeTurnDriver {
 
     fn checkpoint_state_view(
         &self,
-        messages: Arc<Vec<Message>>,
+        messages: crate::MessageSequence,
         iteration: usize,
     ) -> crate::SessionReadView {
         let state = SessionStateEnvelope {
@@ -281,11 +335,11 @@ impl RuntimeTurnDriver {
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
         };
-        crate::SessionReadView::from_graph_projection_arc(
+        crate::SessionReadView::from_graph_message_sequence(
             &state,
-            Arc::clone(&self.base_graph),
+            self.progress_graph.base_graph(),
             messages,
-            Arc::clone(&self.tool_calls),
+            self.progress_graph.tool_calls_arc(),
         )
     }
 }

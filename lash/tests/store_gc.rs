@@ -2,8 +2,8 @@
 
 use lash::{
     BlobArtifactDescriptor, ContextApproach, DynamicStateSnapshot, ExecutionMode,
-    HydratedSessionCheckpoint, PersistedSessionConfig, PersistedSessionState, PersistedTurnState,
-    PluginSessionSnapshot, RuntimeCommit, SessionGraph, SessionHead, Store, TokenUsage,
+    HydratedSessionCheckpoint, PersistedSessionConfig, PersistedSessionState, PersistedStateCommit,
+    PersistedTurnState, PluginSessionSnapshot, SessionGraph, SessionHead, Store, TokenUsage,
 };
 
 #[test]
@@ -26,6 +26,8 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
         plugin_snapshot: Some(PluginSessionSnapshot {
             plugins: Default::default(),
         }),
+        execution_state_ref: None,
+        execution_state: None,
     });
     store.save_session_head(SessionHead {
         session_id: "root".to_string(),
@@ -65,7 +67,7 @@ fn runtime_commit_rejects_different_session_id_on_single_session_store() {
         session_id: "alpha".to_string(),
         ..PersistedSessionState::default()
     };
-    let first = store.apply_runtime_commit(RuntimeCommit::persisted_state(&alpha, &[]));
+    let first = store.apply_runtime_commit(PersistedStateCommit::persisted_state(&alpha, &[]));
     assert!(first.is_ok());
 
     let beta = PersistedSessionState {
@@ -73,7 +75,7 @@ fn runtime_commit_rejects_different_session_id_on_single_session_store() {
         ..PersistedSessionState::default()
     };
     let err = store
-        .apply_runtime_commit(RuntimeCommit::persisted_state(&beta, &[]))
+        .apply_runtime_commit(PersistedStateCommit::persisted_state(&beta, &[]))
         .expect_err("mismatched session commit should fail");
     assert!(err.to_string().contains("bound to session `alpha`"));
 }

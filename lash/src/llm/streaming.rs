@@ -18,7 +18,7 @@ impl SseBuffer {
 
     fn push_chunk<F>(&mut self, chunk: &[u8], mut on_event: F) -> Result<(), LlmTransportError>
     where
-        F: FnMut(String) -> Result<(), LlmTransportError>,
+        F: FnMut(&str) -> Result<(), LlmTransportError>,
     {
         self.pending.push_str(&String::from_utf8_lossy(chunk));
         while let Some(pos) = self.pending.find('\n') {
@@ -52,7 +52,7 @@ impl SseBuffer {
 
     fn finish<F>(&mut self, mut on_event: F) -> Result<(), LlmTransportError>
     where
-        F: FnMut(String) -> Result<(), LlmTransportError>,
+        F: FnMut(&str) -> Result<(), LlmTransportError>,
     {
         {
             let pending = self.pending.trim();
@@ -72,13 +72,14 @@ impl SseBuffer {
 
     fn flush_event<F>(&mut self, on_event: &mut F) -> Result<(), LlmTransportError>
     where
-        F: FnMut(String) -> Result<(), LlmTransportError>,
+        F: FnMut(&str) -> Result<(), LlmTransportError>,
     {
         if self.event_data.is_empty() {
             return Ok(());
         }
-        let raw = std::mem::take(&mut self.event_data);
-        on_event(raw)
+        let result = on_event(self.event_data.as_str());
+        self.event_data.clear();
+        result
     }
 }
 
@@ -89,7 +90,7 @@ pub async fn drive_sse_response<F>(
     mut on_event: F,
 ) -> Result<(), LlmTransportError>
 where
-    F: FnMut(String) -> Result<(), LlmTransportError>,
+    F: FnMut(&str) -> Result<(), LlmTransportError>,
 {
     let mut buffer = SseBuffer::new();
     loop {

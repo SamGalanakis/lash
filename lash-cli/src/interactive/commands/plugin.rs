@@ -39,7 +39,7 @@ pub(super) async fn handle_plugin(
                 app.blocks = projected_blocks_from_state(
                     &projected_messages,
                     &projected_tool_calls,
-                    &app.ui_resume_state(),
+                    &app.ui_projection_state(),
                 );
                 app.invalidate_height_cache();
                 app.scroll_to_bottom();

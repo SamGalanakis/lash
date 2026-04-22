@@ -100,6 +100,15 @@ pub enum Effect {
     Log { event: LogEvent },
     /// Fire-and-forget event (no response needed).
     Emit(SessionEvent),
+    /// Prompt-history progress that may be durably persisted by the host.
+    ///
+    /// This is separate from [`SessionEvent`]: UI stream events can be partial,
+    /// duplicated, or display-only, while `Progress` is emitted only after the
+    /// state machine has applied semantic message/iteration changes.
+    Progress {
+        messages: MessageSequence,
+        iteration: usize,
+    },
     /// Turn is done.
     Done {
         messages: MessageSequence,
@@ -422,8 +431,8 @@ impl TurnMachine {
         self.messages.shared()
     }
 
-    pub fn materialized_messages(&self) -> Arc<Vec<Message>> {
-        self.messages.shared()
+    pub fn message_sequence(&self) -> MessageSequence {
+        self.messages.clone()
     }
 
     pub fn iteration(&self) -> usize {
@@ -448,6 +457,13 @@ impl TurnMachine {
 
     fn emit(&mut self, event: SessionEvent) {
         self.pending_effects.push_back(Effect::Emit(event));
+    }
+
+    fn emit_progress(&mut self) {
+        self.pending_effects.push_back(Effect::Progress {
+            messages: self.messages.clone(),
+            iteration: self.iteration,
+        });
     }
 
     pub fn fail_turn(&mut self, event: SessionEvent) {
@@ -561,12 +577,14 @@ impl TurnMachine {
     }
 
     pub fn apply_actions(&mut self, actions: Vec<DriverAction>) {
+        let mut progress_dirty = false;
         for action in actions {
             match action {
                 DriverAction::Emit(event) => self.emit(event),
                 DriverAction::AppendMessages(messages) => {
                     if !messages.is_empty() {
                         self.messages.extend(messages);
+                        progress_dirty = true;
                     }
                 }
                 DriverAction::StartLlm {
@@ -581,7 +599,10 @@ impl TurnMachine {
                     checkpoint,
                     on_empty,
                 } => self.request_checkpoint(checkpoint, on_empty),
-                DriverAction::AdvanceIteration => self.iteration += 1,
+                DriverAction::AdvanceIteration => {
+                    self.iteration += 1;
+                    progress_dirty = true;
+                }
                 DriverAction::ScheduleTurnLimitFinal => {
                     self.termination.maybe_schedule_turn_limit_final(
                         self.iteration,
@@ -589,12 +610,20 @@ impl TurnMachine {
                         self.config.max_turns,
                         self.messages.make_mut(),
                     );
+                    progress_dirty = true;
                 }
                 DriverAction::Finish => {
+                    if progress_dirty {
+                        self.emit_progress();
+                        progress_dirty = false;
+                    }
                     self.finish();
                     break;
                 }
             }
+        }
+        if progress_dirty {
+            self.emit_progress();
         }
     }
 
@@ -755,6 +784,7 @@ impl TurnMachine {
             if matches!(checkpoint, CheckpointKind::BeforeCompletion) {
                 self.iteration += 1;
                 if self.termination.should_force_exit_after_grace_turn() {
+                    self.emit_progress();
                     self.finish();
                     return;
                 }
@@ -766,6 +796,7 @@ impl TurnMachine {
                 );
             }
             self.state = MachineState::PrepareIteration;
+            self.emit_progress();
             return;
         }
 

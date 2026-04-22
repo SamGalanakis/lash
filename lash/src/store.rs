@@ -35,7 +35,7 @@ pub enum StoreError {
     InconsistentSessionBindings { session_ids: Vec<String> },
 }
 
-/// SQLite-backed store for checkpoint blobs, live resume state, and the canonical session head.
+/// SQLite-backed store for checkpoint blobs and the canonical session head.
 #[cfg(feature = "sqlite-store")]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -51,17 +51,6 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS blobs (
     hash    TEXT PRIMARY KEY,
     content BLOB NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS live_resume (
-    singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
-    session_id     TEXT NOT NULL DEFAULT 'root',
-    snapshot_json  TEXT NOT NULL DEFAULT '{}'
-);
-
-CREATE TABLE IF NOT EXISTS ui_resume_state (
-    singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
-    state_json     TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS session_head (
@@ -99,7 +88,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
 ";
 
 #[cfg(feature = "sqlite-store")]
-const SCHEMA_VERSION: i32 = 13;
+const SCHEMA_VERSION: i32 = 14;
 
 #[cfg(feature = "sqlite-store")]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -178,7 +167,7 @@ pub enum PersistedArtifactKind {
     CheckpointManifest,
     DynamicStateSnapshot,
     PluginSessionSnapshot,
-    LiveResumeDelta,
+    ExecutionStateSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -230,9 +219,9 @@ impl BlobArtifactDescriptor {
         )
     }
 
-    pub fn live_resume_delta() -> Self {
+    pub fn execution_state_snapshot() -> Self {
         Self::new(
-            PersistedArtifactKind::LiveResumeDelta,
+            PersistedArtifactKind::ExecutionStateSnapshot,
             vec![BlobStorageHint::Compressible, BlobStorageHint::LargePayload],
         )
     }
@@ -299,6 +288,8 @@ pub struct SessionCheckpoint {
     pub plugin_snapshot_ref: Option<BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_snapshot_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_ref: Option<BlobRef>,
 }
 
 impl SessionCheckpoint {
@@ -316,6 +307,12 @@ impl SessionCheckpoint {
                 kind: PersistedArtifactKind::PluginSessionSnapshot,
             });
         }
+        if let Some(blob_ref) = &self.execution_state_ref {
+            refs.push(RetainedArtifactRef {
+                blob_ref: blob_ref.clone(),
+                kind: PersistedArtifactKind::ExecutionStateSnapshot,
+            });
+        }
         refs
     }
 }
@@ -328,41 +325,14 @@ pub struct HydratedSessionCheckpoint {
     pub plugin_snapshot_ref: Option<BlobRef>,
     pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
     pub plugin_snapshot_revision: Option<u64>,
+    pub execution_state_ref: Option<BlobRef>,
+    pub execution_state: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct StoredSessionCheckpoint {
     pub checkpoint_ref: BlobRef,
     pub manifest: SessionCheckpoint,
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct LiveResumeDelta {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub appended_graph_nodes: Vec<crate::SessionNodeRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leaf_node_id: Option<String>,
-    #[serde(default)]
-    pub turn_state: crate::PersistedTurnState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic_state: Option<crate::DynamicStateSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_state_snapshot: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub token_ledger: Vec<crate::TokenLedgerEntry>,
-}
-
-impl LiveResumeDelta {
-    pub fn apply_to_graph(&self, base: &crate::SessionGraph) -> crate::SessionGraph {
-        let mut graph = base.clone();
-        graph.extend_node_records(self.appended_graph_nodes.iter().cloned());
-        if self.leaf_node_id.is_some() {
-            graph.set_leaf_node_id(self.leaf_node_id.clone());
-        }
-        graph
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -454,38 +424,12 @@ pub struct PersistedStateCommit {
 }
 
 #[derive(Clone, Debug)]
-pub struct LiveResumeCommit {
-    pub session_id: String,
-    pub seed_graph: Option<crate::SessionGraph>,
-    pub live_graph: crate::SessionGraph,
-    pub config: crate::PersistedSessionConfig,
-    pub turn_state: crate::PersistedTurnState,
-    pub dynamic_state: Option<crate::DynamicStateSnapshot>,
-    pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
-    pub execution_state_snapshot: Option<Vec<u8>>,
-    pub token_ledger: Vec<crate::TokenLedgerEntry>,
-}
-
-#[derive(Clone, Debug)]
-pub enum RuntimeCommit {
-    PersistedState(PersistedStateCommit),
-    LiveResume(LiveResumeCommit),
-}
-
-#[derive(Clone, Debug)]
 pub struct PersistedStateCommitResult {
     pub checkpoint_ref: BlobRef,
     pub manifest: SessionCheckpoint,
     /// Total node count the store now holds after the commit. The runtime
     /// replaces its `persisted_graph_node_count` with this value.
     pub persisted_graph_node_count: usize,
-}
-
-#[derive(Clone, Debug)]
-pub enum RuntimeCommitResult {
-    PersistedState(PersistedStateCommitResult),
-    LiveResumeSaved,
-    LiveResumeSkipped,
 }
 
 fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::PersistedTurnState {
@@ -506,6 +450,8 @@ fn build_checkpoint_from_persisted_state(
         plugin_snapshot_ref: state.plugin_snapshot_ref.clone(),
         plugin_snapshot_revision: state.plugin_snapshot_revision,
         plugin_snapshot: state.plugin_snapshot.clone(),
+        execution_state_ref: state.execution_state_ref.clone(),
+        execution_state: state.execution_state_snapshot.clone(),
     }
 }
 
@@ -532,39 +478,32 @@ fn graph_commit_from_state(state: &crate::PersistedSessionState) -> SessionGraph
     }
 }
 
-impl RuntimeCommit {
+impl PersistedStateCommit {
     pub fn persisted_state(
         state: &crate::PersistedSessionState,
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Self {
-        Self::PersistedState(PersistedStateCommit {
+        Self {
             session_id: state.session_id.clone(),
             config: persisted_session_config_from_state(state),
             graph: graph_commit_from_state(state),
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
-        })
+        }
     }
 
-    pub fn live_resume(
-        seed_graph: Option<crate::SessionGraph>,
-        live_graph: crate::SessionGraph,
+    pub(crate) fn persisted_state_with_graph_commit(
         state: &crate::PersistedSessionState,
-    ) -> Option<Self> {
-        if !crate::messages_are_live_resume_safe(&live_graph.project_messages()) {
-            return None;
-        }
-        Some(Self::LiveResume(LiveResumeCommit {
+        graph: SessionGraphCommit,
+        usage_deltas: &[crate::TokenLedgerEntry],
+    ) -> Self {
+        Self {
             session_id: state.session_id.clone(),
-            seed_graph,
-            live_graph,
             config: persisted_session_config_from_state(state),
-            turn_state: build_persisted_turn_state(state),
-            dynamic_state: state.dynamic_state_snapshot.clone(),
-            plugin_snapshot: state.plugin_snapshot.clone(),
-            execution_state_snapshot: state.execution_state_snapshot.clone(),
-            token_ledger: state.token_ledger.clone(),
-        }))
+            graph,
+            checkpoint: build_checkpoint_from_persisted_state(state),
+            usage_deltas: usage_deltas.to_vec(),
+        }
     }
 }
 
@@ -585,6 +524,7 @@ fn persisted_session_state_from_head(
         plugin_snapshot_ref: None,
         plugin_snapshot_revision: None,
         plugin_snapshot: None,
+        execution_state_ref: None,
         execution_state_snapshot: None,
         token_ledger: head.token_ledger,
         checkpoint_ref: head.checkpoint_ref.clone(),
@@ -612,39 +552,10 @@ fn persisted_session_state_from_head(
         state.plugin_snapshot_ref = checkpoint.plugin_snapshot_ref.clone();
         state.plugin_snapshot_revision = checkpoint.plugin_snapshot_revision;
         state.plugin_snapshot = checkpoint.plugin_snapshot;
+        state.execution_state_ref = checkpoint.execution_state_ref.clone();
+        state.execution_state_snapshot = checkpoint.execution_state;
     }
     state
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct LiveResumeSnapshot {
-    #[serde(default = "default_root_session_id")]
-    pub session_id: String,
-    pub graph: crate::SessionGraph,
-    pub config: crate::PersistedSessionConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint_ref: Option<BlobRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delta_ref: Option<BlobRef>,
-}
-
-impl LiveResumeSnapshot {
-    pub fn retained_artifact_refs(&self) -> Vec<RetainedArtifactRef> {
-        let mut refs = Vec::new();
-        if let Some(blob_ref) = &self.checkpoint_ref {
-            refs.push(RetainedArtifactRef {
-                blob_ref: blob_ref.clone(),
-                kind: PersistedArtifactKind::CheckpointManifest,
-            });
-        }
-        if let Some(blob_ref) = &self.delta_ref {
-            refs.push(RetainedArtifactRef {
-                blob_ref: blob_ref.clone(),
-                kind: PersistedArtifactKind::LiveResumeDelta,
-            });
-        }
-        refs
-    }
 }
 
 impl Default for SessionHead {
@@ -672,28 +583,7 @@ impl Default for SessionHeadMeta {
     }
 }
 
-impl Default for LiveResumeSnapshot {
-    fn default() -> Self {
-        Self {
-            session_id: default_root_session_id(),
-            graph: crate::SessionGraph::default(),
-            config: crate::PersistedSessionConfig::default(),
-            checkpoint_ref: None,
-            delta_ref: None,
-        }
-    }
-}
-
-pub fn materialize_live_resume_graph(
-    snapshot: &LiveResumeSnapshot,
-    delta: Option<&LiveResumeDelta>,
-) -> crate::SessionGraph {
-    delta
-        .map(|delta| delta.apply_to_graph(&snapshot.graph))
-        .unwrap_or_else(|| snapshot.graph.clone())
-}
-
-/// Persistence backend for checkpoint blobs, committed session heads, and live resume snapshots.
+/// Persistence backend for checkpoint blobs and committed session heads.
 #[async_trait::async_trait]
 pub trait RuntimeStore: Send + Sync {
     #[doc(hidden)]
@@ -722,12 +612,6 @@ pub trait RuntimeStore: Send + Sync {
     async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]);
     #[doc(hidden)]
     async fn load_session_graph(&self) -> crate::SessionGraph;
-    #[doc(hidden)]
-    async fn save_live_resume(&self, snapshot: LiveResumeSnapshot);
-    #[doc(hidden)]
-    async fn load_live_resume(&self) -> Option<LiveResumeSnapshot>;
-    #[doc(hidden)]
-    async fn clear_live_resume(&self);
     async fn save_session_meta(&self, meta: SessionMeta);
     async fn load_session_meta(&self) -> Option<SessionMeta>;
     async fn gc_unreachable(&self) -> GcReport {
@@ -830,77 +714,35 @@ pub trait RuntimeStore: Send + Sync {
 
     async fn apply_runtime_commit(
         &self,
-        commit: RuntimeCommit,
-    ) -> Result<RuntimeCommitResult, StoreError> {
-        Ok(match commit {
-            RuntimeCommit::PersistedState(commit) => {
-                let stored_checkpoint = put_checkpoint(self, &commit.checkpoint).await;
-                if !commit.usage_deltas.is_empty() {
-                    self.append_usage_deltas(&commit.usage_deltas).await;
-                }
-                match &commit.graph {
-                    SessionGraphCommit::Replace(graph) => {
-                        self.replace_session_graph(graph).await;
-                    }
-                    SessionGraphCommit::Append { nodes, .. } if !nodes.is_empty() => {
-                        self.append_session_graph_nodes(nodes).await;
-                    }
-                    SessionGraphCommit::Append { .. } => {}
-                }
-                let graph_node_count = commit.graph.graph_node_count();
-                self.save_session_head_meta(SessionHeadMeta {
-                    session_id: commit.session_id,
-                    config: commit.config,
-                    checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
-                    leaf_node_id: commit.graph.leaf_node_id().cloned(),
-                    graph_node_count,
-                    token_ledger: Vec::new(),
-                })
-                .await;
-                self.clear_live_resume().await;
-                RuntimeCommitResult::PersistedState(PersistedStateCommitResult {
-                    checkpoint_ref: stored_checkpoint.checkpoint_ref,
-                    manifest: stored_checkpoint.manifest,
-                    persisted_graph_node_count: graph_node_count,
-                })
+        commit: PersistedStateCommit,
+    ) -> Result<PersistedStateCommitResult, StoreError> {
+        let stored_checkpoint = put_checkpoint(self, &commit.checkpoint).await;
+        if !commit.usage_deltas.is_empty() {
+            self.append_usage_deltas(&commit.usage_deltas).await;
+        }
+        match &commit.graph {
+            SessionGraphCommit::Replace(graph) => {
+                self.replace_session_graph(graph).await;
             }
-            RuntimeCommit::LiveResume(commit) => {
-                let base = if let Some(snapshot) = self.load_live_resume().await {
-                    Some((snapshot.graph, snapshot.checkpoint_ref))
-                } else {
-                    self.load_session_head()
-                        .await
-                        .map(|head| (head.graph, head.checkpoint_ref))
-                };
-                let (graph, checkpoint_ref) =
-                    base.unwrap_or_else(|| (commit.seed_graph.unwrap_or_default(), None));
-                if !crate::messages_are_live_resume_safe(&commit.live_graph.project_messages()) {
-                    return Ok(RuntimeCommitResult::LiveResumeSkipped);
-                }
-                let delta_ref = put_typed_artifact_blob(
-                    self,
-                    BlobArtifactDescriptor::live_resume_delta(),
-                    &crate::LiveResumeDelta {
-                        appended_graph_nodes: commit.live_graph.nodes[graph.nodes.len()..].to_vec(),
-                        leaf_node_id: commit.live_graph.leaf_node_id.clone(),
-                        turn_state: commit.turn_state,
-                        dynamic_state: commit.dynamic_state,
-                        plugin_snapshot: commit.plugin_snapshot,
-                        execution_state_snapshot: commit.execution_state_snapshot,
-                        token_ledger: commit.token_ledger,
-                    },
-                )
-                .await;
-                self.save_live_resume(crate::LiveResumeSnapshot {
-                    session_id: commit.session_id,
-                    graph,
-                    config: commit.config,
-                    checkpoint_ref,
-                    delta_ref: Some(delta_ref),
-                })
-                .await;
-                RuntimeCommitResult::LiveResumeSaved
+            SessionGraphCommit::Append { nodes, .. } if !nodes.is_empty() => {
+                self.append_session_graph_nodes(nodes).await;
             }
+            SessionGraphCommit::Append { .. } => {}
+        }
+        let graph_node_count = commit.graph.graph_node_count();
+        self.save_session_head_meta(SessionHeadMeta {
+            session_id: commit.session_id,
+            config: commit.config,
+            checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
+            leaf_node_id: commit.graph.leaf_node_id().cloned(),
+            graph_node_count,
+            token_ledger: Vec::new(),
+        })
+        .await;
+        Ok(PersistedStateCommitResult {
+            checkpoint_ref: stored_checkpoint.checkpoint_ref,
+            manifest: stored_checkpoint.manifest,
+            persisted_graph_node_count: graph_node_count,
         })
     }
 
@@ -924,7 +766,6 @@ pub trait RuntimeStore: Send + Sync {
 
     async fn save_turn_checkpoint(&self, head: SessionHead) {
         self.save_session_head(head).await;
-        self.clear_live_resume().await;
     }
 
     async fn head_copy_from_store(&self, source: &(dyn RuntimeStore + '_))
@@ -1063,11 +904,24 @@ fn put_checkpoint_tx(
             )
         })
         .or_else(|| checkpoint.plugin_snapshot_ref.clone());
+    let execution_state_ref = checkpoint
+        .execution_state
+        .as_ref()
+        .map(|snapshot| {
+            put_typed_artifact_blob_tx(
+                tx,
+                profile,
+                &BlobArtifactDescriptor::execution_state_snapshot(),
+                snapshot,
+            )
+        })
+        .or_else(|| checkpoint.execution_state_ref.clone());
     let manifest = SessionCheckpoint {
         turn_state: checkpoint.turn_state.clone(),
         dynamic_state_ref,
         plugin_snapshot_ref,
         plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+        execution_state_ref,
     };
     let checkpoint_ref = put_typed_artifact_blob_tx(
         tx,
@@ -1143,35 +997,6 @@ fn append_session_graph_nodes_tx(
 }
 
 #[cfg(feature = "sqlite-store")]
-fn save_live_resume_tx(tx: &rusqlite::Transaction<'_>, snapshot: LiveResumeSnapshot) {
-    let snapshot_json = encode_json(&snapshot);
-    tx.execute(
-        "INSERT OR REPLACE INTO live_resume (singleton, session_id, snapshot_json)
-         VALUES (1, ?1, ?2)",
-        params![snapshot.session_id, snapshot_json],
-    )
-    .expect("persist live resume");
-}
-
-#[cfg(feature = "sqlite-store")]
-fn clear_live_resume_tx(tx: &rusqlite::Transaction<'_>) {
-    tx.execute("DELETE FROM live_resume WHERE singleton = 1", [])
-        .expect("clear live resume");
-}
-
-#[cfg(feature = "sqlite-store")]
-fn load_live_resume_from_conn(conn: &Connection) -> Option<LiveResumeSnapshot> {
-    let snapshot_json: String = conn
-        .query_row(
-            "SELECT snapshot_json FROM live_resume WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .ok()?;
-    serde_json::from_str(&snapshot_json).ok()
-}
-
-#[cfg(feature = "sqlite-store")]
 fn load_session_head_meta_from_conn(conn: &Connection) -> Option<SessionHeadMeta> {
     let head_json: String = conn
         .query_row(
@@ -1214,22 +1039,9 @@ fn load_bound_session_id_from_head_conn(conn: &Connection) -> Option<String> {
 }
 
 #[cfg(feature = "sqlite-store")]
-fn load_bound_session_id_from_live_resume_conn(conn: &Connection) -> Option<String> {
-    conn.query_row(
-        "SELECT session_id FROM live_resume WHERE singleton = 1",
-        [],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
-#[cfg(feature = "sqlite-store")]
 fn bound_session_id_from_conn(conn: &Connection) -> Result<Option<String>, StoreError> {
     let mut session_ids = std::collections::BTreeSet::new();
     if let Some(session_id) = load_bound_session_id_from_head_conn(conn) {
-        session_ids.insert(session_id);
-    }
-    if let Some(session_id) = load_bound_session_id_from_live_resume_conn(conn) {
         session_ids.insert(session_id);
     }
     match session_ids.len() {
@@ -1348,11 +1160,23 @@ pub async fn put_checkpoint<S: RuntimeStore + ?Sized>(
         ),
         None => checkpoint.plugin_snapshot_ref.clone(),
     };
+    let execution_state_ref = match checkpoint.execution_state.as_ref() {
+        Some(snapshot) => Some(
+            put_typed_artifact_blob(
+                store,
+                BlobArtifactDescriptor::execution_state_snapshot(),
+                snapshot,
+            )
+            .await,
+        ),
+        None => checkpoint.execution_state_ref.clone(),
+    };
     let record = SessionCheckpoint {
         turn_state: checkpoint.turn_state.clone(),
         dynamic_state_ref,
         plugin_snapshot_ref,
         plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+        execution_state_ref,
     };
     let checkpoint_ref = put_typed_artifact_blob(
         store,
@@ -1392,6 +1216,10 @@ pub async fn get_checkpoint<S: RuntimeStore + ?Sized>(
         Some(blob_ref) => get_typed_blob(store, blob_ref).await,
         None => None,
     };
+    let execution_state = match record.execution_state_ref.as_ref() {
+        Some(blob_ref) => get_typed_blob(store, blob_ref).await,
+        None => None,
+    };
     Some(HydratedSessionCheckpoint {
         turn_state: record.turn_state,
         dynamic_state_ref: record.dynamic_state_ref,
@@ -1399,6 +1227,8 @@ pub async fn get_checkpoint<S: RuntimeStore + ?Sized>(
         plugin_snapshot_ref: record.plugin_snapshot_ref,
         plugin_snapshot,
         plugin_snapshot_revision: record.plugin_snapshot_revision,
+        execution_state_ref: record.execution_state_ref,
+        execution_state,
     })
 }
 
@@ -1414,6 +1244,7 @@ pub async fn copy_checkpoint_blobs_from_store<
     for blob_ref in [
         record.dynamic_state_ref.as_ref(),
         record.plugin_snapshot_ref.as_ref(),
+        record.execution_state_ref.as_ref(),
     ]
     .into_iter()
     .enumerate()
@@ -1426,6 +1257,7 @@ pub async fn copy_checkpoint_blobs_from_store<
             let descriptor = match index {
                 0 => BlobArtifactDescriptor::dynamic_state_snapshot(),
                 1 => BlobArtifactDescriptor::plugin_session_snapshot(),
+                2 => BlobArtifactDescriptor::execution_state_snapshot(),
                 _ => BlobArtifactDescriptor::new(PersistedArtifactKind::GenericBlob, Vec::new()),
             };
             let _ = target.put_artifact_blob(descriptor, &bytes).await;
@@ -1657,11 +1489,22 @@ impl Store {
                 )
             })
             .or_else(|| checkpoint.plugin_snapshot_ref.clone());
+        let execution_state_ref = checkpoint
+            .execution_state
+            .as_ref()
+            .map(|snapshot| {
+                self.put_typed_artifact_blob(
+                    BlobArtifactDescriptor::execution_state_snapshot(),
+                    snapshot,
+                )
+            })
+            .or_else(|| checkpoint.execution_state_ref.clone());
         let manifest = SessionCheckpoint {
             turn_state: checkpoint.turn_state.clone(),
             dynamic_state_ref,
             plugin_snapshot_ref,
             plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+            execution_state_ref,
         };
         let checkpoint_ref =
             self.put_typed_artifact_blob(BlobArtifactDescriptor::checkpoint_manifest(), &manifest);
@@ -1686,6 +1529,11 @@ impl Store {
                 .as_ref()
                 .and_then(|blob_ref| self.get_typed_blob(blob_ref)),
             plugin_snapshot_revision: record.plugin_snapshot_revision,
+            execution_state_ref: record.execution_state_ref.clone(),
+            execution_state: record
+                .execution_state_ref
+                .as_ref()
+                .and_then(|blob_ref| self.get_typed_blob(blob_ref)),
         })
     }
 
@@ -1745,66 +1593,13 @@ impl Store {
         rows.filter_map(Result::ok).collect()
     }
 
-    pub fn save_live_resume(&self, snapshot: LiveResumeSnapshot) {
-        let conn = self.conn.lock().unwrap();
-        let snapshot_json = encode_json(&snapshot);
-        conn.execute(
-            "INSERT OR REPLACE INTO live_resume (singleton, snapshot_json)
-             VALUES (1, ?1)",
-            params![snapshot_json],
-        )
-        .unwrap();
-    }
-
-    pub fn load_live_resume(&self) -> Option<LiveResumeSnapshot> {
-        let conn = self.conn.lock().unwrap();
-        load_live_resume_from_conn(&conn)
-    }
-
-    pub fn clear_live_resume(&self) {
-        let conn = self.conn.lock().unwrap();
-        if let Err(err) = conn.execute("DELETE FROM live_resume WHERE singleton = 1", []) {
-            tracing::warn!(error = %err, "failed to clear live resume snapshot");
-        }
-    }
-
-    pub fn save_ui_resume_state<T: serde::Serialize>(&self, state: &T) {
-        let state_json = match serde_json::to_string(state) {
-            Ok(state_json) => state_json,
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to serialize UI resume state");
-                return;
-            }
-        };
-        let conn = self.conn.lock().unwrap();
-        if let Err(err) = conn.execute(
-            "INSERT OR REPLACE INTO ui_resume_state (singleton, state_json)
-             VALUES (1, ?1)",
-            params![state_json],
-        ) {
-            tracing::warn!(error = %err, "failed to persist UI resume state");
-        }
-    }
-
-    pub fn load_ui_resume_state<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
-        let conn = self.conn.lock().unwrap();
-        let state_json: String = conn
-            .query_row(
-                "SELECT state_json FROM ui_resume_state WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .ok()?;
-        serde_json::from_str(&state_json).ok()
-    }
-
     pub fn save_session_head_meta(&self, meta: SessionHeadMeta) {
         let conn = self.conn.lock().unwrap();
         let head_json = encode_json(&meta);
         if let Err(err) = conn.execute(
-            "INSERT OR REPLACE INTO session_head (singleton, head_json)
-             VALUES (1, ?1)",
-            params![head_json],
+            "INSERT OR REPLACE INTO session_head (singleton, session_id, head_json)
+             VALUES (1, ?1, ?2)",
+            params![meta.session_id, head_json],
         ) {
             tracing::warn!(error = %err, "failed to persist session head");
         }
@@ -1877,86 +1672,34 @@ impl Store {
 
     pub fn apply_runtime_commit(
         &self,
-        commit: RuntimeCommit,
-    ) -> Result<RuntimeCommitResult, StoreError> {
+        commit: PersistedStateCommit,
+    ) -> Result<PersistedStateCommitResult, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().expect("runtime commit transaction");
-        let result = match commit {
-            RuntimeCommit::PersistedState(commit) => {
-                validate_session_binding_conn(&tx, &commit.session_id)?;
-                let stored_checkpoint =
-                    put_checkpoint_tx(&tx, self.options.blob_profile, &commit.checkpoint);
-                append_usage_deltas_tx(&tx, &commit.usage_deltas);
-                match &commit.graph {
-                    SessionGraphCommit::Replace(graph) => replace_session_graph_tx(&tx, graph),
-                    SessionGraphCommit::Append { nodes, .. } => {
-                        append_session_graph_nodes_tx(&tx, nodes)
-                    }
-                }
-                let graph_node_count = commit.graph.graph_node_count();
-                save_session_head_meta_tx(
-                    &tx,
-                    SessionHeadMeta {
-                        session_id: commit.session_id,
-                        config: commit.config,
-                        checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
-                        leaf_node_id: commit.graph.leaf_node_id().cloned(),
-                        graph_node_count,
-                        token_ledger: Vec::new(),
-                    },
-                );
-                clear_live_resume_tx(&tx);
-                RuntimeCommitResult::PersistedState(PersistedStateCommitResult {
-                    checkpoint_ref: stored_checkpoint.checkpoint_ref,
-                    manifest: stored_checkpoint.manifest,
-                    persisted_graph_node_count: graph_node_count,
-                })
-            }
-            RuntimeCommit::LiveResume(commit) => {
-                validate_session_binding_conn(&tx, &commit.session_id)?;
-                let base = load_live_resume_from_conn(&tx)
-                    .map(|snapshot| (snapshot.graph, snapshot.checkpoint_ref))
-                    .or_else(|| {
-                        load_session_head_meta_from_conn(&tx).map(|meta| {
-                            (
-                                Self::load_session_graph_from_conn(&tx, meta.leaf_node_id.clone()),
-                                meta.checkpoint_ref,
-                            )
-                        })
-                    });
-                let (graph, checkpoint_ref) =
-                    base.unwrap_or_else(|| (commit.seed_graph.unwrap_or_default(), None));
-                if !crate::messages_are_live_resume_safe(&commit.live_graph.project_messages()) {
-                    RuntimeCommitResult::LiveResumeSkipped
-                } else {
-                    let delta_ref = put_typed_artifact_blob_tx(
-                        &tx,
-                        self.options.blob_profile,
-                        &BlobArtifactDescriptor::live_resume_delta(),
-                        &crate::LiveResumeDelta {
-                            appended_graph_nodes: commit.live_graph.nodes[graph.nodes.len()..]
-                                .to_vec(),
-                            leaf_node_id: commit.live_graph.leaf_node_id.clone(),
-                            turn_state: commit.turn_state,
-                            dynamic_state: commit.dynamic_state,
-                            plugin_snapshot: commit.plugin_snapshot,
-                            execution_state_snapshot: commit.execution_state_snapshot,
-                            token_ledger: commit.token_ledger,
-                        },
-                    );
-                    save_live_resume_tx(
-                        &tx,
-                        LiveResumeSnapshot {
-                            session_id: commit.session_id,
-                            graph,
-                            config: commit.config,
-                            checkpoint_ref,
-                            delta_ref: Some(delta_ref),
-                        },
-                    );
-                    RuntimeCommitResult::LiveResumeSaved
-                }
-            }
+        validate_session_binding_conn(&tx, &commit.session_id)?;
+        let stored_checkpoint =
+            put_checkpoint_tx(&tx, self.options.blob_profile, &commit.checkpoint);
+        append_usage_deltas_tx(&tx, &commit.usage_deltas);
+        match &commit.graph {
+            SessionGraphCommit::Replace(graph) => replace_session_graph_tx(&tx, graph),
+            SessionGraphCommit::Append { nodes, .. } => append_session_graph_nodes_tx(&tx, nodes),
+        }
+        let graph_node_count = commit.graph.graph_node_count();
+        save_session_head_meta_tx(
+            &tx,
+            SessionHeadMeta {
+                session_id: commit.session_id,
+                config: commit.config,
+                checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
+                leaf_node_id: commit.graph.leaf_node_id().cloned(),
+                graph_node_count,
+                token_ledger: Vec::new(),
+            },
+        );
+        let result = PersistedStateCommitResult {
+            checkpoint_ref: stored_checkpoint.checkpoint_ref,
+            manifest: stored_checkpoint.manifest,
+            persisted_graph_node_count: graph_node_count,
         };
         tx.commit().expect("runtime commit commit");
         drop(conn);
@@ -1968,7 +1711,6 @@ impl Store {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().expect("gc transaction");
         let head_meta = load_session_head_meta_from_conn(&tx);
-        let live_resume = load_live_resume_from_conn(&tx);
         let mut roots = Vec::new();
         if let Some(checkpoint_ref) = head_meta
             .as_ref()
@@ -1979,9 +1721,6 @@ impl Store {
                 blob_ref: checkpoint_ref,
                 kind: PersistedArtifactKind::CheckpointManifest,
             });
-        }
-        if let Some(snapshot) = &live_resume {
-            roots.extend(snapshot.retained_artifact_refs());
         }
         let mut retained = std::collections::BTreeMap::<String, PersistedArtifactKind>::new();
         let mut stack = roots.clone();
@@ -2167,18 +1906,6 @@ impl RuntimeStore for Store {
         Self::load_session_graph(self)
     }
 
-    async fn save_live_resume(&self, snapshot: LiveResumeSnapshot) {
-        Self::save_live_resume(self, snapshot);
-    }
-
-    async fn load_live_resume(&self) -> Option<LiveResumeSnapshot> {
-        Self::load_live_resume(self)
-    }
-
-    async fn clear_live_resume(&self) {
-        Self::clear_live_resume(self);
-    }
-
     async fn save_session_meta(&self, meta: SessionMeta) {
         Self::save_session_meta(self, meta);
     }
@@ -2193,8 +1920,8 @@ impl RuntimeStore for Store {
 
     async fn apply_runtime_commit(
         &self,
-        commit: RuntimeCommit,
-    ) -> Result<RuntimeCommitResult, StoreError> {
+        commit: PersistedStateCommit,
+    ) -> Result<PersistedStateCommitResult, StoreError> {
         Self::apply_runtime_commit(self, commit)
     }
 
@@ -2245,21 +1972,6 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
 
-    if user_version == 11 {
-        migrate_schema_v11_to_v12(conn)?;
-        migrate_schema_v12_to_v13(conn)?;
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return Ok(());
-    }
-
-    if user_version == 12 {
-        migrate_schema_v12_to_v13(conn)?;
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return Ok(());
-    }
-
     if user_version == 0 && !has_user_schema_objects(conn)? {
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -2269,75 +1981,6 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     Err(rusqlite::Error::InvalidParameterName(
         unsupported_schema_message(),
     ))
-}
-
-#[cfg(feature = "sqlite-store")]
-fn migrate_schema_v11_to_v12(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute(
-        "ALTER TABLE session_head ADD COLUMN session_id TEXT NOT NULL DEFAULT 'root'",
-        [],
-    )?;
-    conn.execute(
-        "ALTER TABLE live_resume ADD COLUMN session_id TEXT NOT NULL DEFAULT 'root'",
-        [],
-    )?;
-
-    let head_rows: Vec<(i64, String)> = {
-        let mut stmt = conn.prepare("SELECT singleton, head_json FROM session_head")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (singleton, head_json) in head_rows {
-        let session_id = serde_json::from_str::<SessionHeadMeta>(&head_json)
-            .map(|meta| meta.session_id)
-            .unwrap_or_else(|_| default_root_session_id());
-        conn.execute(
-            "UPDATE session_head SET session_id = ?1 WHERE singleton = ?2",
-            params![session_id, singleton],
-        )?;
-    }
-
-    let live_rows: Vec<(i64, String)> = {
-        let mut stmt = conn.prepare("SELECT singleton, snapshot_json FROM live_resume")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (singleton, snapshot_json) in live_rows {
-        let session_id = serde_json::from_str::<LiveResumeSnapshot>(&snapshot_json)
-            .map(|snapshot| snapshot.session_id)
-            .unwrap_or_else(|_| default_root_session_id());
-        conn.execute(
-            "UPDATE live_resume SET session_id = ?1 WHERE singleton = ?2",
-            params![session_id, singleton],
-        )?;
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "sqlite-store")]
-fn migrate_schema_v12_to_v13(conn: &Connection) -> rusqlite::Result<()> {
-    // Add tombstoned flag to graph_nodes. Default 0 preserves existing
-    // rows as live. Persistence policies (DropOrphans) flip this column
-    // to 1 on orphan trim; `vacuum()` deletes rows where tombstoned = 1.
-    //
-    // Idempotent: the `ALTER TABLE` fails with `duplicate column name`
-    // if the column already exists (possible when `ensure_schema` ran
-    // `execute_batch(SCHEMA)` first and `graph_nodes` was created fresh
-    // with the v13 shape). Swallow that specific error — other errors
-    // propagate.
-    if let Err(err) = conn.execute(
-        "ALTER TABLE graph_nodes ADD COLUMN tombstoned INTEGER NOT NULL DEFAULT 0",
-        [],
-    ) {
-        let msg = err.to_string();
-        let already_added = msg.contains("duplicate column name");
-        let no_such_table = msg.contains("no such table");
-        if !already_added && !no_such_table {
-            return Err(err);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -2428,83 +2071,6 @@ mod tests {
     }
 
     #[test]
-    fn open_migrates_v11_binding_columns_without_full_snapshot_decode_on_hot_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("v11.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE live_resume (
-                singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
-                snapshot_json  TEXT NOT NULL DEFAULT '{}'
-            );
-            CREATE TABLE session_head (
-                singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
-                head_json      TEXT NOT NULL DEFAULT '{}'
-            );
-            ",
-        )
-        .unwrap();
-        conn.pragma_update(None, "user_version", 11).unwrap();
-        let head_json = serde_json::to_string(&SessionHeadMeta {
-            session_id: "head-session".to_string(),
-            config: crate::PersistedSessionConfig::default(),
-            checkpoint_ref: None,
-            leaf_node_id: None,
-            graph_node_count: 0,
-            token_ledger: Vec::new(),
-        })
-        .unwrap();
-        let snapshot_json = serde_json::to_string(&LiveResumeSnapshot {
-            session_id: "resume-session".to_string(),
-            graph: crate::SessionGraph::default(),
-            config: crate::PersistedSessionConfig::default(),
-            checkpoint_ref: None,
-            delta_ref: None,
-        })
-        .unwrap();
-        conn.execute(
-            "INSERT INTO session_head (singleton, head_json) VALUES (1, ?1)",
-            params![head_json],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO live_resume (singleton, snapshot_json) VALUES (1, ?1)",
-            params![snapshot_json],
-        )
-        .unwrap();
-        drop(conn);
-
-        let store = Store::open(&path).unwrap();
-        let conn = store.conn.lock().unwrap();
-        let err = bound_session_id_from_conn(&conn).unwrap_err().to_string();
-        drop(conn);
-        assert!(err.contains("inconsistent session bindings"));
-
-        let conn = Connection::open(&path).unwrap();
-        let version: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-        let head_binding: String = conn
-            .query_row(
-                "SELECT session_id FROM session_head WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let resume_binding: String = conn
-            .query_row(
-                "SELECT session_id FROM live_resume WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(head_binding, "head-session");
-        assert_eq!(resume_binding, "resume-session");
-    }
-
-    #[test]
     fn graph_copy_from_store_round_trip() {
         let source = mem();
         source.save_session_head(SessionHead {
@@ -2563,33 +2129,6 @@ mod tests {
     }
 
     #[test]
-    fn live_resume_rewrites_and_clears() {
-        let store = mem();
-        store.save_live_resume(LiveResumeSnapshot {
-            graph: crate::SessionGraph::from_projection(
-                &[text_message("u0", MessageRole::User, "first")],
-                &[],
-            ),
-            ..LiveResumeSnapshot::default()
-        });
-        store.save_live_resume(LiveResumeSnapshot {
-            graph: crate::SessionGraph::from_projection(
-                &[text_message("u1", MessageRole::User, "second")],
-                &[],
-            ),
-            ..LiveResumeSnapshot::default()
-        });
-
-        let graph = store.load_live_resume().expect("live resume").graph;
-        let messages = graph.project_messages();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].parts[0].content, "second");
-
-        store.clear_live_resume();
-        assert!(store.load_live_resume().is_none());
-    }
-
-    #[test]
     fn load_picker_info_reads_message_graph() {
         let store = mem();
         store.save_session_meta(SessionMeta {
@@ -2640,6 +2179,8 @@ mod tests {
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: None,
             plugin_snapshot: None,
+            execution_state_ref: None,
+            execution_state: None,
         };
         let stored = store.put_checkpoint(&checkpoint);
         let checkpoint_record = store
@@ -2655,5 +2196,44 @@ mod tests {
         assert_eq!(loaded.turn_state.iteration, 7);
         assert!(loaded.dynamic_state.is_none());
         assert!(loaded.plugin_snapshot.is_none());
+    }
+
+    #[test]
+    fn runtime_commit_preserves_execution_state_ref_when_snapshot_is_reused() {
+        let store = mem();
+        let mut state = crate::PersistedSessionState {
+            session_graph: crate::SessionGraph::from_projection(
+                &[text_message("u0", MessageRole::User, "hello")],
+                &[],
+            ),
+            execution_state_snapshot: Some(b"runtime-state".to_vec()),
+            ..crate::PersistedSessionState::default()
+        };
+
+        let result = store
+            .apply_runtime_commit(PersistedStateCommit::persisted_state(&state, &[]))
+            .expect("first commit");
+        state.apply_persisted_commit_result(result);
+        let execution_ref = state
+            .execution_state_ref
+            .clone()
+            .expect("execution state ref");
+
+        state.iteration += 1;
+        let result = store
+            .apply_runtime_commit(PersistedStateCommit::persisted_state(&state, &[]))
+            .expect("second commit");
+        state.apply_persisted_commit_result(result);
+
+        assert_eq!(state.execution_state_ref.as_ref(), Some(&execution_ref));
+        let head = store.load_session_head().expect("session head");
+        let checkpoint = store
+            .get_checkpoint(head.checkpoint_ref.as_ref().expect("checkpoint ref"))
+            .expect("checkpoint");
+        assert_eq!(checkpoint.execution_state, Some(b"runtime-state".to_vec()));
+        assert_eq!(
+            checkpoint.execution_state_ref.as_ref(),
+            Some(&execution_ref)
+        );
     }
 }

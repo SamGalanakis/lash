@@ -393,7 +393,7 @@ fn final_message_event_is_rendered() {
 }
 
 #[test]
-fn finish_turn_for_resume_reconciles_authoritative_assistant_text() {
+fn finish_turn_for_projection_reconciles_authoritative_assistant_text() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::TextDelta {
@@ -401,7 +401,7 @@ fn finish_turn_for_resume_reconciles_authoritative_assistant_text() {
     });
     app.stop_turn();
 
-    let persisted = app.finish_turn_for_resume_with_output(Some(
+    let persisted = app.finish_turn_for_projection_with_output(Some(
         "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now",
     ));
 
@@ -422,7 +422,7 @@ fn finish_turn_for_resume_reconciles_authoritative_assistant_text() {
 }
 
 #[test]
-fn finish_turn_for_resume_does_not_append_shorter_authoritative_text() {
+fn finish_turn_for_projection_does_not_append_shorter_authoritative_text() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::TextDelta {
@@ -430,7 +430,7 @@ fn finish_turn_for_resume_does_not_append_shorter_authoritative_text() {
     });
     app.stop_turn();
 
-    let persisted = app.finish_turn_for_resume_with_output(Some("Visible"));
+    let persisted = app.finish_turn_for_projection_with_output(Some("Visible"));
 
     let last_block = app
         .blocks
@@ -454,7 +454,7 @@ fn late_text_deltas_after_authoritative_final_output_are_ignored() {
         content: "Use this minimal set:\n\n- `code`\n- `feature`\n".into(),
     });
 
-    let _persisted = app.finish_turn_for_resume_with_output(Some(final_text));
+    let _persisted = app.finish_turn_for_projection_with_output(Some(final_text));
 
     app.handle_session_event(SessionEvent::TextDelta {
         content: "Yeah — **`feature` is nicer than `topic`** if you want the graph to stay product-shaped.\n\nMy take:\n\n- **`topic` is safer**".into(),
@@ -592,7 +592,7 @@ fn tool_output_does_not_change_total_content_height() {
 }
 
 #[test]
-fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
+fn finish_turn_for_projection_preserves_streaming_output_snapshot() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::Message {
@@ -600,7 +600,7 @@ fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
         kind: "tool_output".into(),
     });
 
-    let persisted = app.finish_turn_for_resume_with_output(None);
+    let persisted = app.finish_turn_for_projection_with_output(None);
 
     assert!(!app.running);
     assert!(app.live_tool_output.lines.is_empty());
@@ -865,9 +865,9 @@ fn interrupted_projection_preserves_partial_assistant_text() {
     let blocks = project_interrupted_blocks(
         &[],
         &[],
-        &UiResumeState {
+        &UiProjectionState {
             live_assistant_text: Some("Partial streamed answer".to_string()),
-            ..UiResumeState::default()
+            ..UiProjectionState::default()
         },
         "Cancelled.",
     );
@@ -897,9 +897,9 @@ fn interrupted_projection_does_not_duplicate_already_committed_prose() {
     let blocks = project_interrupted_blocks(
         &messages,
         &[],
-        &UiResumeState {
+        &UiProjectionState {
             live_assistant_text: Some("first prose\n\nsecond prose".into()),
-            ..UiResumeState::default()
+            ..UiProjectionState::default()
         },
         "Cancelled.",
     );
@@ -923,9 +923,9 @@ fn interrupted_projection_appends_only_uncommitted_tail() {
     let blocks = project_interrupted_blocks(
         &messages,
         &[],
-        &UiResumeState {
+        &UiProjectionState {
             live_assistant_text: Some("first prose\n\nmid stream tail".into()),
-            ..UiResumeState::default()
+            ..UiProjectionState::default()
         },
         "Cancelled.",
     );
@@ -1003,7 +1003,7 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
     let blocks = project_interrupted_blocks(
         &[text_message("m0", MessageRole::User, "go"), result_message],
         &tool_calls,
-        &UiResumeState::default(),
+        &UiProjectionState::default(),
         "Cancelled.",
     );
 
@@ -1118,7 +1118,7 @@ fn transient_status_expires_on_tick() {
 }
 
 #[test]
-fn ui_resume_state_omits_transient_live_turn() {
+fn ui_projection_state_omits_transient_live_turn() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
     app.set_status("retrying", Some("in 5s".into()), true);
@@ -1126,7 +1126,7 @@ fn ui_resume_state_omits_transient_live_turn() {
         turn.has_visible_output = true;
     }
 
-    let persisted = serde_json::to_value(app.ui_resume_state()).expect("serialize ui");
+    let persisted = serde_json::to_value(app.ui_projection_state()).expect("serialize ui");
     assert!(persisted.get("live_turn").is_none());
 }
 

@@ -11,6 +11,16 @@ pub struct PluginHost {
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
+struct BuildPluginSessionRequest<'a> {
+    session_id: String,
+    parent_session_id: Option<String>,
+    execution_mode: ExecutionMode,
+    context_approach: crate::ContextApproach,
+    snapshot: Option<&'a PluginSessionSnapshot>,
+    tool_surface_overlay: ToolSurfaceContribution,
+    tool_snapshot: Option<crate::DynamicStateSnapshot>,
+}
+
 impl PluginHost {
     pub fn empty() -> Self {
         Self::new(Vec::new())
@@ -98,15 +108,15 @@ impl PluginHost {
         context_approach: crate::ContextApproach,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session_inner(
-            session_id.into(),
+        self.build_session_inner(BuildPluginSessionRequest {
+            session_id: session_id.into(),
             parent_session_id,
             execution_mode,
             context_approach,
             snapshot,
-            ToolSurfaceContribution::default(),
-            None,
-        )
+            tool_surface_overlay: ToolSurfaceContribution::default(),
+            tool_snapshot: None,
+        })
     }
 
     pub fn build_session_with_surface(
@@ -118,27 +128,30 @@ impl PluginHost {
         tool_surface_overlay: ToolSurfaceContribution,
         tool_snapshot: Option<crate::DynamicStateSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session_inner(
-            session_id.into(),
-            None,
+        self.build_session_inner(BuildPluginSessionRequest {
+            session_id: session_id.into(),
+            parent_session_id: None,
             execution_mode,
             context_approach,
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
-        )
+        })
     }
 
     fn build_session_inner(
         &self,
-        session_id: String,
-        parent_session_id: Option<String>,
-        execution_mode: ExecutionMode,
-        context_approach: crate::ContextApproach,
-        snapshot: Option<&PluginSessionSnapshot>,
-        tool_surface_overlay: ToolSurfaceContribution,
-        tool_snapshot: Option<crate::DynamicStateSnapshot>,
+        request: BuildPluginSessionRequest<'_>,
     ) -> Result<Arc<PluginSession>, PluginError> {
+        let BuildPluginSessionRequest {
+            session_id,
+            parent_session_id,
+            execution_mode,
+            context_approach,
+            snapshot,
+            tool_surface_overlay,
+            tool_snapshot,
+        } = request;
         if matches!(
             context_approach,
             crate::ContextApproach::ObservationalMemory(_)
@@ -256,12 +269,12 @@ impl PluginHost {
             monitor_specs: reg.monitor_specs,
             turn_context_transforms: {
                 let mut list = reg.turn_context_transforms;
-                list.sort_by(|a, b| b.0.cmp(&a.0));
+                list.sort_by_key(|entry| std::cmp::Reverse(entry.0));
                 list.into_iter().map(|(_, t)| t).collect()
             },
             history_rewriters: {
                 let mut list = reg.history_rewriters;
-                list.sort_by(|a, b| b.0.cmp(&a.0));
+                list.sort_by_key(|entry| std::cmp::Reverse(entry.0));
                 list.into_iter().map(|(_, r)| r).collect()
             },
             mode_session,

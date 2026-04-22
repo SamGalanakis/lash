@@ -537,13 +537,16 @@ impl PluginSession {
         host: Arc<dyn SessionManager>,
     ) -> Result<TurnFinalization, PluginError> {
         let session_id = turn.state.session_id.clone();
-        let directives = self
-            .after_turn(TurnResultHookContext {
+        let directives = if self.after_turn_hooks.is_empty() {
+            Vec::new()
+        } else {
+            self.after_turn(TurnResultHookContext {
                 session_id: session_id.clone(),
                 turn: Arc::new(crate::plugin::TurnResultSummary::from_assembled(&turn)),
                 host: Arc::clone(&host),
             })
-            .await?;
+            .await?
+        };
         let mut events = Vec::new();
         let mut updated_messages: Option<crate::MessageSequence> = None;
         for emitted in directives {

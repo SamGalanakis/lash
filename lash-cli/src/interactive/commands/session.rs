@@ -131,24 +131,20 @@ pub(super) async fn handle_retry(
 pub(super) async fn handle_fork(
     app: &mut App,
     logger: &mut SessionLogger,
-    dynamic_tools: &Arc<DynamicToolProvider>,
+    _dynamic_tools: &Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
     provider: &ProviderHandle,
     current_model_variant: &Option<String>,
-    toolset_hash: &str,
+    _toolset_hash: &str,
 ) -> anyhow::Result<bool> {
-    let current_dynamic_state = dynamic_tools.export_state();
     match fork::fork_current_session(
         runtime.as_mut(),
         logger,
-        &app.ui_resume_state(),
         provider,
         &app.model,
         app.context_window
             .expect("app context_window must be set before forking"),
         current_model_variant.as_deref(),
-        toolset_hash,
-        &current_dynamic_state,
     )
     .await
     {

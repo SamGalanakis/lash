@@ -105,6 +105,8 @@ pub struct PersistedSessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_state_snapshot: Option<Vec<u8>>,
     /// Cost-accounting ledger. Every LLM call (parent turns, subagent
     /// children, compaction, observers, background helpers) contributes an
@@ -147,6 +149,7 @@ impl PersistedSessionState {
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: None,
             plugin_snapshot: None,
+            execution_state_ref: None,
             execution_state_snapshot: None,
             token_ledger: Vec::new(),
             checkpoint_ref: None,
@@ -221,6 +224,10 @@ impl PersistedSessionState {
             .append_projection_delta(messages, tool_calls);
     }
 
+    pub fn append_projected_messages(&mut self, messages: &[Message]) {
+        self.session_graph.append_projected_messages(messages);
+    }
+
     pub fn read_view(&self) -> crate::SessionReadView {
         crate::SessionReadView::from_persisted_state(self)
     }
@@ -251,12 +258,14 @@ impl PersistedSessionState {
     ) {
         self.checkpoint_ref = Some(result.checkpoint_ref);
         self.dynamic_state_ref = result.manifest.dynamic_state_ref;
-        self.dynamic_state_generation = self
-            .dynamic_state_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.base_generation);
+        if let Some(snapshot) = self.dynamic_state_snapshot.as_ref() {
+            self.dynamic_state_generation = Some(snapshot.base_generation);
+        } else if self.dynamic_state_ref.is_none() {
+            self.dynamic_state_generation = None;
+        }
         self.plugin_snapshot_ref = result.manifest.plugin_snapshot_ref;
         self.plugin_snapshot_revision = result.manifest.plugin_snapshot_revision;
+        self.execution_state_ref = result.manifest.execution_state_ref;
         self.persisted_graph_node_count = result.persisted_graph_node_count;
         self.graph_replace_required = false;
         self.dynamic_state_snapshot = None;
@@ -265,11 +274,32 @@ impl PersistedSessionState {
     }
 
     pub fn set_execution_state_snapshot(&mut self, execution_state_snapshot: Option<Vec<u8>>) {
+        if execution_state_snapshot.is_none() {
+            self.execution_state_ref = None;
+        }
         self.execution_state_snapshot = execution_state_snapshot;
     }
 
     pub fn execution_state_snapshot(&self) -> Option<&[u8]> {
         self.execution_state_snapshot.as_deref()
+    }
+
+    pub fn refresh_plugin_snapshots(&mut self, plugins: &crate::PluginSession) {
+        if let Some(dynamic_tools) = plugins.dynamic_tools() {
+            let generation = dynamic_tools.generation();
+            if self.dynamic_state_ref.is_none() || self.dynamic_state_generation != Some(generation)
+            {
+                let snapshot = dynamic_tools.export_state();
+                self.dynamic_state_generation = Some(snapshot.base_generation);
+                self.dynamic_state_snapshot = Some(snapshot);
+            }
+        }
+
+        let revision = plugins.snapshot_revision_fingerprint();
+        if self.plugin_snapshot_ref.is_none() || self.plugin_snapshot_revision != Some(revision) {
+            self.plugin_snapshot = plugins.snapshot().ok();
+        }
+        self.plugin_snapshot_revision = Some(revision);
     }
 }
 
@@ -288,6 +318,7 @@ impl Default for PersistedSessionState {
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: None,
             plugin_snapshot: None,
+            execution_state_ref: None,
             execution_state_snapshot: None,
             token_ledger: Vec::new(),
             checkpoint_ref: None,
@@ -334,6 +365,7 @@ pub(super) fn apply_session_checkpoint(
         state.plugin_snapshot_ref = None;
         state.plugin_snapshot_revision = None;
         state.plugin_snapshot = None;
+        state.execution_state_ref = None;
         state.execution_state_snapshot = None;
         return;
     };
@@ -349,6 +381,7 @@ pub(super) fn apply_session_checkpoint(
     state.plugin_snapshot_ref = checkpoint.plugin_snapshot_ref.clone();
     state.plugin_snapshot_revision = checkpoint.plugin_snapshot_revision;
     state.plugin_snapshot = checkpoint.plugin_snapshot;
+    state.execution_state_ref = checkpoint.execution_state_ref.clone();
     state.execution_state_snapshot = None;
 }
 
@@ -365,6 +398,7 @@ pub(super) fn apply_session_head(
     state.plugin_snapshot_ref = None;
     state.plugin_snapshot_revision = None;
     state.plugin_snapshot = None;
+    state.execution_state_ref = None;
     state.execution_state_snapshot = None;
     state.persisted_graph_node_count = state.session_graph.nodes.len();
     state.graph_replace_required = false;

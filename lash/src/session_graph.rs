@@ -196,7 +196,69 @@ enum ProjectionItem<'a> {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
+pub(crate) struct SessionGraphAppendBuilder {
+    existing_ids: HashSet<String>,
+    leaf_node_id: Option<String>,
+}
+
+impl SessionGraphAppendBuilder {
+    pub(crate) fn leaf_node_id(&self) -> Option<&String> {
+        self.leaf_node_id.as_ref()
+    }
+
+    pub(crate) fn append_messages<I>(&mut self, messages: I) -> Vec<SessionNodeRecord>
+    where
+        I: IntoIterator<Item = Message>,
+    {
+        let mut nodes = Vec::new();
+        for mut message in messages {
+            if message.id.is_empty() {
+                message.id = fresh_node_id("m");
+            }
+            let node_id = unique_message_node_id(&message.id, &self.existing_ids);
+            self.existing_ids.insert(node_id.clone());
+            let parent_node_id = self.leaf_node_id.clone();
+            self.leaf_node_id = Some(node_id.clone());
+            nodes.push(SessionNodeRecord {
+                node_id,
+                parent_node_id,
+                timestamp: Utc::now().to_rfc3339(),
+                payload: SessionNodePayload::Message { message },
+            });
+        }
+        nodes
+    }
+
+    pub(crate) fn append_tool_call_records<I>(&mut self, records: I) -> Vec<SessionNodeRecord>
+    where
+        I: IntoIterator<Item = ToolCallRecord>,
+    {
+        let mut nodes = Vec::new();
+        for record in records {
+            let stable_key = stable_tool_call_key(&record);
+            let node_id = unique_plugin_node_id(&stable_key, &self.existing_ids);
+            self.existing_ids.insert(node_id.clone());
+            let parent_node_id = self.leaf_node_id.clone();
+            self.leaf_node_id = Some(node_id.clone());
+            nodes.push(SessionNodeRecord {
+                node_id,
+                parent_node_id,
+                timestamp: Utc::now().to_rfc3339(),
+                payload: SessionNodePayload::Plugin {
+                    plugin_type: INTERNAL_TOOL_CALL_PLUGIN_TYPE.to_string(),
+                    body: SharedJsonValue::new(
+                        serde_json::to_value(ToolCallPluginBody { stable_key, record })
+                            .unwrap_or(serde_json::Value::Null),
+                    ),
+                },
+            });
+        }
+        nodes
+    }
+}
+
+#[derive(Debug, Clone)]
 struct SessionGraphCache {
     by_id: HashMap<String, usize>,
     active_path_indices: Vec<usize>,
@@ -310,6 +372,24 @@ impl SessionGraphCache {
             apply_rlm_globals_patch_map(Arc::make_mut(&mut self.projected_rlm_globals), patch);
         }
     }
+
+    fn reserve_append_capacity(
+        &mut self,
+        additional_nodes: usize,
+        additional_messages: usize,
+        additional_tool_calls: usize,
+    ) {
+        self.by_id.reserve(additional_nodes);
+        self.active_path_indices.reserve(additional_nodes);
+        if additional_messages > 0 {
+            Arc::make_mut(&mut self.projected_messages).reserve(additional_messages);
+            let rendered = Arc::make_mut(&mut self.rendered_prompt);
+            rendered.messages.reserve(additional_messages);
+        }
+        if additional_tool_calls > 0 {
+            Arc::make_mut(&mut self.projected_tool_calls).reserve(additional_tool_calls);
+        }
+    }
 }
 
 fn apply_rlm_globals_patch_map(
@@ -352,29 +432,44 @@ impl SessionNodeRecord {
 
 impl SessionGraph {
     pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
-        let mut seen_message_ids = self
-            .projected_messages()
-            .iter()
-            .map(|message| message.id.clone())
-            .collect::<HashSet<_>>();
-        for message in messages {
-            if message.is_transient() || !seen_message_ids.insert(message.id.clone()) {
-                continue;
-            }
-            self.append_message(message.clone());
-        }
-
+        let appendable_messages = {
+            let mut seen_message_ids = self
+                .projected_messages()
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<HashSet<_>>();
+            messages
+                .iter()
+                .filter(|message| {
+                    !message.is_transient() && seen_message_ids.insert(message.id.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         let mut seen_tool_call_keys = self
             .projected_tool_calls()
             .iter()
             .map(|record| tool_call_projection_key(&stable_tool_call_key(record), record))
             .collect::<HashSet<_>>();
-        for record in tool_calls {
-            let stable_key = stable_tool_call_key(record);
-            let projection_key = tool_call_projection_key(&stable_key, record);
-            if !seen_tool_call_keys.insert(projection_key) {
-                continue;
-            }
+        let appendable_tool_calls = tool_calls
+            .iter()
+            .filter_map(|record| {
+                let stable_key = stable_tool_call_key(record);
+                let projection_key = tool_call_projection_key(&stable_key, record);
+                seen_tool_call_keys
+                    .insert(projection_key)
+                    .then_some((stable_key, record))
+            })
+            .collect::<Vec<_>>();
+
+        self.reserve_append_capacity(
+            appendable_messages.len() + appendable_tool_calls.len(),
+            appendable_messages.len(),
+            appendable_tool_calls.len(),
+        );
+        self.append_message_batch(appendable_messages);
+
+        for (stable_key, record) in appendable_tool_calls {
             self.append_plugin(
                 INTERNAL_TOOL_CALL_PLUGIN_TYPE,
                 serde_json::to_value(ToolCallPluginBody {
@@ -384,6 +479,16 @@ impl SessionGraph {
                 .unwrap_or(serde_json::Value::Null),
             );
         }
+    }
+
+    pub(crate) fn append_projected_messages(&mut self, messages: &[Message]) {
+        let appendable_messages = messages
+            .iter()
+            .filter(|message| !message.is_transient())
+            .cloned()
+            .collect::<Vec<_>>();
+        self.reserve_append_capacity(appendable_messages.len(), appendable_messages.len(), 0);
+        self.append_message_batch(appendable_messages);
     }
 
     pub fn from_nodes(nodes: Vec<SessionNodeRecord>, leaf_node_id: Option<String>) -> Self {
@@ -396,6 +501,13 @@ impl SessionGraph {
         }
     }
 
+    pub(crate) fn append_builder(&self) -> SessionGraphAppendBuilder {
+        SessionGraphAppendBuilder {
+            existing_ids: self.nodes.iter().map(|node| node.node_id.clone()).collect(),
+            leaf_node_id: self.leaf_node_id.clone(),
+        }
+    }
+
     fn invalidate_cache(&mut self) {
         self.cache = Arc::new(OnceLock::new());
     }
@@ -405,8 +517,107 @@ impl SessionGraph {
         Arc::make_mut(&mut self.inner)
     }
 
+    fn reserve_append_capacity(
+        &mut self,
+        additional_nodes: usize,
+        additional_messages: usize,
+        additional_tool_calls: usize,
+    ) {
+        if additional_nodes == 0 {
+            return;
+        }
+        self.detach_initialized_cache_for_append();
+        Arc::make_mut(&mut self.inner)
+            .nodes
+            .reserve(additional_nodes);
+        if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
+            && let Some(cache) = cache_lock.get_mut()
+        {
+            cache.reserve_append_capacity(
+                additional_nodes,
+                additional_messages,
+                additional_tool_calls,
+            );
+        }
+    }
+
+    fn detach_initialized_cache_for_append(&mut self) {
+        if Arc::get_mut(&mut self.cache).is_some() {
+            return;
+        }
+        let Some(cache) = self.cache.get().cloned() else {
+            self.invalidate_cache();
+            return;
+        };
+        let lock = OnceLock::new();
+        let _ = lock.set(cache);
+        self.cache = Arc::new(lock);
+    }
+
     fn cache(&self) -> &SessionGraphCache {
         self.cache.get_or_init(|| SessionGraphCache::build(self))
+    }
+
+    fn append_message_batch(&mut self, messages: Vec<Message>) {
+        if messages.is_empty() {
+            return;
+        }
+
+        let messages = messages.into_iter();
+        let mut existing_ids = self
+            .nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<HashSet<_>>();
+        let mut parent_node_id = self.leaf_node_id.clone();
+        let mut nodes = Vec::with_capacity(messages.len());
+        for mut message in messages {
+            if message.id.is_empty() {
+                message.id = fresh_node_id("m");
+            }
+            let node_id = unique_message_node_id(&message.id, &existing_ids);
+            existing_ids.insert(node_id.clone());
+            nodes.push(SessionNodeRecord {
+                node_id: node_id.clone(),
+                parent_node_id,
+                timestamp: Utc::now().to_rfc3339(),
+                payload: SessionNodePayload::Message { message },
+            });
+            parent_node_id = Some(node_id);
+        }
+
+        self.append_prebuilt_nodes(nodes);
+    }
+
+    fn append_prebuilt_nodes(&mut self, nodes: Vec<SessionNodeRecord>) {
+        if nodes.is_empty() {
+            return;
+        }
+
+        self.detach_initialized_cache_for_append();
+        if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
+            && let Some(cache) = cache_lock.get_mut()
+        {
+            let data = Arc::make_mut(&mut self.inner);
+            for node in nodes {
+                let previous_leaf = data.leaf_node_id.clone();
+                let node_id = node.node_id.clone();
+                data.nodes.push(node);
+                cache.append_node(
+                    data.nodes.len() - 1,
+                    data.nodes.last().expect("just appended graph node"),
+                    previous_leaf.as_deref(),
+                );
+                data.leaf_node_id = Some(node_id);
+            }
+            return;
+        }
+
+        let data = self.data_mut();
+        for node in nodes {
+            data.leaf_node_id = Some(node.node_id.clone());
+            data.nodes.push(node);
+        }
     }
 
     pub fn append_message(&mut self, mut message: Message) -> String {
@@ -427,6 +638,7 @@ impl SessionGraph {
             timestamp: Utc::now().to_rfc3339(),
             payload: SessionNodePayload::Message { message },
         };
+        self.detach_initialized_cache_for_append();
         if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
             && let Some(cache) = cache_lock.get_mut()
         {
@@ -463,6 +675,7 @@ impl SessionGraph {
                 body: SharedJsonValue::new(body),
             },
         };
+        self.detach_initialized_cache_for_append();
         if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
             && let Some(cache) = cache_lock.get_mut()
         {
@@ -885,6 +1098,11 @@ fn target_item_key(item: &ProjectionItem<'_>) -> String {
 fn tool_call_projection_key(stable_key: &str, record: &ToolCallRecord) -> String {
     let fingerprint = serde_json::to_string(record).unwrap_or_default();
     format!("tool_call:{stable_key}:{fingerprint}")
+}
+
+pub(crate) fn tool_call_record_projection_key(record: &ToolCallRecord) -> String {
+    let stable_key = stable_tool_call_key(record);
+    tool_call_projection_key(&stable_key, record)
 }
 
 fn unique_plugin_node_id(stable_key: &str, existing_ids: &HashSet<String>) -> String {

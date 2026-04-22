@@ -12,11 +12,7 @@ use lash::session_model::Message;
 use lash::session_model::{MessageRole, PartKind};
 use lash::{Store, TokenUsage};
 
-#[cfg(test)]
-use crate::app::UiResumeState;
 use crate::app::{DisplayBlock, LiveToolOutput, projected_blocks_from_state};
-use crate::resume_snapshot;
-use crate::ui_resume;
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -283,37 +279,15 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
 
 pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
-    if let Some(live) = resume_snapshot::load_live_resume_snapshot(&store) {
-        let messages = live.graph.project_messages();
-        let tool_calls = live.graph.project_tool_calls();
-        let checkpoint = live
-            .snapshot
-            .checkpoint_ref
-            .as_ref()
-            .and_then(|blob_ref| store.get_checkpoint(blob_ref));
-        let live_turn_state = live.delta.as_ref().map(|delta| &delta.turn_state);
-        let blocks = projected_blocks_from_state(&messages, &tool_calls, &live.ui_state);
-        return Ok(LoadedSession {
-            messages,
-            blocks,
-            last_token_usage: live_turn_state
-                .map(|state| state.token_usage.clone())
-                .or_else(|| checkpoint.map(|checkpoint| checkpoint.turn_state.token_usage))
-                .unwrap_or_default(),
-            plugin_mode_indicators: live.ui_state.plugin_mode_indicators.clone(),
-            live_tool_output: live.ui_state.live_tool_output.clone(),
-        });
-    }
     let head = store.load_session_head().unwrap_or_default();
     let graph = head.graph;
     let messages = graph.project_messages();
     let tool_calls = graph.project_tool_calls();
-    let ui_state = ui_resume::load_ui_resume_state(&store);
+    let ui_state = crate::app::UiProjectionState::default();
     let checkpoint = head
         .checkpoint_ref
         .as_ref()
         .and_then(|blob_ref| store.get_checkpoint(blob_ref));
-    let last_response_usage = ui_state.last_response_usage.clone();
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
     let blocks = projected_blocks_from_state(&messages, &tool_calls, &ui_state);
@@ -332,7 +306,7 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         blocks,
         last_token_usage: checkpoint
             .map(|checkpoint| checkpoint.turn_state.token_usage)
-            .unwrap_or(last_response_usage),
+            .unwrap_or_default(),
         plugin_mode_indicators,
         live_tool_output,
     })
@@ -355,15 +329,14 @@ mod tests {
         store: &Store,
         messages: Vec<Message>,
         tool_calls: Vec<ToolCallRecord>,
-        ui_state: UiResumeState,
+        token_usage: TokenUsage,
     ) {
-        ui_resume::save_ui_resume_state(store, &ui_state);
         let graph = lash::SessionGraph::from_projection(&messages, &tool_calls);
         let checkpoint_ref = store
             .put_checkpoint(&lash::HydratedSessionCheckpoint {
                 turn_state: lash::PersistedTurnState {
                     iteration: 1,
-                    token_usage: ui_state.last_response_usage.clone(),
+                    token_usage,
                     last_prompt_usage: None,
                 },
                 dynamic_state_ref: None,
@@ -375,6 +348,8 @@ mod tests {
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,
                 plugin_snapshot: None,
+                execution_state_ref: None,
+                execution_state: None,
             })
             .checkpoint_ref;
         store.save_session_head(lash::SessionHead {
@@ -457,23 +432,11 @@ mod tests {
                 &store,
                 messages.clone(),
                 Vec::new(),
-                UiResumeState {
-                    last_response_usage: TokenUsage {
-                        input_tokens: 12,
-                        output_tokens: 7,
-                        cached_input_tokens: 2,
-                        reasoning_tokens: 1,
-                    },
-                    plugin_mode_indicators: BTreeMap::from([(
-                        "plan_mode".to_string(),
-                        "plan".to_string(),
-                    )]),
-                    live_tool_output: LiveToolOutput {
-                        lines: vec!["started git status --short".to_string()],
-                        hidden: 2,
-                        partial: "partial tool line".to_string(),
-                    },
-                    ..UiResumeState::default()
+                TokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 7,
+                    cached_input_tokens: 2,
+                    reasoning_tokens: 1,
                 },
             );
 
@@ -494,16 +457,10 @@ mod tests {
                 Some(DisplayBlock::AssistantText(text)) if text == "Hello world"
             ));
             assert_eq!(loaded.last_token_usage.input_tokens, 12);
-            assert_eq!(
-                loaded.plugin_mode_indicators.get("plan_mode"),
-                Some(&"plan".to_string())
-            );
-            assert_eq!(
-                loaded.live_tool_output.lines,
-                vec!["started git status --short".to_string()]
-            );
-            assert_eq!(loaded.live_tool_output.hidden, 2);
-            assert_eq!(loaded.live_tool_output.partial, "partial tool line");
+            assert!(loaded.plugin_mode_indicators.is_empty());
+            assert!(loaded.live_tool_output.lines.is_empty());
+            assert_eq!(loaded.live_tool_output.hidden, 0);
+            assert!(loaded.live_tool_output.partial.is_empty());
         });
     }
 
@@ -538,7 +495,7 @@ mod tests {
                 success: true,
                 duration_ms: 42,
             }];
-            persist_root_snapshot(&store, messages, tool_calls, UiResumeState::default());
+            persist_root_snapshot(&store, messages, tool_calls, TokenUsage::default());
 
             let loaded = load_session(&filename).unwrap();
             // blocks[0] = TurnStart, [1] = UserInput, [2] = Activity, [3] = AssistantText
@@ -577,7 +534,7 @@ mod tests {
                 text_message(MessageRole::User, "m0", "Hi"),
                 text_message(MessageRole::Assistant, "m1", assistant),
             ];
-            persist_root_snapshot(&store, messages, Vec::new(), UiResumeState::default());
+            persist_root_snapshot(&store, messages, Vec::new(), TokenUsage::default());
 
             let loaded = load_session(&filename).unwrap();
             // blocks[0] = TurnStart, [1] = UserInput, [2] = AssistantText
@@ -607,7 +564,7 @@ mod tests {
                 &parent_store,
                 vec![text_message(MessageRole::User, "m0", "hello there")],
                 Vec::new(),
-                UiResumeState::default(),
+                TokenUsage::default(),
             );
             child_store.save_session_meta(lash::SessionMeta {
                 session_id: "child".to_string(),
@@ -623,7 +580,7 @@ mod tests {
                 &child_store,
                 vec![text_message(MessageRole::User, "m0", "child prompt")],
                 Vec::new(),
-                UiResumeState::default(),
+                TokenUsage::default(),
             );
 
             let sessions = list_recent_sessions(10);

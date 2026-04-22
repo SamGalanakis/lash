@@ -296,7 +296,6 @@ struct RuntimePerfStore {
     blobs: Mutex<HashMap<String, Vec<u8>>>,
     session_head_meta: Mutex<Option<SessionHeadMeta>>,
     session_graph: Mutex<SessionGraph>,
-    live_resume: Mutex<Option<LiveResumeSnapshot>>,
     usage_deltas: Mutex<Vec<TokenLedgerEntry>>,
     session_meta: Mutex<Option<store::SessionMeta>>,
 }
@@ -362,24 +361,6 @@ impl RuntimeStore for RuntimePerfStore {
 
     async fn load_session_graph(&self) -> SessionGraph {
         self.session_graph.lock().expect("lock perf graph").clone()
-    }
-
-    async fn save_live_resume(&self, snapshot: LiveResumeSnapshot) {
-        *self.live_resume.lock().expect("lock perf live resume") = Some(snapshot);
-    }
-
-    async fn load_live_resume(&self) -> Option<LiveResumeSnapshot> {
-        self.live_resume
-            .lock()
-            .expect("lock perf live resume")
-            .clone()
-    }
-
-    async fn clear_live_resume(&self) {
-        self.live_resume
-            .lock()
-            .expect("lock perf live resume")
-            .take();
     }
 
     async fn save_session_meta(&self, meta: store::SessionMeta) {

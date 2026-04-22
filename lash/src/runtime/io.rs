@@ -4,42 +4,34 @@
 //! `InputItem` and `PathResolver` types they use keep their public paths
 //! in `mod.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::session_model::Message;
 
 use super::{InputItem, NormalizedItem, PathResolver};
 
-pub(super) fn projection_message_delta_if_base_preserved(
+pub(super) fn projection_message_delta_if_base_preserved<'a>(
     base: &[Message],
-    next: &[Message],
+    next: impl IntoIterator<Item = &'a Message>,
 ) -> Option<Vec<Message>> {
-    let projected = next
-        .iter()
-        .filter(|message| !message.is_transient())
-        .collect::<Vec<_>>();
-    if projected.len() < base.len() {
-        return None;
+    let mut base_index = 0;
+    let mut appended = Vec::new();
+    for message in next.into_iter().filter(|message| !message.is_transient()) {
+        if let Some(base_message) = base.get(base_index) {
+            if base_message.id != message.id {
+                return None;
+            }
+            base_index += 1;
+        } else {
+            appended.push(message.clone());
+        }
     }
-    if !base
-        .iter()
-        .zip(projected.iter())
-        .all(|(base_message, next_message)| base_message.id == next_message.id)
-    {
-        return None;
+    if base_index == base.len() {
+        Some(appended)
+    } else {
+        None
     }
-    let mut seen_ids = base
-        .iter()
-        .map(|message| message.id.as_str())
-        .collect::<HashSet<_>>();
-    Some(
-        projected
-            .into_iter()
-            .filter(|message| seen_ids.insert(message.id.as_str()))
-            .cloned()
-            .collect(),
-    )
 }
 
 pub(super) fn normalize_input_items(

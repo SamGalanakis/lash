@@ -818,11 +818,9 @@ impl OpenAiGenericProvider {
             tool_choice,
         };
 
-        Some((|| {
-            serde_json::to_vec(&body).map_err(|e| {
-                LlmTransportError::new(format!("Failed to serialize OpenAI-compatible body: {e}"))
-            })
-        })())
+        Some(serde_json::to_vec(&body).map_err(|e| {
+            LlmTransportError::new(format!("Failed to serialize OpenAI-compatible body: {e}"))
+        }))
     }
 
     fn build_request_body_bytes(
@@ -1030,44 +1028,61 @@ impl OpenAiGenericProvider {
         out
     }
 
-    fn append_added_delta(
+    fn emit_added_delta(
+        retained_deltas: &mut Option<&mut Vec<String>>,
+        stream_events: Option<&LlmEventSender>,
+        delta: String,
+    ) {
+        match (retained_deltas.as_mut(), stream_events) {
+            (Some(dst), Some(tx)) => {
+                (**dst).push(delta.clone());
+                tx.send(LlmStreamEvent::Delta(delta));
+            }
+            (Some(dst), None) => (**dst).push(delta),
+            (None, Some(tx)) => tx.send(LlmStreamEvent::Delta(delta)),
+            (None, None) => {}
+        }
+    }
+
+    fn append_added_delta_owned(
         full: &mut String,
         retained_deltas: &mut Option<&mut Vec<String>>,
         stream_events: Option<&LlmEventSender>,
-        piece: &str,
+        piece: String,
     ) {
-        if let Some(delta) = Self::append_stream_piece(full, piece) {
-            match (retained_deltas.as_mut(), stream_events) {
-                (Some(dst), Some(tx)) => {
-                    (**dst).push(delta.clone());
-                    tx.send(LlmStreamEvent::Delta(delta));
-                }
-                (Some(dst), None) => (**dst).push(delta),
-                (None, Some(tx)) => tx.send(LlmStreamEvent::Delta(delta)),
-                (None, None) => {}
-            }
+        if piece.is_empty() {
+            return;
         }
+        if piece.starts_with(full.as_str()) {
+            let delta_start = full.len();
+            if delta_start < piece.len() {
+                full.push_str(&piece[delta_start..]);
+                Self::emit_added_delta(
+                    retained_deltas,
+                    stream_events,
+                    piece[delta_start..].to_string(),
+                );
+            }
+            return;
+        }
+        full.push_str(piece.as_str());
+        Self::emit_added_delta(retained_deltas, stream_events, piece);
     }
 
     fn process_stream_content(
         full: &mut String,
         retained_deltas: &mut Option<&mut Vec<String>>,
         stream_events: Option<&LlmEventSender>,
-        content: &OpenAiCompatContent,
+        content: OpenAiCompatContent,
     ) {
         match content {
             OpenAiCompatContent::Text(text) => {
-                Self::append_added_delta(full, retained_deltas, stream_events, text.as_ref());
+                Self::append_added_delta_owned(full, retained_deltas, stream_events, text);
             }
             OpenAiCompatContent::Parts(parts) => {
                 for part in parts {
-                    if let Some(text) = part.text.as_ref() {
-                        Self::append_added_delta(
-                            full,
-                            retained_deltas,
-                            stream_events,
-                            text.as_ref(),
-                        );
+                    if let Some(text) = part.text {
+                        Self::append_added_delta_owned(full, retained_deltas, stream_events, text);
                     }
                 }
             }
@@ -1129,10 +1144,10 @@ impl OpenAiGenericProvider {
         {
             tx.send(LlmStreamEvent::Usage(state.usage.clone()));
         }
-        for choice in &event.choices {
+        for mut choice in event.choices {
             // Reasoning arrives before text on providers that emit it;
             // apply it first so ordering in the final parts list matches.
-            if let Some(delta) = &choice.delta
+            if let Some(delta) = choice.delta.as_mut()
                 && let Some(piece) = delta.reasoning_text()
             {
                 Self::handle_reasoning_piece(
@@ -1141,7 +1156,7 @@ impl OpenAiGenericProvider {
                     piece,
                 );
             }
-            if let Some(message) = &choice.message
+            if let Some(message) = choice.message.as_mut()
                 && let Some(piece) = message.reasoning_text()
             {
                 Self::handle_reasoning_piece(
@@ -1151,8 +1166,8 @@ impl OpenAiGenericProvider {
                 );
             }
 
-            if let Some(delta) = &choice.delta
-                && let Some(content) = delta.content.as_ref()
+            if let Some(delta) = choice.delta.as_mut()
+                && let Some(content) = delta.content.take()
             {
                 // A content delta means we're no longer streaming reasoning;
                 // close the segment so later reasoning (if any) starts fresh.
@@ -1166,8 +1181,8 @@ impl OpenAiGenericProvider {
                     content,
                 );
             }
-            if let Some(message) = &choice.message
-                && let Some(content) = message.content.as_ref()
+            if let Some(message) = choice.message.as_mut()
+                && let Some(content) = message.content.take()
             {
                 if let Some(acc) = state.reasoning.as_deref_mut() {
                     acc.close_segment();
@@ -1179,11 +1194,9 @@ impl OpenAiGenericProvider {
                     content,
                 );
             }
-        }
-        // Accumulate streaming tool call deltas.
-        if let Some(tool_calls) = state.tool_calls.as_mut() {
-            let tool_calls = &mut **tool_calls;
-            for choice in &event.choices {
+
+            // Accumulate streaming tool call deltas.
+            if let Some(tool_calls) = state.tool_calls.as_deref_mut() {
                 for tc in choice
                     .delta
                     .as_ref()
@@ -1212,12 +1225,11 @@ impl OpenAiGenericProvider {
                         }
                     }
                 }
-            }
-            // OpenRouter emits encrypted reasoning alongside the
-            // assistant's visible output. Pair each `reasoning.encrypted`
-            // entry with the tool call whose id it references so we can
-            // replay it as `reasoning_details` on the next request.
-            for choice in &event.choices {
+
+                // OpenRouter emits encrypted reasoning alongside the
+                // assistant's visible output. Pair each `reasoning.encrypted`
+                // entry with the tool call whose id it references so we can
+                // replay it as `reasoning_details` on the next request.
                 for details in choice
                     .delta
                     .as_ref()
@@ -1619,7 +1631,7 @@ impl Provider for OpenAiGenericProvider {
             |raw| {
                 let prev_usage = usage.clone();
                 Self::process_sse_event_with_tools(
-                    &raw,
+                    raw,
                     SseEventState::new(&mut full, &mut usage, &prev_usage)
                         .with_retained_deltas_opt(retained_deltas.as_mut())
                         .with_stream_events(stream_events.as_ref())

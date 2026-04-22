@@ -528,7 +528,6 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
             prompt,
             SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
             AutonomousPersistenceContext {
-                store: Arc::clone(&store),
                 await_background_work: args.await_background_work,
                 turn_usage_json: args.turn_usage_json.clone(),
             },

@@ -387,6 +387,13 @@ impl MessageSequence {
         self.len() == 0
     }
 
+    pub fn iter(&self) -> MessageSequenceIter<'_> {
+        match self.owned.as_ref() {
+            Some(owned) => MessageSequenceIter::Owned(owned.iter()),
+            None => MessageSequenceIter::Split(self.base.iter().chain(self.delta.iter())),
+        }
+    }
+
     pub fn as_slice(&self) -> &[Message] {
         if let Some(owned) = &self.owned {
             return owned.as_slice();
@@ -504,6 +511,22 @@ impl MessageSequence {
     }
 }
 
+pub enum MessageSequenceIter<'a> {
+    Owned(std::slice::Iter<'a, Message>),
+    Split(std::iter::Chain<std::slice::Iter<'a, Message>, std::slice::Iter<'a, Message>>),
+}
+
+impl<'a> Iterator for MessageSequenceIter<'a> {
+    type Item = &'a Message;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Owned(iter) => iter.next(),
+            Self::Split(iter) => iter.next(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct TranscriptTurn {
     user: Vec<String>,
@@ -516,7 +539,9 @@ pub fn render_prompt(msgs: &[Message]) -> RenderedPrompt {
     rendered
 }
 
-pub fn messages_are_live_resume_safe(messages: &[Message]) -> bool {
+pub fn messages_are_prompt_resume_safe<'a>(
+    messages: impl IntoIterator<Item = &'a Message>,
+) -> bool {
     let mut seen_tool_calls = HashSet::new();
     let mut completed_tool_calls = HashSet::new();
 
@@ -540,7 +565,7 @@ pub fn messages_are_live_resume_safe(messages: &[Message]) -> bool {
                     else {
                         return false;
                     };
-                    if !seen_tool_calls.insert(call_id.to_string()) {
+                    if !seen_tool_calls.insert(call_id) {
                         return false;
                     }
                 }
@@ -559,7 +584,7 @@ pub fn messages_are_live_resume_safe(messages: &[Message]) -> bool {
                     if !seen_tool_calls.contains(call_id) {
                         return false;
                     }
-                    if !completed_tool_calls.insert(call_id.to_string()) {
+                    if !completed_tool_calls.insert(call_id) {
                         return false;
                     }
                 }
@@ -1146,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn live_resume_safety_accepts_completed_tool_history() {
+    fn prompt_resume_safety_accepts_completed_tool_history() {
         let msgs = vec![
             Message {
                 id: "m0".to_string(),
@@ -1186,7 +1211,7 @@ mod tests {
             },
         ];
 
-        assert!(messages_are_live_resume_safe(&msgs));
+        assert!(messages_are_prompt_resume_safe(&msgs));
     }
 
     #[test]
@@ -1258,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn live_resume_safety_rejects_unmatched_tool_calls() {
+    fn prompt_resume_safety_rejects_unmatched_tool_calls() {
         let msgs = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::Assistant,
@@ -1278,7 +1303,7 @@ mod tests {
             origin: None,
         }];
 
-        assert!(!messages_are_live_resume_safe(&msgs));
+        assert!(!messages_are_prompt_resume_safe(&msgs));
     }
 
     // ─── Reasoning-part roundtrip (fix 1.3b) ──────────────────────────

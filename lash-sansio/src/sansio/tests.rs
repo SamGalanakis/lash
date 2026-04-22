@@ -94,6 +94,16 @@ fn find_checkpoint(effects: &[Effect]) -> Option<(EffectId, CheckpointKind)> {
     })
 }
 
+fn find_progress(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Progress {
+            messages,
+            iteration,
+        } => Some((messages, *iteration)),
+        _ => None,
+    })
+}
+
 fn find_done(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
     effects.iter().find_map(|effect| match effect {
         Effect::Done {
@@ -428,6 +438,25 @@ fn checkpoint_messages_resume_prepare_iteration() {
     });
 
     let effects = drain_effects(&mut machine);
+    let (progress_messages, progress_iteration) =
+        find_progress(&effects).expect("checkpoint progress");
+    assert_eq!(progress_iteration, 1);
+    assert!(progress_messages.iter().any(|message| {
+        message.role == MessageRole::User
+            && message
+                .parts
+                .iter()
+                .any(|part| part.content == "one more thing")
+    }));
+    let progress_idx = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::Progress { .. }))
+        .expect("progress index");
+    let llm_idx = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::LlmCall { .. }))
+        .expect("llm index");
+    assert!(progress_idx < llm_idx);
     assert!(find_llm_call(&effects).is_some());
     assert!(machine.messages().iter().any(|message| {
         message.role == MessageRole::User

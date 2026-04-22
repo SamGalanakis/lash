@@ -33,7 +33,7 @@ pub use session_model::{
     Part, PartKind, PromptBuiltin, PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode,
     PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState,
     RenderedPrompt, RetryPolicy, SessionEvent, TokenUsage, default_prompt_template,
-    messages_are_live_resume_safe,
+    messages_are_prompt_resume_safe,
 };
 pub use tool_surface::{
     ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceOverride,

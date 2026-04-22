@@ -330,7 +330,7 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
     };
 
     let blocks =
-        projected_blocks_from_state(&[message], &[], &crate::app::UiResumeState::default());
+        projected_blocks_from_state(&[message], &[], &crate::app::UiProjectionState::default());
 
     // blocks[0] is the TurnStart marker emitted before the user input.
     assert!(matches!(blocks.first(), Some(DisplayBlock::TurnStart(_))));

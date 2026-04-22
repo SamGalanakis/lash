@@ -3,7 +3,7 @@ pub mod prompt;
 
 pub use message::{
     Message, MessageRole, MessageSequence, Part, PartKind, PruneState, ReasoningMeta,
-    RenderedPrompt, append_rendered_prompt, messages_are_live_resume_safe, render_prompt,
+    RenderedPrompt, append_rendered_prompt, messages_are_prompt_resume_safe, render_prompt,
     render_transcript_prompt,
 };
 pub use prompt::{

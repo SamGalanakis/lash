@@ -57,7 +57,7 @@ pub async fn switch_to_tree_selection(
     app.blocks = projected_blocks_from_state(
         &projected_messages,
         &projected_tool_calls,
-        &app.ui_resume_state(),
+        &app.ui_projection_state(),
     );
     app.token_usage = state.token_usage.clone();
     app.last_prompt_usage = state.last_prompt_usage.clone();
@@ -74,12 +74,7 @@ pub async fn switch_to_tree_selection(
     app.scroll_to_bottom();
 
     let mut persistence_state = lash::PersistedSessionState::from_state(state);
-    persist_committed_runtime_state(
-        logger.store().as_ref(),
-        &mut persistence_state,
-        &app.ui_resume_state(),
-    )
-    .await;
+    persist_committed_runtime_state(logger.store().as_ref(), &mut persistence_state).await;
 
     Ok(())
 }
