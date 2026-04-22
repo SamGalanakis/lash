@@ -979,7 +979,7 @@ impl Provider for AnthropicProvider {
             resp,
             timeouts.chunk_timeout,
             "Anthropic stream chunk timed out",
-            |raw| Self::process_sse_event(&raw, &mut state, stream_events.as_ref()),
+            |raw| Self::process_sse_event(raw, &mut state, stream_events.as_ref()),
         )
         .await?;
 

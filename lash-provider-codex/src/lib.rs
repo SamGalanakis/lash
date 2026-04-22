@@ -1770,7 +1770,7 @@ impl Provider for CodexProvider {
                 let prev_len = state.deltas.len();
                 let prev_usage = state.usage.clone();
                 let mut emitted_parts = Vec::new();
-                Self::process_sse_event(&raw, &mut state, Some(&mut emitted_parts))?;
+                Self::process_sse_event(raw, &mut state, Some(&mut emitted_parts))?;
                 emit_progress(
                     stream_events.as_ref(),
                     &state.deltas,

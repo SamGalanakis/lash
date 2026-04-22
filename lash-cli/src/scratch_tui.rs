@@ -512,6 +512,26 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     if written_rows < viewport_height
+        && let Some(live_lines) = app.live_reasoning_lines_snapshot()
+    {
+        if app.live_reasoning_leading_padding() > 0 {
+            if skip_lines > 0 {
+                skip_lines -= 1;
+            } else if written_rows < viewport_height {
+                written_rows += 1;
+            }
+        }
+        for line in live_lines.iter().skip(skip_lines) {
+            if written_rows >= viewport_height {
+                break;
+            }
+            frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
+            written_rows += 1;
+        }
+        skip_lines = skip_lines.saturating_sub(live_lines.len());
+    }
+
+    if written_rows < viewport_height
         && let Some(live_lines) = app.live_assistant_lines_snapshot()
     {
         if app.live_assistant_leading_padding() > 0 {
@@ -528,7 +548,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
             written_rows += 1;
         }
-        // Advance skip_lines past the live-assistant content rows so a
+        // Advance skip_lines past the live markdown content rows so a
         // trailing plan-dock render picks up at the right offset.
         skip_lines = skip_lines.saturating_sub(live_lines.len());
     }

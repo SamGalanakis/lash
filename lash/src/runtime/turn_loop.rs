@@ -34,6 +34,105 @@ impl LashRuntime {
             probe.end(phase);
         }
     }
+
+    async fn persist_progress_boundary(
+        &mut self,
+        messages: &crate::MessageSequence,
+        tool_calls: &[ToolCallRecord],
+        iteration: usize,
+    ) -> Result<(), RuntimeError> {
+        if !crate::messages_are_prompt_resume_safe(messages.iter()) {
+            return Ok(());
+        }
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
+            return Ok(());
+        };
+
+        self.state.policy = self.policy.clone();
+        self.state.iteration = iteration;
+        if let Some(appended_messages) = projection_message_delta_if_base_preserved(
+            self.state.projected_messages(),
+            messages.iter(),
+        ) {
+            self.state.append_projected_messages(&appended_messages);
+        } else {
+            let projected_messages = messages.shared();
+            self.state
+                .replace_projection(projected_messages.as_slice(), tool_calls);
+        }
+
+        if let Some(session) = self.session.as_mut() {
+            if let Ok(snapshot) = session.snapshot_execution_state().await {
+                self.state.set_execution_state_snapshot(snapshot);
+            }
+            let plugins = session.plugins();
+            self.state.refresh_plugin_snapshots(plugins.as_ref());
+        }
+
+        let commit = crate::store::PersistedStateCommit::persisted_state(&self.state, &[]);
+        let result = store
+            .apply_runtime_commit(commit)
+            .await
+            .map_err(|err| RuntimeError {
+                code: "store_commit_failed".to_string(),
+                message: err.to_string(),
+            })?;
+        self.state.apply_persisted_commit_result(result);
+        Ok(())
+    }
+
+    async fn handle_pending_prompt(
+        prompt: PendingPrompt,
+        plugins: Option<&Arc<crate::PluginSession>>,
+        manager: &Arc<dyn SessionManager>,
+        events: &dyn EventSink,
+        assembler: &mut TurnAssembler,
+    ) {
+        if let Some(plugins) = plugins {
+            match plugins
+                .on_prompt_request(crate::PromptRequestHookContext {
+                    session_id: plugins.session_id().to_string(),
+                    request: prompt.request.clone(),
+                    host: Arc::clone(manager),
+                })
+                .await
+            {
+                Ok(emitted) => {
+                    for surface in emitted {
+                        let surface_events = crate::plugin::plugin_surface_session_events(
+                            &surface.plugin_id,
+                            vec![surface.value],
+                        );
+                        for event in surface_events {
+                            assembler.push(&event);
+                            emit_session_event_to_sink(events, event).await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    let event = make_error_event(
+                        "plugin_prompt_request",
+                        None,
+                        err.to_string(),
+                        Some(err.to_string()),
+                    );
+                    assembler.push(&event);
+                    emit_session_event_to_sink(events, event).await;
+                }
+            }
+        }
+        let event = SessionEvent::Prompt {
+            request: prompt.request,
+            response_tx: prompt.response_tx,
+        };
+        assembler.push(&event);
+        emit_session_event_to_sink(events, event).await;
+    }
+
     /// Run a single turn and stream events to the host sink.
     /// Includes overflow recovery: if the LLM rejects the prompt as too long,
     /// the context is force-compacted and the turn is retried once.
@@ -92,9 +191,9 @@ impl LashRuntime {
                     }),
                 };
                 assembler.push(&error_event);
-                events.emit(error_event).await;
+                emit_session_event_to_sink(events, error_event).await;
                 assembler.push(&SessionEvent::Done);
-                events.emit(SessionEvent::Done).await;
+                emit_session_event_to_sink(events, SessionEvent::Done).await;
                 return Ok(assembler.finish(
                     self.state.export_state(),
                     false,
@@ -299,58 +398,11 @@ impl LashRuntime {
             })?;
         let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PendingPrompt>();
         prompt_bridge.set_sender(prompt_tx);
-        let prompt_event_tx = event_tx.clone();
         let prompt_hook_manager = Arc::clone(&manager);
         let prompt_plugins = self
             .session
             .as_ref()
             .map(|session| Arc::clone(session.plugins()));
-        let prompt_forward = tokio::spawn(async move {
-            while let Some(prompt) = prompt_rx.recv().await {
-                if let Some(plugins) = prompt_plugins.as_ref() {
-                    match plugins
-                        .on_prompt_request(crate::PromptRequestHookContext {
-                            session_id: plugins.session_id().to_string(),
-                            request: prompt.request.clone(),
-                            host: Arc::clone(&prompt_hook_manager),
-                        })
-                        .await
-                    {
-                        Ok(emitted) => {
-                            for surface in emitted {
-                                let events = crate::plugin::plugin_surface_session_events(
-                                    &surface.plugin_id,
-                                    vec![surface.value],
-                                );
-                                for event in events {
-                                    let _ = prompt_event_tx
-                                        .send(RuntimeStreamEvent::Session(event))
-                                        .await;
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            let _ = prompt_event_tx
-                                .send(RuntimeStreamEvent::Session(make_error_event(
-                                    "plugin_prompt_request",
-                                    None,
-                                    err.to_string(),
-                                    Some(err.to_string()),
-                                )))
-                                .await;
-                        }
-                    }
-                }
-                if !prompt_event_tx.is_closed() {
-                    let _ = prompt_event_tx
-                        .send(RuntimeStreamEvent::Session(SessionEvent::Prompt {
-                            request: prompt.request,
-                            response_tx: prompt.response_tx,
-                        }))
-                        .await;
-                }
-            }
-        });
         let plugins = {
             let session = self
                 .session
@@ -391,9 +443,20 @@ impl LashRuntime {
                             match event {
                                 RuntimeStreamEvent::Session(event) => {
                                     assembler.push(&event);
-                                    events.emit(event).await;
+                                    emit_session_event_to_sink(events, event).await;
                                 }
                             }
+                        }
+                    }
+                    maybe_prompt = prompt_rx.recv() => {
+                        if let Some(prompt) = maybe_prompt {
+                            Self::handle_pending_prompt(
+                                prompt,
+                                prompt_plugins.as_ref(),
+                                &prompt_hook_manager,
+                                events,
+                                &mut assembler,
+                            ).await;
                         }
                     }
                 }
@@ -405,7 +468,6 @@ impl LashRuntime {
         emit_session_events_to_sink(events, prepared.events).await;
         if let Some(abort) = prepared.abort {
             prompt_bridge.clear_sender();
-            let _ = prompt_forward.await;
             drop(event_tx);
 
             let mut state = self.state.clone();
@@ -413,7 +475,7 @@ impl LashRuntime {
                 state.projected_messages(),
                 prepared.messages.as_slice(),
             ) {
-                state.append_projection_delta(&appended_messages, &[]);
+                state.append_projected_messages(&appended_messages);
             } else {
                 let tool_calls = state.project_tool_calls();
                 state.replace_projection(prepared.messages.as_slice(), &tool_calls);
@@ -434,9 +496,9 @@ impl LashRuntime {
                 }),
             };
             assembler.push(&error_event);
-            events.emit(error_event).await;
+            emit_session_event_to_sink(events, error_event).await;
             assembler.push(&SessionEvent::Done);
-            events.emit(SessionEvent::Done).await;
+            emit_session_event_to_sink(events, SessionEvent::Done).await;
             return Ok(assembler.finish(
                 state.export_state(),
                 cancel.is_cancelled(),
@@ -445,18 +507,31 @@ impl LashRuntime {
                 &self.host.core.termination,
             ));
         }
+        let current_tool_calls = self.state.session_graph.shared_projected_tool_calls();
+        self.persist_progress_boundary(
+            &prepared.messages,
+            current_tool_calls.as_slice(),
+            self.state.iteration,
+        )
+        .await?;
         let cancel_state = cancel.clone();
         let session = self
             .session
             .take()
             .expect("lash runtime session must be available");
+        let progress_graph = TurnGraphOverlay::new(
+            Arc::new(self.state.session_graph.clone()),
+            self.state.session_graph.shared_projected_messages(),
+            self.state.session_graph.shared_projected_rendered_prompt(),
+            self.state.session_graph.shared_projected_tool_calls(),
+        );
         let mut driver = RuntimeTurnDriver {
             session,
             policy: self.policy.clone(),
             host: self.host.clone(),
             session_id: self.state.session_id.clone(),
-            base_graph: Arc::new(self.state.session_graph.clone()),
-            tool_calls: self.state.session_graph.shared_projected_tool_calls(),
+            progress_graph,
+            progress_state: self.state.clone(),
             llm_stream_summaries: HashMap::new(),
             session_manager: manager,
             prompt_bridge,
@@ -482,9 +557,20 @@ impl LashRuntime {
                         match event {
                             RuntimeStreamEvent::Session(event) => {
                                 assembler.push(&event);
-                                events.emit(event).await;
+                                emit_session_event_to_sink(events, event).await;
                             }
                         }
+                    }
+                }
+                maybe_prompt = prompt_rx.recv() => {
+                    if let Some(prompt) = maybe_prompt {
+                        Self::handle_pending_prompt(
+                            prompt,
+                            prompt_plugins.as_ref(),
+                            &prompt_hook_manager,
+                            events,
+                            &mut assembler,
+                        ).await;
                     }
                 }
                 joined = &mut run_task => {
@@ -511,12 +597,11 @@ impl LashRuntime {
                 }
             }
         };
-        let _ = prompt_forward.await;
         while let Some(event) = event_rx.recv().await {
             match event {
                 RuntimeStreamEvent::Session(event) => {
                     assembler.push(&event);
-                    events.emit(event).await;
+                    emit_session_event_to_sink(events, event).await;
                 }
             }
         }
@@ -529,12 +614,27 @@ impl LashRuntime {
         );
 
         // Drain the shared token ledger (child sessions + direct
-        // completions + async OM observers/reflectors) and merge into
-        // the session state. Also record the parent's own turn usage.
+        // completions + async OM observers/reflectors). Merge it after
+        // restoring the latest progress checkpoint state so in-turn
+        // progress commits cannot wipe live child usage.
         let child_ledger = {
             let mut ledger = self.shared_token_ledger.lock().expect("token ledger lock");
             std::mem::take(&mut *ledger)
         };
+
+        let RuntimeTurnDriver {
+            session,
+            policy,
+            progress_graph,
+            progress_state,
+            ..
+        } = driver;
+        let mut progress_graph = progress_graph;
+        self.session = Some(session);
+        self.policy = policy;
+        self.state = progress_state;
+        self.state.policy = self.policy.clone();
+        self.state.iteration = new_iteration;
         let mut turn_usage_delta = child_ledger.clone();
         for entry in child_ledger {
             merge_ledger_entry(&mut self.state.token_ledger, entry);
@@ -542,42 +642,41 @@ impl LashRuntime {
         if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             let entry = TokenLedgerEntry {
                 source: "turn".to_string(),
-                model: driver.policy.model.clone(),
+                model: self.policy.model.clone(),
                 usage: assembler.token_usage.clone(),
             };
             merge_ledger_entry(&mut self.state.token_ledger, entry.clone());
             turn_usage_delta.push(entry);
         }
         let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
-
-        let RuntimeTurnDriver {
-            session,
-            policy,
-            base_graph,
-            ..
-        } = driver;
-        // Explicit drop: `..` elision keeps the base_graph clone alive
-        // until end of scope in practice, which forces
-        // `append_projection_delta`'s `Arc::make_mut` to deep-clone.
-        drop(base_graph);
-        self.session = Some(session);
-        self.policy = policy;
-        self.state.policy = self.policy.clone();
-        self.state.iteration = new_iteration;
-        if let Some(appended_messages) = projection_message_delta_if_base_preserved(
-            self.state.projected_messages(),
-            new_messages.as_slice(),
-        ) {
-            self.state
-                .append_projection_delta(&appended_messages, &assembler.tool_calls);
+        let projected_new_messages = (new_messages.is_empty() && cancel_state.is_cancelled())
+            .then(|| progress_graph.message_sequence().shared());
+        let appended_messages =
+            if let Some(projected_new_messages) = projected_new_messages.as_ref() {
+                progress_graph.message_delta_if_current_preserved(projected_new_messages.iter())
+            } else {
+                progress_graph.message_delta_if_current_preserved(new_messages.iter())
+            };
+        if let Some(appended_messages) = appended_messages {
+            if assembler.tool_calls.is_empty() {
+                progress_graph.append_projected_messages(&appended_messages);
+            } else {
+                progress_graph.append_projection_delta(&appended_messages, &assembler.tool_calls);
+            }
         } else {
-            let mut next_tool_calls = self.state.project_tool_calls();
+            let mut next_tool_calls = progress_graph.graph_tool_calls().to_vec();
             if !assembler.tool_calls.is_empty() {
                 next_tool_calls.extend(assembler.tool_calls.clone());
             }
-            self.state
-                .replace_projection(new_messages.as_slice(), &next_tool_calls);
+            let projected_new_messages =
+                projected_new_messages.unwrap_or_else(|| new_messages.shared());
+            progress_graph.replace_projection(projected_new_messages.as_slice(), &next_tool_calls);
         }
+        // Drop the pre-turn graph clone before consuming the overlay so
+        // `TurnGraphOverlay` can take ownership of the base graph and append
+        // its node tail without cloning the full graph at finalization.
+        drop(std::mem::take(&mut self.state.session_graph));
+        self.state.session_graph = progress_graph.into_session_graph();
         if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             self.state.token_usage = assembler.token_usage.clone();
         }
@@ -637,24 +736,17 @@ impl LashRuntime {
                 "runtime after finalize_turn"
             );
             let mut returned_turn = finalized.turn;
-            let dynamic_state = plugins.dynamic_tools().map(|tools| tools.export_state());
-            let plugin_snapshot = plugins.snapshot().ok();
-            let plugin_snapshot_revision = Some(plugins.snapshot_revision_fingerprint());
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                dynamic_state_present = dynamic_state.is_some(),
-                plugin_snapshot_present = plugin_snapshot.is_some(),
+                dynamic_state_present = assembled_state.dynamic_state_ref.is_some()
+                    || assembled_state.dynamic_state_snapshot.is_some(),
+                plugin_snapshot_present = assembled_state.plugin_snapshot_ref.is_some()
+                    || assembled_state.plugin_snapshot.is_some(),
                 "runtime before stamp_runtime_state"
             );
             self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
             assembled_state.apply_exported_state(&returned_turn.state);
-            assembled_state.dynamic_state_snapshot = dynamic_state;
-            assembled_state.dynamic_state_generation = assembled_state
-                .dynamic_state_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.base_generation);
-            assembled_state.plugin_snapshot = plugin_snapshot;
-            assembled_state.plugin_snapshot_revision = plugin_snapshot_revision;
+            assembled_state.refresh_plugin_snapshots(plugins.as_ref());
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
                 persisted_graph_node_count = assembled_state.session_graph.nodes.len(),
@@ -666,20 +758,18 @@ impl LashRuntime {
                 .as_ref()
                 .and_then(|session| session.history_store())
             {
-                let commit = crate::store::RuntimeCommit::persisted_state(
+                let commit = crate::store::PersistedStateCommit::persisted_state(
                     &assembled_state,
                     &turn_usage_delta,
                 );
-                let crate::store::RuntimeCommitResult::PersistedState(result) = store
-                    .apply_runtime_commit(commit)
-                    .await
-                    .map_err(|err| RuntimeError {
-                        code: "store_commit_failed".to_string(),
-                        message: err.to_string(),
-                    })?
-                else {
-                    unreachable!("persisted state commit should return persisted result");
-                };
+                let result =
+                    store
+                        .apply_runtime_commit(commit)
+                        .await
+                        .map_err(|err| RuntimeError {
+                            code: "store_commit_failed".to_string(),
+                            message: err.to_string(),
+                        })?;
                 assembled_state.apply_persisted_commit_result(result);
             } else {
                 clear_persisted_runtime_caches(&mut assembled_state);

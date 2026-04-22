@@ -6,9 +6,7 @@ use lash::{PluginMessage, *};
 
 use super::*;
 use crate::input_items::build_items_from_editor_input;
-#[cfg(test)]
-use crate::turn_runner::pending_turn_graph;
-use crate::turn_runner::{RuntimeRunResult, persist_pending_turn, spawn_runtime_turn};
+use crate::turn_runner::{RuntimeRunResult, spawn_runtime_turn};
 
 pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
@@ -254,7 +252,7 @@ pub(super) async fn send_user_message(
     turn_input: TurnInput,
     app: &mut App,
     ui_trace: Option<&mut UiTraceRecorder>,
-    logger: &mut SessionLogger,
+    _logger: &mut SessionLogger,
     runtime: &mut Option<LashRuntime>,
     _history: &mut Vec<Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
@@ -290,13 +288,6 @@ pub(super) async fn send_user_message(
     let rt = runtime
         .take()
         .expect("runtime should be available when not running");
-    persist_pending_turn(
-        logger.store().as_ref(),
-        &rt,
-        &turn_input,
-        &app.ui_resume_state(),
-    )
-    .await;
     tracing::info!(
         mode = ?turn_input.mode,
         items = turn_input.items.len(),
@@ -466,59 +457,5 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
         }
     } else {
         tracing::debug!("copy path had no selected or fallback text");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lash::{SkillCatalog, UserInputProvenance};
-
-    #[test]
-    fn pending_turn_graph_preserves_user_input_provenance() {
-        let turn = PreparedTurn::prepare("/yolopush".into(), Vec::new(), &SkillCatalog::default());
-        let turn_input = crate::turn_runner::make_turn_input(&turn);
-        let graph = pending_turn_graph(&SessionGraph::default(), &turn_input);
-
-        let messages = graph.project_messages();
-        let user_message = messages.last().expect("user message");
-        assert_eq!(
-            user_message
-                .user_input
-                .as_ref()
-                .map(|input| input.display_text.as_str()),
-            Some("/yolopush")
-        );
-    }
-
-    #[test]
-    fn pending_turn_graph_keeps_explicit_user_input_provenance() {
-        let turn_input = TurnInput {
-            items: vec![InputItem::Text {
-                text: "/localref\n\n<skill>\nbody\n</skill>".into(),
-            }],
-            image_blobs: HashMap::new(),
-            user_input: Some(UserInputProvenance {
-                display_text: "/localref".into(),
-                effective_text: "/localref\n\n<skill>\nbody\n</skill>".into(),
-                transforms: vec![lash::UserInputTransform::SkillBlockAppend {
-                    skill_name: "localref".into(),
-                    skill_path: "/tmp/localref/SKILL.md".into(),
-                }],
-            }),
-            mode: Some(RunMode::Normal),
-            rlm_termination_override: None,
-        };
-        let graph = pending_turn_graph(&SessionGraph::default(), &turn_input);
-
-        let messages = graph.project_messages();
-        let user_message = messages.last().expect("user message");
-        assert_eq!(
-            user_message
-                .user_input
-                .as_ref()
-                .map(|input| input.display_text.as_str()),
-            Some("/localref")
-        );
     }
 }

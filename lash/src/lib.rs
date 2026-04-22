@@ -57,7 +57,7 @@ pub use lash_sansio::{
     ToolResult, ToolSurface, ToolSurfaceBuildInput, TurnMachine, TurnMachineConfig,
     UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
     build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
-    execution_mode_supported, messages_are_live_resume_safe, normalized_response_parts,
+    execution_mode_supported, messages_are_prompt_resume_safe, normalized_response_parts,
     reasoning_part, turn_limit_exhausted_message,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
@@ -122,11 +122,9 @@ pub use skill_prompt::{
 };
 pub use store::{
     BlobArtifactDescriptor, BlobCompression, BlobRef, BlobStorageHint, GcReport,
-    HydratedSessionCheckpoint, LiveResumeCommit, LiveResumeDelta, LiveResumeSnapshot,
-    PersistedArtifactKind, PersistedStateCommit, PersistedStateCommitResult, RetainedArtifactRef,
-    RuntimeCommit, RuntimeCommitResult, RuntimeStore, SessionCheckpoint, SessionGraphCommit,
-    SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo, VacuumReport,
-    materialize_live_resume_graph,
+    HydratedSessionCheckpoint, PersistedArtifactKind, PersistedStateCommit,
+    PersistedStateCommitResult, RetainedArtifactRef, RuntimeStore, SessionCheckpoint,
+    SessionGraphCommit, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo, VacuumReport,
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{BuiltinBlobProfile, SqliteStore, Store, StoreGcPolicy, StoreOptions};

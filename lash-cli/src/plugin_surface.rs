@@ -243,6 +243,31 @@ pub fn apply_surface_event(
     }
 }
 
+pub fn desktop_notification_effect(event: &PluginSurfaceEvent) -> Option<lash_ui::UiHostEffect> {
+    let PluginSurfaceEvent::Custom { name, payload } = event else {
+        return None;
+    };
+    if name != "desktop_notification" {
+        return None;
+    }
+    Some(lash_ui::UiHostEffect::DesktopNotification {
+        title: payload
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("lash")
+            .to_string(),
+        body: payload
+            .get("body")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        only_when_unfocused: payload
+            .get("only_when_unfocused")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,29 +438,4 @@ mod tests {
         assert!(mutation.plan_dock_change.is_none());
         assert_eq!(blocks.len(), 1);
     }
-}
-
-pub fn desktop_notification_effect(event: &PluginSurfaceEvent) -> Option<lash_ui::UiHostEffect> {
-    let PluginSurfaceEvent::Custom { name, payload } = event else {
-        return None;
-    };
-    if name != "desktop_notification" {
-        return None;
-    }
-    Some(lash_ui::UiHostEffect::DesktopNotification {
-        title: payload
-            .get("title")
-            .and_then(|value| value.as_str())
-            .unwrap_or("lash")
-            .to_string(),
-        body: payload
-            .get("body")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        only_when_unfocused: payload
-            .get("only_when_unfocused")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true),
-    })
 }

@@ -1006,28 +1006,41 @@ dependencies = [
 
 [[package]]
 name = "fff-grep"
-version = "0.5.2"
+version = "0.6.2-nightly.a677d64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0bac75b4c81cf5efbee66d95760ff91dc6f1a105eea7c0477640512d88d9da8"
+checksum = "7012271523fc16ab6eabcf6911570ed29b0904b8889630396a1a3666b2994df1"
 dependencies = [
  "bstr",
  "memchr",
 ]
 
 [[package]]
-name = "fff-query-parser"
-version = "0.5.2"
+name = "fff-notify-debouncer-full"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57b495c4ada3a9e3b2dc8585a8811c2beba7a18556ffa7f3212cc22ad9bb66b1"
+checksum = "4594f0ef1ad0bfcd112bbe4b397ef881f50442bc710356b86858d555848e4d09"
+dependencies = [
+ "file-id",
+ "log",
+ "notify",
+ "notify-types",
+ "walkdir",
+]
+
+[[package]]
+name = "fff-query-parser"
+version = "0.6.2-nightly.a677d64"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb455721b327e8cbe86e011edc99d3ea0aa2089ddd8e1031e41ac7c565841de7"
 dependencies = [
  "zlob",
 ]
 
 [[package]]
 name = "fff-search"
-version = "0.5.2"
+version = "0.6.2-nightly.a677d64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b90f3f8bcbc5ad57de86ad785e75335953d89d7613c79c7d306957a6a0550b83"
+checksum = "1bae1c7bc06a46d04d847267c9fb51ebf93270ca41175625bf6b785b297a7ef4"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -1037,22 +1050,24 @@ dependencies = [
  "dirs 5.0.1",
  "dunce",
  "fff-grep",
+ "fff-notify-debouncer-full",
  "fff-query-parser",
  "git2",
  "glidesort",
  "globset",
  "heed",
  "ignore",
+ "libc",
  "memchr",
  "memmap2",
  "neo_frizbee",
  "notify",
- "notify-debouncer-full",
  "once_cell",
  "parking_lot",
  "pathdiff",
  "rayon",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "smallvec",
@@ -1133,15 +1148,6 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
-name = "fsevent-sys"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "futures-channel"
@@ -2388,9 +2394,9 @@ dependencies = [
 
 [[package]]
 name = "neo_frizbee"
-version = "0.8.5"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34a8a11f48357cecd5ada0751f1490d8da4dd935e595d34cc2727567d5288ead"
+checksum = "2b216854d8c3752f8dbda56703c708de44bccb0542ca3924976c5977d6fb0724"
 dependencies = [
  "itertools 0.14.0",
  "raw-cpuid",
@@ -2429,33 +2435,22 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "8.2.0"
+version = "9.0.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d3d07927151ff8575b7087f245456e549fea62edf0ec4e565a5ee50c8402bc3"
+checksum = "783683ce6e1059e3747190a6c05688db21e07a846bf90babb351365f9133fe3e"
 dependencies = [
  "bitflags 2.11.1",
- "fsevent-sys",
  "inotify",
  "kqueue",
  "libc",
  "log",
  "mio",
  "notify-types",
+ "objc2-core-foundation",
+ "objc2-core-services",
  "walkdir",
- "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "notify-debouncer-full"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c02b49179cfebc9932238d04d6079912d26de0379328872846118a0fa0dbb302"
-dependencies = [
- "file-id",
- "log",
- "notify",
- "notify-types",
- "walkdir",
+ "windows-sys 0.61.2",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -2534,6 +2529,16 @@ dependencies = [
  "objc2",
  "objc2-core-foundation",
  "objc2-io-surface",
+]
+
+[[package]]
+name = "objc2-core-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -4993,6 +4998,12 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yoke"

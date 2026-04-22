@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
 use lash::session_model::Message;
-use lash::{SessionGraph, SessionMeta, Store, ToolCallRecord, materialize_live_resume_graph};
+use lash::{SessionGraph, SessionMeta, Store, ToolCallRecord};
 
 pub mod html;
 pub mod json;
@@ -100,21 +100,6 @@ pub enum SessionSelector<'a> {
 }
 
 fn load_graph(store: &Store) -> SessionGraph {
-    // Live resume holds the newest mid-turn state, but may be empty or
-    // "unsafe" (e.g. a tool call without its result). We prefer it when
-    // it contains a usable projection and otherwise fall back to the
-    // committed session head.
-    if let Some(snapshot) = store.load_live_resume() {
-        let delta = snapshot
-            .delta_ref
-            .as_ref()
-            .and_then(|blob_ref| store.get_typed_blob::<lash::LiveResumeDelta>(blob_ref));
-        let graph = materialize_live_resume_graph(&snapshot, delta.as_ref());
-        let messages = graph.project_messages();
-        if !messages.is_empty() && lash::messages_are_live_resume_safe(&messages) {
-            return graph;
-        }
-    }
     if let Some(head) = store.load_session_head() {
         return head.graph;
     }
@@ -138,7 +123,7 @@ fn resolve_session_path_by_id(sessions_dir: &Path, session_id: &str) -> Result<P
             .unwrap_or(SystemTime::UNIX_EPOCH);
         candidates.push((path, modified));
     }
-    candidates.sort_by(|left, right| right.1.cmp(&left.1));
+    candidates.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     for (path, _) in candidates {
         let Ok(store) = Store::open_readonly(&path) else {

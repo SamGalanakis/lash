@@ -48,22 +48,17 @@ fn text_delta_accumulates_raw() {
     app.handle_session_event(SessionEvent::TextDelta {
         content: "\n\nfirst\n".into(),
     });
-    // Raw accumulation — no normalization until flush
     assert_eq!(
-        app.live_assistant
-            .as_ref()
-            .map(|view| view.raw_text.as_str()),
-        Some("\n\nfirst\n")
+        app.live_assistant.normalized_text().as_deref(),
+        Some("first")
     );
 
     app.handle_session_event(SessionEvent::TextDelta {
         content: "\n\n\nsecond\n".into(),
     });
     assert_eq!(
-        app.live_assistant
-            .as_ref()
-            .map(|view| view.raw_text.as_str()),
-        Some("\n\nfirst\n\n\n\nsecond\n")
+        app.live_assistant.normalized_text().as_deref(),
+        Some("first\n\nsecond")
     );
 }
 
@@ -79,8 +74,8 @@ fn text_delta_code_fence_preserved() {
     // The newline between ```python and # comment must be preserved
     assert!(
         app.live_assistant
-            .as_ref()
-            .is_some_and(|view| view.raw_text.contains("```python\n# comment"))
+            .normalized_text()
+            .is_some_and(|text| text.contains("```python\n# comment"))
     );
 }
 
@@ -297,7 +292,7 @@ fn llm_request_flushes_intermediate_stream_text() {
         tool_list: String::new(),
     });
 
-    assert!(app.live_assistant.is_none());
+    assert!(app.live_assistant.normalized_text().is_none());
     assert!(app.blocks.iter().any(|block| {
         matches!(block, DisplayBlock::AssistantText(text) if text == "Let me continue testing.")
     }));
@@ -320,7 +315,7 @@ fn tool_call_flushes_intermediate_stream_text_immediately() {
         duration_ms: 1,
     });
 
-    assert!(app.live_assistant.is_none());
+    assert!(app.live_assistant.normalized_text().is_none());
     assert!(matches!(
         app.blocks.first(),
         Some(DisplayBlock::AssistantText(text))
@@ -398,7 +393,7 @@ fn final_message_event_is_rendered() {
 }
 
 #[test]
-fn finish_turn_for_resume_reconciles_authoritative_assistant_text() {
+fn finish_turn_for_projection_reconciles_authoritative_assistant_text() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::TextDelta {
@@ -406,7 +401,7 @@ fn finish_turn_for_resume_reconciles_authoritative_assistant_text() {
     });
     app.stop_turn();
 
-    let persisted = app.finish_turn_for_resume_with_output(Some(
+    let persisted = app.finish_turn_for_projection_with_output(Some(
         "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now",
     ));
 
@@ -427,7 +422,7 @@ fn finish_turn_for_resume_reconciles_authoritative_assistant_text() {
 }
 
 #[test]
-fn finish_turn_for_resume_does_not_append_shorter_authoritative_text() {
+fn finish_turn_for_projection_does_not_append_shorter_authoritative_text() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::TextDelta {
@@ -435,7 +430,7 @@ fn finish_turn_for_resume_does_not_append_shorter_authoritative_text() {
     });
     app.stop_turn();
 
-    let persisted = app.finish_turn_for_resume_with_output(Some("Visible"));
+    let persisted = app.finish_turn_for_projection_with_output(Some("Visible"));
 
     let last_block = app
         .blocks
@@ -459,7 +454,7 @@ fn late_text_deltas_after_authoritative_final_output_are_ignored() {
         content: "Use this minimal set:\n\n- `code`\n- `feature`\n".into(),
     });
 
-    let _persisted = app.finish_turn_for_resume_with_output(Some(final_text));
+    let _persisted = app.finish_turn_for_projection_with_output(Some(final_text));
 
     app.handle_session_event(SessionEvent::TextDelta {
         content: "Yeah — **`feature` is nicer than `topic`** if you want the graph to stay product-shaped.\n\nMy take:\n\n- **`topic` is safer**".into(),
@@ -487,7 +482,7 @@ fn tool_output_renders_during_generic_running_turn() {
     });
 
     assert_eq!(
-        app.streaming_output,
+        app.live_tool_output.lines,
         vec!["started git status --short".to_string()]
     );
 }
@@ -501,15 +496,15 @@ fn tool_output_carriage_return_rewrites_partial_line() {
         text: "Compiling alpha".into(),
         kind: "tool_output".into(),
     });
-    assert_eq!(app.streaming_output_partial, "Compiling alpha");
+    assert_eq!(app.live_tool_output.partial, "Compiling alpha");
 
     app.handle_session_event(SessionEvent::Message {
         text: "\rCompiling beta".into(),
         kind: "tool_output".into(),
     });
 
-    assert!(app.streaming_output.is_empty());
-    assert_eq!(app.streaming_output_partial, "Compiling beta");
+    assert!(app.live_tool_output.lines.is_empty());
+    assert_eq!(app.live_tool_output.partial, "Compiling beta");
 }
 
 #[test]
@@ -523,10 +518,10 @@ fn tool_output_crlf_commits_current_line() {
     });
 
     assert_eq!(
-        app.streaming_output,
+        app.live_tool_output.lines,
         vec!["started cargo check".to_string()]
     );
-    assert!(app.streaming_output_partial.is_empty());
+    assert!(app.live_tool_output.partial.is_empty());
 }
 
 #[test]
@@ -540,10 +535,10 @@ fn tool_output_strips_ansi_escape_sequences_from_live_preview() {
     });
 
     assert_eq!(
-        app.streaming_output,
+        app.live_tool_output.lines,
         vec!["warning: check this".to_string()]
     );
-    assert!(app.streaming_output_partial.is_empty());
+    assert!(app.live_tool_output.partial.is_empty());
 }
 
 #[test]
@@ -560,8 +555,8 @@ fn tool_output_strips_osc_escape_sequences_from_live_preview() {
         kind: "tool_output".into(),
     });
 
-    assert_eq!(app.streaming_output, vec!["done".to_string()]);
-    assert!(app.streaming_output_partial.is_empty());
+    assert_eq!(app.live_tool_output.lines, vec!["done".to_string()]);
+    assert!(app.live_tool_output.partial.is_empty());
 }
 
 #[test]
@@ -575,10 +570,10 @@ fn tool_output_tabs_collapse_to_single_spaces_in_live_preview() {
     });
 
     assert_eq!(
-        app.streaming_output,
+        app.live_tool_output.lines,
         vec!["hash refs/tags/v0.2.29".to_string()]
     );
-    assert!(app.streaming_output_partial.is_empty());
+    assert!(app.live_tool_output.partial.is_empty());
 }
 
 #[test]
@@ -597,7 +592,7 @@ fn tool_output_does_not_change_total_content_height() {
 }
 
 #[test]
-fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
+fn finish_turn_for_projection_preserves_streaming_output_snapshot() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::Message {
@@ -605,12 +600,12 @@ fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
         kind: "tool_output".into(),
     });
 
-    let persisted = app.finish_turn_for_resume_with_output(None);
+    let persisted = app.finish_turn_for_projection_with_output(None);
 
     assert!(!app.running);
-    assert!(app.streaming_output.is_empty());
+    assert!(app.live_tool_output.lines.is_empty());
     assert_eq!(
-        persisted.streaming_output,
+        persisted.live_tool_output.lines,
         vec!["started git status --short".to_string()]
     );
 }
@@ -870,9 +865,9 @@ fn interrupted_projection_preserves_partial_assistant_text() {
     let blocks = project_interrupted_blocks(
         &[],
         &[],
-        &UiResumeState {
-            interrupted_assistant_text: Some("Partial streamed answer".to_string()),
-            ..UiResumeState::default()
+        &UiProjectionState {
+            live_assistant_text: Some("Partial streamed answer".to_string()),
+            ..UiProjectionState::default()
         },
         "Cancelled.",
     );
@@ -892,7 +887,7 @@ fn interrupted_projection_does_not_duplicate_already_committed_prose() {
     // Codex emits multiple prose chunks intermixed with tool calls. Each
     // prose chunk is committed as a separate assistant message, and on
     // interrupt the runtime hands the UI the entire concatenation as
-    // `interrupted_assistant_text`. The projection must not re-render that
+    // `live_assistant_text`. The projection must not re-render that
     // concat as an additional block on top of the already-projected ones.
     let messages = vec![
         text_message("m0", MessageRole::User, "go"),
@@ -902,9 +897,9 @@ fn interrupted_projection_does_not_duplicate_already_committed_prose() {
     let blocks = project_interrupted_blocks(
         &messages,
         &[],
-        &UiResumeState {
-            interrupted_assistant_text: Some("first prose\n\nsecond prose".into()),
-            ..UiResumeState::default()
+        &UiProjectionState {
+            live_assistant_text: Some("first prose\n\nsecond prose".into()),
+            ..UiProjectionState::default()
         },
         "Cancelled.",
     );
@@ -928,9 +923,9 @@ fn interrupted_projection_appends_only_uncommitted_tail() {
     let blocks = project_interrupted_blocks(
         &messages,
         &[],
-        &UiResumeState {
-            interrupted_assistant_text: Some("first prose\n\nmid stream tail".into()),
-            ..UiResumeState::default()
+        &UiProjectionState {
+            live_assistant_text: Some("first prose\n\nmid stream tail".into()),
+            ..UiProjectionState::default()
         },
         "Cancelled.",
     );
@@ -1008,7 +1003,7 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
     let blocks = project_interrupted_blocks(
         &[text_message("m0", MessageRole::User, "go"), result_message],
         &tool_calls,
-        &UiResumeState::default(),
+        &UiProjectionState::default(),
         "Cancelled.",
     );
 
@@ -1123,7 +1118,7 @@ fn transient_status_expires_on_tick() {
 }
 
 #[test]
-fn ui_resume_state_omits_transient_live_turn() {
+fn ui_projection_state_omits_transient_live_turn() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
     app.set_status("retrying", Some("in 5s".into()), true);
@@ -1131,7 +1126,7 @@ fn ui_resume_state_omits_transient_live_turn() {
         turn.has_visible_output = true;
     }
 
-    let persisted = serde_json::to_value(app.ui_resume_state()).expect("serialize ui");
+    let persisted = serde_json::to_value(app.ui_projection_state()).expect("serialize ui");
     assert!(persisted.get("live_turn").is_none());
 }
 

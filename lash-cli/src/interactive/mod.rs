@@ -22,7 +22,7 @@ use crate::event::AppEvent;
 use crate::render;
 use crate::resume;
 use crate::session_log::{self, SessionLogger};
-use crate::turn_runner::{RuntimeRunResult, make_turn_input, persist_runtime_turn_state};
+use crate::turn_runner::{RuntimeRunResult, make_turn_input};
 use crate::ui_action::UiAction;
 use crate::ui_trace::{
     UiTraceRecorder, disable_aux_op_recording, enable_aux_op_recording, render_screen_text,
@@ -78,7 +78,7 @@ pub(crate) async fn run_app(
     initial_context_window: u64,
     session_name: String,
     model_catalog: Arc<CachedModelCatalog>,
-    store: Arc<Store>,
+    _store: Arc<Store>,
     mut toolset_hash: String,
     initial_model_variant: Option<String>,
     initial_execution_mode: ExecutionMode,
@@ -447,7 +447,7 @@ pub(crate) async fn run_app(
                     let interrupted = matches!(done.result.status, TurnStatus::Interrupted);
                     let no_visible_output = matches!(done.result.status, TurnStatus::Completed)
                         && !turn_has_visible_output(&done.result);
-                    let mut state = done.result.state;
+                    let state = done.result.state;
                     tracing::info!(
                         iteration = state.iteration,
                         status = ?done.result.status,
@@ -500,22 +500,11 @@ pub(crate) async fn run_app(
                             Some(DisplayBlock::SystemMessage(message))
                                 if message == crate::util::manual_interrupt_message()
                         );
-                        let mut ui_resume_state = app.ui_resume_state();
-                        ui_resume_state.interrupted_assistant_text =
-                            app::interrupted_assistant_tail(
-                                &app.blocks,
-                                &done.result.assistant_output.safe_text,
-                            );
-                        if let Some(rt) = runtime.as_mut() {
-                            persist_runtime_turn_state(
-                                rt,
-                                &mut state,
-                                true,
-                                &store,
-                                &ui_resume_state,
-                            )
-                            .await;
-                        }
+                        let mut ui_projection_state = app.ui_projection_state();
+                        ui_projection_state.live_assistant_text = app::interrupted_assistant_tail(
+                            &app.blocks,
+                            &done.result.assistant_output.safe_text,
+                        );
                         let interrupted_message = if had_manual_interrupt_message {
                             crate::util::manual_interrupt_message().to_string()
                         } else {
@@ -531,7 +520,7 @@ pub(crate) async fn run_app(
                             app.blocks = app::project_interrupted_blocks(
                                 &projected_messages,
                                 &projected_tool_calls,
-                                &ui_resume_state,
+                                &ui_projection_state,
                                 interrupted_message,
                             );
                             app.invalidate_height_cache();
@@ -580,12 +569,8 @@ pub(crate) async fn run_app(
                         (!done.result.assistant_output.safe_text.is_empty())
                             .then(|| done.result.assistant_output.safe_text.clone())
                     });
-                    let ui_resume_state =
-                        app.finish_turn_for_resume_with_output(final_output.as_deref());
-                    if let Some(rt) = runtime.as_mut() {
-                        persist_runtime_turn_state(rt, &mut state, false, &store, &ui_resume_state)
-                            .await;
-                    }
+                    let _ui_projection_state =
+                        app.finish_turn_for_projection_with_output(final_output.as_deref());
                     app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;

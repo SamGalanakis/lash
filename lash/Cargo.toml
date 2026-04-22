@@ -49,5 +49,5 @@ similar = "2"
 pdf-extract = { version = "0.7", optional = true }
 portable-pty = { version = "0.9", optional = true }
 futures-util = "0.3"
-fff-search = { version = "0.5.2", default-features = false, optional = true }
+fff-search = { version = "0.6.2-nightly.a677d64", default-features = false, optional = true }
 libc = "0.2"

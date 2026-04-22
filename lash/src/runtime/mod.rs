@@ -12,6 +12,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 mod turn_driver;
+mod turn_graph;
 mod turn_loop;
 mod usage;
 
@@ -44,6 +45,7 @@ use crate::{
 use host::*;
 use session_manager::*;
 use turn_driver::*;
+use turn_graph::*;
 
 // `PromptUsage` is re-exported below alongside the runtime's own types.
 pub use lash_sansio::PromptUsage;
@@ -268,6 +270,10 @@ impl Default for TerminationPolicy {
 /// `SessionEvent` is intentionally mode-specific and should be treated as preview/progress data.
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
+    fn is_noop(&self) -> bool {
+        false
+    }
+
     async fn emit(&self, event: SessionEvent);
 }
 
@@ -276,6 +282,10 @@ pub struct NoopEventSink;
 
 #[async_trait::async_trait]
 impl EventSink for NoopEventSink {
+    fn is_noop(&self) -> bool {
+        true
+    }
+
     async fn emit(&self, _event: SessionEvent) {}
 }
 

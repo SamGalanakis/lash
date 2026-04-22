@@ -92,7 +92,6 @@ struct RecordingStore {
     blobs: Mutex<HashMap<String, Vec<u8>>>,
     session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
     session_graph: Mutex<crate::SessionGraph>,
-    live_resume: Mutex<Option<crate::LiveResumeSnapshot>>,
     usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
 }
 
@@ -147,18 +146,6 @@ impl crate::store::RuntimeStore for RecordingStore {
 
     async fn load_session_graph(&self) -> crate::SessionGraph {
         self.session_graph.lock().expect("lock graph").clone()
-    }
-
-    async fn save_live_resume(&self, snapshot: crate::LiveResumeSnapshot) {
-        *self.live_resume.lock().expect("lock live resume") = Some(snapshot);
-    }
-
-    async fn load_live_resume(&self) -> Option<crate::LiveResumeSnapshot> {
-        self.live_resume.lock().expect("lock live resume").clone()
-    }
-
-    async fn clear_live_resume(&self) {
-        self.live_resume.lock().expect("lock live resume").take();
     }
 
     async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
@@ -3588,9 +3575,11 @@ async fn environment_park_resume_preserves_active_path() {
 
     // Initial state: one user message. Force the active leaf to this
     // node so later reads find it.
-    let mut initial_state = PersistedSessionState::default();
-    initial_state.session_id = "integration-park-resume".to_string();
-    initial_state.policy = rlm_test_policy();
+    let mut initial_state = PersistedSessionState {
+        session_id: "integration-park-resume".to_string(),
+        policy: rlm_test_policy(),
+        ..PersistedSessionState::default()
+    };
     // Borrow the existing plugin-message helper to construct a
     // minimal Message without touching sansio's Message struct
     // directly (its shape may change).

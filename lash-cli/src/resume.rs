@@ -7,8 +7,7 @@ use lash::{
     Store, TokenUsage,
 };
 
-use crate::app::{App, DisplayBlock, projected_blocks_from_state};
-use crate::resume_snapshot;
+use crate::app::{App, DisplayBlock};
 use crate::session_log;
 
 fn push_history_system_message(history: &mut Vec<Message>, content: String) {
@@ -82,38 +81,6 @@ fn normalized_last_prompt_usage(last_prompt_usage: Option<PromptUsage>) -> Optio
     Some(usage)
 }
 
-fn merged_resume_checkpoint(
-    checkpoint: Option<lash::HydratedSessionCheckpoint>,
-    live_delta: Option<&lash::LiveResumeDelta>,
-) -> Option<lash::HydratedSessionCheckpoint> {
-    match (checkpoint, live_delta) {
-        (Some(mut checkpoint), Some(delta)) => {
-            checkpoint.turn_state = delta.turn_state.clone();
-            if delta.dynamic_state.is_some() {
-                checkpoint.dynamic_state = delta.dynamic_state.clone();
-                checkpoint.dynamic_state_ref = None;
-            }
-            if delta.plugin_snapshot.is_some() {
-                checkpoint.plugin_snapshot = delta.plugin_snapshot.clone();
-                checkpoint.plugin_snapshot_ref = None;
-            }
-            if delta.plugin_snapshot.is_some() {
-                checkpoint.plugin_snapshot_revision = None;
-            }
-            Some(checkpoint)
-        }
-        (None, Some(delta)) => Some(lash::HydratedSessionCheckpoint {
-            turn_state: delta.turn_state.clone(),
-            dynamic_state_ref: None,
-            dynamic_state: delta.dynamic_state.clone(),
-            plugin_snapshot_ref: None,
-            plugin_snapshot_revision: None,
-            plugin_snapshot: delta.plugin_snapshot.clone(),
-        }),
-        (checkpoint, None) => checkpoint,
-    }
-}
-
 async fn restore_model_from_graph_config(
     config: Option<&PersistedSessionConfig>,
     app: &mut App,
@@ -171,7 +138,6 @@ async fn apply_graph_resume_state(
     config: Option<lash::PersistedSessionConfig>,
     token_ledger: Vec<lash::TokenLedgerEntry>,
     checkpoint: Option<lash::HydratedSessionCheckpoint>,
-    live_delta: Option<lash::LiveResumeDelta>,
     checkpoint_ref: Option<lash::BlobRef>,
     history: &mut Vec<Message>,
     runtime: &mut Option<LashRuntime>,
@@ -192,7 +158,6 @@ async fn apply_graph_resume_state(
     if graph.heal_orphaned_leaf() {
         tracing::warn!("session graph leaf was orphaned on resume; healed to most recent message");
     }
-    let checkpoint = merged_resume_checkpoint(checkpoint, live_delta.as_ref());
     let messages = graph.project_messages();
     let tool_calls = graph.project_tool_calls();
     *history = messages.clone();
@@ -244,11 +209,9 @@ async fn apply_graph_resume_state(
         )));
     }
 
-    let execution_state_snapshot = checkpoint.as_ref().and_then(|_| {
-        live_delta
-            .as_ref()
-            .and_then(|delta| delta.execution_state_snapshot.clone())
-    });
+    let execution_state_snapshot = checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.execution_state.clone());
     restore_execution_state_if_present(runtime, app, history, execution_state_snapshot.as_deref())
         .await;
 
@@ -289,6 +252,9 @@ async fn apply_graph_resume_state(
                 .as_ref()
                 .and_then(|checkpoint| checkpoint.plugin_snapshot_revision),
             plugin_snapshot: None,
+            execution_state_ref: checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.execution_state_ref.clone()),
             execution_state_snapshot: None,
             token_ledger,
             checkpoint_ref,
@@ -342,9 +308,7 @@ pub async fn load_resumed_session(
     )
     .await?;
     app.stop_turn();
-    app.streaming_output = loaded.streaming_output;
-    app.streaming_output_hidden = loaded.streaming_output_hidden;
-    app.streaming_output_partial = loaded.streaming_output_partial;
+    app.live_tool_output = loaded.live_tool_output;
     app.invalidate_height_cache();
     app.resume_follow_output();
     Ok(())
@@ -413,55 +377,6 @@ pub async fn restore_session_state(
         }
     };
 
-    if let Some(live) = resume_snapshot::load_live_resume_snapshot(&resume_store) {
-        let live_messages = live.graph.project_messages();
-        let live_tool_calls = live.graph.project_tool_calls();
-        *history = live_messages.clone();
-        app.blocks = projected_blocks_from_state(&live_messages, &live_tool_calls, &live.ui_state);
-        app.last_response_usage = live.ui_state.last_response_usage.clone();
-        app.plugin_mode_indicators = live.ui_state.plugin_mode_indicators.clone();
-        app.streaming_output = live.ui_state.streaming_output.clone();
-        app.streaming_output_hidden = live.ui_state.streaming_output_hidden;
-        app.streaming_output_partial = live.ui_state.streaming_output_partial.clone();
-        app.invalidate_height_cache();
-        app.blocks.push(DisplayBlock::SystemMessage(
-            "Interrupted runtime state restored from a live snapshot.".to_string(),
-        ));
-        let checkpoint = live
-            .snapshot
-            .checkpoint_ref
-            .as_ref()
-            .and_then(|blob_ref| resume_store.get_checkpoint(blob_ref));
-        return apply_graph_resume_state(
-            live.graph,
-            Some(live.snapshot.config),
-            live.snapshot
-                .checkpoint_ref
-                .as_ref()
-                .and_then(|blob_ref| {
-                    resume_store.load_session_head().and_then(|head| {
-                        (head.checkpoint_ref.as_ref() == Some(blob_ref))
-                            .then_some(head.token_ledger)
-                    })
-                })
-                .unwrap_or_default(),
-            checkpoint,
-            live.delta,
-            live.snapshot.checkpoint_ref,
-            history,
-            runtime,
-            app,
-            turn_counter,
-            execution_mode,
-            provider,
-            current_model_variant,
-            dynamic_tools,
-            desired_dynamic,
-            model_catalog,
-        )
-        .await;
-    }
-
     if let Some(head) = resume_store.load_session_head() {
         let checkpoint = head
             .checkpoint_ref
@@ -472,7 +387,6 @@ pub async fn restore_session_state(
             Some(head.config),
             head.token_ledger,
             checkpoint,
-            None,
             head.checkpoint_ref,
             history,
             runtime,
@@ -498,21 +412,17 @@ pub async fn restore_session_state(
 mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use crate::ui_resume;
 
     use lash::{
         EmbeddedRuntimeHost, MemoryModelCatalogStore, PersistedSessionState, PluginFactory,
-        PluginHost, PluginSpecFactory, RuntimeCoreConfig, RuntimeServices, SessionStateEnvelope,
-        ToolProvider,
+        PluginHost, PluginSpecFactory, RuntimeCoreConfig, RuntimeServices, ToolProvider,
     };
 
     fn persist_session_head(
         store: &Store,
         graph: lash::SessionGraph,
         checkpoint: lash::HydratedSessionCheckpoint,
-        ui_state: crate::app::UiResumeState,
     ) {
-        ui_resume::save_ui_resume_state(store, &ui_state);
         let checkpoint_ref = store.put_checkpoint(&checkpoint).checkpoint_ref;
         store.save_session_head(lash::SessionHead {
             session_id: "root".to_string(),
@@ -553,29 +463,10 @@ mod tests {
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,
                 plugin_snapshot: None,
+                execution_state_ref: None,
+                execution_state: None,
             },
         )
-    }
-
-    fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
-        Message {
-            id: id.to_string(),
-            role,
-            parts: vec![Part {
-                id: format!("{id}.p0"),
-                kind: PartKind::Text,
-                content: content.to_string(),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
-                prune_state: PruneState::Intact,
-                reasoning_meta: None,
-            }],
-            user_input: None,
-            origin: None,
-        }
     }
 
     async fn build_runtime(
@@ -662,12 +553,7 @@ mod tests {
                 context_budget_tokens: 0,
             }),
         );
-        persist_session_head(
-            &store,
-            graph,
-            checkpoint,
-            crate::app::UiResumeState::default(),
-        );
+        persist_session_head(&store, graph, checkpoint);
 
         let provider =
             lash::ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
@@ -714,194 +600,5 @@ mod tests {
         assert_eq!(restored_state.iteration, 7);
         assert_eq!(restored_state.token_usage.input_tokens, 1200);
         assert_eq!(restored_state.token_usage.reasoning_tokens, 55);
-    }
-
-    #[tokio::test]
-    async fn restore_session_state_prefers_live_graph() {
-        let _env_guard = env_lock().lock().await;
-        let temp = TempDirGuard::new("lash-resume-live-snapshot");
-        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = crate::paths::lash_home().join("sessions");
-        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-
-        let db_path = sessions_dir.join("resume-live.db");
-        let store = Store::open(&db_path).expect("store");
-        let (graph, checkpoint) = state_with_graph(
-            vec![text_message(
-                "old",
-                MessageRole::User,
-                "canonical history message",
-            )],
-            1,
-            TokenUsage::default(),
-            None,
-        );
-        persist_session_head(
-            &store,
-            graph,
-            checkpoint,
-            crate::app::UiResumeState::default(),
-        );
-
-        let live_messages = vec![text_message(
-            "m0",
-            MessageRole::User,
-            "live snapshot message",
-        )];
-        let mut live_state = SessionStateEnvelope {
-            session_id: crate::ROOT_SESSION_ID.to_string(),
-            policy: lash::SessionPolicy {
-                execution_mode: ExecutionMode::Standard,
-                ..lash::SessionPolicy::default()
-            },
-            session_graph: state_with_graph(live_messages.clone(), 2, TokenUsage::default(), None)
-                .0,
-            iteration: 2,
-            token_usage: TokenUsage::default(),
-            ..SessionStateEnvelope::default()
-        };
-        live_state.replace_projection(&live_messages, &[]);
-        crate::resume_snapshot::save_live_resume_snapshot(
-            &store,
-            &live_state,
-            &crate::app::UiResumeState {
-                interrupted_assistant_text: Some("Interrupted partial assistant reply".to_string()),
-                ..crate::app::UiResumeState::default()
-            },
-            &DynamicStateSnapshot {
-                base_generation: 0,
-                tools: std::collections::BTreeMap::new(),
-                enabled_tools: std::collections::BTreeSet::new(),
-            },
-        )
-        .await
-        .expect("live snapshot");
-
-        let provider =
-            lash::ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
-                "test-key",
-                "https://example.invalid/v1",
-            )));
-        let (dynamic_tools, mut desired_dynamic, model_catalog, runtime) =
-            build_runtime(&provider).await;
-
-        let mut app = App::new("gpt-5".into(), "resume-live".into());
-        let mut history = Vec::new();
-        let mut runtime = Some(runtime);
-        let mut turn_counter = 0;
-        let mut execution_mode = ExecutionMode::Standard;
-        let mut current_model_variant = None;
-
-        restore_session_state(
-            "resume-live.db",
-            &mut history,
-            &mut runtime,
-            &mut app,
-            &mut turn_counter,
-            &mut execution_mode,
-            &provider,
-            &mut current_model_variant,
-            &dynamic_tools,
-            &mut desired_dynamic,
-            &model_catalog,
-        )
-        .await
-        .expect("restore");
-
-        assert!(!history.is_empty());
-        assert_eq!(history[0].parts[0].content, "live snapshot message");
-        let restored_runtime = runtime.expect("runtime").export_state();
-        assert_eq!(restored_runtime.iteration, 2);
-        assert_eq!(restored_runtime.projected_messages().len(), 1);
-        assert_eq!(
-            restored_runtime.projected_messages()[0].parts[0].content,
-            "live snapshot message"
-        );
-        assert!(app.blocks.iter().any(|block| {
-            matches!(
-                block,
-                DisplayBlock::AssistantText(text)
-                    if text == "Interrupted partial assistant reply"
-            )
-        }));
-    }
-
-    #[tokio::test]
-    async fn load_resumed_session_clears_stale_live_turn_ui() {
-        let _env_guard = env_lock().lock().await;
-        let temp = TempDirGuard::new("lash-load-resume-live-turn");
-        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = crate::paths::lash_home().join("sessions");
-        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-
-        let filename = "resume-ui.db";
-        let db_path = sessions_dir.join(filename);
-        let store = Store::open(&db_path).expect("store");
-        let (graph, checkpoint) = state_with_graph(
-            vec![text_message("m0", MessageRole::User, "hello")],
-            1,
-            TokenUsage::default(),
-            None,
-        );
-        persist_session_head(
-            &store,
-            graph,
-            checkpoint,
-            crate::app::UiResumeState {
-                streaming_output: vec!["started git status --short".to_string()],
-                streaming_output_hidden: 1,
-                streaming_output_partial: "partial".to_string(),
-                ..crate::app::UiResumeState::default()
-            },
-        );
-
-        let provider =
-            lash::ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
-                "test-key",
-                "https://example.invalid/v1",
-            )));
-        let model_catalog =
-            CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
-                .expect("catalog");
-        let plugins = PluginHost::new(vec![Arc::new(
-            lash_mode_standard::BuiltinStandardModePluginFactory,
-        )])
-        .with_dynamic_tools()
-        .build_standard_session("root", None)
-        .expect("plugins");
-        let dynamic_tools = plugins.dynamic_tools().expect("dynamic tools");
-        let mut desired_dynamic = dynamic_tools.export_state();
-
-        let mut app = App::new("gpt-5".into(), "resume-ui".into());
-        let mut history = Vec::new();
-        let mut runtime: Option<LashRuntime> = None;
-        let mut turn_counter = 0;
-        let mut execution_mode = ExecutionMode::Standard;
-        let mut current_model_variant = None;
-
-        load_resumed_session(
-            filename,
-            &mut app,
-            &mut history,
-            &mut runtime,
-            &mut turn_counter,
-            &mut execution_mode,
-            &provider,
-            &mut current_model_variant,
-            &dynamic_tools,
-            &mut desired_dynamic,
-            &model_catalog,
-        )
-        .await
-        .expect("load resumed session");
-
-        assert!(!app.running);
-        assert!(app.live_turn.is_none());
-        assert_eq!(
-            app.streaming_output,
-            vec!["started git status --short".to_string()]
-        );
-        assert_eq!(app.streaming_output_hidden, 1);
-        assert_eq!(app.streaming_output_partial, "partial");
     }
 }

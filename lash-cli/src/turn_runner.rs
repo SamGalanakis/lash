@@ -1,13 +1,9 @@
-use lash::session_model::{MessageRole, Part, PartKind, PruneState, fresh_message_id};
 use lash::*;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{PreparedTurn, UiResumeState};
+use crate::app::PreparedTurn;
 use crate::input_items::build_items_from_editor_input;
-use crate::persistence::{
-    persist_committed_runtime_state, persist_live_runtime_state, snapshot_execution_state,
-};
 
 /// Returned by the spawned runtime task so callers can reclaim ownership.
 pub(crate) struct RuntimeRunResult {
@@ -26,165 +22,6 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
         mode: Some(RunMode::Normal),
         rlm_termination_override: None,
     }
-}
-
-fn turn_input_message(turn_input: &TurnInput) -> Message {
-    let user_id = fresh_message_id();
-    let mut image_ids = Vec::new();
-    let mut user_parts = Vec::new();
-
-    for item in &turn_input.items {
-        match item {
-            InputItem::Text { text } => {
-                if text.is_empty() {
-                    continue;
-                }
-                user_parts.push(Part {
-                    id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Text,
-                    content: text.clone(),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                });
-            }
-            InputItem::FileRef { path } => {
-                user_parts.push(Part {
-                    id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Text,
-                    content: format!("[file: {path}]"),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                });
-            }
-            InputItem::DirRef { path } => {
-                user_parts.push(Part {
-                    id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Text,
-                    content: format!("[directory: {}]", path.trim_end_matches('/')),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                });
-            }
-            InputItem::ImageRef { id } => {
-                let Some(bytes) = turn_input.image_blobs.get(id) else {
-                    continue;
-                };
-                if image_ids.iter().any(|candidate| candidate == id) {
-                    continue;
-                }
-                image_ids.push(id.clone());
-                user_parts.push(Part {
-                    id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Image,
-                    content: String::new(),
-                    attachment: Some(lash::session_model::message::PartAttachment {
-                        mime: "image/png".to_string(),
-                        url: lash::session_model::message::data_url_for_bytes("image/png", bytes),
-                        filename: None,
-                    }),
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                });
-            }
-        }
-    }
-
-    if user_parts.is_empty() {
-        user_parts.push(Part {
-            id: format!("{user_id}.p0"),
-            kind: PartKind::Text,
-            content: String::new(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-        });
-    }
-
-    Message {
-        id: user_id,
-        role: MessageRole::User,
-        parts: user_parts,
-        user_input: turn_input.user_input.clone(),
-        origin: None,
-    }
-}
-
-pub(crate) fn live_resume_graph_from_state(graph: &SessionGraph) -> SessionGraph {
-    graph.clone()
-}
-
-pub(crate) fn pending_turn_graph(graph: &SessionGraph, turn_input: &TurnInput) -> SessionGraph {
-    let mut graph = live_resume_graph_from_state(graph);
-    graph.append_message(turn_input_message(turn_input));
-    graph
-}
-
-pub(crate) async fn persist_pending_turn(
-    store: &Store,
-    runtime: &LashRuntime,
-    turn_input: &TurnInput,
-    ui_state: &UiResumeState,
-) {
-    let persistence_state = runtime.export_persistence_state();
-    persist_live_runtime_state(
-        store,
-        Some(persistence_state.session_graph().clone()),
-        pending_turn_graph(persistence_state.session_graph(), turn_input),
-        ui_state,
-        &persistence_state,
-    )
-    .await;
-}
-
-pub(crate) async fn persist_runtime_turn_state(
-    runtime: &mut LashRuntime,
-    state: &mut SessionStateEnvelope,
-    interrupted: bool,
-    store: &Store,
-    ui_state: &UiResumeState,
-) {
-    let mut persistence_state = runtime.export_persisted_state();
-    if let Err(err) = snapshot_execution_state(runtime, &mut persistence_state).await {
-        tracing::warn!("{err:#}");
-    }
-    if interrupted {
-        persist_live_runtime_state(
-            store,
-            store.load_session_head().map(|head| head.graph),
-            live_resume_graph_from_state(persistence_state.session_graph()),
-            ui_state,
-            &persistence_state,
-        )
-        .await;
-    } else {
-        lash::RuntimeStore::refresh_persisted_session_state(store, &mut persistence_state).await;
-        persist_committed_runtime_state(store, &mut persistence_state, ui_state).await;
-    }
-    runtime.apply_persistence_state(persistence_state.clone());
-    *state = persistence_state.export_state();
 }
 
 pub(crate) fn spawn_runtime_turn<S>(
@@ -244,6 +81,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash::session_model::fresh_message_id;
 
     #[tokio::test]
     async fn refresh_runtime_persistence_state_recovers_latest_token_ledger() {
@@ -294,6 +132,8 @@ mod tests {
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,
                 plugin_snapshot: None,
+                execution_state_ref: None,
+                execution_state: None,
             })
             .checkpoint_ref;
         store.append_usage_deltas(&ledger);

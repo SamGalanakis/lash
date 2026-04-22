@@ -318,6 +318,18 @@ impl Session {
         prompt_contributions: Vec<PromptContribution>,
         include_base_tools: bool,
     ) {
+        let tool_providers_unchanged = self.context_tools.len() == tool_providers.len()
+            && self
+                .context_tools
+                .iter()
+                .zip(&tool_providers)
+                .all(|(current, next)| Arc::ptr_eq(current, next));
+        if self.include_base_tools == include_base_tools
+            && self.context_prompt_contributions == prompt_contributions
+            && tool_providers_unchanged
+        {
+            return;
+        }
         self.include_base_tools = include_base_tools;
         self.context_surface_revision = self.context_surface_revision.wrapping_add(1);
         self.context_tools = tool_providers;
@@ -1478,6 +1490,39 @@ mod tests {
                 _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn set_context_surface_is_noop_for_unchanged_surface() {
+        let plugin_host = PluginHost::new(Vec::new());
+        let plugin_session = plugin_host
+            .build_session(
+                "root",
+                crate::ExecutionMode::Standard,
+                crate::ContextApproach::default(),
+                None,
+            )
+            .expect("plugin session");
+        let mut session = Session::new(
+            crate::RuntimeServices::new(plugin_session),
+            "root",
+            crate::ExecutionMode::Standard,
+        )
+        .await
+        .expect("session");
+
+        session.set_context_surface(Vec::new(), Vec::new(), true);
+        assert_eq!(session.context_surface_revision, 0);
+
+        let prompt_contributions = vec![crate::PromptContribution::guidance(
+            "Memory Context",
+            "remember",
+        )];
+        session.set_context_surface(Vec::new(), prompt_contributions.clone(), true);
+        assert_eq!(session.context_surface_revision, 1);
+
+        session.set_context_surface(Vec::new(), prompt_contributions, true);
+        assert_eq!(session.context_surface_revision, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

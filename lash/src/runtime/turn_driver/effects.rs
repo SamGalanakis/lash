@@ -31,8 +31,7 @@ impl RuntimeTurnDriver {
             .apply_checkpoint(CheckpointHookContext {
                 session_id: self.session_id.clone(),
                 checkpoint,
-                state: self
-                    .checkpoint_state_view(machine.materialized_messages(), machine.iteration()),
+                state: self.checkpoint_state_view(machine.message_sequence(), machine.iteration()),
                 host: Arc::clone(&self.session_manager),
             })
             .await

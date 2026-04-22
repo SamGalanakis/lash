@@ -4,7 +4,7 @@ use crate::mode::ModePreamble;
 use crate::prompt::{PreparedPrompt, PromptBuildInput, build_prompt};
 use crate::sansio::{RlmTermination, TurnMachine, TurnMachineConfig};
 use crate::session_model::RetryPolicy;
-use crate::{MessageSequence, PromptContribution, PromptTemplate, ToolSurface};
+use crate::{MessageSequence, PromptContribution, PromptTemplate};
 
 pub struct SansIoTurnInput {
     pub session_id: String,
@@ -14,7 +14,6 @@ pub struct SansIoTurnInput {
     pub messages: MessageSequence,
     pub run_offset: usize,
     pub mode_preamble: Arc<ModePreamble>,
-    pub tool_surface: ToolSurface,
     pub prompt_template: PromptTemplate,
     pub prompt_contributions: Vec<PromptContribution>,
     pub max_turns: Option<usize>,
@@ -27,7 +26,6 @@ pub struct SansIoTurnInput {
 pub struct PreparedTurnMachine {
     pub machine: TurnMachine,
     pub prepared_prompt: PreparedPrompt,
-    pub tool_surface: ToolSurface,
     pub mode_preamble: Arc<ModePreamble>,
 }
 
@@ -65,7 +63,6 @@ pub fn build_turn(input: SansIoTurnInput) -> PreparedTurnMachine {
     PreparedTurnMachine {
         machine,
         prepared_prompt,
-        tool_surface: input.tool_surface,
         mode_preamble: input.mode_preamble,
     }
 }
@@ -140,7 +137,7 @@ mod tests {
 
     #[test]
     fn build_turn_creates_machine_with_rendered_system_prompt() {
-        let tool_surface = ToolSurface::from_tools(vec![tool("read_file")]);
+        let tool_surface = crate::ToolSurface::from_tools(vec![tool("read_file")]);
         let mode_preamble = Arc::new(ModePreamble {
             config: ModeConfig {
                 protocol: Arc::new(NoopDriver),
@@ -160,7 +157,6 @@ mod tests {
             messages: crate::MessageSequence::default(),
             run_offset: 2,
             mode_preamble,
-            tool_surface,
             prompt_template: default_prompt_template(),
             prompt_contributions: vec![PromptContribution::guidance("Guide", "Be precise.")],
             max_turns: Some(3),

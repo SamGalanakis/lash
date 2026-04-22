@@ -1,18 +1,14 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::sync::Arc;
 
 use lash::*;
 use tokio::sync::mpsc;
 
-use crate::app::{PreparedTurn, UiResumeState};
-use crate::turn_runner::{
-    make_turn_input, persist_pending_turn, persist_runtime_turn_state, spawn_runtime_turn,
-};
+use crate::app::PreparedTurn;
+use crate::turn_runner::{make_turn_input, spawn_runtime_turn};
 use crate::{plugin_surface, util};
 
 pub(crate) struct AutonomousPersistenceContext {
-    pub(crate) store: Arc<Store>,
     pub(crate) await_background_work: bool,
     pub(crate) turn_usage_json: Option<std::path::PathBuf>,
 }
@@ -211,8 +207,6 @@ pub(crate) async fn run_autonomous(
     let before_usage = runtime.usage_report();
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
     let turn_input = make_turn_input(&prepared);
-    let ui_state = UiResumeState::default();
-    persist_pending_turn(persistence.store.as_ref(), &runtime, &turn_input, &ui_state).await;
     let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
     let sink = AutonomousChannelSink { tx: event_tx };
     let (cancel, return_rx) = spawn_runtime_turn(runtime, turn_input, sink, 1);
@@ -248,19 +242,10 @@ pub(crate) async fn run_autonomous(
     };
     let mut done =
         done.map_err(|err| anyhow::anyhow!("autonomous turn task channel failed: {err}"))?;
-    let interrupted = matches!(done.result.status, TurnStatus::Interrupted);
     if persistence.await_background_work {
         done.runtime.await_background_work().await?;
         done.result.state = done.runtime.export_state();
     }
-    persist_runtime_turn_state(
-        &mut done.runtime,
-        &mut done.result.state,
-        interrupted,
-        persistence.store.as_ref(),
-        &ui_state,
-    )
-    .await;
     let cumulative_usage = done.runtime.usage_report();
     if let Some(path) = &persistence.turn_usage_json {
         let (delta_entries, delta_error, delta_is_fallback) = match lash::diff_usage_reports(

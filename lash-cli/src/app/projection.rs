@@ -8,10 +8,10 @@ const TEXT_PREVIEW_LINE_CHAR_LIMIT: usize = 240;
 pub(crate) fn projected_blocks_from_state(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
-    ui_state: &UiResumeState,
+    ui_state: &UiProjectionState,
 ) -> Vec<DisplayBlock> {
     let mut blocks = blocks_from_transcript(messages, tool_calls);
-    append_interrupted_assistant_block(&mut blocks, ui_state);
+    append_live_projection_blocks(&mut blocks, ui_state);
     blocks.extend(
         ui_state
             .plugin_panels
@@ -25,7 +25,7 @@ pub(crate) fn projected_blocks_from_state(
 pub(crate) fn project_interrupted_blocks(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
-    ui_state: &UiResumeState,
+    ui_state: &UiProjectionState,
     status_message: impl Into<String>,
 ) -> Vec<DisplayBlock> {
     let mut blocks = projected_blocks_from_state(messages, tool_calls, ui_state);
@@ -42,7 +42,7 @@ pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) ->
     // chunk as its own assistant message, so the transcript already
     // projected into multiple AssistantText blocks for the current turn.
     // The runtime hands us the ENTIRE accumulated `text_deltas` as
-    // `interrupted_assistant_text` on abort — pushing it whole would
+    // uncommitted assistant text on abort — pushing it whole would
     // duplicate every prose block already on screen. Walk the current
     // turn's AssistantText blocks in order and peel each from the front
     // of `cleaned`; any leftover is the uncommitted mid-stream tail.
@@ -96,11 +96,13 @@ pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) ->
     Some(cleaned)
 }
 
-fn append_interrupted_assistant_block(blocks: &mut Vec<DisplayBlock>, ui_state: &UiResumeState) {
-    let Some(text) = ui_state.interrupted_assistant_text.as_deref() else {
-        return;
-    };
-    if let Some(tail) = interrupted_assistant_tail(blocks, text) {
+fn append_live_projection_blocks(blocks: &mut Vec<DisplayBlock>, ui_state: &UiProjectionState) {
+    if let Some(text) = ui_state.live_reasoning_text.as_deref() {
+        let _ = assistant_text::push_assistant_reasoning_block(blocks, text);
+    }
+    if let Some(text) = ui_state.live_assistant_text.as_deref()
+        && let Some(tail) = interrupted_assistant_tail(blocks, text)
+    {
         let _ = push_assistant_text_block(blocks, &tail);
     }
 }

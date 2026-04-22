@@ -3,6 +3,12 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{app::DisplayBlock, markdown, text_layout, theme};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownLane {
+    Assistant,
+    Reasoning,
+}
+
 pub fn normalize_assistant_text(text: &str) -> String {
     let mut out = String::new();
     let mut started = false;
@@ -53,46 +59,12 @@ pub fn render_assistant_text_block(
     viewport_width: usize,
     add_spacing_before: bool,
 ) -> Vec<Line<'static>> {
-    let first_prefix = "■ ";
-    let continuation_prefix = "  ";
-    let prefix_w = UnicodeWidthStr::width(first_prefix);
-    let content_width = viewport_width.saturating_sub(prefix_w);
-    let rendered = markdown::render_markdown_compact(text, content_width);
-    if rendered.is_empty() {
-        return Vec::new();
-    }
-
-    let mut lines = Vec::new();
-    if add_spacing_before {
-        lines.push(Line::from(""));
-    }
-
-    let mut marker_placed = false;
-    for line in rendered {
-        let is_empty = line.spans.iter().all(|span| span.content.trim().is_empty());
-        if is_empty {
-            lines.push(Line::from(""));
-            continue;
-        }
-
-        for subline in text_layout::wrap_styled_line_with_prefix(
-            &line,
-            content_width,
-            assistant_continuation_prefix,
-        ) {
-            let prefix = if marker_placed {
-                continuation_prefix
-            } else {
-                marker_placed = true;
-                first_prefix
-            };
-            let mut spans = vec![Span::styled(prefix, theme::assistant_bar())];
-            spans.extend(subline.spans);
-            lines.push(Line::from(spans));
-        }
-    }
-
-    lines
+    render_markdown_lane_documents(
+        MarkdownLane::Assistant,
+        [text],
+        viewport_width,
+        add_spacing_before,
+    )
 }
 
 pub fn push_assistant_reasoning_block(blocks: &mut Vec<DisplayBlock>, text: &str) -> bool {
@@ -120,55 +92,12 @@ pub fn render_assistant_reasoning_block(
     viewport_width: usize,
     add_spacing_before: bool,
 ) -> Vec<Line<'static>> {
-    let cleaned = normalize_assistant_text(text);
-    if cleaned.is_empty() {
-        return Vec::new();
-    }
-
-    // Pi's reasoning uses italic + muted with no marker. Lash keeps the
-    // two-column indent so reasoning lines up flush with assistant text
-    // immediately below — same "■ " column slot, but the marker is a
-    // faint vertical rule and the body is italicized.
-    let first_prefix = "┊ ";
-    let continuation_prefix = "┊ ";
-    let prefix_w = UnicodeWidthStr::width(first_prefix);
-    let content_width = viewport_width.saturating_sub(prefix_w);
-
-    let mut lines = Vec::new();
-    if add_spacing_before {
-        lines.push(Line::from(""));
-    }
-
-    let body_style = theme::assistant_reasoning();
-    let bar_style = theme::assistant_reasoning_bar();
-
-    for logical_line in cleaned.split('\n') {
-        if logical_line.is_empty() {
-            lines.push(Line::from(vec![Span::styled(
-                continuation_prefix.to_string(),
-                bar_style,
-            )]));
-            continue;
-        }
-        let segments = if content_width == 0 {
-            vec![(0, logical_line.len())]
-        } else {
-            text_layout::wrap_text_ranges_wordwise(logical_line, content_width)
-        };
-        for (i, (seg_start, seg_end)) in segments.into_iter().enumerate() {
-            let prefix = if i == 0 {
-                first_prefix
-            } else {
-                continuation_prefix
-            };
-            lines.push(Line::from(vec![
-                Span::styled(prefix.to_string(), bar_style),
-                Span::styled(logical_line[seg_start..seg_end].to_string(), body_style),
-            ]));
-        }
-    }
-
-    lines
+    render_markdown_lane_documents(
+        MarkdownLane::Reasoning,
+        [text],
+        viewport_width,
+        add_spacing_before,
+    )
 }
 
 /// One-line collapsed form of a reasoning block used in history when
@@ -228,45 +157,131 @@ fn compact_reasoning_preview(text: &str, max_chars: usize) -> String {
     out
 }
 
-pub fn render_live_assistant_text_block(text: &str, viewport_width: usize) -> Vec<Line<'static>> {
-    let cleaned = normalize_assistant_text(text);
-    if cleaned.is_empty() {
-        return Vec::new();
-    }
+pub(crate) fn render_live_markdown_documents<'a, I>(
+    lane: MarkdownLane,
+    docs: I,
+    viewport_width: usize,
+) -> Vec<Line<'static>>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    render_markdown_lane_documents(lane, docs, viewport_width, false)
+}
 
-    let first_prefix = "■ ";
-    let continuation_prefix = "  ";
-    let prefix_w = UnicodeWidthStr::width(first_prefix);
-    let content_width = viewport_width.saturating_sub(prefix_w);
+fn render_markdown_lane_documents<'a, I>(
+    lane: MarkdownLane,
+    docs: I,
+    viewport_width: usize,
+    add_spacing_before: bool,
+) -> Vec<Line<'static>>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let prefix = match lane {
+        MarkdownLane::Assistant => "■ ",
+        MarkdownLane::Reasoning => "┊ ",
+    };
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let content_width = viewport_width.saturating_sub(prefix_width);
 
-    let mut lines = Vec::new();
-    let mut marker_placed = false;
-
-    for line in cleaned.split('\n') {
-        if line.is_empty() {
-            lines.push(Line::from(""));
+    let mut logical_lines = Vec::new();
+    for doc in docs {
+        let cleaned = normalize_assistant_text(doc);
+        if cleaned.is_empty() {
             continue;
         }
 
-        let wrapped = text_layout::wrap_text_ranges_wordwise(line, content_width);
-        for (seg_start, seg_end) in wrapped {
-            let prefix = if marker_placed {
-                continuation_prefix
-            } else {
-                marker_placed = true;
-                first_prefix
-            };
-            lines.push(Line::from(vec![
-                Span::styled(prefix, theme::assistant_bar()),
-                Span::styled(
-                    line[seg_start..seg_end].to_string(),
-                    theme::assistant_text(),
-                ),
-            ]));
+        let mut rendered_doc = Vec::new();
+        for line in markdown::render_markdown_compact(&cleaned, content_width) {
+            if is_blank_line(&line) {
+                rendered_doc.push(Line::from(""));
+                continue;
+            }
+
+            let wrapped = text_layout::wrap_styled_line_with_prefix(
+                &line,
+                content_width,
+                assistant_continuation_prefix,
+            );
+            match lane {
+                MarkdownLane::Assistant => rendered_doc.extend(wrapped),
+                MarkdownLane::Reasoning => {
+                    rendered_doc.extend(wrapped.into_iter().map(reasoning_overlay_line))
+                }
+            }
+        }
+
+        if rendered_doc.is_empty() {
+            continue;
+        }
+        if !logical_lines.is_empty() {
+            logical_lines.push(Line::from(""));
+        }
+        logical_lines.extend(rendered_doc);
+    }
+
+    if logical_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    if add_spacing_before {
+        lines.push(Line::from(""));
+    }
+
+    match lane {
+        MarkdownLane::Assistant => {
+            let mut marker_placed = false;
+            for line in logical_lines {
+                if is_blank_line(&line) {
+                    lines.push(Line::from(""));
+                    continue;
+                }
+                let prefix = if marker_placed {
+                    "  "
+                } else {
+                    marker_placed = true;
+                    "■ "
+                };
+                let mut spans = vec![Span::styled(prefix, theme::assistant_bar())];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            }
+        }
+        MarkdownLane::Reasoning => {
+            for line in logical_lines {
+                if is_blank_line(&line) {
+                    lines.push(Line::from(vec![Span::styled(
+                        "┊ ".to_string(),
+                        theme::assistant_reasoning_bar(),
+                    )]));
+                    continue;
+                }
+                let mut spans = vec![Span::styled(
+                    "┊ ".to_string(),
+                    theme::assistant_reasoning_bar(),
+                )];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            }
         }
     }
 
     lines
+}
+
+fn is_blank_line(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
+}
+
+fn reasoning_overlay_line(line: Line<'static>) -> Line<'static> {
+    let overlay = theme::assistant_reasoning();
+    Line::from(
+        line.spans
+            .into_iter()
+            .map(|span| Span::styled(span.content.to_string(), span.style.merge(overlay)))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn assistant_continuation_prefix(line: &Line<'static>) -> Vec<Span<'static>> {
