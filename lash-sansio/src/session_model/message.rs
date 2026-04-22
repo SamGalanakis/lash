@@ -441,11 +441,24 @@ impl MessageSequence {
     }
 
     pub fn push(&mut self, message: Message) {
-        self.make_mut().push(message);
+        if let Some(owned) = self.owned.as_mut() {
+            owned.push(message);
+        } else {
+            self.delta.push(message);
+        }
+        self.materialized = OnceLock::new();
     }
 
     pub fn extend(&mut self, messages: Vec<Message>) {
-        self.make_mut().extend(messages);
+        if messages.is_empty() {
+            return;
+        }
+        if let Some(owned) = self.owned.as_mut() {
+            owned.extend(messages);
+        } else {
+            self.delta.extend(messages);
+        }
+        self.materialized = OnceLock::new();
     }
 
     pub fn replace(&mut self, messages: Vec<Message>) {

@@ -5,8 +5,7 @@ use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 
 use super::*;
-use crate::session_model::{fresh_message_id, plugin_message_to_message, reassign_part_ids};
-use crate::{Message, Part, PartKind, PruneState};
+use crate::session_model::plugin_message_to_message;
 
 async fn collect_owned_async<C, O, H, F>(
     hooks: &[RegisteredHook<H>],
@@ -59,33 +58,6 @@ fn append_plugin_messages(
         .collect::<Vec<_>>();
     if !new_messages.is_empty() {
         messages.extend(new_messages);
-    }
-}
-
-fn normalize_message_ids(messages: &mut [Message]) {
-    for message in messages.iter_mut() {
-        if message.id.is_empty() {
-            message.id = fresh_message_id();
-        }
-        if message.parts.is_empty() {
-            message.parts.push(Part {
-                id: String::new(),
-                kind: PartKind::Text,
-                content: String::new(),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
-                prune_state: PruneState::Intact,
-                reasoning_meta: None,
-            });
-        }
-        if !matches!(message.role, MessageRole::User) {
-            message.user_input = None;
-        }
-        let message_id = message.id.clone();
-        reassign_part_ids(&message_id, &mut message.parts);
     }
 }
 
@@ -353,7 +325,6 @@ impl PluginSession {
             }
         }
 
-        normalize_message_ids(messages.make_mut());
         Ok(TurnPreparation {
             messages,
             events,
@@ -613,8 +584,7 @@ impl PluginSession {
                 }
             }
         }
-        if let Some(messages) = updated_messages.as_mut() {
-            normalize_message_ids(messages.make_mut());
+        if let Some(messages) = updated_messages.as_ref() {
             let tool_calls = turn.state.projected_tool_calls().to_vec();
             turn.state
                 .replace_projection(messages.as_slice(), &tool_calls);

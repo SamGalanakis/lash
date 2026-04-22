@@ -119,19 +119,22 @@ pub enum LlmContentBlock {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LlmMessage {
     pub role: LlmRole,
-    pub blocks: Vec<LlmContentBlock>,
+    pub blocks: Arc<Vec<LlmContentBlock>>,
 }
 
 impl LlmMessage {
     pub fn new(role: LlmRole, blocks: Vec<LlmContentBlock>) -> Self {
-        Self { role, blocks }
+        Self {
+            role,
+            blocks: Arc::new(blocks),
+        }
     }
 
     /// Convenience constructor for a single-text-block message.
     pub fn text(role: LlmRole, text: impl Into<String>) -> Self {
         Self {
             role,
-            blocks: vec![LlmContentBlock::Text(text.into())],
+            blocks: Arc::new(vec![LlmContentBlock::Text(text.into())]),
         }
     }
 

@@ -17,7 +17,7 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) policy: SessionPolicy,
     pub(super) host: RuntimeHost,
     pub(super) session_id: String,
-    pub(super) base_graph: crate::SessionGraph,
+    pub(super) base_graph: Arc<crate::SessionGraph>,
     pub(super) tool_calls: Arc<Vec<ToolCallRecord>>,
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     pub(super) session_manager: Arc<dyn SessionManager>,
@@ -195,10 +195,10 @@ impl RuntimeTurnDriver {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: self.session_id.clone(),
                 host: Arc::clone(&self.session_manager),
-                state: crate::SessionReadView::from_graph_projection(
+                state: crate::SessionReadView::from_graph_message_sequence(
                     &prompt_state,
-                    self.base_graph.clone(),
-                    messages.shared(),
+                    Arc::clone(&self.base_graph),
+                    messages.clone(),
                     Arc::clone(&self.tool_calls),
                 ),
                 rlm_termination: self.rlm_termination.clone(),
@@ -281,9 +281,9 @@ impl RuntimeTurnDriver {
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
         };
-        crate::SessionReadView::from_graph_projection(
+        crate::SessionReadView::from_graph_projection_arc(
             &state,
-            self.base_graph.clone(),
+            Arc::clone(&self.base_graph),
             messages,
             Arc::clone(&self.tool_calls),
         )

@@ -124,10 +124,13 @@ impl RuntimeTurnDriver {
         let mut streamed_output = StandardStreamFallback::default();
         let mut debug = LlmStreamDebugState::new();
         let mut abort_requested = false;
+        let buffer_stream_fallback = self.policy.provider.requires_streaming()
+            || self.session.plugins().has_assistant_stream_hooks();
         let mut stream_state = StandardStreamState {
             text_streamed: &mut text_streamed,
             streamed_usage: &mut streamed_usage,
             streamed_output: &mut streamed_output,
+            buffer_stream_fallback,
             debug: &mut debug,
             iteration,
             abort_requested: &mut abort_requested,
@@ -459,7 +462,9 @@ impl RuntimeTurnDriver {
                         },
                     );
                     if !delta.is_empty() {
-                        state.streamed_output.push_text(&delta);
+                        if state.buffer_stream_fallback {
+                            state.streamed_output.push_text(&delta);
+                        }
                         send_session_event(event_tx, SessionEvent::TextDelta { content: delta })
                             .await;
                     }
@@ -484,9 +489,11 @@ impl RuntimeTurnDriver {
                     // Delta-only streaming path (fix 1.3a display). No
                     // encrypted content yet — that arrives with the full
                     // item on `output_item.done` (fix 1.3b).
-                    state
-                        .streamed_output
-                        .push_reasoning(delta.clone(), None, Vec::new(), None);
+                    if state.buffer_stream_fallback {
+                        state
+                            .streamed_output
+                            .push_reasoning(delta.clone(), None, Vec::new(), None);
+                    }
                     send_session_event(event_tx, SessionEvent::ReasoningDelta { content: delta })
                         .await;
                 }
@@ -517,7 +524,9 @@ impl RuntimeTurnDriver {
                         },
                     );
                     if !text.is_empty() {
-                        state.streamed_output.push_text(&text);
+                        if state.buffer_stream_fallback {
+                            state.streamed_output.push_text(&text);
+                        }
                         send_session_event(event_tx, SessionEvent::TextDelta { content: text })
                             .await;
                     }
@@ -548,9 +557,11 @@ impl RuntimeTurnDriver {
                         }),
                     },
                 );
-                state
-                    .streamed_output
-                    .push_tool_call(call_id, tool_name, input_json, item_id, signature);
+                if state.buffer_stream_fallback {
+                    state
+                        .streamed_output
+                        .push_tool_call(call_id, tool_name, input_json, item_id, signature);
+                }
             }
             LlmStreamEvent::Part(LlmOutputPart::Reasoning {
                 text,
@@ -583,9 +594,11 @@ impl RuntimeTurnDriver {
                     )
                     .await;
                 }
-                state
-                    .streamed_output
-                    .push_reasoning(text, item_id, summary, encrypted_content);
+                if state.buffer_stream_fallback {
+                    state
+                        .streamed_output
+                        .push_reasoning(text, item_id, summary, encrypted_content);
+                }
             }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(

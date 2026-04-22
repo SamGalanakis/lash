@@ -1245,6 +1245,116 @@ fn reasoning_is_compact_below_l2_and_full_at_l2() {
 }
 
 #[test]
+fn live_reasoning_compacts_after_activity_appends_below_it() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.start_turn();
+    app.blocks = vec![DisplayBlock::AssistantReasoning(
+        "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
+    )];
+
+    app.expand_level = 1;
+    let live_text: Vec<String> = app
+        .rendered_block_lines_cached(0, 80, 24)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        live_text
+            .iter()
+            .any(|line| line.contains("Detailed thinking body")),
+        "live reasoning should expand while it is the tail; got {live_text:?}",
+    );
+
+    app.handle_session_event(lash::SessionEvent::ToolCall {
+        call_id: None,
+        name: "read_file".into(),
+        args: serde_json::json!({ "path": "lash/src/provider.rs" }),
+        result: serde_json::json!({ "content": "provider code" }),
+        success: true,
+        duration_ms: 0,
+    });
+
+    let compact_text: Vec<String> = app
+        .rendered_block_lines_cached(0, 80, 24)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        compact_text
+            .iter()
+            .any(|line| line.contains("Inspecting config implementation")),
+        "reasoning should keep its compact preview after another block appends; got {compact_text:?}",
+    );
+    assert!(
+        !compact_text
+            .iter()
+            .any(|line| line.contains("Detailed thinking body")),
+        "reasoning body should compact after it is no longer the live tail; got {compact_text:?}",
+    );
+}
+
+#[test]
+fn live_reasoning_compacts_after_turn_stops() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.start_turn();
+    app.blocks = vec![DisplayBlock::AssistantReasoning(
+        "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
+    )];
+
+    let live_text: Vec<String> = app
+        .rendered_block_lines_cached(0, 80, 24)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        live_text
+            .iter()
+            .any(|line| line.contains("Detailed thinking body")),
+        "live reasoning should expand while a turn is running; got {live_text:?}",
+    );
+
+    app.stop_turn();
+
+    let compact_text: Vec<String> = app
+        .rendered_block_lines_cached(0, 80, 24)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        compact_text
+            .iter()
+            .any(|line| line.contains("Inspecting config implementation")),
+        "stopped reasoning should keep its compact preview; got {compact_text:?}",
+    );
+    assert!(
+        !compact_text
+            .iter()
+            .any(|line| line.contains("Detailed thinking body")),
+        "reasoning body should compact after the turn stops; got {compact_text:?}",
+    );
+}
+
+#[test]
 fn lashlang_code_block_renders_header_and_body_at_full_expand() {
     let code = "r = call read_file { path: \"a\" }\nsubmit r.value";
     let blocks = vec![DisplayBlock::LashlangCode(code.to_string())];

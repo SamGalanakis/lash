@@ -631,7 +631,7 @@ impl CodexProvider {
             // `instructions` top-level field rather than appearing in the
             // input array.
             if matches!(msg.role, LlmRole::System) {
-                for block in &msg.blocks {
+                for block in msg.blocks.iter() {
                     if let LlmContentBlock::Text(text) = block
                         && !text.is_empty()
                     {
