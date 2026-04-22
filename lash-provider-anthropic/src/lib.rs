@@ -209,7 +209,7 @@ impl AnthropicProvider {
 
             let wire_role = Self::role_name(&msg.role);
             let mut blocks: Vec<Value> = Vec::new();
-            for block in &msg.blocks {
+            for block in msg.blocks.iter() {
                 if let Some(value) = Self::content_block_value(req, block) {
                     blocks.push(value);
                 }

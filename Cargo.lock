@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-observational-memory"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2001,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-plan-mode"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "lash",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-prompt-context"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "chrono",
  "lash",
@@ -2025,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-rolling-history"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "lash",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "lash-plugin-ui-activity"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "lash",
  "serde_json",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-anthropic"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "base64",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-codex"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "base64",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-google"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "base64",
@@ -2089,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "lash-provider-openai"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "async-trait",
  "base64",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "lash-providers-builtin"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "lash-provider-anthropic",
  "lash-provider-codex",

@@ -59,6 +59,7 @@ pub(super) struct StandardStreamState<'a> {
     pub(super) text_streamed: &'a mut bool,
     pub(super) streamed_usage: &'a mut LlmUsage,
     pub(super) streamed_output: &'a mut StandardStreamFallback,
+    pub(super) buffer_stream_fallback: bool,
     pub(super) debug: &'a mut LlmStreamDebugState,
     pub(super) iteration: usize,
     /// Set to `true` by `forward_standard_stream_event` when a plugin
@@ -234,10 +235,10 @@ fn append_stream_piece(full: &mut String, piece: &str) {
     }
 }
 
-#[derive(Default)]
 pub(super) struct TurnAssembler {
     pub(super) final_message: Option<String>,
     pub(super) text_deltas: String,
+    pub(super) capture_text_deltas: bool,
     pub(super) tool_calls: Vec<ToolCallRecord>,
     pub(super) token_usage: TokenUsage,
     pub(super) last_llm_usage: Option<TokenUsage>,
@@ -248,10 +249,32 @@ pub(super) struct TurnAssembler {
     pub(super) typed_finish: Option<serde_json::Value>,
 }
 
+impl Default for TurnAssembler {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
 impl TurnAssembler {
+    pub(super) fn new(capture_text_deltas: bool) -> Self {
+        Self {
+            final_message: None,
+            text_deltas: String::new(),
+            capture_text_deltas,
+            tool_calls: Vec::new(),
+            token_usage: TokenUsage::default(),
+            last_llm_usage: None,
+            issues: Vec::new(),
+            saw_done: false,
+            saw_tool_failure: false,
+            has_plugin_visible_output: false,
+            typed_finish: None,
+        }
+    }
+
     pub(super) fn push(&mut self, event: &SessionEvent) {
         match event {
-            SessionEvent::TextDelta { content } => {
+            SessionEvent::TextDelta { content } if self.capture_text_deltas => {
                 self.text_deltas.push_str(content);
             }
             SessionEvent::ToolCall {

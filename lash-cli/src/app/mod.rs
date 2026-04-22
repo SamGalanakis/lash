@@ -570,6 +570,7 @@ impl App {
     }
 
     pub fn stop_turn(&mut self) {
+        self.invalidate_live_reasoning_tail();
         self.running = false;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
@@ -679,10 +680,35 @@ impl App {
         }
     }
 
+    fn live_reasoning_tail_index(&self) -> Option<usize> {
+        if self.running
+            && matches!(
+                self.blocks.last(),
+                Some(DisplayBlock::AssistantReasoning(_))
+            )
+        {
+            self.blocks.len().checked_sub(1)
+        } else {
+            None
+        }
+    }
+
+    fn append_invalidation_start(&self) -> usize {
+        self.live_reasoning_tail_index()
+            .unwrap_or(self.blocks.len())
+    }
+
+    fn invalidate_live_reasoning_tail(&mut self) {
+        if let Some(idx) = self.live_reasoning_tail_index() {
+            self.invalidate_height_cache_from(idx);
+        }
+    }
+
     fn push_activity_block(&mut self, activity: ActivityBlock) {
+        let invalidate_from = self.append_invalidation_start();
         append_activity_block(&mut self.blocks, activity);
         if !self.blocks.is_empty() {
-            self.invalidate_height_cache_from(self.blocks.len() - 1);
+            self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
         }
     }
 
@@ -697,8 +723,9 @@ impl App {
         if display.trim().is_empty() {
             return;
         }
+        let invalidate_from = self.append_invalidation_start();
         self.blocks.push(DisplayBlock::UserInput(display));
-        self.invalidate_height_cache();
+        self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
         self.keep_latest_user_block_visible();
     }
 
@@ -1025,8 +1052,9 @@ impl App {
             return;
         }
 
+        let invalidate_from = self.append_invalidation_start();
         if push_assistant_text_block(&mut self.blocks, &cleaned) {
-            self.invalidate_height_cache_from(self.blocks.len() - 1);
+            self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
             self.mark_visible_output();
         }
         self.live_assistant = None;
@@ -1075,8 +1103,9 @@ impl App {
             return;
         }
 
+        let invalidate_from = self.append_invalidation_start();
         if push_assistant_text_block(&mut self.blocks, &final_text) {
-            self.invalidate_height_cache_from(self.blocks.len() - 1);
+            self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
             self.mark_visible_output();
         }
         self.assistant_text_finalized = true;
@@ -1172,8 +1201,9 @@ impl App {
         ) {
             return;
         }
+        let invalidate_from = self.append_invalidation_start();
         self.blocks.push(DisplayBlock::UserInput(history_text));
-        self.invalidate_height_cache_from(self.blocks.len() - 1);
+        self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
     }
 
     /// Process a session event, updating display blocks.
@@ -1268,7 +1298,9 @@ impl App {
                     // so the renderer can hide it by default and reveal
                     // it when the user hits Alt+O (full expansion).
                     self.finalize_live_assistant();
+                    let invalidate_from = self.append_invalidation_start();
                     self.blocks.push(DisplayBlock::LashlangCode(text));
+                    self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
                     self.invalidate_live_tool_output_cache();
                     self.scroll_to_bottom();
                 } else if kind == "tool_output" {
@@ -1353,8 +1385,9 @@ impl App {
                         Some(message.chars().take(96).collect()),
                         std::time::Duration::from_secs(8),
                     );
+                    let invalidate_from = self.append_invalidation_start();
                     self.blocks.push(DisplayBlock::Error(message));
-                    self.invalidate_height_cache_from(self.blocks.len() - 1);
+                    self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
                 }
                 self.mark_visible_output();
                 self.scroll_to_bottom();

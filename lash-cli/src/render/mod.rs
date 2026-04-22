@@ -1058,12 +1058,11 @@ fn render_block_into(
                         | DisplayBlock::TurnStart(_)
                 );
             // Show full reasoning only when either (a) the user has
-            // opted into full expansion (Alt+O → level 2), or (b) this
+            // opted into full expansion (Alt+O -> level 2), or (b) this
             // is the live tail of a running turn so the stream stays
-            // visible as it arrives. Reasoning is the heaviest block
-            // in the transcript and lives at L2 alongside full
-            // artifacts and shell output — not at L1 with activity
-            // detail lines.
+            // visible as it arrives. Reasoning is the heaviest block in
+            // the transcript and lives at L2 alongside full artifacts
+            // and shell output.
             let is_live_tail = idx + 1 == blocks.len() && app.running;
             let should_expand = expand_level >= 2 || is_live_tail;
             if should_expand {

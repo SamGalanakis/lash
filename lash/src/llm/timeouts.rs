@@ -33,6 +33,10 @@ pub fn request_body_snapshot(body: String) -> RequestBodySnapshot {
     bytes::Bytes::from(body)
 }
 
+pub fn request_body_snapshot_bytes(body: Vec<u8>) -> RequestBodySnapshot {
+    bytes::Bytes::from(body)
+}
+
 fn is_retryable_http_error(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect() || error.is_body() || error.is_decode()
 }

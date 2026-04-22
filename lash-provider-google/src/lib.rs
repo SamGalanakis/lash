@@ -149,7 +149,7 @@ impl GoogleOAuthProvider {
             };
 
             let mut parts: Vec<Value> = Vec::new();
-            for block in &msg.blocks {
+            for block in msg.blocks.iter() {
                 match block {
                     LlmContentBlock::Text(text) => {
                         if text.is_empty() {
@@ -270,7 +270,7 @@ impl GoogleOAuthProvider {
             if !matches!(msg.role, LlmRole::System) {
                 continue;
             }
-            for block in &msg.blocks {
+            for block in msg.blocks.iter() {
                 if let LlmContentBlock::Text(text) = block
                     && !text.is_empty()
                 {

@@ -351,7 +351,6 @@ impl LashRuntime {
                 }
             }
         });
-        let mut assembler = TurnAssembler::default();
         let plugins = {
             let session = self
                 .session
@@ -359,6 +358,9 @@ impl LashRuntime {
                 .expect("lash runtime session must be available");
             Arc::clone(session.plugins())
         };
+        let capture_text_deltas =
+            self.policy.provider.requires_streaming() || plugins.has_assistant_stream_hooks();
+        let mut assembler = TurnAssembler::new(capture_text_deltas);
         self.mark_phase_begin(RuntimeTurnPhase::BeforeTurnHooks);
         // Block-scope the pinned future so it (and its captured
         // `SessionReadView` clone of the session graph) drops before the
@@ -453,7 +455,7 @@ impl LashRuntime {
             policy: self.policy.clone(),
             host: self.host.clone(),
             session_id: self.state.session_id.clone(),
-            base_graph: self.state.session_graph.clone(),
+            base_graph: Arc::new(self.state.session_graph.clone()),
             tool_calls: self.state.session_graph.shared_projected_tool_calls(),
             llm_stream_summaries: HashMap::new(),
             session_manager: manager,

@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 
 use lash::llm::streaming::drive_sse_response;
 use lash::llm::timeouts::{
-    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
+    build_http_client, read_response_text, request_body_snapshot_bytes, response_start_timeout,
     send_request,
 };
 use lash::llm::transport::LlmTransportError;
@@ -371,6 +371,53 @@ struct OpenAiCompatToolFunction {
     arguments: Option<String>,
 }
 
+#[derive(Serialize)]
+struct OpenAiTextOnlyBody<'a> {
+    model: &'a str,
+    messages: Vec<OpenAiTextOnlyMessage<'a>>,
+    temperature: u8,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<OpenAiStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiToolSpecWire<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct OpenAiTextOnlyMessage<'a> {
+    role: &'static str,
+    content: &'a str,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct OpenAiStreamOptions {
+    include_usage: bool,
+}
+
+#[derive(Serialize)]
+struct OpenAiToolSpecWire<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: OpenAiToolFunctionWire<'a>,
+}
+
+#[derive(Serialize)]
+struct OpenAiToolFunctionWire<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
+}
+
 impl OpenAiGenericProvider {
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
@@ -427,7 +474,7 @@ impl OpenAiGenericProvider {
             let mut tool_calls: Vec<Value> = Vec::new();
             let mut tool_results: Vec<Value> = Vec::new();
             let mut reasoning_details: Vec<Value> = Vec::new();
-            for block in &msg.blocks {
+            for block in msg.blocks.iter() {
                 match block {
                     LlmContentBlock::Text(text) => {
                         if text.is_empty() {
@@ -666,14 +713,144 @@ impl OpenAiGenericProvider {
         Self::is_openrouter(base_url)
     }
 
-    fn build_request_body(
+    fn max_output_tokens() -> u64 {
+        // The cap is 32k by default; benchmarks that need longer outputs
+        // (e.g. long-horizon CoT) can raise it via `LASH_MAX_OUTPUT_TOKENS`.
+        std::env::var("LASH_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|v: &u64| *v > 0)
+            .unwrap_or(32768)
+    }
+
+    fn try_build_text_only_request_body(
         &self,
         req: &LlmRequest,
         stream: bool,
-    ) -> Result<(Value, String), LlmTransportError> {
+        base_url: &str,
+        compat: &OpenAiCompat,
+    ) -> Option<Result<Vec<u8>, LlmTransportError>> {
+        if req.output_spec.is_some() || req.model_variant.is_some() {
+            return None;
+        }
+        if Self::supports_prompt_cache_key(base_url) && req.model.starts_with("anthropic/") {
+            return None;
+        }
+
+        let mut messages = Vec::with_capacity(req.messages.len());
+        let mut seen_first_system = false;
+        for msg in &req.messages {
+            let mut text = None;
+            for block in msg.blocks.iter() {
+                match block {
+                    LlmContentBlock::Text(value) if value.is_empty() => {}
+                    LlmContentBlock::Text(value) if text.is_none() => {
+                        text = Some(sanitize_surrogates(value));
+                    }
+                    LlmContentBlock::Text(_) => return None,
+                    LlmContentBlock::Image { .. }
+                    | LlmContentBlock::ToolCall { .. }
+                    | LlmContentBlock::ToolResult { .. }
+                    | LlmContentBlock::Reasoning { .. } => return None,
+                }
+            }
+            let Some(content) = text else {
+                continue;
+            };
+            let role = match msg.role {
+                LlmRole::System => {
+                    if seen_first_system {
+                        "user"
+                    } else {
+                        seen_first_system = true;
+                        "system"
+                    }
+                }
+                _ => Self::role_name(&msg.role),
+            };
+            if role == "user"
+                && messages
+                    .last()
+                    .is_some_and(|message: &OpenAiTextOnlyMessage<'_>| message.role == "user")
+            {
+                return None;
+            }
+            messages.push(OpenAiTextOnlyMessage { role, content });
+        }
+
+        let max_output_tokens = Self::max_output_tokens();
+        let tools = (!req.tools.is_empty()).then(|| {
+            req.tools
+                .iter()
+                .map(|tool| OpenAiToolSpecWire {
+                    kind: "function",
+                    function: OpenAiToolFunctionWire {
+                        name: &tool.name,
+                        description: &tool.description,
+                        parameters: &tool.input_schema,
+                        strict: compat.supports_strict_mode.then_some(false),
+                    },
+                })
+                .collect::<Vec<_>>()
+        });
+        let tool_choice = tools.as_ref().map(|_| match req.tool_choice {
+            LlmToolChoice::Auto => "auto",
+            LlmToolChoice::None => "none",
+            LlmToolChoice::Required => "required",
+        });
+        let body = OpenAiTextOnlyBody {
+            model: &req.model,
+            messages,
+            temperature: 0,
+            stream,
+            max_tokens: compat.use_max_tokens_field.then_some(max_output_tokens),
+            max_completion_tokens: (!compat.use_max_tokens_field).then_some(max_output_tokens),
+            stream_options: (stream && compat.supports_usage_in_streaming).then_some(
+                OpenAiStreamOptions {
+                    include_usage: true,
+                },
+            ),
+            prompt_cache_key: req
+                .session_id
+                .as_deref()
+                .filter(|_| Self::supports_prompt_cache_key(base_url)),
+            tools,
+            tool_choice,
+        };
+
+        Some((|| {
+            serde_json::to_vec(&body).map_err(|e| {
+                LlmTransportError::new(format!("Failed to serialize OpenAI-compatible body: {e}"))
+            })
+        })())
+    }
+
+    fn build_request_body_bytes(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<(Vec<u8>, String), LlmTransportError> {
         let base_url = self.base_url.clone();
         let compat = detect_compat(&base_url);
+        if let Some(body) = self.try_build_text_only_request_body(req, stream, &base_url, &compat) {
+            return body.map(|body| (body, base_url));
+        }
 
+        let (body, base_url) =
+            self.build_request_body_with_compat(req, stream, base_url, compat)?;
+        let body = serde_json::to_vec(&body).map_err(|e| {
+            LlmTransportError::new(format!("Failed to serialize OpenAI-compatible body: {e}"))
+        })?;
+        Ok((body, base_url))
+    }
+
+    fn build_request_body_with_compat(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+        base_url: String,
+        compat: OpenAiCompat,
+    ) -> Result<(Value, String), LlmTransportError> {
         let mut messages = self.build_messages(req);
         Self::maybe_add_openrouter_anthropic_cache_control(&mut messages, &req.model, &base_url);
 
@@ -684,14 +861,8 @@ impl OpenAiGenericProvider {
             "stream": stream,
         });
 
-        // Use the correct max-tokens field name per provider. The cap is 32k by
-        // default; benchmarks that need longer outputs (e.g. long-horizon CoT)
-        // can raise it via `LASH_MAX_OUTPUT_TOKENS`.
-        let max_output_tokens: u64 = std::env::var("LASH_MAX_OUTPUT_TOKENS")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .filter(|v: &u64| *v > 0)
-            .unwrap_or(32768);
+        // Use the correct max-tokens field name per provider.
+        let max_output_tokens = Self::max_output_tokens();
         if compat.use_max_tokens_field {
             body["max_tokens"] = json!(max_output_tokens);
         } else {
@@ -1318,7 +1489,8 @@ impl Provider for OpenAiGenericProvider {
         let timeouts = self.options.llm_timeouts();
         let api_key = self.api_key.clone();
 
-        let (body, base_url) = self.build_request_body(&req, stream_events.is_some())?;
+        let (body_bytes, base_url) =
+            self.build_request_body_bytes(&req, stream_events.is_some())?;
 
         // Serialize once. reqwest's `.json(&body)` would re-run
         // `serde_json::to_vec` internally, wasting a large allocation per
@@ -1326,10 +1498,7 @@ impl Provider for OpenAiGenericProvider {
         // transport errors, but do not attach a full request copy to
         // successful responses; the runtime fills a compact debug request
         // when LLM logging is enabled.
-        let body_string = serde_json::to_string(&body).map_err(|e| {
-            LlmTransportError::new(format!("Failed to serialize OpenAI-compatible body: {e}"))
-        })?;
-        let request_body = request_body_snapshot(body_string);
+        let request_body = request_body_snapshot_bytes(body_bytes);
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
         let request = self
             .client
@@ -1380,6 +1549,7 @@ impl Provider for OpenAiGenericProvider {
                 request_body: Some(String::from_utf8_lossy(&request_body).into_owned()),
             });
         }
+        drop(request_body);
 
         let is_sse = resp
             .headers()
@@ -1570,5 +1740,69 @@ impl ProviderFactory for OpenAiGenericProviderFactory {
             options: cfg.options,
             client: build_http_client(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use lash::llm::types::LlmToolSpec;
+
+    fn text_request(messages: Vec<LlmMessage>) -> LlmRequest {
+        LlmRequest {
+            model: "mock-model".to_string(),
+            messages,
+            attachments: Vec::new(),
+            tools: Arc::new(Vec::<LlmToolSpec>::new()),
+            tool_choice: LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: Some("session-1".to_string()),
+            output_spec: None,
+            stream_events: None,
+        }
+    }
+
+    #[test]
+    fn text_only_request_fast_path_matches_compat_builder() {
+        let provider = OpenAiGenericProvider::new("test-key", "https://example.invalid/v1");
+        let req = text_request(vec![
+            LlmMessage::text(LlmRole::System, "system prompt"),
+            LlmMessage::text(LlmRole::User, "hello"),
+            LlmMessage::text(LlmRole::Assistant, "hi"),
+        ]);
+        let base_url = provider.base_url.clone();
+        let compat = detect_compat(&base_url);
+
+        let fast = provider
+            .try_build_text_only_request_body(&req, true, &base_url, &compat)
+            .expect("text request should use fast path")
+            .expect("serialize fast request");
+        let (fallback, _) = provider
+            .build_request_body_with_compat(&req, true, base_url, compat)
+            .expect("build fallback request");
+
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fast).expect("parse fast request"),
+            fallback
+        );
+    }
+
+    #[test]
+    fn text_only_request_fast_path_defers_for_consecutive_user_messages() {
+        let provider = OpenAiGenericProvider::new("test-key", "https://example.invalid/v1");
+        let req = text_request(vec![
+            LlmMessage::text(LlmRole::User, "first"),
+            LlmMessage::text(LlmRole::User, "second"),
+        ]);
+        let base_url = provider.base_url.clone();
+        let compat = detect_compat(&base_url);
+
+        assert!(
+            provider
+                .try_build_text_only_request_body(&req, true, &base_url, &compat)
+                .is_none()
+        );
     }
 }

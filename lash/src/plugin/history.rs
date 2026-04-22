@@ -62,7 +62,7 @@ pub struct SessionReadView(Arc<SessionReadState>);
 struct SessionReadState {
     meta: SessionReadMeta,
     graph: SessionReadGraph,
-    messages: Arc<Vec<crate::Message>>,
+    messages: SessionReadMessages,
     tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
 }
@@ -115,9 +115,27 @@ enum SessionReadGraph {
     Derived {
         cache: OnceLock<Arc<crate::SessionGraph>>,
         base_graph: Option<Arc<crate::SessionGraph>>,
-        messages: Arc<Vec<crate::Message>>,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     },
+}
+
+#[derive(Debug)]
+enum SessionReadMessages {
+    Shared(Arc<Vec<crate::Message>>),
+    Sequence {
+        sequence: crate::MessageSequence,
+        cache: OnceLock<Arc<Vec<crate::Message>>>,
+    },
+}
+
+impl SessionReadMessages {
+    fn as_slice(&self) -> &[crate::Message] {
+        match self {
+            Self::Shared(messages) => messages.as_slice(),
+            Self::Sequence { sequence, cache } => {
+                cache.get_or_init(|| sequence.shared()).as_slice()
+            }
+        }
+    }
 }
 
 impl SessionReadView {
@@ -129,7 +147,7 @@ impl SessionReadView {
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_owned(state),
             graph: SessionReadGraph::Owned(Arc::clone(&graph)),
-            messages,
+            messages: SessionReadMessages::Shared(messages),
             tool_calls,
             projected_rlm_globals: graph.shared_projected_rlm_globals(),
         }))
@@ -148,10 +166,8 @@ impl SessionReadView {
             graph: SessionReadGraph::Derived {
                 cache: OnceLock::new(),
                 base_graph: None,
-                messages: Arc::clone(&messages),
-                tool_calls: Arc::clone(&tool_calls),
             },
-            messages,
+            messages: SessionReadMessages::Shared(messages),
             tool_calls,
             projected_rlm_globals: Arc::new(serde_json::Map::new()),
         }))
@@ -163,17 +179,47 @@ impl SessionReadView {
         messages: Arc<Vec<crate::Message>>,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     ) -> Self {
+        Self::from_graph_projection_arc(state, Arc::new(base_graph), messages, tool_calls)
+    }
+
+    pub(crate) fn from_graph_projection_arc(
+        state: &SessionStateEnvelope,
+        base_graph: Arc<crate::SessionGraph>,
+        messages: Arc<Vec<crate::Message>>,
+        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    ) -> Self {
+        let projected_rlm_globals = base_graph.shared_projected_rlm_globals();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Derived {
                 cache: OnceLock::new(),
-                base_graph: Some(Arc::new(base_graph.clone())),
-                messages: Arc::clone(&messages),
-                tool_calls: Arc::clone(&tool_calls),
+                base_graph: Some(base_graph),
             },
-            messages,
+            messages: SessionReadMessages::Shared(messages),
             tool_calls,
-            projected_rlm_globals: base_graph.shared_projected_rlm_globals(),
+            projected_rlm_globals,
+        }))
+    }
+
+    pub(crate) fn from_graph_message_sequence(
+        state: &SessionStateEnvelope,
+        base_graph: Arc<crate::SessionGraph>,
+        messages: crate::MessageSequence,
+        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    ) -> Self {
+        let projected_rlm_globals = base_graph.shared_projected_rlm_globals();
+        Self(Arc::new(SessionReadState {
+            meta: SessionReadMeta::from_state_ref(state),
+            graph: SessionReadGraph::Derived {
+                cache: OnceLock::new(),
+                base_graph: Some(base_graph),
+            },
+            messages: SessionReadMessages::Sequence {
+                sequence: messages,
+                cache: OnceLock::new(),
+            },
+            tool_calls,
+            projected_rlm_globals,
         }))
     }
 
@@ -181,7 +227,7 @@ impl SessionReadView {
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Owned(Arc::new(state.session_graph.clone())),
-            messages: state.session_graph.shared_projected_messages(),
+            messages: SessionReadMessages::Shared(state.session_graph.shared_projected_messages()),
             tool_calls: state.session_graph.shared_projected_tool_calls(),
             projected_rlm_globals: state.session_graph.shared_projected_rlm_globals(),
         }))
@@ -194,24 +240,18 @@ impl SessionReadView {
     fn graph_arc(&self) -> &Arc<crate::SessionGraph> {
         match &self.0.graph {
             SessionReadGraph::Owned(graph) => graph,
-            SessionReadGraph::Derived {
-                cache,
-                base_graph,
-                messages,
-                tool_calls,
-            } => cache.get_or_init(|| {
+            SessionReadGraph::Derived { cache, base_graph } => cache.get_or_init(|| {
                 let mut graph = base_graph
                     .as_ref()
                     .map(|graph| graph.as_ref().clone())
                     .unwrap_or_default();
-                graph.merge_active_projection(messages.as_slice(), tool_calls.as_slice());
+                graph.merge_active_projection(
+                    self.0.messages.as_slice(),
+                    self.0.tool_calls.as_slice(),
+                );
                 Arc::new(graph)
             }),
         }
-    }
-
-    fn messages_arc(&self) -> &Arc<Vec<crate::Message>> {
-        &self.0.messages
     }
 
     fn tool_calls_arc(&self) -> &Arc<Vec<crate::ToolCallRecord>> {
@@ -235,7 +275,7 @@ impl SessionReadView {
     }
 
     pub fn messages(&self) -> &[crate::Message] {
-        self.messages_arc().as_slice()
+        self.0.messages.as_slice()
     }
 
     pub fn tool_calls(&self) -> &[crate::ToolCallRecord] {
