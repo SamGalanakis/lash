@@ -18,13 +18,15 @@ use crate::activity::{
     is_batch_tool_name, merge_edit_activity, merge_exploration_activity,
 };
 use crate::assistant_text::{
-    normalize_assistant_text, push_assistant_text_block, render_live_assistant_text_block,
+    MarkdownLane, normalize_assistant_text, push_assistant_reasoning_block,
+    push_assistant_text_block,
 };
 use crate::editor::EditorState;
 use crate::overlay::{OverlayState, PickerState};
 use crate::plugin_surface;
 use crate::render;
 use crate::repo_status::RepoStatus;
+use crate::stream_markdown::LiveMarkdown;
 use crate::util::{is_cancelled_error, manual_interrupt_message};
 
 use self::projection::{append_activity_block, push_system_message_block_if_new};
@@ -107,44 +109,69 @@ impl LiveTurnState {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct LiveAssistantView {
-    raw_text: String,
-    display_text: String,
-    rendered_lines: Vec<Line<'static>>,
-    render_width: usize,
-    dirty: bool,
-    has_visible_text: bool,
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LiveToolOutput {
+    #[serde(default)]
+    pub lines: Vec<String>,
+    #[serde(default)]
+    pub hidden: usize,
+    #[serde(default)]
+    pub partial: String,
 }
 
-impl LiveAssistantView {
-    fn append(&mut self, content: &str) {
-        self.raw_text.push_str(content);
-        self.has_visible_text |= content.chars().any(|ch| !ch.is_whitespace());
-        self.dirty = true;
+impl LiveToolOutput {
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.hidden = 0;
+        self.partial.clear();
     }
 
-    fn normalized_text(&self) -> String {
-        if self.dirty {
-            normalize_assistant_text(&self.raw_text)
-        } else {
-            self.display_text.clone()
+    pub(crate) fn height(&self) -> usize {
+        usize::from(self.hidden > 0) + self.lines.len() + usize::from(!self.partial.is_empty())
+    }
+
+    fn push_text(&mut self, text: &str, line_char_limit: usize, max_lines: usize) {
+        let sanitized = strip_ansi_escape_sequences(text);
+        let mut chars = sanitized.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\r' if matches!(chars.peek(), Some('\n')) => {
+                    chars.next();
+                    let completed = std::mem::take(&mut self.partial);
+                    self.push_line(completed, line_char_limit, max_lines);
+                }
+                '\r' => {
+                    self.partial.clear();
+                }
+                '\n' => {
+                    let completed = std::mem::take(&mut self.partial);
+                    self.push_line(completed, line_char_limit, max_lines);
+                }
+                '\t' => {
+                    if !self.partial.chars().last().is_some_and(char::is_whitespace) {
+                        self.partial.push(' ');
+                    }
+                }
+                '\u{8}' | '\u{7f}' => {
+                    self.partial.pop();
+                }
+                control if control.is_control() => {}
+                _ => self.partial.push(ch),
+            }
+
+            if self.partial.chars().count() > line_char_limit {
+                self.partial = smart_truncate_preview_line(&self.partial, line_char_limit);
+            }
         }
     }
 
-    fn ensure_rendered(&mut self, viewport_width: usize) {
-        if !self.dirty && self.render_width == viewport_width {
-            return;
+    fn push_line(&mut self, line: String, line_char_limit: usize, max_lines: usize) {
+        if self.lines.len() == max_lines {
+            self.lines.remove(0);
+            self.hidden += 1;
         }
-
-        self.display_text = normalize_assistant_text(&self.raw_text);
-        self.rendered_lines = render_live_assistant_text_block(&self.display_text, viewport_width);
-        self.render_width = viewport_width;
-        self.dirty = false;
-    }
-
-    fn has_renderable_output(&self) -> bool {
-        self.has_visible_text
+        self.lines
+            .push(smart_truncate_preview_line(&line, line_char_limit));
     }
 }
 
@@ -366,13 +393,11 @@ pub struct UiResumeState {
     #[serde(default)]
     pub plugin_panels: Vec<PluginPanelBlock>,
     #[serde(default)]
-    pub streaming_output: Vec<String>,
+    pub live_tool_output: LiveToolOutput,
     #[serde(default)]
-    pub streaming_output_hidden: usize,
+    pub live_assistant_text: Option<String>,
     #[serde(default)]
-    pub streaming_output_partial: String,
-    #[serde(default)]
-    pub interrupted_assistant_text: Option<String>,
+    pub live_reasoning_text: Option<String>,
 }
 
 impl UiResumeState {
@@ -388,10 +413,9 @@ impl UiResumeState {
                     _ => None,
                 })
                 .collect(),
-            streaming_output: app.streaming_output.clone(),
-            streaming_output_hidden: app.streaming_output_hidden,
-            streaming_output_partial: app.streaming_output_partial.clone(),
-            interrupted_assistant_text: None,
+            live_tool_output: app.live_tool_output.clone(),
+            live_assistant_text: app.live_assistant_normalized_text(),
+            live_reasoning_text: app.live_reasoning_normalized_text(),
         }
     }
 }
@@ -446,8 +470,10 @@ pub struct App {
     pub tick: usize,
     /// Active live turn state for the bottom status strip.
     pub live_turn: Option<LiveTurnState>,
-    /// Transient assistant prose for the active streamed turn.
-    live_assistant: Option<LiveAssistantView>,
+    /// Incremental markdown stream for assistant prose in the active turn.
+    live_assistant: LiveMarkdown,
+    /// Incremental markdown stream for reasoning in the active turn.
+    live_reasoning: LiveMarkdown,
     /// Ignore stray late TextDelta events once the latest assistant block has
     /// been reconciled to authoritative final text.
     assistant_text_finalized: bool,
@@ -467,10 +493,8 @@ pub struct App {
     block_render_cache: Vec<Option<BlockRenderCacheEntry>>,
     /// Owned editor/input state.
     pub editor: EditorState,
-    /// Live streaming output lines from tool execution (e.g. bash).
-    pub streaming_output: Vec<String>,
-    pub streaming_output_hidden: usize,
-    pub streaming_output_partial: String,
+    /// Live tool output preview anchored to the active tool activity block.
+    pub live_tool_output: LiveToolOutput,
     /// Loaded skills registry.
     pub skills: SkillCatalog,
     /// Slash commands contributed by plugins in the current session.
@@ -560,7 +584,8 @@ impl App {
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
         self.iteration = 0;
-        self.live_assistant = None;
+        self.live_assistant.clear();
+        self.live_reasoning.clear();
         self.assistant_text_finalized = false;
         self.clear_live_tool_output();
         self.live_output_chars_estimate = 0;
@@ -574,6 +599,7 @@ impl App {
         self.running = false;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
+        self.commit_live_reasoning_block();
         self.commit_live_assistant_block();
         self.clear_live_tool_output();
         self.live_output_chars_estimate = 0;
@@ -680,35 +706,21 @@ impl App {
         }
     }
 
-    fn live_reasoning_tail_index(&self) -> Option<usize> {
-        if self.running
-            && matches!(
-                self.blocks.last(),
-                Some(DisplayBlock::AssistantReasoning(_))
-            )
-        {
-            self.blocks.len().checked_sub(1)
-        } else {
-            None
-        }
-    }
-
-    fn append_invalidation_start(&self) -> usize {
-        self.live_reasoning_tail_index()
-            .unwrap_or(self.blocks.len())
-    }
-
-    fn invalidate_live_reasoning_tail(&mut self) {
-        if let Some(idx) = self.live_reasoning_tail_index() {
-            self.invalidate_height_cache_from(idx);
-        }
-    }
-
     fn push_activity_block(&mut self, activity: ActivityBlock) {
         let invalidate_from = self.append_invalidation_start();
+        let prior_len = self.blocks.len();
         append_activity_block(&mut self.blocks, activity);
         if !self.blocks.is_empty() {
-            self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
+            let changed_idx = if self.blocks.len() == prior_len {
+                prior_len.saturating_sub(1)
+            } else {
+                prior_len
+            };
+            self.invalidate_height_cache_from(
+                invalidate_from
+                    .min(changed_idx)
+                    .min(self.blocks.len().saturating_sub(1)),
+            );
         }
     }
 
@@ -723,9 +735,14 @@ impl App {
         if display.trim().is_empty() {
             return;
         }
+        let changed_idx = self.blocks.len();
         let invalidate_from = self.append_invalidation_start();
         self.blocks.push(DisplayBlock::UserInput(display));
-        self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
+        self.invalidate_height_cache_from(
+            invalidate_from
+                .min(changed_idx)
+                .min(self.blocks.len().saturating_sub(1)),
+        );
         self.keep_latest_user_block_visible();
     }
 
@@ -750,7 +767,8 @@ impl App {
             iteration: 0,
             tick: 0,
             live_turn: None,
-            live_assistant: None,
+            live_assistant: LiveMarkdown::new(MarkdownLane::Assistant),
+            live_reasoning: LiveMarkdown::new(MarkdownLane::Reasoning),
             assistant_text_finalized: false,
             dirty: true,
             follow_mode: FollowOutputMode::Bottom,
@@ -760,9 +778,7 @@ impl App {
             height_cache_vh: 0,
             block_render_cache: Vec::new(),
             editor: EditorState::default(),
-            streaming_output: Vec::new(),
-            streaming_output_hidden: 0,
-            streaming_output_partial: String::new(),
+            live_tool_output: LiveToolOutput::default(),
             skills: SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
             plugin_commands: Vec::new(),
             pending_steers: VecDeque::new(),
@@ -849,6 +865,29 @@ impl App {
             .min(idx.min(self.blocks.len().saturating_sub(1)));
     }
 
+    fn live_reasoning_tail_index(&self) -> Option<usize> {
+        self.running
+            .then(|| self.blocks.len().checked_sub(1))
+            .flatten()
+            .filter(|&idx| {
+                matches!(
+                    self.blocks.get(idx),
+                    Some(DisplayBlock::AssistantReasoning(_))
+                )
+            })
+    }
+
+    fn append_invalidation_start(&self) -> usize {
+        self.live_reasoning_tail_index()
+            .unwrap_or(self.blocks.len())
+    }
+
+    fn invalidate_live_reasoning_tail(&mut self) {
+        if let Some(idx) = self.live_reasoning_tail_index() {
+            self.invalidate_height_cache_from(idx);
+        }
+    }
+
     /// Remove the empty-state splash once real conversation content is present.
     #[cfg(test)]
     pub fn dismiss_splash(&mut self) {
@@ -860,34 +899,31 @@ impl App {
         self.invalidate_height_cache();
     }
 
-    /// Check whether a new CodeBlock belongs to an existing code-block group.
-    /// Returns `true` if there is a prior CodeBlock with only Activity / CodeOutput
-    /// blocks between it and the end (no user-facing boundary like AssistantText,
-    /// Error, UserInput, etc.).
-    fn live_assistant_mut(&mut self) -> &mut LiveAssistantView {
-        self.live_assistant
-            .get_or_insert_with(LiveAssistantView::default)
-    }
-
     fn live_assistant_normalized_text(&self) -> Option<String> {
         self.live_assistant
-            .as_ref()
-            .filter(|view| view.has_renderable_output())
-            .map(LiveAssistantView::normalized_text)
-            .filter(|text| !text.is_empty())
+            .has_renderable_output()
+            .then(|| self.live_assistant.normalized_text())
+            .flatten()
     }
 
-    fn ensure_live_assistant_rendered(&mut self, viewport_width: usize) {
-        if let Some(view) = self.live_assistant.as_mut() {
-            view.ensure_rendered(viewport_width);
-        }
+    fn live_reasoning_normalized_text(&self) -> Option<String> {
+        self.live_reasoning
+            .has_renderable_output()
+            .then(|| self.live_reasoning.normalized_text())
+            .flatten()
+    }
+
+    fn ensure_live_markdown_rendered(&mut self, viewport_width: usize) {
+        self.live_reasoning.ensure_rendered(viewport_width);
+        self.live_assistant.ensure_rendered(viewport_width);
+    }
+
+    pub fn live_reasoning_lines_snapshot(&self) -> Option<&[Line<'static>]> {
+        (!self.live_reasoning.lines().is_empty()).then_some(self.live_reasoning.lines())
     }
 
     pub fn live_assistant_lines_snapshot(&self) -> Option<&[Line<'static>]> {
-        self.live_assistant
-            .as_ref()
-            .filter(|view| !view.rendered_lines.is_empty())
-            .map(|view| view.rendered_lines.as_slice())
+        (!self.live_assistant.lines().is_empty()).then_some(self.live_assistant.lines())
     }
 
     pub(crate) fn rendered_block_lines_cached(
@@ -932,12 +968,27 @@ impl App {
             .len()
     }
 
+    pub(crate) fn live_reasoning_leading_padding(&self) -> usize {
+        if !self.live_reasoning.has_renderable_output() {
+            return 0;
+        }
+
+        match self.blocks.last() {
+            Some(
+                DisplayBlock::AssistantReasoning(_)
+                | DisplayBlock::Splash
+                | DisplayBlock::TurnStart(_),
+            )
+            | None => 0,
+            _ => 1,
+        }
+    }
+
     pub(crate) fn live_assistant_leading_padding(&self) -> usize {
-        if self
-            .live_assistant
-            .as_ref()
-            .is_none_or(|view| !view.has_renderable_output())
-        {
+        if !self.live_assistant.has_renderable_output() {
+            return 0;
+        }
+        if self.live_reasoning.has_renderable_output() {
             return 0;
         }
 
@@ -953,18 +1004,24 @@ impl App {
         }
     }
 
-    fn live_assistant_height(&self) -> usize {
-        let Some(view) = self.live_assistant.as_ref() else {
-            return 0;
-        };
-        if view.rendered_lines.is_empty() {
+    fn live_reasoning_height(&self) -> usize {
+        let lines = self.live_reasoning.lines();
+        if lines.is_empty() {
             return 0;
         }
-        self.live_assistant_leading_padding() + view.rendered_lines.len()
+        self.live_reasoning_leading_padding() + lines.len()
+    }
+
+    fn live_assistant_height(&self) -> usize {
+        let lines = self.live_assistant.lines();
+        if lines.is_empty() {
+            return 0;
+        }
+        self.live_assistant_leading_padding() + lines.len()
     }
 
     pub(crate) fn live_tool_output_anchor_block_index(&self) -> Option<usize> {
-        if self.streaming_output_height() == 0 {
+        if self.live_tool_output.height() == 0 {
             return None;
         }
         self.blocks
@@ -993,9 +1050,9 @@ impl App {
     }
 
     fn clear_live_tool_output(&mut self) {
-        let had_output = self.streaming_output_height() > 0;
+        let had_output = self.live_tool_output.height() > 0;
         let anchor_idx = self.live_tool_output_anchor_block_index();
-        self.clear_streaming_output();
+        self.live_tool_output.clear();
         if had_output && let Some(idx) = anchor_idx {
             self.invalidate_height_cache_from(idx);
         }
@@ -1041,51 +1098,52 @@ impl App {
     }
 
     fn commit_live_assistant_block(&mut self) {
-        let Some(cleaned) = self.live_assistant_normalized_text() else {
-            self.live_assistant = None;
+        let Some(cleaned) = self.live_assistant.take_normalized_text() else {
             return;
         };
 
         if self.reconcile_trailing_assistant_block(&cleaned) {
             self.mark_visible_output();
-            self.live_assistant = None;
             return;
         }
 
+        let changed_idx = self.blocks.len();
         let invalidate_from = self.append_invalidation_start();
         if push_assistant_text_block(&mut self.blocks, &cleaned) {
-            self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
+            self.invalidate_height_cache_from(
+                invalidate_from
+                    .min(changed_idx)
+                    .min(self.blocks.len().saturating_sub(1)),
+            );
             self.mark_visible_output();
         }
-        self.live_assistant = None;
     }
 
-    fn append_to_trailing_reasoning_block(&mut self, delta: &str) {
-        if delta.is_empty() {
+    fn commit_live_reasoning_block(&mut self) {
+        let Some(cleaned) = self.live_reasoning.take_normalized_text() else {
             return;
-        }
-        match self.blocks.last_mut() {
-            Some(DisplayBlock::AssistantReasoning(existing)) => {
-                existing.push_str(delta);
-                let idx = self.blocks.len() - 1;
-                self.invalidate_height_cache_from(idx);
-            }
-            _ => {
-                self.blocks
-                    .push(DisplayBlock::AssistantReasoning(delta.to_string()));
-                self.invalidate_height_cache_from(self.blocks.len() - 1);
-            }
+        };
+        let prior_len = self.blocks.len();
+        if push_assistant_reasoning_block(&mut self.blocks, &cleaned) {
+            let changed_idx = if self.blocks.len() == prior_len {
+                prior_len.saturating_sub(1)
+            } else {
+                prior_len
+            };
+            self.invalidate_height_cache_from(changed_idx.min(self.blocks.len() - 1));
+            self.mark_visible_output();
         }
     }
 
-    fn finalize_live_assistant(&mut self) {
+    fn finalize_live_markdown(&mut self) {
+        self.commit_live_reasoning_block();
         self.commit_live_assistant_block();
     }
 
     fn commit_final_assistant_text(&mut self, text: &str) {
         let cleaned = normalize_assistant_text(text);
         if cleaned.is_empty() {
-            self.live_assistant = None;
+            self.live_assistant.clear();
             return;
         }
 
@@ -1096,23 +1154,28 @@ impl App {
             _ => cleaned,
         };
 
-        self.live_assistant = None;
+        self.live_assistant.clear();
         if self.reconcile_trailing_assistant_block(&final_text) {
             self.assistant_text_finalized = true;
             self.mark_visible_output();
             return;
         }
 
+        let changed_idx = self.blocks.len();
         let invalidate_from = self.append_invalidation_start();
         if push_assistant_text_block(&mut self.blocks, &final_text) {
-            self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
+            self.invalidate_height_cache_from(
+                invalidate_from
+                    .min(changed_idx)
+                    .min(self.blocks.len().saturating_sub(1)),
+            );
             self.mark_visible_output();
         }
         self.assistant_text_finalized = true;
     }
 
     fn accept_injected_turn_input(&mut self, messages: &[PluginMessage]) {
-        self.finalize_live_assistant();
+        self.finalize_live_markdown();
         let mut accepted_user_message = false;
         for message in messages {
             if !matches!(message.role, MessageRole::User) {
@@ -1136,7 +1199,7 @@ impl App {
     }
 
     fn commit_injected_messages(&mut self, messages: &[PluginMessage]) {
-        self.finalize_live_assistant();
+        self.finalize_live_markdown();
         let mut committed_user_message = false;
         for message in messages {
             match message.role {
@@ -1201,9 +1264,14 @@ impl App {
         ) {
             return;
         }
+        let changed_idx = self.blocks.len();
         let invalidate_from = self.append_invalidation_start();
         self.blocks.push(DisplayBlock::UserInput(history_text));
-        self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
+        self.invalidate_height_cache_from(
+            invalidate_from
+                .min(changed_idx)
+                .min(self.blocks.len().saturating_sub(1)),
+        );
     }
 
     /// Process a session event, updating display blocks.
@@ -1214,17 +1282,23 @@ impl App {
                     return;
                 }
                 self.mark_first_token_arrived();
-                // Render reasoning live in scrollback by extending the
-                // trailing `AssistantReasoning` block. We stream directly
-                // to a display block instead of buffering so the user
-                // sees the thinking trace appear immediately, matching
-                // pi's experience.
-                self.append_to_trailing_reasoning_block(&content);
+                if self.live_assistant.has_renderable_output() {
+                    self.commit_live_assistant_block();
+                }
+                let had_output = self.live_reasoning.has_renderable_output();
+                self.live_reasoning.append(&content);
+                if !had_output && self.live_reasoning.has_renderable_output() {
+                    self.mark_visible_output();
+                }
                 self.mark_visible_output();
                 self.scroll_to_bottom();
             }
             SessionEvent::TextDelta { content } => {
-                if !self.running && self.live_turn.is_none() && self.live_assistant.is_none() {
+                if !self.running
+                    && self.live_turn.is_none()
+                    && self.live_assistant_normalized_text().is_none()
+                    && self.live_reasoning_normalized_text().is_none()
+                {
                     if self.assistant_text_finalized {
                         return;
                     }
@@ -1237,17 +1311,12 @@ impl App {
                 self.live_output_chars_estimate += content.chars().count() as i64;
                 self.live_output_tokens_estimate =
                     estimate_tokens_from_char_count(self.live_output_chars_estimate);
-                let has_renderable_output_before = self
-                    .live_assistant
-                    .as_ref()
-                    .is_some_and(|view| view.has_renderable_output());
-                self.live_assistant_mut().append(&content);
-                if !has_renderable_output_before
-                    && self
-                        .live_assistant
-                        .as_ref()
-                        .is_some_and(|view| view.has_renderable_output())
-                {
+                if self.live_reasoning.has_renderable_output() {
+                    self.commit_live_reasoning_block();
+                }
+                let had_output = self.live_assistant.has_renderable_output();
+                self.live_assistant.append(&content);
+                if !had_output && self.live_assistant.has_renderable_output() {
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
@@ -1260,7 +1329,7 @@ impl App {
                 duration_ms,
                 ..
             } => {
-                self.finalize_live_assistant();
+                self.finalize_live_markdown();
                 self.clear_live_tool_output();
                 let activities = self.activity_state.blocks_for_tool_call(
                     &name,
@@ -1297,10 +1366,15 @@ impl App {
                     // model just emitted. Pushed as its own DisplayBlock
                     // so the renderer can hide it by default and reveal
                     // it when the user hits Alt+O (full expansion).
-                    self.finalize_live_assistant();
+                    self.finalize_live_markdown();
+                    let changed_idx = self.blocks.len();
                     let invalidate_from = self.append_invalidation_start();
                     self.blocks.push(DisplayBlock::LashlangCode(text));
-                    self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
+                    self.invalidate_height_cache_from(
+                        invalidate_from
+                            .min(changed_idx)
+                            .min(self.blocks.len().saturating_sub(1)),
+                    );
                     self.invalidate_live_tool_output_cache();
                     self.scroll_to_bottom();
                 } else if kind == "tool_output" {
@@ -1314,12 +1388,17 @@ impl App {
                     let stream_active = self.running
                         || current_status.is_some_and(|status| status.contains("shell"));
                     if stream_active {
-                        self.push_streaming_output_text(&text);
+                        self.live_tool_output.push_text(
+                            &text,
+                            STREAMING_OUTPUT_LINE_CHAR_LIMIT,
+                            STREAMING_OUTPUT_MAX_LINES,
+                        );
                         self.invalidate_live_tool_output_cache();
                         self.mark_visible_output();
                         self.scroll_to_bottom();
                     }
                 } else if kind == "final" {
+                    self.commit_live_reasoning_block();
                     self.commit_final_assistant_text(&text);
                     self.scroll_to_bottom();
                 } else {
@@ -1327,7 +1406,7 @@ impl App {
                 }
             }
             SessionEvent::LlmRequest { iteration, .. } => {
-                self.finalize_live_assistant();
+                self.finalize_live_markdown();
                 self.iteration = iteration + 1;
                 if let Some(detail) = self.pending_retry_status.take() {
                     self.set_status("retrying", Some(detail), true);
@@ -1360,12 +1439,12 @@ impl App {
                 self.scroll_to_bottom();
             }
             SessionEvent::Done => {
-                self.finalize_live_assistant();
+                self.finalize_live_markdown();
                 self.stop_turn();
                 self.scroll_to_bottom();
             }
             SessionEvent::Error { message, envelope } => {
-                self.finalize_live_assistant();
+                self.finalize_live_markdown();
                 let code = envelope.as_ref().and_then(|err| err.code.as_deref());
                 if is_cancelled_error(&message, code) {
                     let manual_interrupt_requested = self.manual_interrupt_requested;
@@ -1385,9 +1464,14 @@ impl App {
                         Some(message.chars().take(96).collect()),
                         std::time::Duration::from_secs(8),
                     );
+                    let changed_idx = self.blocks.len();
                     let invalidate_from = self.append_invalidation_start();
                     self.blocks.push(DisplayBlock::Error(message));
-                    self.invalidate_height_cache_from(invalidate_from.min(self.blocks.len() - 1));
+                    self.invalidate_height_cache_from(
+                        invalidate_from
+                            .min(changed_idx)
+                            .min(self.blocks.len().saturating_sub(1)),
+                    );
                 }
                 self.mark_visible_output();
                 self.scroll_to_bottom();

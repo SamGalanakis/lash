@@ -501,11 +501,10 @@ pub(crate) async fn run_app(
                                 if message == crate::util::manual_interrupt_message()
                         );
                         let mut ui_resume_state = app.ui_resume_state();
-                        ui_resume_state.interrupted_assistant_text =
-                            app::interrupted_assistant_tail(
-                                &app.blocks,
-                                &done.result.assistant_output.safe_text,
-                            );
+                        ui_resume_state.live_assistant_text = app::interrupted_assistant_tail(
+                            &app.blocks,
+                            &done.result.assistant_output.safe_text,
+                        );
                         if let Some(rt) = runtime.as_mut() {
                             persist_runtime_turn_state(
                                 rt,

@@ -342,9 +342,7 @@ pub async fn load_resumed_session(
     )
     .await?;
     app.stop_turn();
-    app.streaming_output = loaded.streaming_output;
-    app.streaming_output_hidden = loaded.streaming_output_hidden;
-    app.streaming_output_partial = loaded.streaming_output_partial;
+    app.live_tool_output = loaded.live_tool_output;
     app.invalidate_height_cache();
     app.resume_follow_output();
     Ok(())
@@ -420,9 +418,7 @@ pub async fn restore_session_state(
         app.blocks = projected_blocks_from_state(&live_messages, &live_tool_calls, &live.ui_state);
         app.last_response_usage = live.ui_state.last_response_usage.clone();
         app.plugin_mode_indicators = live.ui_state.plugin_mode_indicators.clone();
-        app.streaming_output = live.ui_state.streaming_output.clone();
-        app.streaming_output_hidden = live.ui_state.streaming_output_hidden;
-        app.streaming_output_partial = live.ui_state.streaming_output_partial.clone();
+        app.live_tool_output = live.ui_state.live_tool_output.clone();
         app.invalidate_height_cache();
         app.blocks.push(DisplayBlock::SystemMessage(
             "Interrupted runtime state restored from a live snapshot.".to_string(),
@@ -765,7 +761,7 @@ mod tests {
             &store,
             &live_state,
             &crate::app::UiResumeState {
-                interrupted_assistant_text: Some("Interrupted partial assistant reply".to_string()),
+                live_assistant_text: Some("Interrupted partial assistant reply".to_string()),
                 ..crate::app::UiResumeState::default()
             },
             &DynamicStateSnapshot {
@@ -848,9 +844,11 @@ mod tests {
             graph,
             checkpoint,
             crate::app::UiResumeState {
-                streaming_output: vec!["started git status --short".to_string()],
-                streaming_output_hidden: 1,
-                streaming_output_partial: "partial".to_string(),
+                live_tool_output: crate::app::LiveToolOutput {
+                    lines: vec!["started git status --short".to_string()],
+                    hidden: 1,
+                    partial: "partial".to_string(),
+                },
                 ..crate::app::UiResumeState::default()
             },
         );
@@ -898,10 +896,10 @@ mod tests {
         assert!(!app.running);
         assert!(app.live_turn.is_none());
         assert_eq!(
-            app.streaming_output,
+            app.live_tool_output.lines,
             vec!["started git status --short".to_string()]
         );
-        assert_eq!(app.streaming_output_hidden, 1);
-        assert_eq!(app.streaming_output_partial, "partial");
+        assert_eq!(app.live_tool_output.hidden, 1);
+        assert_eq!(app.live_tool_output.partial, "partial");
     }
 }

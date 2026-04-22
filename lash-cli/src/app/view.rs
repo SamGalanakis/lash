@@ -5,12 +5,13 @@ impl App {
         self.blocks = vec![DisplayBlock::Splash];
         self.scroll_offset = 0;
         self.follow_mode = FollowOutputMode::Bottom;
-        self.live_assistant = None;
+        self.live_assistant.clear();
+        self.live_reasoning.clear();
         self.assistant_text_finalized = false;
         self.clear_status();
         self.editor.pending_images.clear();
         self.editor.pending_large_pastes.clear();
-        self.clear_streaming_output();
+        self.clear_live_tool_output();
         self.pending_steers.clear();
         self.queued_turns.clear();
         self.pending_monitor_wakes.clear();
@@ -284,19 +285,20 @@ impl App {
             return Some(self.block_content_start_offset(idx));
         }
 
+        let history_tail = self.height_cache.last().copied().unwrap_or(0);
+        if self.live_reasoning.has_renderable_output() {
+            return Some(history_tail + self.live_reasoning_leading_padding());
+        }
         self.live_assistant
-            .as_ref()
-            .filter(|view| view.has_renderable_output())
-            .map(|_| {
-                self.height_cache.last().copied().unwrap_or(0)
-                    + self.live_assistant_leading_padding()
-            })
+            .has_renderable_output()
+            .then_some(history_tail + self.live_assistant_leading_padding())
     }
 
     fn is_turn_visible_output_block(block: &DisplayBlock) -> bool {
         matches!(
             block,
             DisplayBlock::AssistantText(_)
+                | DisplayBlock::AssistantReasoning(_)
                 | DisplayBlock::Activity(_)
                 | DisplayBlock::ShellOutput { .. }
                 | DisplayBlock::Error(_)
@@ -361,7 +363,7 @@ impl App {
 
     pub fn ensure_height_cache_pub(&mut self, width: usize, viewport_height: usize) {
         self.ensure_height_cache(width, viewport_height);
-        self.ensure_live_assistant_rendered(width);
+        self.ensure_live_markdown_rendered(width);
     }
 
     pub fn height_cache_snapshot(&self) -> &[usize] {
@@ -409,75 +411,10 @@ impl App {
 
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
-        self.ensure_live_assistant_rendered(width);
+        self.ensure_live_markdown_rendered(width);
         self.height_cache.last().copied().unwrap_or(0)
+            + self.live_reasoning_height()
             + self.live_assistant_height()
             + crate::render::plan_dock_trailing_height(self)
-    }
-
-    pub fn streaming_output_height(&self) -> usize {
-        usize::from(self.streaming_output_hidden > 0)
-            + self.streaming_output.len()
-            + usize::from(!self.streaming_output_partial.is_empty())
-    }
-
-    pub(super) fn clear_streaming_output(&mut self) {
-        self.streaming_output.clear();
-        self.streaming_output_hidden = 0;
-        self.streaming_output_partial.clear();
-    }
-
-    pub(super) fn push_streaming_output_text(&mut self, text: &str) {
-        let sanitized = strip_ansi_escape_sequences(text);
-        let mut chars = sanitized.chars().peekable();
-        while let Some(ch) = chars.next() {
-            match ch {
-                '\r' if matches!(chars.peek(), Some('\n')) => {
-                    chars.next();
-                    let completed = std::mem::take(&mut self.streaming_output_partial);
-                    self.push_streaming_output_line(completed);
-                }
-                '\r' => {
-                    self.streaming_output_partial.clear();
-                }
-                '\n' => {
-                    let completed = std::mem::take(&mut self.streaming_output_partial);
-                    self.push_streaming_output_line(completed);
-                }
-                '\t' => {
-                    if !self
-                        .streaming_output_partial
-                        .chars()
-                        .last()
-                        .is_some_and(char::is_whitespace)
-                    {
-                        self.streaming_output_partial.push(' ');
-                    }
-                }
-                '\u{8}' | '\u{7f}' => {
-                    self.streaming_output_partial.pop();
-                }
-                ch if ch.is_control() => {}
-                _ => self.streaming_output_partial.push(ch),
-            }
-
-            if self.streaming_output_partial.chars().count() > STREAMING_OUTPUT_LINE_CHAR_LIMIT {
-                self.streaming_output_partial = smart_truncate_preview_line(
-                    &self.streaming_output_partial,
-                    STREAMING_OUTPUT_LINE_CHAR_LIMIT,
-                );
-            }
-        }
-    }
-
-    fn push_streaming_output_line(&mut self, line: String) {
-        if self.streaming_output.len() == STREAMING_OUTPUT_MAX_LINES {
-            self.streaming_output.remove(0);
-            self.streaming_output_hidden += 1;
-        }
-        self.streaming_output.push(smart_truncate_preview_line(
-            &line,
-            STREAMING_OUTPUT_LINE_CHAR_LIMIT,
-        ));
     }
 }

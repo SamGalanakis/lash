@@ -26,6 +26,7 @@ mod scratch_tui;
 mod session_bootstrap;
 mod session_log;
 mod setup;
+mod stream_markdown;
 #[cfg(test)]
 mod test_support;
 mod text_display;

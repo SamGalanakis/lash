@@ -548,6 +548,12 @@ fn history_content_lines_snapshot(
             viewport_height,
         ));
     }
+    if let Some(live_lines) = app.live_reasoning_lines_snapshot() {
+        if app.live_reasoning_leading_padding() > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.extend(live_lines.iter().cloned());
+    }
     if let Some(live_lines) = app.live_assistant_lines_snapshot() {
         if app.live_assistant_leading_padding() > 0 {
             lines.push(Line::from(""));
@@ -1301,15 +1307,15 @@ fn append_streaming_output_lines(
     content_style: Style,
     row_limit: usize,
 ) {
-    if app.streaming_output_height() == 0 {
+    if app.live_tool_output.height() == 0 {
         return;
     }
 
-    let mut hidden_rows = app.streaming_output_hidden;
-    let mut logical = Vec::with_capacity(app.streaming_output_height());
-    logical.extend(app.streaming_output.iter().cloned());
-    if !app.streaming_output_partial.is_empty() {
-        logical.push(app.streaming_output_partial.clone());
+    let mut hidden_rows = app.live_tool_output.hidden;
+    let mut logical = Vec::with_capacity(app.live_tool_output.height());
+    logical.extend(app.live_tool_output.lines.iter().cloned());
+    if !app.live_tool_output.partial.is_empty() {
+        logical.push(app.live_tool_output.partial.clone());
     }
 
     if row_limit > 0 {
@@ -1356,7 +1362,7 @@ fn render_live_tool_output_inline(
     activity_kind: &ActivityKind,
     viewport_width: usize,
 ) {
-    if app.streaming_output_height() == 0 || viewport_width == 0 {
+    if app.live_tool_output.height() == 0 || viewport_width == 0 {
         return;
     }
 

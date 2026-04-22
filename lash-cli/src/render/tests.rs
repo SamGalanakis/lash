@@ -805,7 +805,7 @@ fn shell_activity_renders_live_output_inline_under_tool() {
         output_start_anchor_pending: false,
         transient_until: None,
     });
-    app.streaming_output = vec!["Compiling lash-cli".into(), "warning: unused import".into()];
+    app.live_tool_output.lines = vec!["Compiling lash-cli".into(), "warning: unused import".into()];
 
     let rendered = app
         .rendered_block_lines_cached(0, 64, 20)

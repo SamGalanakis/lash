@@ -6,8 +6,8 @@ use std::time::Duration;
 use fff_search::git::format_git_status_opt;
 use fff_search::grep::{GrepMode, GrepSearchOptions, has_regex_metacharacters, is_import_line};
 use fff_search::{
-    AiGrepConfig, FFFMode, FileItem, FilePicker, FilePickerOptions, FuzzySearchOptions, GrepMatch,
-    PaginationArgs, QueryParser, SharedFrecency, SharedPicker,
+    AiGrepConfig, ContentCacheBudget, FFFMode, FileItem, FilePicker, FilePickerOptions,
+    FuzzySearchOptions, GrepMatch, PaginationArgs, QueryParser, SharedFrecency, SharedPicker,
 };
 use serde_json::json;
 
@@ -139,6 +139,7 @@ impl Grep {
                                 auto_expand_defs: retry_auto_expand,
                                 broadened_from: Some(query),
                                 approximate: false,
+                                picker,
                             },
                             &mut cursors,
                         ));
@@ -166,6 +167,7 @@ impl Grep {
                         auto_expand_defs: fuzzy_auto_expand,
                         broadened_from: None,
                         approximate: true,
+                        picker,
                     },
                     &mut cursors,
                 ));
@@ -173,8 +175,7 @@ impl Grep {
 
             if query.contains('/') {
                 let file_query = QueryParser::default().parse(query);
-                let file_result = FilePicker::fuzzy_search(
-                    picker.get_files(),
+                let file_result = picker.fuzzy_search(
                     &file_query,
                     None,
                     FuzzySearchOptions {
@@ -203,7 +204,7 @@ impl Grep {
                             "files_with_matches": 0,
                             "truncated": false,
                             "cursor": null,
-                            "suggested_path": top.relative_path,
+                            "suggested_path": top.relative_path(picker),
                             "approximate": false,
                         }));
                     }
@@ -232,6 +233,7 @@ impl Grep {
                 auto_expand_defs: auto_expand,
                 broadened_from: None,
                 approximate: false,
+                picker,
             },
             &mut cursors,
         ))
@@ -486,9 +488,10 @@ fn initialize_backend_at(base_path: &Path) -> Result<GrepBackend, String> {
         SharedFrecency::default(),
         FilePickerOptions {
             base_path: base_path.to_string_lossy().into_owned(),
-            warmup_mmap_cache: false,
+            enable_mmap_cache: false,
+            enable_content_indexing: false,
             mode: FFFMode::Ai,
-            cache_budget: None,
+            cache_budget: Some(grep_content_cache_budget()),
             watch: false,
         },
     )
@@ -505,6 +508,16 @@ type SharedBackendCache = Mutex<HashMap<PathBuf, Result<Arc<GrepBackend>, String
 fn shared_backend_cache() -> &'static SharedBackendCache {
     static CACHE: OnceLock<SharedBackendCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn grep_content_cache_budget() -> ContentCacheBudget {
+    ContentCacheBudget {
+        max_files: 0,
+        max_bytes: 0,
+        max_file_size: 10 * 1024 * 1024,
+        cached_count: Default::default(),
+        cached_bytes: Default::default(),
+    }
 }
 
 fn parse_max_results(args: &serde_json::Value) -> Result<usize, ToolResult> {
@@ -563,6 +576,8 @@ fn make_grep_options(mode: GrepMode, file_offset: usize) -> (GrepSearchOptions, 
             before_context,
             after_context,
             classify_definitions: true,
+            trim_whitespace: false,
+            abort_signal: None,
         },
         auto_expand_defs,
     )
@@ -668,6 +683,7 @@ struct StructuredGrepInput<'a> {
     auto_expand_defs: bool,
     broadened_from: Option<&'a str>,
     approximate: bool,
+    picker: &'a FilePicker,
 }
 
 fn structured_grep_result(
@@ -689,22 +705,22 @@ fn structured_grep_result(
     indices.truncate(input.max_results);
 
     let cursor = (input.next_file_offset > 0).then(|| cursor_store.store(input.next_file_offset));
-    let mut per_file: HashMap<&str, usize> = HashMap::new();
-    let mut file_order: Vec<&str> = Vec::new();
-    let mut suggested_path = None::<&str>;
+    let mut per_file: HashMap<String, usize> = HashMap::new();
+    let mut file_order: Vec<String> = Vec::new();
+    let mut suggested_path = None::<String>;
     let matches = indices
         .iter()
         .map(|&index| {
             let matched = &input.matches[index];
             let file = input.files[matched.file_index];
-            let path = file.relative_path.as_str();
-            let count = per_file.entry(path).or_insert_with(|| {
-                file_order.push(path);
+            let path = file.relative_path(input.picker);
+            let count = per_file.entry(path.clone()).or_insert_with(|| {
+                file_order.push(path.clone());
                 0
             });
             *count += 1;
             if suggested_path.is_none() || matched.is_definition {
-                suggested_path = Some(path);
+                suggested_path = Some(path.clone());
             }
             let ranges = matched
                 .match_byte_offsets
@@ -739,13 +755,13 @@ fn structured_grep_result(
             let file = input
                 .files
                 .iter()
-                .find(|file| file.relative_path == path)
+                .find(|file| file.relative_path(input.picker) == path)
                 .expect("file_order only contains known files");
             json!({
                 "path": path,
-                "count": per_file[path],
+                "count": per_file[&path],
                 "size_bytes": file.size,
-                "is_binary": file.is_binary,
+                "is_binary": file.is_binary(),
                 "git_status": format_git_status_opt(file.git_status),
             })
         })

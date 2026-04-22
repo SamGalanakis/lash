@@ -48,22 +48,17 @@ fn text_delta_accumulates_raw() {
     app.handle_session_event(SessionEvent::TextDelta {
         content: "\n\nfirst\n".into(),
     });
-    // Raw accumulation — no normalization until flush
     assert_eq!(
-        app.live_assistant
-            .as_ref()
-            .map(|view| view.raw_text.as_str()),
-        Some("\n\nfirst\n")
+        app.live_assistant.normalized_text().as_deref(),
+        Some("first")
     );
 
     app.handle_session_event(SessionEvent::TextDelta {
         content: "\n\n\nsecond\n".into(),
     });
     assert_eq!(
-        app.live_assistant
-            .as_ref()
-            .map(|view| view.raw_text.as_str()),
-        Some("\n\nfirst\n\n\n\nsecond\n")
+        app.live_assistant.normalized_text().as_deref(),
+        Some("first\n\nsecond")
     );
 }
 
@@ -79,8 +74,8 @@ fn text_delta_code_fence_preserved() {
     // The newline between ```python and # comment must be preserved
     assert!(
         app.live_assistant
-            .as_ref()
-            .is_some_and(|view| view.raw_text.contains("```python\n# comment"))
+            .normalized_text()
+            .is_some_and(|text| text.contains("```python\n# comment"))
     );
 }
 
@@ -297,7 +292,7 @@ fn llm_request_flushes_intermediate_stream_text() {
         tool_list: String::new(),
     });
 
-    assert!(app.live_assistant.is_none());
+    assert!(app.live_assistant.normalized_text().is_none());
     assert!(app.blocks.iter().any(|block| {
         matches!(block, DisplayBlock::AssistantText(text) if text == "Let me continue testing.")
     }));
@@ -320,7 +315,7 @@ fn tool_call_flushes_intermediate_stream_text_immediately() {
         duration_ms: 1,
     });
 
-    assert!(app.live_assistant.is_none());
+    assert!(app.live_assistant.normalized_text().is_none());
     assert!(matches!(
         app.blocks.first(),
         Some(DisplayBlock::AssistantText(text))
@@ -487,7 +482,7 @@ fn tool_output_renders_during_generic_running_turn() {
     });
 
     assert_eq!(
-        app.streaming_output,
+        app.live_tool_output.lines,
         vec!["started git status --short".to_string()]
     );
 }
@@ -501,15 +496,15 @@ fn tool_output_carriage_return_rewrites_partial_line() {
         text: "Compiling alpha".into(),
         kind: "tool_output".into(),
     });
-    assert_eq!(app.streaming_output_partial, "Compiling alpha");
+    assert_eq!(app.live_tool_output.partial, "Compiling alpha");
 
     app.handle_session_event(SessionEvent::Message {
         text: "\rCompiling beta".into(),
         kind: "tool_output".into(),
     });
 
-    assert!(app.streaming_output.is_empty());
-    assert_eq!(app.streaming_output_partial, "Compiling beta");
+    assert!(app.live_tool_output.lines.is_empty());
+    assert_eq!(app.live_tool_output.partial, "Compiling beta");
 }
 
 #[test]
@@ -523,10 +518,10 @@ fn tool_output_crlf_commits_current_line() {
     });
 
     assert_eq!(
-        app.streaming_output,
+        app.live_tool_output.lines,
         vec!["started cargo check".to_string()]
     );
-    assert!(app.streaming_output_partial.is_empty());
+    assert!(app.live_tool_output.partial.is_empty());
 }
 
 #[test]
@@ -540,10 +535,10 @@ fn tool_output_strips_ansi_escape_sequences_from_live_preview() {
     });
 
     assert_eq!(
-        app.streaming_output,
+        app.live_tool_output.lines,
         vec!["warning: check this".to_string()]
     );
-    assert!(app.streaming_output_partial.is_empty());
+    assert!(app.live_tool_output.partial.is_empty());
 }
 
 #[test]
@@ -560,8 +555,8 @@ fn tool_output_strips_osc_escape_sequences_from_live_preview() {
         kind: "tool_output".into(),
     });
 
-    assert_eq!(app.streaming_output, vec!["done".to_string()]);
-    assert!(app.streaming_output_partial.is_empty());
+    assert_eq!(app.live_tool_output.lines, vec!["done".to_string()]);
+    assert!(app.live_tool_output.partial.is_empty());
 }
 
 #[test]
@@ -575,10 +570,10 @@ fn tool_output_tabs_collapse_to_single_spaces_in_live_preview() {
     });
 
     assert_eq!(
-        app.streaming_output,
+        app.live_tool_output.lines,
         vec!["hash refs/tags/v0.2.29".to_string()]
     );
-    assert!(app.streaming_output_partial.is_empty());
+    assert!(app.live_tool_output.partial.is_empty());
 }
 
 #[test]
@@ -608,9 +603,9 @@ fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
     let persisted = app.finish_turn_for_resume_with_output(None);
 
     assert!(!app.running);
-    assert!(app.streaming_output.is_empty());
+    assert!(app.live_tool_output.lines.is_empty());
     assert_eq!(
-        persisted.streaming_output,
+        persisted.live_tool_output.lines,
         vec!["started git status --short".to_string()]
     );
 }
@@ -871,7 +866,7 @@ fn interrupted_projection_preserves_partial_assistant_text() {
         &[],
         &[],
         &UiResumeState {
-            interrupted_assistant_text: Some("Partial streamed answer".to_string()),
+            live_assistant_text: Some("Partial streamed answer".to_string()),
             ..UiResumeState::default()
         },
         "Cancelled.",
@@ -892,7 +887,7 @@ fn interrupted_projection_does_not_duplicate_already_committed_prose() {
     // Codex emits multiple prose chunks intermixed with tool calls. Each
     // prose chunk is committed as a separate assistant message, and on
     // interrupt the runtime hands the UI the entire concatenation as
-    // `interrupted_assistant_text`. The projection must not re-render that
+    // `live_assistant_text`. The projection must not re-render that
     // concat as an additional block on top of the already-projected ones.
     let messages = vec![
         text_message("m0", MessageRole::User, "go"),
@@ -903,7 +898,7 @@ fn interrupted_projection_does_not_duplicate_already_committed_prose() {
         &messages,
         &[],
         &UiResumeState {
-            interrupted_assistant_text: Some("first prose\n\nsecond prose".into()),
+            live_assistant_text: Some("first prose\n\nsecond prose".into()),
             ..UiResumeState::default()
         },
         "Cancelled.",
@@ -929,7 +924,7 @@ fn interrupted_projection_appends_only_uncommitted_tail() {
         &messages,
         &[],
         &UiResumeState {
-            interrupted_assistant_text: Some("first prose\n\nmid stream tail".into()),
+            live_assistant_text: Some("first prose\n\nmid stream tail".into()),
             ..UiResumeState::default()
         },
         "Cancelled.",

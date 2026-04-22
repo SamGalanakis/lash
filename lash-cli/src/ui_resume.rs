@@ -18,15 +18,18 @@ mod tests {
     fn save_and_load_ui_resume_state_round_trip() {
         let store = Store::memory().expect("store");
         let ui_state = UiResumeState {
-            streaming_output: vec!["tail".to_string()],
-            streaming_output_hidden: 2,
+            live_tool_output: crate::app::LiveToolOutput {
+                lines: vec!["tail".to_string()],
+                hidden: 2,
+                partial: String::new(),
+            },
             ..UiResumeState::default()
         };
 
         save_ui_resume_state(&store, &ui_state);
         let loaded = load_ui_resume_state(&store);
 
-        assert_eq!(loaded.streaming_output_hidden, 2);
-        assert_eq!(loaded.streaming_output[0], "tail");
+        assert_eq!(loaded.live_tool_output.hidden, 2);
+        assert_eq!(loaded.live_tool_output.lines[0], "tail");
     }
 }

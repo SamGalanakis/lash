@@ -14,7 +14,7 @@ use lash::{Store, TokenUsage};
 
 #[cfg(test)]
 use crate::app::UiResumeState;
-use crate::app::{DisplayBlock, projected_blocks_from_state};
+use crate::app::{DisplayBlock, LiveToolOutput, projected_blocks_from_state};
 use crate::resume_snapshot;
 use crate::ui_resume;
 
@@ -38,9 +38,7 @@ pub struct LoadedSession {
     pub blocks: Vec<DisplayBlock>,
     pub last_token_usage: TokenUsage,
     pub plugin_mode_indicators: BTreeMap<String, String>,
-    pub streaming_output: Vec<String>,
-    pub streaming_output_hidden: usize,
-    pub streaming_output_partial: String,
+    pub live_tool_output: LiveToolOutput,
 }
 
 pub struct SessionLogger {
@@ -303,9 +301,7 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
                 .or_else(|| checkpoint.map(|checkpoint| checkpoint.turn_state.token_usage))
                 .unwrap_or_default(),
             plugin_mode_indicators: live.ui_state.plugin_mode_indicators.clone(),
-            streaming_output: live.ui_state.streaming_output.clone(),
-            streaming_output_hidden: live.ui_state.streaming_output_hidden,
-            streaming_output_partial: live.ui_state.streaming_output_partial.clone(),
+            live_tool_output: live.ui_state.live_tool_output.clone(),
         });
     }
     let head = store.load_session_head().unwrap_or_default();
@@ -319,9 +315,7 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         .and_then(|blob_ref| store.get_checkpoint(blob_ref));
     let last_response_usage = ui_state.last_response_usage.clone();
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
-    let streaming_output = ui_state.streaming_output.clone();
-    let streaming_output_hidden = ui_state.streaming_output_hidden;
-    let streaming_output_partial = ui_state.streaming_output_partial.clone();
+    let live_tool_output = ui_state.live_tool_output.clone();
     let blocks = projected_blocks_from_state(&messages, &tool_calls, &ui_state);
     tracing::debug!(
         session_file = filename,
@@ -340,9 +334,7 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
             .map(|checkpoint| checkpoint.turn_state.token_usage)
             .unwrap_or(last_response_usage),
         plugin_mode_indicators,
-        streaming_output,
-        streaming_output_hidden,
-        streaming_output_partial,
+        live_tool_output,
     })
 }
 
@@ -476,9 +468,11 @@ mod tests {
                         "plan_mode".to_string(),
                         "plan".to_string(),
                     )]),
-                    streaming_output: vec!["started git status --short".to_string()],
-                    streaming_output_hidden: 2,
-                    streaming_output_partial: "partial tool line".to_string(),
+                    live_tool_output: LiveToolOutput {
+                        lines: vec!["started git status --short".to_string()],
+                        hidden: 2,
+                        partial: "partial tool line".to_string(),
+                    },
                     ..UiResumeState::default()
                 },
             );
@@ -505,11 +499,11 @@ mod tests {
                 Some(&"plan".to_string())
             );
             assert_eq!(
-                loaded.streaming_output,
+                loaded.live_tool_output.lines,
                 vec!["started git status --short".to_string()]
             );
-            assert_eq!(loaded.streaming_output_hidden, 2);
-            assert_eq!(loaded.streaming_output_partial, "partial tool line");
+            assert_eq!(loaded.live_tool_output.hidden, 2);
+            assert_eq!(loaded.live_tool_output.partial, "partial tool line");
         });
     }
 
