@@ -1069,7 +1069,8 @@ fn render_block_into(
             // visible as it arrives. Reasoning is the heaviest block in
             // the transcript and lives at L2 alongside full artifacts
             // and shell output.
-            let is_live_tail = idx + 1 == blocks.len() && app.running;
+            let is_live_tail =
+                idx + 1 == blocks.len() && app.running && !app.has_live_markdown_output();
             let should_expand = expand_level >= 2 || is_live_tail;
             if should_expand {
                 lines.extend(assistant_text::render_assistant_reasoning_block(

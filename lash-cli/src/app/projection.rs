@@ -327,19 +327,19 @@ fn append_transcript_blocks(
             }
         }
         MessageRole::Assistant => {
+            for part in &message.parts {
+                if !matches!(part.kind, PartKind::Reasoning) {
+                    continue;
+                }
+                let trimmed = part.content.trim();
+                if !trimmed.is_empty() {
+                    let _ = assistant_text::push_assistant_reasoning_block(blocks, trimmed);
+                }
+            }
+
             let mut prose = Vec::new();
             for part in &message.parts {
-                // Reasoning gets its own block kind and is always emitted
-                // before any prose from the same message, preserving the
-                // "thinking → reply" order the model produced. Flush any
-                // pending prose first so a reasoning part doesn't reorder
-                // in front of prose from earlier parts.
                 if matches!(part.kind, PartKind::Reasoning) {
-                    flush_assistant_prose(blocks, &mut prose);
-                    let trimmed = part.content.trim();
-                    if !trimmed.is_empty() {
-                        let _ = assistant_text::push_assistant_reasoning_block(blocks, trimmed);
-                    }
                     continue;
                 }
                 let Some(text) = rendered_part_text(&part.kind, &part.content) else {
@@ -432,7 +432,7 @@ pub(crate) fn rendered_message_text(message: &Message) -> String {
 
 fn rendered_part_text(kind: &PartKind, content: &str) -> Option<String> {
     match kind {
-        PartKind::ToolCall | PartKind::ToolResult => None,
+        PartKind::Reasoning | PartKind::ToolCall | PartKind::ToolResult => None,
         PartKind::Image => Some("[Image attached]".to_string()),
         _ => (!content.trim().is_empty()).then(|| content.to_string()),
     }

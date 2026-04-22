@@ -1304,6 +1304,43 @@ fn live_reasoning_compacts_after_activity_appends_below_it() {
 }
 
 #[test]
+fn committed_reasoning_compacts_while_live_assistant_streams() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.start_turn();
+    app.expand_level = 1;
+    app.blocks = vec![DisplayBlock::AssistantReasoning(
+        "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
+    )];
+
+    app.handle_session_event(lash::SessionEvent::TextDelta {
+        content: "Answer is streaming.".into(),
+    });
+
+    let compact_text: Vec<String> = app
+        .rendered_block_lines_cached(0, 80, 24)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        compact_text
+            .iter()
+            .any(|line| line.contains("Inspecting config implementation")),
+        "reasoning should keep its compact preview; got {compact_text:?}",
+    );
+    assert!(
+        !compact_text
+            .iter()
+            .any(|line| line.contains("Detailed thinking body")),
+        "reasoning body should compact once live assistant text exists; got {compact_text:?}",
+    );
+}
+
+#[test]
 fn live_reasoning_compacts_after_turn_stops() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();

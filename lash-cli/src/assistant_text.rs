@@ -77,13 +77,40 @@ pub fn push_assistant_reasoning_block(blocks: &mut Vec<DisplayBlock>, text: &str
         // paragraph-separated block so the renderer draws one continuous
         // "thinking" span instead of a stack of near-identical
         // separators.
-        if !existing.is_empty() {
-            existing.push_str("\n\n");
-        }
-        existing.push_str(&cleaned);
-        return true;
+        return merge_assistant_reasoning_text(existing, &cleaned);
     }
     blocks.push(DisplayBlock::AssistantReasoning(cleaned));
+    true
+}
+
+pub fn merge_assistant_reasoning_text(existing: &mut String, text: &str) -> bool {
+    let cleaned = normalize_assistant_text(text);
+    if cleaned.is_empty() {
+        return false;
+    }
+
+    let existing_cleaned = normalize_assistant_text(existing);
+    if existing_cleaned.is_empty() {
+        *existing = cleaned;
+        return true;
+    }
+    if existing_cleaned == cleaned || existing_cleaned.ends_with(cleaned.as_str()) {
+        if *existing != existing_cleaned {
+            *existing = existing_cleaned;
+            return true;
+        }
+        return false;
+    }
+
+    let merged = if cleaned.starts_with(existing_cleaned.as_str()) {
+        cleaned
+    } else {
+        format!("{existing_cleaned}\n\n{cleaned}")
+    };
+    if *existing == merged {
+        return false;
+    }
+    *existing = merged;
     true
 }
 

@@ -18,8 +18,8 @@ use crate::activity::{
     is_batch_tool_name, merge_edit_activity, merge_exploration_activity,
 };
 use crate::assistant_text::{
-    MarkdownLane, normalize_assistant_text, push_assistant_reasoning_block,
-    push_assistant_text_block,
+    MarkdownLane, merge_assistant_reasoning_text, normalize_assistant_text,
+    push_assistant_reasoning_block, push_assistant_text_block,
 };
 use crate::editor::EditorState;
 use crate::overlay::{OverlayState, PickerState};
@@ -567,6 +567,7 @@ impl App {
         final_assistant_text: Option<&str>,
     ) -> UiProjectionState {
         if let Some(text) = final_assistant_text {
+            self.commit_live_reasoning_block();
             self.commit_final_assistant_text(text);
         }
         let persisted = UiProjectionState::from_app(self);
@@ -926,6 +927,10 @@ impl App {
         (!self.live_assistant.lines().is_empty()).then_some(self.live_assistant.lines())
     }
 
+    pub(crate) fn has_live_markdown_output(&self) -> bool {
+        self.live_reasoning.has_renderable_output() || self.live_assistant.has_renderable_output()
+    }
+
     pub(crate) fn rendered_block_lines_cached(
         &mut self,
         idx: usize,
@@ -1135,6 +1140,19 @@ impl App {
         }
     }
 
+    fn merge_into_trailing_reasoning_block(&mut self, text: &str) -> bool {
+        let Some(DisplayBlock::AssistantReasoning(existing)) = self.blocks.last_mut() else {
+            return false;
+        };
+        let changed = merge_assistant_reasoning_text(existing, text);
+        if changed {
+            let idx = self.blocks.len().saturating_sub(1);
+            self.invalidate_height_cache_from(idx);
+            self.mark_visible_output();
+        }
+        true
+    }
+
     fn finalize_live_markdown(&mut self) {
         self.commit_live_reasoning_block();
         self.commit_live_assistant_block();
@@ -1282,8 +1300,11 @@ impl App {
                     return;
                 }
                 self.mark_first_token_arrived();
-                if self.live_assistant.has_renderable_output() {
-                    self.commit_live_assistant_block();
+                if self.live_assistant.has_renderable_output()
+                    && self.merge_into_trailing_reasoning_block(&content)
+                {
+                    self.scroll_to_bottom();
+                    return;
                 }
                 let had_output = self.live_reasoning.has_renderable_output();
                 self.live_reasoning.append(&content);
