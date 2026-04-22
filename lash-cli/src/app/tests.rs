@@ -9,20 +9,24 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
     Message {
         id: id.to_string(),
         role,
-        parts: vec![Part {
-            id: format!("{id}.p0"),
-            kind: PartKind::Text,
-            content: content.to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-        }],
+        parts: vec![part(&format!("{id}.p0"), PartKind::Text, content)],
         user_input: None,
         origin: None,
+    }
+}
+
+fn part(id: &str, kind: PartKind, content: &str) -> Part {
+    Part {
+        id: id.to_string(),
+        kind,
+        content: content.to_string(),
+        attachment: None,
+        tool_call_id: None,
+        tool_name: None,
+        tool_item_id: None,
+        tool_signature: None,
+        prune_state: PruneState::Intact,
+        reasoning_meta: None,
     }
 }
 
@@ -419,6 +423,101 @@ fn finish_turn_for_projection_reconciles_authoritative_assistant_text() {
         "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now"
     );
     assert!(persisted.plugin_panels.is_empty());
+}
+
+#[test]
+fn latest_assistant_text_ignores_reasoning_parts() {
+    let message = Message {
+        id: "a1".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            part("a1.r", PartKind::Reasoning, "Crafting a cool poem"),
+            part("a1.t", PartKind::Text, "Neon rain on midnight street."),
+        ],
+        user_input: None,
+        origin: None,
+    };
+
+    assert_eq!(
+        latest_assistant_text_from_messages(&[message]).as_deref(),
+        Some("Neon rain on midnight street.")
+    );
+}
+
+#[test]
+fn late_reasoning_does_not_duplicate_final_assistant_text() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.start_turn();
+    app.handle_session_event(SessionEvent::ReasoningDelta {
+        content: "Crafting a cool poem".into(),
+    });
+    app.handle_session_event(SessionEvent::TextDelta {
+        content: "Neon rain on midnight street.".into(),
+    });
+    app.handle_session_event(SessionEvent::ReasoningDelta {
+        content: "Crafting a cool poem".into(),
+    });
+    app.handle_session_event(SessionEvent::ReasoningDelta {
+        content: "I see the user wants a cool poem.".into(),
+    });
+
+    let message = Message {
+        id: "a1".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            part(
+                "a1.r",
+                PartKind::Reasoning,
+                "Crafting a cool poem\n\nI see the user wants a cool poem.",
+            ),
+            part("a1.t", PartKind::Text, "Neon rain on midnight street."),
+        ],
+        user_input: None,
+        origin: None,
+    };
+    let final_output = latest_assistant_text_from_messages(&[message]).expect("assistant text");
+
+    let _persisted = app.finish_turn_for_projection_with_output(Some(&final_output));
+
+    let assistant_texts: Vec<&str> = app
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            DisplayBlock::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["Neon rain on midnight street."]);
+
+    let reasoning_blocks: Vec<&str> = app
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            DisplayBlock::AssistantReasoning(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning_blocks.len(), 1);
+    assert!(reasoning_blocks[0].contains("Crafting a cool poem"));
+    assert!(reasoning_blocks[0].contains("I see the user wants a cool poem."));
+}
+
+#[test]
+fn projected_assistant_message_places_reasoning_before_text() {
+    let message = Message {
+        id: "a1".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            part("a1.t", PartKind::Text, "Visible answer."),
+            part("a1.r", PartKind::Reasoning, "Late summary."),
+        ],
+        user_input: None,
+        origin: None,
+    };
+
+    let blocks = projected_blocks_from_state(&[message], &[], &UiProjectionState::default());
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(variants, vec!["AssistantReasoning", "AssistantText"]);
 }
 
 #[test]

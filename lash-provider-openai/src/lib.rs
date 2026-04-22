@@ -1147,6 +1147,7 @@ impl OpenAiGenericProvider {
         for mut choice in event.choices {
             // Reasoning arrives before text on providers that emit it;
             // apply it first so ordering in the final parts list matches.
+            let mut handled_reasoning_from_delta = false;
             if let Some(delta) = choice.delta.as_mut()
                 && let Some(piece) = delta.reasoning_text()
             {
@@ -1155,8 +1156,10 @@ impl OpenAiGenericProvider {
                     state.stream_events,
                     piece,
                 );
+                handled_reasoning_from_delta = true;
             }
-            if let Some(message) = choice.message.as_mut()
+            if !handled_reasoning_from_delta
+                && let Some(message) = choice.message.as_mut()
                 && let Some(piece) = message.reasoning_text()
             {
                 Self::handle_reasoning_piece(
@@ -1757,7 +1760,7 @@ impl ProviderFactory for OpenAiGenericProviderFactory {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use lash::llm::types::LlmToolSpec;
@@ -1816,5 +1819,38 @@ mod tests {
                 .try_build_text_only_request_body(&req, true, &base_url, &compat)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn stream_reasoning_prefers_delta_over_mirrored_message_field() {
+        let raw = r#"{"choices":[{"delta":{"reasoning_content":"Thinking"},"message":{"reasoning_content":"Thinking"}}]}"#;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let tx = LlmEventSender::new(move |event| {
+            captured.lock().expect("events lock").push(event);
+        });
+        let mut full = String::new();
+        let mut usage = LlmUsage::default();
+        let prev_usage = usage.clone();
+        let mut reasoning = ReasoningAccumulator::default();
+
+        OpenAiGenericProvider::process_sse_event_with_tools(
+            raw,
+            SseEventState::new(&mut full, &mut usage, &prev_usage)
+                .with_stream_events(Some(&tx))
+                .with_reasoning(&mut reasoning),
+        )
+        .expect("process event");
+
+        assert_eq!(reasoning.into_parts(), vec!["Thinking"]);
+        let reasoning_events = events
+            .lock()
+            .expect("events lock")
+            .iter()
+            .filter(
+                |event| matches!(event, LlmStreamEvent::ReasoningDelta(text) if text == "Thinking"),
+            )
+            .count();
+        assert_eq!(reasoning_events, 1);
     }
 }
