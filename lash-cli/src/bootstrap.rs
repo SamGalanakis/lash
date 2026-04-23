@@ -28,11 +28,11 @@ use crate::{
 fn plugin_factories_for_surface(
     autonomous: bool,
     execution_mode: ExecutionMode,
-    _store: Arc<Store>,
     tavily_key: String,
     instruction_source: Arc<dyn InstructionSource>,
     session_policy: SessionPolicy,
     lash_config: &LashConfig,
+    host_docs_dir: std::path::PathBuf,
 ) -> Vec<Arc<dyn PluginFactory>> {
     let low_tier_execution_mode = lash_config
         .runtime
@@ -64,6 +64,10 @@ fn plugin_factories_for_surface(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
     )) as Arc<dyn PluginFactory>);
+    plugin_factories.push(
+        Arc::new(crate::host_docs::HostDocsPluginFactory::new(host_docs_dir))
+            as Arc<dyn PluginFactory>,
+    );
     if profile.interactive_extras {
         plugin_factories.push(Arc::new(PlanModePluginFactory::new(Default::default())));
         plugin_factories.push(Arc::new(UiActivityPluginFactory));
@@ -300,6 +304,8 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     if args.print_prompt.is_none() {
         lash_config.save(&crate::paths::config_file())?;
     }
+    let host_docs = crate::host_docs::ensure_host_docs()
+        .map_err(|err| anyhow::anyhow!("failed to prepare Lash CLI host docs: {err}"))?;
     let model_catalog = models_dev_catalog().map_err(anyhow::Error::msg)?;
     if let Err(err) = model_catalog
         .refresh_if_stale(lash::model_info::DEFAULT_REFRESH_INTERVAL)
@@ -430,11 +436,11 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     let plugin_factories = plugin_factories_for_surface(
         autonomous,
         execution_mode,
-        Arc::clone(&store),
         tavily_key,
         Arc::clone(&instruction_source),
         session_policy.clone(),
         &lash_config,
+        host_docs.dir().to_path_buf(),
     );
     let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
     let root_plugins = plugin_host.build_session(
