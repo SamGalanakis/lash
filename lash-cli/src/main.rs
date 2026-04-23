@@ -243,8 +243,8 @@ struct Args {
     #[arg(long, value_name = "MS")]
     debug_ui_trace_interval_ms: Option<u64>,
 
-    /// Resume an existing session file on startup
-    #[arg(long, value_name = "SESSION.db")]
+    /// Resume an existing session by id, name, or legacy .db filename
+    #[arg(long, value_name = "ID_OR_NAME")]
     resume: Option<String>,
 
     /// Queue and immediately send a prompt after startup resume

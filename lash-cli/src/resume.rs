@@ -270,7 +270,7 @@ async fn apply_graph_resume_state(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn load_resumed_session(
-    filename: &str,
+    identifier: &str,
     app: &mut App,
     history: &mut Vec<Message>,
     runtime: &mut Option<LashRuntime>,
@@ -282,8 +282,10 @@ pub async fn load_resumed_session(
     desired_dynamic: &mut DynamicStateSnapshot,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
+    let filename = session_log::filename_for_session_identifier(identifier)
+        .unwrap_or_else(|| identifier.to_string());
     let loaded =
-        session_log::load_session(filename).map_err(|err| format!("Could not load: {err}"))?;
+        session_log::load_session(&filename).map_err(|err| format!("Could not load: {err}"))?;
     *history = loaded.messages;
     app.blocks = loaded.blocks;
     app.last_response_usage = loaded.last_token_usage;
@@ -294,7 +296,7 @@ pub async fn load_resumed_session(
         filename
     )));
     restore_session_state(
-        filename,
+        &filename,
         history,
         runtime,
         app,

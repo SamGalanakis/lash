@@ -30,6 +30,7 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+.playwright-mcp/
 /.agents/lash/
 /.lash/
 /.claude/

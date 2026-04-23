@@ -252,14 +252,45 @@ pub fn load_session_start(filename: &str) -> Result<SessionStart> {
     })
 }
 
-pub fn filename_for_session_id(session_id: &str) -> Option<String> {
-    collect_session_candidates()
-        .into_iter()
-        .find_map(|(path, filename, _)| {
-            let store = Store::open_readonly(&path).ok()?;
-            let meta = store.load_session_meta()?;
-            (meta.session_id == session_id).then_some(filename)
-        })
+fn filename_for_session_meta(
+    candidates: Vec<(PathBuf, String, SystemTime)>,
+    mut matches: impl FnMut(&lash::SessionMeta) -> bool,
+) -> Option<String> {
+    candidates.into_iter().find_map(|(path, filename, _)| {
+        let store = Store::open_readonly(&path).ok()?;
+        let meta = store.load_session_meta()?;
+        matches(&meta).then_some(filename)
+    })
+}
+
+pub(crate) fn filename_for_session_id(session_id: &str) -> Option<String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+
+    filename_for_session_meta(collect_session_candidates(), |meta| {
+        meta.session_id == session_id
+    })
+}
+
+pub(crate) fn filename_for_session_identifier(identifier: &str) -> Option<String> {
+    let identifier = identifier.trim();
+    if identifier.is_empty() {
+        return None;
+    }
+
+    let candidates = collect_session_candidates();
+    if candidates
+        .iter()
+        .any(|(_, filename, _)| filename == identifier)
+    {
+        return Some(identifier.to_string());
+    }
+
+    filename_for_session_meta(candidates, |meta| {
+        meta.session_id == identifier || meta.session_name == identifier
+    })
 }
 
 pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
@@ -588,6 +619,53 @@ mod tests {
             assert_eq!(sessions[0].filename, "parent.db");
             assert_eq!(sessions[0].message_count, 1);
             assert_eq!(sessions[0].first_message, "hello there");
+        });
+    }
+
+    #[test]
+    fn session_identifier_resolves_filename_id_and_name_including_children() {
+        with_temp_lash_home("lash-session-identifier", || {
+            let parent = sessions_dir().join("parent.db");
+            let child = sessions_dir().join("child.db");
+            let parent_store = Arc::new(Store::open(&parent).unwrap());
+            let child_store = Store::open(&child).unwrap();
+            SessionLogger::new(
+                Arc::clone(&parent_store),
+                "parent.db".into(),
+                "gpt-test",
+                Some("parent-id".into()),
+                "parent-name".into(),
+            )
+            .unwrap();
+            child_store.save_session_meta(lash::SessionMeta {
+                session_id: "child-id".to_string(),
+                session_name: "child-name".to_string(),
+                created_at: "2026-03-25T10:00:00Z".to_string(),
+                model: "gpt-test".to_string(),
+                cwd: None,
+                parent_session_id: Some("parent-id".to_string()),
+            });
+
+            assert_eq!(
+                filename_for_session_identifier("parent.db").as_deref(),
+                Some("parent.db")
+            );
+            assert_eq!(
+                filename_for_session_identifier("parent-id").as_deref(),
+                Some("parent.db")
+            );
+            assert_eq!(
+                filename_for_session_identifier("parent-name").as_deref(),
+                Some("parent.db")
+            );
+            assert_eq!(
+                filename_for_session_identifier("child-id").as_deref(),
+                Some("child.db")
+            );
+            assert_eq!(
+                filename_for_session_identifier("child-name").as_deref(),
+                Some("child.db")
+            );
         });
     }
 }
