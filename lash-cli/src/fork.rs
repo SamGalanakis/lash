@@ -535,6 +535,11 @@ fn materialize_child_from_graph(
     });
 }
 
+pub struct ForkedSession {
+    pub session_id: String,
+    pub session_name: String,
+}
+
 pub async fn fork_current_session(
     runtime: Option<&mut lash::LashRuntime>,
     logger: &SessionLogger,
@@ -542,7 +547,7 @@ pub async fn fork_current_session(
     configured_model: &str,
     _context_window: u64,
     _model_variant: Option<&str>,
-) -> Result<(String, String)> {
+) -> Result<ForkedSession> {
     if let Some(runtime) = runtime {
         persist_parent_root_snapshot(runtime, logger.store().as_ref()).await?;
     }
@@ -566,8 +571,9 @@ pub async fn fork_current_session(
 
     let child_bootstrap = SessionBootstrap::fork_child(&logger.session_id, configured_model)?;
     let child_store = child_bootstrap.store();
-    let child_filename = child_bootstrap.filename().to_string();
-    let child_session_name = child_bootstrap.session_name();
+    let child_meta = child_store
+        .load_session_meta()
+        .ok_or_else(|| anyhow!("Fork child session metadata was not created"))?;
     materialize_child_from_graph(
         child_store.as_ref(),
         logger.store().as_ref(),
@@ -576,7 +582,10 @@ pub async fn fork_current_session(
         parent_head.checkpoint_ref.as_ref(),
     );
 
-    Ok((child_filename, child_session_name))
+    Ok(ForkedSession {
+        session_id: child_meta.session_id,
+        session_name: child_meta.session_name,
+    })
 }
 
 #[cfg(test)]
@@ -688,7 +697,7 @@ mod fork_tests {
         }];
         save_persisted_root(parent_store.as_ref(), persisted_graph(messages, 1), 1);
 
-        let (child_filename, _child_session_name) = fork_current_session(
+        let child = fork_current_session(
             None,
             &parent_logger,
             &dummy_provider(),
@@ -699,9 +708,13 @@ mod fork_tests {
         .await
         .expect("fork should succeed");
 
-        let child_store = lash::Store::open(&session_log::sessions_dir().join(&child_filename))
+        let child_filename = session_log::filename_for_session_identifier(&child.session_id)
+            .expect("child filename");
+        let child_store = lash::Store::open(&session_log::sessions_dir().join(child_filename))
             .expect("child store");
         let child_meta = child_store.load_session_meta().expect("child meta");
+        assert_eq!(child.session_id, child_meta.session_id);
+        assert_eq!(child.session_name, child_meta.session_name);
         assert_eq!(
             child_meta.parent_session_id.as_deref(),
             Some("parent-session")

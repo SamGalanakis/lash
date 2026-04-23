@@ -26,7 +26,9 @@ pub(crate) struct SessionBootstrap {
 impl SessionBootstrapSource {
     pub(crate) fn from_resume_arg(resume: Option<String>) -> Self {
         match resume {
-            Some(filename) => Self::Resume(filename),
+            Some(identifier) => Self::Resume(
+                session_log::filename_for_session_identifier(&identifier).unwrap_or(identifier),
+            ),
             None => Self::Fresh,
         }
     }

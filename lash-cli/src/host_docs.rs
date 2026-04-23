@@ -69,8 +69,8 @@ Lash sessions are persisted as SQLite databases under `$LASH_HOME/sessions`.
 
 Useful operations:
 
-- `lash --resume`: resume the most recent session.
-- `lash --resume <id-or-name>`: resume a specific session.
+- `lash --resume <id-or-name>`: resume a specific session by id, name, or legacy `.db` filename.
+- `/resume`: choose a recent session from inside the interactive TUI.
 - `lash --info`: print the current session database path when configured.
 - `lash export ...`: export session data when the export command is available in the installed CLI.
 

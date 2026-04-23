@@ -148,31 +148,59 @@ pub(super) async fn handle_fork(
     )
     .await
     {
-        Ok((child_filename, child_session_name)) => {
+        Ok(forked) => {
+            let fallback_command = fork_resume_command(&forked.session_id);
             let exe = match std::env::current_exe() {
                 Ok(exe) => exe,
                 Err(err) => {
                     push_system_message(
                         app,
-                        format!("Fork created but launcher lookup failed: {}", err),
+                        fork_launch_fallback_message(
+                            &forked,
+                            &fallback_command,
+                            &format!("launcher lookup failed: {}", err),
+                        ),
                     );
                     return Ok(false);
                 }
             };
-            let child_args = vec!["--resume".to_string(), child_filename.clone()];
+            let child_args = vec!["--resume".to_string(), forked.session_id.clone()];
             match fork::spawn_in_new_terminal(&exe, &child_args) {
                 Ok(()) => push_system_message(
                     app,
-                    format!("Forked into `{}` ({})", child_session_name, child_filename),
+                    format!(
+                        "Forked into `{}` ({})",
+                        forked.session_name, forked.session_id
+                    ),
                 ),
-                Err(err) => {
-                    push_system_message(app, format!("Fork created but launch failed: {}", err))
-                }
+                Err(err) => push_system_message(
+                    app,
+                    fork_launch_fallback_message(
+                        &forked,
+                        &fallback_command,
+                        &format!("launch failed: {}", err),
+                    ),
+                ),
             }
         }
         Err(err) => push_system_message(app, format!("Fork failed: {}", err)),
     }
     Ok(false)
+}
+
+fn fork_resume_command(session_id: &str) -> String {
+    format!("lash --resume {session_id}")
+}
+
+fn fork_launch_fallback_message(
+    forked: &fork::ForkedSession,
+    fallback_command: &str,
+    reason: &str,
+) -> String {
+    format!(
+        "Fork `{}` was created, but {}.\nResume it with:\n{}",
+        forked.session_name, reason, fallback_command
+    )
 }
 
 pub(super) fn handle_tree(app: &mut App, runtime: &Option<LashRuntime>) -> anyhow::Result<bool> {
@@ -305,4 +333,24 @@ pub(super) fn handle_skills(app: &mut App) -> anyhow::Result<bool> {
         app.show_skill_picker(items);
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_fallback_message_uses_resume_id_command() {
+        let forked = fork::ForkedSession {
+            session_id: "session-123".to_string(),
+            session_name: "quiet-forest".to_string(),
+        };
+        let command = fork_resume_command(&forked.session_id);
+
+        assert_eq!(command, "lash --resume session-123");
+        let message = fork_launch_fallback_message(&forked, &command, "launch failed: no tty");
+        assert!(message.contains("Fork `quiet-forest` was created"));
+        assert!(message.contains("Resume it with:\nlash --resume session-123"));
+        assert!(!message.contains(".db"));
+    }
 }

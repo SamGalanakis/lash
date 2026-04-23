@@ -446,9 +446,9 @@
           <div class="eyebrow">Current workspace architecture</div>
           <h1>lash<span class="slash">/</span>system</h1>
           <p>
-            <strong>lash</strong> is a Rust workspace for an embeddable terminal coding agent. The current shape is a layered system: <code>lash-sansio</code> provides the deterministic turn protocol, <code>lash</code> hosts runtime, plugins, persistence, providers, and sessions, and <code>lash-cli</code> assembles the default application experience. Runtime construction, turn execution, provider registration, and session bootstrap now live behind focused module boundaries instead of the older monolithic paths.
+            <strong>lash</strong> is a Rust workspace for an embeddable terminal coding agent. The current shape is a layered system: <code>lash-sansio</code> provides the deterministic turn protocol, <code>lash</code> hosts runtime, plugins, persistence, providers, and sessions, and <code>lash-cli</code> assembles the default application experience. Runtime construction, turn execution, provider registration, session bootstrap, stable resume identifiers, and host documentation now live behind focused module boundaries instead of the older monolithic paths.
           </p>
-          <div class="footer-note">Updated against the current workspace on 2026-04-22 • split runtime architecture • built-in provider registry • CLI session bootstrap • Mermaid rerenders on tab switch</div>
+          <div class="footer-note">Updated against the current workspace on 2026-04-23 • stable session-id resume/fork • split runtime architecture • built-in provider registry • CLI host docs • Mermaid rerenders on tab switch</div>
         </div>
         <div class="hero-meta">
           <div class="meta-card">
@@ -482,7 +482,7 @@
       <section class="tab-panel active" id="overview">
         <div class="section-header">
           <h2>Overview</h2>
-          <p>The workspace is intentionally split between pure protocol logic, host runtime orchestration, tool/plugin composition, provider crates, and opinionated application hosting. The latest architectural shift is the runtime/provider cleanup: display labels live in provider factories, all built-in providers register through one crate, and the runtime is split by lifecycle, session API, turn loop, turn effects, streaming, and session-manager responsibilities.</p>
+          <p>The workspace is intentionally split between pure protocol logic, host runtime orchestration, tool/plugin composition, provider crates, and opinionated application hosting. The latest architectural shift keeps CLI-only concerns in the CLI host: resume/fork now addresses sessions by stable id or name while legacy database filenames remain an internal storage detail.</p>
         </div>
 
         <div class="kpi-grid">
@@ -493,17 +493,17 @@
           </article>
           <article class="kpi">
             <small>Rust source files</small>
-            <strong>243</strong>
+            <strong>244</strong>
             <span>Current <code>*.rs</code> file count across the workspace, excluding <code>target/</code>.</span>
           </article>
           <article class="kpi">
             <small>Tracked source & docs LOC</small>
-            <strong>143k</strong>
+            <strong>170k</strong>
             <span>Approximate lines across Rust, HTML, Markdown, TOML, JSON, Python, Shell, and YAML artifacts in repo.</span>
           </article>
           <article class="kpi">
             <small>Resolved lock packages</small>
-            <strong>519</strong>
+            <strong>520</strong>
             <span>Current dependency package count visible from <code>Cargo.lock</code>.</span>
           </article>
         </div>
@@ -575,6 +575,7 @@ flowchart TD
               <li><strong>Runtime is no longer a single slab:</strong> construction/resume, session APIs, turn orchestration, effect execution, streaming, and child-session management are separate modules.</li>
               <li><strong>Providers have one display source:</strong> provider labels live in <code>ProviderFactory</code> implementations and hosts resolve them through the registry.</li>
               <li><strong>Sessions are first-class:</strong> root sessions, subagent children, forked sessions, and benchmark sessions reuse the same runtime/session manager machinery.</li>
+              <li><strong>Resume is id-first:</strong> startup, <code>/resume</code>, and fork fallback resolve session id/name to the stored database path instead of exposing filenames as the primary user interface.</li>
               <li><strong>Dual execution remains central:</strong> standard and RLM mode share policy, plugin, provider, and persistence infrastructure.</li>
             </ul>
           </div>
@@ -628,6 +629,8 @@ flowchart TD
             <p>The main application. It handles startup, provider selection, persisted session bootstrap, TUI, autonomous runs, rendering, and command-level host policy.</p>
             <ul>
               <li><code>session_bootstrap.rs</code> centralizes fresh, resume, and fork session file/store/logger setup</li>
+              <li><code>session_log.rs</code>, <code>resume.rs</code>, and <code>fork.rs</code> keep session id/name resolution above the storage filename layer</li>
+              <li><code>host_docs.rs</code> writes managed Markdown into the configured Lash home and injects that path through a CLI-only prompt contribution</li>
               <li><code>bootstrap.rs</code> assembles default plugins, providers, policies, and the runtime host</li>
               <li><code>main.rs</code> now picks <code>default_prompt_template()</code> or an autonomous-specific template</li>
               <li>Richest concentration of user-facing behavior and UX details</li>
@@ -713,7 +716,9 @@ flowchart TD
           <div class="mermaid">
 flowchart LR
   U[User input / host request] --> C[lash-cli or embedder]
-  C --> SB[SessionBootstrap / runtime builder]
+  C --> RID[Session id/name resolver]
+  RID --> SB[SessionBootstrap / runtime builder]
+  RID --> LS[Session log metadata scan]
   C --> PR[Provider registry]
   PR --> PH[ProviderHandle]
   C --> B[RuntimeCoreConfig + PromptTemplate]
@@ -736,6 +741,7 @@ flowchart LR
   LLM --> TM
   TM --> OUT[Assembled turn / events / usage]
   OUT --> STORE[Store + session graph + snapshots]
+  STORE --> LS
   OUT --> C
           </div>
         </div>
@@ -748,6 +754,7 @@ flowchart LR
               <li><code>lash-sansio::build_prompt</code> merges prompt contributions into <code>PromptContext</code>.</li>
               <li><code>PromptTemplate::render</code> owns the final system prompt layout.</li>
               <li>Plugin-provided contributions include runtime context, project instructions, plan guidance, shell guidance, and delegation notes.</li>
+              <li>CLI host docs are written under the active Lash home and surfaced as a prompt path without changing core runtime behavior.</li>
             </ul>
           </div>
           <div class="note">
@@ -755,6 +762,7 @@ flowchart LR
             <ul>
               <li>Turns emit usage/events and may append plugin/session graph nodes.</li>
               <li>Persistent runtimes snapshot graph state, plugin state, and checkpoints through store abstractions.</li>
+              <li>Resume accepts stable session ids or names, then maps them to the current SQLite filename through session metadata.</li>
               <li>Child sessions reuse the same store/session manager APIs but can carry different policy, tool surfaces, and usage-source labels.</li>
             </ul>
           </div>
@@ -784,6 +792,7 @@ sequenceDiagram
   Builder->>Runtime: create runtime
   Runtime->>Session: initialize session
   Session->>Plugins: mode initialization / tool surface
+  Host->>Store: resolve resume id/name when resuming or forking
   Host->>Runtime: stream_turn(...)
   Runtime->>Plugins: prepare turn + collect prompt contributions
   Runtime->>Provider: send assembled prompt/messages/tools via turn driver
@@ -883,6 +892,10 @@ classDiagram
     +open(source)
     +logger(model, session_id)
   }
+  class SessionLog {
+    +filename_for_session_identifier(...)
+    +load_session(...)
+  }
   class SessionManager {
     <<trait>>
   }
@@ -893,7 +906,9 @@ classDiagram
   SessionPlugin --> ToolProvider
   SessionPlugin --> SessionManager
   RuntimeCoreConfig --> ProviderFactory
+  SessionBootstrap --> SessionLog
   SessionBootstrap --> RuntimeStore
+  SessionLog --> RuntimeStore
   RuntimeCoreConfig --> RuntimeStore
   SessionPlugin --> InstructionSource
           </div>
@@ -937,7 +952,7 @@ classDiagram
           <article class="module">
             <small>CLI persistence bootstrap</small>
             <h3><code>SessionBootstrap</code></h3>
-            <p>Fresh, resume, and fork startup paths share session filename, store, logger, session name, persisted config, and initial graph setup through one helper.</p>
+            <p>Fresh, resume, and fork startup paths share store, logger, session name, persisted config, initial graph setup, and id/name-to-file resolution through narrow CLI-host helpers.</p>
           </article>
 
           <article class="module">
@@ -974,6 +989,7 @@ flowchart TD
   TRACE[tracing + tracing-subscriber]
   OAUTH[OAuth + provider crates]
   BUILTIN[lash-providers-builtin]
+  DOCS[Managed host docs]
   WEB[Tavily / MCP / external web tools]
 
   LASH --> TOKIO
@@ -985,6 +1001,7 @@ flowchart TD
   LASH --> TRACE
   LASH --> OAUTH
   OAUTH --> BUILTIN
+  LASH --> DOCS
   LASH --> WEB
           </div>
         </div>
@@ -1009,6 +1026,11 @@ flowchart TD
             <small>External integrations</small>
             <h3>Providers, Tavily, MCP</h3>
             <p>Provider adapters drive LLM calls. The built-in provider crate registers Anthropic, Codex, Google OAuth, and OpenAI-compatible factories for hosts that want the stock catalog. Optional web search and MCP attachment add broader external tool integration surfaces.</p>
+          </article>
+          <article class="module">
+            <small>CLI-owned knowledge</small>
+            <h3>Host docs under Lash home</h3>
+            <p>The CLI writes small managed Markdown docs into the configured Lash home and tells the model where to read them. That keeps self-knowledge host-specific instead of adding a core runtime tool.</p>
           </article>
         </div>
       </section>
@@ -1048,6 +1070,10 @@ flowchart TD
               <tr><td><code>lash-sansio/src/lib.rs</code></td><td>Core sans-IO exports for messages, prompts, tools, effects, and protocol types.</td></tr>
               <tr><td><code>lash-cli/src/bootstrap.rs</code></td><td>CLI boot path, plugin assembly, provider resolution, and runtime host initialization.</td></tr>
               <tr><td><code>lash-cli/src/session_bootstrap.rs</code></td><td>Shared fresh/resume/fork session store, logger, session name, persisted config, and initial graph setup.</td></tr>
+              <tr><td><code>lash-cli/src/session_log.rs</code></td><td>Session database discovery, metadata projection, id/name/legacy filename resolution, and visible transcript reconstruction.</td></tr>
+              <tr><td><code>lash-cli/src/resume.rs</code></td><td>Runtime/app restoration from a persisted session, including id/name lookup before opening the backing store.</td></tr>
+              <tr><td><code>lash-cli/src/fork.rs</code></td><td>Forked session materialization, parent snapshot persistence, and terminal-launch support with session-id resume fallback.</td></tr>
+              <tr><td><code>lash-cli/src/host_docs.rs</code></td><td>Managed Lash-home Markdown docs and CLI-only prompt contribution that exposes their configured path.</td></tr>
               <tr><td><code>lash-cli/src/main.rs</code></td><td>CLI entrypoint and autonomous/default prompt template selection.</td></tr>
               <tr><td><code>lash-plugin-prompt-context/src/lib.rs</code></td><td>Prompt-context plugin that emits runtime-context and project-instructions slot content.</td></tr>
               <tr><td><code>lash-default-tools/src/lib.rs</code></td><td>Default tool bundle/plugin surface assembly.</td></tr>
