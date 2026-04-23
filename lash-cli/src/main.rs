@@ -10,6 +10,7 @@ mod diff;
 mod editor;
 mod event;
 mod fork;
+mod host_docs;
 mod input_items;
 mod interactive;
 mod markdown;
