@@ -317,6 +317,31 @@ impl PreparedTurn {
     }
 }
 
+impl From<lash_ui::UiPreparedTurn> for PreparedTurn {
+    fn from(turn: lash_ui::UiPreparedTurn) -> Self {
+        PreparedTurn::prepare_with_effective_text(
+            turn.display_text,
+            turn.effective_text,
+            Vec::new(),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingSessionSwitch {
+    pub session_id: String,
+    pub queued_turn: Option<PreparedTurn>,
+}
+
+impl PendingSessionSwitch {
+    pub fn new(session_id: String, queued_turn: Option<PreparedTurn>) -> Self {
+        Self {
+            session_id,
+            queued_turn,
+        }
+    }
+}
+
 /// Who owns this turn. Used by the renderer and later by any feature that
 /// wants to address turns directly (fold, jump, collapse).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -511,6 +536,9 @@ pub struct App {
     /// Most recent selection-style prompt response, held briefly so the next
     /// tool result can render it inline if it exposes a question-panel artifact.
     pending_option_prompt_response: Option<String>,
+    /// Pending request to switch sessions after the current runtime stream
+    /// finishes or is cancelled.
+    pending_session_switch: Option<PendingSessionSwitch>,
     /// Active overlay/picker/dialog state.
     pub overlay: Option<OverlayState>,
     /// Whether the terminal window is currently focused.
@@ -787,6 +815,7 @@ impl App {
             pending_monitor_wakes: VecDeque::new(),
             in_flight_monitor_wakes: VecDeque::new(),
             pending_option_prompt_response: None,
+            pending_session_switch: None,
             overlay: None,
             focused: true,
             token_usage: TokenUsage::default(),
@@ -1565,6 +1594,19 @@ impl App {
             return;
         }
         self.queued_turns.push_back(turn);
+    }
+
+    pub fn queue_session_switch(&mut self, pending_switch: PendingSessionSwitch) {
+        self.pending_session_switch = Some(pending_switch);
+        self.dirty = true;
+    }
+
+    pub fn has_pending_session_switch(&self) -> bool {
+        self.pending_session_switch.is_some()
+    }
+
+    pub fn take_pending_session_switch(&mut self) -> Option<PendingSessionSwitch> {
+        self.pending_session_switch.take()
     }
 
     pub fn queue_monitor_wake(&mut self, input: String) {

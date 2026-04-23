@@ -319,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
 
     let execution_mode = parse_execution_mode(&args.execution_mode)?;
     let context_approach = parse_context_approach(&args.context_approach)?;
-    let model_slug = args.model.replace('/', "_").replace(':', "_");
+    let model_slug = args.model.replace(['/', ':'], "_");
     let domain_label = summarize_domain_selection(&args.domain);
     let diff_label = args.difficulty.clone().unwrap_or_else(|| "all".to_string());
     let responses_path = responses_dir.join(format!(
@@ -428,7 +428,6 @@ async fn main() -> anyhow::Result<()> {
         let args = args_shared.clone();
         let output_dir = output_dir_shared.clone();
         let responses_path = responses_path_shared.clone();
-        let execution_mode = execution_mode;
         let context_approach = context_approach.clone();
         join_set.spawn(async move {
             let _permit = permit;

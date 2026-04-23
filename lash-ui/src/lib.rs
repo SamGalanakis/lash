@@ -106,6 +106,12 @@ pub struct ShortcutSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiPreparedTurn {
+    pub display_text: String,
+    pub effective_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiHostEffect {
     PushSystemMessage(String),
     DesktopNotification {
@@ -142,6 +148,7 @@ pub enum UiHostEffect {
     },
     SwitchToNewSession {
         session_id: String,
+        queued_turn: Option<UiPreparedTurn>,
     },
     MountSurface {
         spec: UiSurfaceSpec,
@@ -1224,8 +1231,17 @@ impl UiExtension for PlanModeUiExtension {
                 == Some("fresh_context")
                 && let Some(session_id) = result.get("session_id").and_then(|value| value.as_str())
             {
+                let queued_turn = result
+                    .get("fresh_context_input")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|input| UiPreparedTurn {
+                        display_text: input.to_string(),
+                        effective_text: input.to_string(),
+                    });
                 effects.push(UiHostEffect::SwitchToNewSession {
                     session_id: session_id.to_string(),
+                    queued_turn,
                 });
             }
             effects
@@ -1380,7 +1396,8 @@ mod tests {
             result: json!({
                 "approved": true,
                 "execution_mode": "fresh_context",
-                "session_id": "new-plan-session"
+                "session_id": "new-plan-session",
+                "fresh_context_input": "Do a full, faithful implementation of the plan found at: .lash/plans/demo.md"
             }),
             success: true,
             duration_ms: 12,
@@ -1397,7 +1414,11 @@ mod tests {
                     key: "panel".to_string()
                 },
                 UiHostEffect::SwitchToNewSession {
-                    session_id: "new-plan-session".to_string()
+                    session_id: "new-plan-session".to_string(),
+                    queued_turn: Some(UiPreparedTurn {
+                        display_text: "Do a full, faithful implementation of the plan found at: .lash/plans/demo.md".to_string(),
+                        effective_text: "Do a full, faithful implementation of the plan found at: .lash/plans/demo.md".to_string(),
+                    })
                 }
             ]
         );

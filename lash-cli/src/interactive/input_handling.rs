@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{App, DisplayBlock, PreparedTurn};
+use crate::app::{App, DisplayBlock, PendingSessionSwitch, PreparedTurn};
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
 use crate::render;
@@ -108,44 +108,90 @@ pub(super) async fn apply_ui_host_effect(
     plugin_host: &PluginHost,
 ) {
     match effect {
-        UiHostEffect::SwitchToNewSession { session_id } => {
-            match resume::load_resumed_session_by_id(
-                &session_id,
-                app,
-                history,
-                runtime,
-                turn_counter,
-                current_execution_mode,
-                provider,
-                current_model_variant,
-                dynamic_tools,
-                desired_dynamic,
-                model_catalog,
-            )
-            .await
-            {
-                Ok(()) => {
-                    if let Some(rt) = runtime.as_ref() {
-                        match rt.session_manager() {
-                            Ok(manager) => *session_manager = manager,
-                            Err(err) => push_system_message(
-                                app,
-                                format!("Failed to refresh session manager: {}", err),
-                            ),
-                        }
-                    }
-                    sync_ui_extensions(
-                        app,
-                        ui_extensions,
-                        plugin_host,
-                        Arc::clone(session_manager),
-                    )
-                    .await;
-                }
-                Err(err) => push_system_message(app, err),
+        UiHostEffect::SwitchToNewSession {
+            session_id,
+            queued_turn,
+        } => {
+            let pending_switch =
+                PendingSessionSwitch::new(session_id, queued_turn.map(PreparedTurn::from));
+            if runtime.is_some() && !app.running {
+                load_session_switch(
+                    app,
+                    pending_switch,
+                    history,
+                    runtime,
+                    turn_counter,
+                    current_execution_mode,
+                    provider,
+                    current_model_variant,
+                    dynamic_tools,
+                    desired_dynamic,
+                    model_catalog,
+                    session_manager,
+                    ui_extensions,
+                    plugin_host,
+                )
+                .await;
+            } else {
+                app.queue_session_switch(pending_switch);
             }
         }
         other => apply_ui_host_effects(app, vec![other]),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn load_session_switch(
+    app: &mut App,
+    pending_switch: PendingSessionSwitch,
+    history: &mut Vec<lash::session_model::Message>,
+    runtime: &mut Option<LashRuntime>,
+    turn_counter: &mut usize,
+    current_execution_mode: &mut ExecutionMode,
+    provider: &ProviderHandle,
+    current_model_variant: &mut Option<String>,
+    dynamic_tools: &Arc<DynamicToolProvider>,
+    desired_dynamic: &mut DynamicStateSnapshot,
+    model_catalog: &CachedModelCatalog,
+    session_manager: &mut Arc<dyn SessionManager>,
+    ui_extensions: &UiExtensions,
+    plugin_host: &PluginHost,
+) -> bool {
+    match resume::load_resumed_session_by_id(
+        &pending_switch.session_id,
+        app,
+        history,
+        runtime,
+        turn_counter,
+        current_execution_mode,
+        provider,
+        current_model_variant,
+        dynamic_tools,
+        desired_dynamic,
+        model_catalog,
+    )
+    .await
+    {
+        Ok(()) => {
+            if let Some(turn) = pending_switch.queued_turn {
+                app.queue_turn(turn);
+            }
+            if let Some(rt) = runtime.as_ref() {
+                match rt.session_manager() {
+                    Ok(manager) => *session_manager = manager,
+                    Err(err) => push_system_message(
+                        app,
+                        format!("Failed to refresh session manager: {}", err),
+                    ),
+                }
+            }
+            sync_ui_extensions(app, ui_extensions, plugin_host, Arc::clone(session_manager)).await;
+            true
+        }
+        Err(err) => {
+            push_system_message(app, err);
+            false
+        }
     }
 }
 

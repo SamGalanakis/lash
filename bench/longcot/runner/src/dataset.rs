@@ -23,7 +23,7 @@ pub struct LongCoTQuestion {
 
 pub fn select_difficulties(difficulty: Option<&str>) -> Vec<&'static str> {
     match difficulty {
-        None => DIFFICULTIES.iter().copied().collect(),
+        None => DIFFICULTIES.to_vec(),
         Some("longcot") => vec!["medium", "hard"],
         Some("longcot-mini") => vec!["easy"],
         Some(d) if DIFFICULTIES.contains(&d) => {
@@ -40,7 +40,7 @@ pub fn load_questions(
 ) -> anyhow::Result<Vec<LongCoTQuestion>> {
     let difficulties = select_difficulties(difficulty);
     let selected_domains: Vec<&str> = if domains.is_empty() {
-        DOMAINS.iter().copied().collect()
+        DOMAINS.to_vec()
     } else {
         domains.iter().map(String::as_str).collect()
     };

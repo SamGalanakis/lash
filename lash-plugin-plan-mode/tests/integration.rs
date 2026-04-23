@@ -1258,16 +1258,10 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     assert_eq!(manager.created.lock().expect("created").len(), 0);
     assert!(matches!(create_request.start, SessionStartPoint::Empty));
     assert_eq!(create_request.plugin_mode, SessionPluginMode::Fresh);
-    assert_eq!(create_request.initial_nodes.len(), 1);
-    match &create_request.initial_nodes[0] {
-        lash::SessionAppendNode::Message { message } => {
-            assert_eq!(
-                message.content,
-                "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
-            );
-        }
-        other => panic!("expected initial message node, got {other:?}"),
-    }
+    assert!(
+        create_request.initial_nodes.is_empty(),
+        "fresh-context execution should let the CLI auto-send the seed prompt as the first user turn"
+    );
     assert!(
         directives
             .iter()

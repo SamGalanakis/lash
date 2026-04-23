@@ -50,7 +50,7 @@ pub(crate) use self::runtime::{generate_session_name, notify_desktop};
 
 use self::input_handling::{
     apply_terminal_action, apply_ui_host_effect, handle_key_event, handle_mouse_event,
-    handle_surface_input, process_pending_monitor_wakes,
+    handle_surface_input, load_session_switch, process_pending_monitor_wakes,
 };
 
 // Items used only by tests via `use super::*;` in tests.rs.
@@ -408,7 +408,63 @@ pub(crate) async fn run_app(
                         &mut pending_text_deltas,
                         ui_trace.as_mut(),
                     );
+                    let pending_session_switch = app.take_pending_session_switch();
                     runtime = Some(done.runtime);
+                    if let Some(pending_switch) = pending_session_switch {
+                        app.stop_turn();
+                        app.recycle_unaccepted_monitor_wakes();
+                        runtime_return_rx = None;
+                        cancel_token = None;
+                        if load_session_switch(
+                            &mut app,
+                            pending_switch,
+                            &mut history,
+                            &mut runtime,
+                            &mut turn_counter,
+                            &mut current_execution_mode,
+                            &provider,
+                            &mut current_model_variant,
+                            &dynamic_tools,
+                            &mut desired_dynamic,
+                            model_catalog.as_ref(),
+                            &mut session_manager,
+                            ui_extensions.as_ref(),
+                            &plugin_host,
+                        )
+                        .await
+                        {
+                            dispatch_next_queued_turn(
+                                &mut app,
+                                &mut ui_trace,
+                                &mut terminal,
+                                logger,
+                                args,
+                                &paused,
+                                &plugin_host,
+                                ui_extensions.as_ref(),
+                                &dynamic_tools,
+                                &mut runtime,
+                                &mut history,
+                                &mut turn_counter,
+                                &mut last_turn,
+                                &mut runtime_return_rx,
+                                &mut cancel_token,
+                                &mut active_stream_id,
+                                &mut provider,
+                                &mut current_model_variant,
+                                &mut current_execution_mode,
+                                &mut session_manager,
+                                &mut desired_dynamic,
+                                &mut pending_reconfigure,
+                                model_catalog.as_ref(),
+                                &mut toolset_hash,
+                                &app_tx,
+                                &mut pending_clear_after_return,
+                            )
+                            .await?;
+                        }
+                        continue;
+                    }
                     if let Err(err) = sync_runtime_tool_surface(&mut runtime).await {
                         push_system_message(
                             &mut app,
@@ -872,6 +928,10 @@ pub(crate) async fn run_app(
                 if stream_id != active_stream_id {
                     continue;
                 }
+                if app.has_pending_session_switch() {
+                    pending_text_deltas.clear();
+                    continue;
+                }
                 if let SessionEvent::TextDelta { content } = event {
                     pending_text_deltas.push(content);
                     continue;
@@ -940,6 +1000,12 @@ pub(crate) async fn run_app(
                             &plugin_host,
                         )
                         .await;
+                    }
+                    if app.has_pending_session_switch() {
+                        pending_text_deltas.clear();
+                        if let Some(token) = cancel_token.as_ref() {
+                            token.cancel();
+                        }
                     }
                     if let Some(effect) = plugin_notification {
                         apply_ui_host_effects(&mut app, vec![effect]);

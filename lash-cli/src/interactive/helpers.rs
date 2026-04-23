@@ -101,6 +101,11 @@ impl PendingTextDeltaBuffer {
             content: std::mem::take(&mut self.content),
         })
     }
+
+    pub(super) fn clear(&mut self) {
+        self.content.clear();
+        self.flush_at = None;
+    }
 }
 
 pub(super) fn flush_pending_text_deltas(
