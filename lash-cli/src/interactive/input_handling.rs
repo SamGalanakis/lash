@@ -1279,8 +1279,7 @@ pub(super) async fn handle_key_event(
             // Shell escape: !command
             if let Some(cmd_str) = shell_escape_command(&queued.display_text) {
                 if !cmd_str.is_empty() {
-                    app.blocks
-                        .push(DisplayBlock::UserInput(queued.display_text.clone()));
+                    app.push_prepared_user_input(&queued);
                     app.invalidate_height_cache();
 
                     use tokio::process::Command as TokioCommand;

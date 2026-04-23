@@ -826,8 +826,9 @@ impl ToolProvider for StandardShell {
                 ],
                 returns: "dict".into(),
                 examples: vec![],
-                enabled: true,
-                injected: true,
+                availability: crate::ToolAvailabilityConfig::documented(),
+                activation: crate::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
                 // exec_command can fork/move/delete files and mutate shell
@@ -877,8 +878,9 @@ impl ToolProvider for StandardShell {
                 ],
                 returns: "dict".into(),
                 examples: vec![],
-                enabled: true,
-                injected: true,
+                availability: crate::ToolAvailabilityConfig::documented(),
+                activation: crate::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
                 // write_stdin targets a specific running command session and

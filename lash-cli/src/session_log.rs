@@ -374,7 +374,6 @@ mod tests {
                 dynamic_state: Some(lash::DynamicStateSnapshot {
                     base_generation: 0,
                     tools: BTreeMap::new(),
-                    enabled_tools: std::collections::BTreeSet::new(),
                 }),
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,

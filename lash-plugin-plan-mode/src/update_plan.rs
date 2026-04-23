@@ -27,11 +27,21 @@ use lash::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     PluginSurfaceEvent, SessionPlugin,
 };
-use lash::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use lash::{
+    PromptContribution, ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult,
+};
 
 const PLUGIN_ID: &str = "update_plan";
 const PANEL_KEY: &str = "plan";
 const PANEL_TITLE: &str = "PLAN";
+const PLANNING_GUIDANCE: &str = concat!(
+    "Use `update_plan` for substantial multi-step work and skip it for trivial or single-step asks. ",
+    "Write short steps and keep exactly one step `in_progress` while work is underway. ",
+    "Mark completed work before moving on, use `explanation` when the plan changes, and update the plan as soon as scope or sequencing shifts. ",
+    "Do not let the plan go stale while coding or running validation. ",
+    "After an `update_plan` call, briefly summarize what changed and what comes next instead of repeating the full checklist. ",
+    "Finish by marking every step `completed` when the task is done.",
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlanItem {
@@ -97,8 +107,9 @@ impl ToolProvider for UpdatePlanTool {
                 "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}"
                     .into(),
             ],
-            enabled: true,
-            injected: true,
+            availability: lash::ToolAvailabilityConfig::documented(),
+            activation: lash::ToolActivation::Always,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             execution_mode: ToolExecutionMode::Parallel,
@@ -205,6 +216,10 @@ fn plan_panel_event(snapshot: &PlanSnapshot) -> PluginSurfaceEvent {
     }
 }
 
+fn planning_prompt_contributions() -> Vec<PromptContribution> {
+    vec![PromptContribution::guidance("Planning", PLANNING_GUIDANCE)]
+}
+
 /// Public plugin factory. Callers that want this plugin installed
 /// (`lash-cli` under `profile.interactive_extras`) push an instance
 /// onto the plugin factory list. In non-root sessions the factory
@@ -250,6 +265,9 @@ impl SessionPlugin for UpdatePlanPlugin {
         if !self.active {
             return Ok(());
         }
+        reg.prompt().contribute(Arc::new(|_ctx| {
+            Box::pin(async move { Ok(planning_prompt_contributions()) })
+        }));
         reg.tools().provider(Arc::new(UpdatePlanTool {
             state: Arc::clone(&self.state),
         }))?;
@@ -289,6 +307,11 @@ impl SessionPlugin for UpdatePlanPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash::testing::{MockSessionManager, test_mode_factories};
+    use lash::{
+        ExecutionMode, PluginHost, PromptHookContext, PromptSlot, SessionReadView,
+        SessionStateEnvelope,
+    };
 
     #[tokio::test]
     async fn validates_shape() {
@@ -388,5 +411,64 @@ mod tests {
         assert!(!child_ctx.is_root_session());
         factory.build(&root_ctx).expect("root build");
         factory.build(&child_ctx).expect("child build");
+    }
+
+    #[tokio::test]
+    async fn root_session_contributes_planning_guidance() {
+        let mut factories = test_mode_factories();
+        factories.push(Arc::new(UpdatePlanPluginFactory::new()));
+        let plugin_host = PluginHost::new(factories);
+        let session = plugin_host
+            .build_standard_session("root", None)
+            .expect("session");
+
+        let contributions = session
+            .collect_prompt_contributions(PromptHookContext {
+                session_id: "root".to_string(),
+                host: Arc::new(MockSessionManager::default()),
+                state: SessionReadView::new(SessionStateEnvelope::default()),
+                rlm_termination: lash::RlmTermination::default(),
+            })
+            .await
+            .expect("prompt contributions");
+
+        let contribution = contributions
+            .iter()
+            .find(|contribution| contribution.title.as_deref() == Some("Planning"))
+            .expect("planning guidance");
+        assert_eq!(contribution.slot, PromptSlot::Guidance);
+        assert_eq!(contribution.content, PLANNING_GUIDANCE);
+    }
+
+    #[tokio::test]
+    async fn child_session_does_not_contribute_planning_guidance() {
+        let mut factories = test_mode_factories();
+        factories.push(Arc::new(UpdatePlanPluginFactory::new()));
+        let plugin_host = PluginHost::new(factories);
+        let session = plugin_host
+            .build_session_with_parent(
+                "child",
+                Some("root".to_string()),
+                ExecutionMode::Standard,
+                lash::ContextApproach::default(),
+                None,
+            )
+            .expect("session");
+
+        let contributions = session
+            .collect_prompt_contributions(PromptHookContext {
+                session_id: "child".to_string(),
+                host: Arc::new(MockSessionManager::default()),
+                state: SessionReadView::new(SessionStateEnvelope::default()),
+                rlm_termination: lash::RlmTermination::default(),
+            })
+            .await
+            .expect("prompt contributions");
+
+        assert!(
+            !contributions
+                .iter()
+                .any(|contribution| contribution.title.as_deref() == Some("Planning"))
+        );
     }
 }

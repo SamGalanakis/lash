@@ -76,8 +76,17 @@ pub enum LogEvent {
 /// An effect the host must fulfil.
 #[derive(Debug)]
 pub enum Effect {
-    /// Sync the live RLM execution surface before the turn proceeds.
-    SyncExecutionSurface { id: EffectId },
+    /// Sync the live execution surface before the turn proceeds.
+    ///
+    /// `update_machine_config` is only needed after the turn has
+    /// already advanced at least once and the host may need to swap in
+    /// a refreshed system prompt or tool schema for the next
+    /// iteration. Initial syncs are host-only because the machine was
+    /// already constructed from a fresh execution surface.
+    SyncExecutionSurface {
+        id: EffectId,
+        update_machine_config: bool,
+    },
     /// Start an LLM call.
     LlmCall { id: EffectId, request: LlmRequest },
     /// Cancel an in-progress LLM stream.
@@ -131,7 +140,7 @@ pub enum Response {
     /// Live RLM execution surface sync completed.
     ExecutionSurfaceSynced {
         id: EffectId,
-        result: Result<(), String>,
+        result: Result<Option<ExecutionSurfaceSync>, String>,
     },
     /// Full LLM response.
     LlmComplete {
@@ -159,6 +168,12 @@ pub enum Response {
     },
     /// Sleep completed.
     Timeout { id: EffectId },
+}
+
+#[derive(Clone)]
+pub struct ExecutionSurfaceSync {
+    pub system_prompt: String,
+    pub tool_specs: Arc<Vec<LlmToolSpec>>,
 }
 
 pub type DriverState = Box<dyn Any + Send + Sync>;
@@ -396,6 +411,7 @@ pub struct TurnMachine {
     run_offset: usize,
     cumulative_usage: TokenUsage,
     termination: TurnTerminationPolicyState,
+    synced_iteration: Option<usize>,
 }
 
 impl TurnMachine {
@@ -419,6 +435,7 @@ impl TurnMachine {
             run_offset,
             cumulative_usage: TokenUsage::default(),
             termination: TurnTerminationPolicyState::new(),
+            synced_iteration: None,
         }
     }
 
@@ -509,7 +526,10 @@ impl TurnMachine {
             let id = self.next_id();
             self.state = MachineState::WaitingExecutionSurface { effect_id: id };
             self.pending_effects
-                .push_back(Effect::SyncExecutionSurface { id });
+                .push_back(Effect::SyncExecutionSurface {
+                    id,
+                    update_machine_config: false,
+                });
             return;
         }
 
@@ -517,6 +537,16 @@ impl TurnMachine {
     }
 
     fn prepare_iteration(&mut self) {
+        if self.config.sync_execution_surface && self.synced_iteration != Some(self.iteration) {
+            let id = self.next_id();
+            self.state = MachineState::WaitingExecutionSurface { effect_id: id };
+            self.pending_effects
+                .push_back(Effect::SyncExecutionSurface {
+                    id,
+                    update_machine_config: true,
+                });
+            return;
+        }
         let actions = {
             let driver = Arc::clone(&self.config.protocol_driver);
             let ctx = self.driver_context();
@@ -601,6 +631,7 @@ impl TurnMachine {
                 } => self.request_checkpoint(checkpoint, on_empty),
                 DriverAction::AdvanceIteration => {
                     self.iteration += 1;
+                    self.synced_iteration = None;
                     progress_dirty = true;
                 }
                 DriverAction::ScheduleTurnLimitFinal => {
@@ -660,7 +691,11 @@ impl TurnMachine {
             .push_back(Effect::Checkpoint { id, checkpoint });
     }
 
-    fn handle_execution_surface_synced(&mut self, id: EffectId, result: Result<(), String>) {
+    fn handle_execution_surface_synced(
+        &mut self,
+        id: EffectId,
+        result: Result<Option<ExecutionSurfaceSync>, String>,
+    ) {
         let waiting_id = match std::mem::replace(&mut self.state, MachineState::Finished) {
             MachineState::WaitingExecutionSurface { effect_id } => effect_id,
             other => {
@@ -676,7 +711,12 @@ impl TurnMachine {
         }
 
         match result {
-            Ok(()) => {
+            Ok(update) => {
+                if let Some(update) = update {
+                    self.config.system_prompt = update.system_prompt;
+                    self.config.tool_specs = update.tool_specs;
+                }
+                self.synced_iteration = Some(self.iteration);
                 self.state = MachineState::PrepareIteration;
             }
             Err(error) => {

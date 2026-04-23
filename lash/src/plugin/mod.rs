@@ -6,7 +6,8 @@ use crate::llm::types::LlmResponse;
 use crate::monitor::{MonitorSnapshot, MonitorSpec, MonitorUpdateBatch};
 use crate::runtime::{AssembledTurn, PersistedSessionState};
 use crate::{
-    ExecutionMode, MessageRole, SessionPolicy, ToolDefinition, ToolProvider, ToolResult, TurnInput,
+    ExecutionMode, MessageRole, SessionPolicy, ToolAvailability, ToolDefinition, ToolProvider,
+    ToolResult, TurnInput,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -346,28 +347,28 @@ pub trait SessionManager: Send + Sync {
             "dynamic tool state mutation is unavailable in this session".to_string(),
         ))
     }
-    async fn set_tools_enabled(
+    async fn set_tools_availability(
         &self,
         session_id: &str,
         tool_names: &[String],
-        enabled: bool,
+        availability: Option<crate::ToolAvailability>,
     ) -> Result<u64, PluginError> {
         let mut snapshot = self.dynamic_tool_state(session_id).await?;
         for name in tool_names {
-            if enabled {
-                snapshot.enabled_tools.insert(name.clone());
-            } else {
-                snapshot.enabled_tools.remove(name);
-            }
+            let Some(spec) = snapshot.tools.get_mut(name) else {
+                return Err(PluginError::Session(format!(
+                    "unknown dynamic tool `{name}`"
+                )));
+            };
+            spec.definition.availability_override = availability;
         }
         self.apply_dynamic_tool_state(session_id, snapshot).await
     }
-    async fn set_tool_state(
+    async fn set_tool_availability(
         &self,
         session_id: &str,
         tool_name: &str,
-        enabled: Option<bool>,
-        injected: Option<bool>,
+        availability: Option<ToolAvailability>,
     ) -> Result<u64, PluginError> {
         let mut snapshot = self.dynamic_tool_state(session_id).await?;
         let Some(spec) = snapshot.tools.get_mut(tool_name) else {
@@ -375,17 +376,7 @@ pub trait SessionManager: Send + Sync {
                 "unknown dynamic tool `{tool_name}`"
             )));
         };
-        if let Some(enabled) = enabled {
-            spec.definition.enabled = enabled;
-            if enabled {
-                snapshot.enabled_tools.insert(tool_name.to_string());
-            } else {
-                snapshot.enabled_tools.remove(tool_name);
-            }
-        }
-        if let Some(injected) = injected {
-            spec.definition.injected = injected;
-        }
+        spec.definition.availability_override = availability;
         self.apply_dynamic_tool_state(session_id, snapshot).await
     }
     async fn create_session(
@@ -907,8 +898,9 @@ mod tests {
                 params: vec![ToolParam::typed("value", "str")],
                 returns: "str".to_string(),
                 examples: vec![],
-                enabled: true,
-                injected: false,
+                availability: crate::ToolAvailabilityConfig::callable(),
+                activation: crate::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
                 execution_mode: crate::ToolExecutionMode::Parallel,

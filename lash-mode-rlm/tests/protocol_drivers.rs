@@ -61,9 +61,15 @@ fn user_message(content: &str) -> Message {
 fn drain_effects(machine: &mut TurnMachine) -> Vec<Effect> {
     let mut effects = Vec::new();
     while let Some(effect) = machine.poll_effect() {
-        if let Effect::SyncExecutionSurface { id } = effect {
+        if let Effect::SyncExecutionSurface { id, .. } = effect {
             effects.push(effect);
-            machine.handle_response(Response::ExecutionSurfaceSynced { id, result: Ok(()) });
+            machine.handle_response(Response::ExecutionSurfaceSynced {
+                id,
+                result: Ok(Some(sansio::ExecutionSurfaceSync {
+                    system_prompt: String::new(),
+                    tool_specs: Arc::new(Vec::new()),
+                })),
+            });
             continue;
         }
         effects.push(effect);

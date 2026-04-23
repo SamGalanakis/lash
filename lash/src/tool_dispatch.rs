@@ -67,11 +67,11 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     progress: Option<&ProgressSender>,
     tool_context: ToolExecutionContext,
 ) -> ToolDispatchOutcome {
-    if !context.surface.has_enabled_tool(&tool_name) {
+    if !context.surface.has_callable_tool(&tool_name) {
         return outcome(
             tool_name,
             args,
-            ToolResult::err_fmt("Tool is not enabled for this session"),
+            ToolResult::err_fmt("Tool is not callable in this session"),
             0,
         );
     }
@@ -229,8 +229,8 @@ pub(crate) fn resolve_tool_execution_mode(
         .surface
         .tools
         .iter()
-        .find(|def| def.name == tool_name)
-        .map(|def| def.execution_mode)
+        .find(|def| def.definition.name == tool_name)
+        .map(|def| def.definition.execution_mode)
         .unwrap_or_default()
 }
 
@@ -334,8 +334,9 @@ mod tests {
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: crate::ToolAvailabilityConfig::documented(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: ToolExecutionMode::Parallel,
@@ -346,8 +347,9 @@ mod tests {
                     params: vec![crate::ToolParam::typed("value", "str")],
                     returns: "str".into(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: crate::ToolAvailabilityConfig::documented(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: ToolExecutionMode::Parallel,
@@ -385,8 +387,9 @@ mod tests {
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: crate::ToolAvailabilityConfig::documented(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: ToolExecutionMode::Parallel,
@@ -397,8 +400,9 @@ mod tests {
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: crate::ToolAvailabilityConfig::documented(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: ToolExecutionMode::Parallel,
@@ -611,8 +615,9 @@ mod tests {
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: crate::ToolAvailabilityConfig::documented(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: ToolExecutionMode::Serial,
@@ -623,8 +628,9 @@ mod tests {
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: crate::ToolAvailabilityConfig::documented(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: ToolExecutionMode::Serial,
@@ -736,8 +742,9 @@ mod tests {
                         params: vec![],
                         returns: "str".into(),
                         examples: vec![],
-                        enabled: true,
-                        injected: true,
+                        availability: crate::ToolAvailabilityConfig::documented(),
+                        activation: crate::ToolActivation::Always,
+                        availability_override: None,
                         input_schema_override: None,
                         output_schema_override: None,
                         execution_mode: ToolExecutionMode::Parallel,
@@ -748,8 +755,9 @@ mod tests {
                         params: vec![],
                         returns: "str".into(),
                         examples: vec![],
-                        enabled: true,
-                        injected: true,
+                        availability: crate::ToolAvailabilityConfig::documented(),
+                        activation: crate::ToolActivation::Always,
+                        availability_override: None,
                         input_schema_override: None,
                         output_schema_override: None,
                         execution_mode: ToolExecutionMode::Parallel,
@@ -760,8 +768,9 @@ mod tests {
                         params: vec![],
                         returns: "str".into(),
                         examples: vec![],
-                        enabled: true,
-                        injected: true,
+                        availability: crate::ToolAvailabilityConfig::documented(),
+                        activation: crate::ToolActivation::Always,
+                        availability_override: None,
                         input_schema_override: None,
                         output_schema_override: None,
                         execution_mode: ToolExecutionMode::Serial,

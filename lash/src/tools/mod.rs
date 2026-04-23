@@ -2,6 +2,7 @@ mod apply_patch;
 mod ask;
 pub mod batch;
 mod composite;
+mod discovery;
 mod fetch_url;
 #[cfg(feature = "tool-impls")]
 mod glob;
@@ -21,6 +22,7 @@ pub use apply_patch::ApplyPatchTool;
 pub use apply_patch::{PatchAction, PatchFileOp, inspect_patch_ops};
 pub use ask::AskTool;
 pub(crate) use composite::CompositeToolProvider;
+pub use discovery::DiscoveryToolsProvider;
 pub use fetch_url::FetchUrl;
 #[cfg(feature = "tool-impls")]
 pub use glob::Glob;
@@ -153,29 +155,42 @@ pub(crate) fn parse_optional_usize_arg(
     }
 }
 
-use std::borrow::Borrow;
-
-pub(crate) fn project_tool_catalog<I, T>(definitions: I) -> Vec<serde_json::Value>
+pub(crate) fn project_tool_catalog<I>(entries: I) -> Vec<serde_json::Value>
 where
-    I: IntoIterator<Item = T>,
-    T: Borrow<crate::ToolDefinition>,
+    I: IntoIterator<Item = crate::ToolSurfaceEntry>,
 {
-    definitions
+    entries
         .into_iter()
-        .filter_map(|definition| {
-            let d = definition.borrow();
-            if !d.enabled {
-                return None;
-            }
-            Some(serde_json::json!({
-                "name": &d.name,
-                "description": &d.description,
-                "params": &d.params,
-                "returns": &d.returns,
-                "examples": &d.examples,
-                "injected": d.injected,
-                "enabled": d.enabled,
-            }))
+        .filter(|entry| entry.availability.is_discoverable())
+        .map(|entry| {
+            let definition = entry.definition;
+            let availability = entry.availability;
+            let loadable = matches!(definition.activation, crate::ToolActivation::Loadable);
+            let activation_hint = if loadable && !availability.is_callable() {
+                format!(
+                    "Call `load_tools(names=[\"{}\"])` to make this tool callable in the current session.",
+                    definition.name
+                )
+            } else if matches!(definition.activation, crate::ToolActivation::Internal) {
+                "This tool is internal and cannot be activated directly.".to_string()
+            } else {
+                String::new()
+            };
+            serde_json::json!({
+                "name": definition.name,
+                "namespace": definition.namespace(),
+                "description": definition.description,
+                "params": definition.params,
+                "returns": definition.returns,
+                "examples": definition.examples,
+                "availability": availability,
+                "callable": availability.is_callable(),
+                "documented": availability.is_documented(),
+                "discoverable": availability.is_discoverable(),
+                "activation": definition.activation,
+                "loadable": loadable,
+                "activation_hint": activation_hint,
+            })
         })
         .collect()
 }
@@ -366,8 +381,9 @@ mod tests {
             params: Vec::new(),
             returns: String::new(),
             examples: Vec::new(),
-            enabled: true,
-            injected: true,
+            availability: crate::ToolAvailabilityConfig::documented(),
+            activation: crate::ToolActivation::Always,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             execution_mode: crate::ToolExecutionMode::Parallel,
@@ -375,10 +391,20 @@ mod tests {
     }
 
     #[test]
-    fn project_tool_catalog_keeps_enabled_tools_with_prompt_metadata() {
-        let catalog = project_tool_catalog([dummy_tool("read_file"), dummy_tool("search_tools")]);
+    fn project_tool_catalog_keeps_discoverable_tools_with_surface_metadata() {
+        let catalog = project_tool_catalog([
+            crate::ToolSurfaceEntry {
+                definition: dummy_tool("read_file"),
+                availability: crate::ToolAvailability::Documented,
+            },
+            crate::ToolSurfaceEntry {
+                definition: dummy_tool("discover_tools"),
+                availability: crate::ToolAvailability::Callable,
+            },
+        ]);
         assert_eq!(catalog.len(), 2);
         assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
-        assert_eq!(catalog[1]["injected"], serde_json::json!(true));
+        assert_eq!(catalog[0]["documented"], serde_json::json!(true));
+        assert_eq!(catalog[1]["callable"], serde_json::json!(true));
     }
 }

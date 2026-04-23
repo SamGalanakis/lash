@@ -367,8 +367,9 @@ impl ToolProvider for AutoresearchTools {
                 ],
                 returns: "json".into(),
                 examples: vec![],
-                enabled: false,
-                injected: true,
+                availability: lash::ToolAvailabilityConfig::hidden(),
+                activation: lash::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
                 execution_mode: ToolExecutionMode::Parallel,
@@ -396,8 +397,9 @@ impl ToolProvider for AutoresearchTools {
                 ],
                 returns: "json".into(),
                 examples: vec![],
-                enabled: false,
-                injected: true,
+                availability: lash::ToolAvailabilityConfig::hidden(),
+                activation: lash::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
                 execution_mode: ToolExecutionMode::Parallel,
@@ -435,8 +437,9 @@ impl ToolProvider for AutoresearchTools {
                 ],
                 returns: "json".into(),
                 examples: vec![],
-                enabled: false,
-                injected: true,
+                availability: lash::ToolAvailabilityConfig::hidden(),
+                activation: lash::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
                 execution_mode: ToolExecutionMode::Parallel,
@@ -931,8 +934,13 @@ async fn set_autoresearch_tools_enabled(
             "autoresearch commands require a session-scoped invocation",
         ));
     };
+    let availability = if enabled {
+        Some(lash::ToolAvailability::Documented)
+    } else {
+        Some(lash::ToolAvailability::Hidden)
+    };
     ctx.host
-        .set_tools_enabled(session_id, &autoresearch_tool_names(), enabled)
+        .set_tools_availability(session_id, &autoresearch_tool_names(), availability)
         .await
         .map_err(|err| {
             let action = if enabled { "enable" } else { "disable" };
@@ -1288,6 +1296,9 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             state: Arc::new(Mutex::new(RuntimeState::default())),
         };
-        assert!(tools.definitions().into_iter().all(|tool| !tool.enabled));
+        assert!(tools.definitions().into_iter().all(|tool| {
+            tool.effective_availability(lash::ExecutionMode::Standard)
+                == lash::ToolAvailability::Hidden
+        }));
     }
 }

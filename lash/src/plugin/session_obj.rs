@@ -148,13 +148,13 @@ impl PluginSession {
         })
         .unwrap_or_else(|err| {
             tracing::warn!("failed to resolve tool surface: {err}");
-            crate::ToolSurface::from_tools(tools)
+            crate::ToolSurface::from_tools(tools, mode)
         })
     }
 
     pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
         let surface = self.tool_surface(session_id, mode);
-        crate::tools::project_tool_catalog(surface.enabled_tools_iter())
+        crate::tools::project_tool_catalog(surface.discoverable_tools_iter().cloned())
     }
 
     pub fn resolve_tool_surface(

@@ -134,7 +134,7 @@ pub fn build_rlm_preamble(input: ModeBuildInput) -> ModePreamble {
     if omitted_tool_count > 0 {
         prompt_contributions.push(PromptContribution::guidance(
             "Tool Discovery",
-            "Use `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. Call `search_tools()` with no query to browse the full catalog, or `search_tools(query: \"git\")` to filter by keyword when you know the kind of tool you need.",
+            "Use `discover_tools` to inspect additional discoverable tools that are omitted from Available Tools for brevity. Call `discover_tools()` with no query to browse the catalog, or `discover_tools(query: \"git\")` to filter by keyword. If a result is marked loadable but not callable, call `load_tools(names=[...])`; the runtime refreshes the surface for the next step in the same turn.",
         ));
     }
     prompt_contributions.extend(input.extra_prompt_contributions);

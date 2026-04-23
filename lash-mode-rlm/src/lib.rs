@@ -5,10 +5,10 @@
 //! Public surface:
 //!
 //! - [`BuiltinRlmModePluginFactory`] — plugin that wires everything
-//!   together: protocol driver, session state management, `search_tools`
-//!   provider, "Bound Variables" / "Print Output" prompt contributions,
-//!   and the stream mask that suppresses the fenced body + raises
-//!   `abort_stream` when the fence closes.
+//!   together: protocol driver, session state management, the shared
+//!   discovery/load tools, "Bound Variables" / "Print Output" prompt
+//!   contributions, and the stream mask that suppresses the fenced
+//!   body + raises `abort_stream` when the fence closes.
 //! - [`RLM_EXECUTION_SECTION`] — the execution-mode prompt text (so
 //!   downstream crates can lightly augment the contract if they need).
 //! - [`contains_closed_lashlang_fence`] — exposed so alternative

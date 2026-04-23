@@ -567,21 +567,17 @@ pub(crate) async fn run_app(
                             "Cancelled.".to_string()
                         };
                         app.stop_turn();
+                        let projected_messages = state.project_messages();
+                        let projected_tool_calls = state.project_tool_calls();
+                        app.blocks = app::project_interrupted_blocks(
+                            &projected_messages,
+                            &projected_tool_calls,
+                            &ui_projection_state,
+                            interrupted_message.clone(),
+                        );
+                        app.invalidate_height_cache();
+                        app.scroll_to_bottom();
                         promote_pending_steers_to_queue(&mut app, &mut ui_trace);
-                        if app.has_queued_messages() {
-                            push_system_message(&mut app, interrupted_message);
-                        } else {
-                            let projected_messages = state.project_messages();
-                            let projected_tool_calls = state.project_tool_calls();
-                            app.blocks = app::project_interrupted_blocks(
-                                &projected_messages,
-                                &projected_tool_calls,
-                                &ui_projection_state,
-                                interrupted_message,
-                            );
-                            app.invalidate_height_cache();
-                            app.scroll_to_bottom();
-                        }
                         app.recycle_unaccepted_monitor_wakes();
                         runtime_return_rx = None;
                         cancel_token = None;
@@ -618,15 +614,8 @@ pub(crate) async fn run_app(
                     }
 
                     let projected_messages = state.project_messages();
-                    let final_output = app::latest_assistant_text_from_messages(
-                        &projected_messages,
-                    )
-                    .or_else(|| {
-                        (!done.result.assistant_output.safe_text.is_empty())
-                            .then(|| done.result.assistant_output.safe_text.clone())
-                    });
-                    let _ui_projection_state =
-                        app.finish_turn_for_projection_with_output(final_output.as_deref());
+                    let projected_tool_calls = state.project_tool_calls();
+                    app.finish_turn_from_projection(&projected_messages, &projected_tool_calls);
                     app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;

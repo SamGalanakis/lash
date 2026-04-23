@@ -429,8 +429,7 @@ fn subagent_surface_contribution(
         .filter(|tool| denied.contains(tool.name.as_str()))
         .map(|tool| ToolSurfaceOverride {
             tool_name: tool.name.clone(),
-            enabled: Some(false),
-            injected: Some(false),
+            availability: Some(lash::ToolAvailability::Hidden),
         })
         .collect::<Vec<_>>();
     let tool_list_notes = vec![format!(

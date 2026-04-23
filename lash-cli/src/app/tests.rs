@@ -177,10 +177,15 @@ fn final_message_never_replaces_visible_streamed_text_with_shorter_text() {
         kind: "final".into(),
     });
 
-    assert!(matches!(
-        app.blocks.last(),
-        Some(DisplayBlock::AssistantText(text)) if text == "Visible streamed text"
-    ));
+    assert_eq!(
+        app.live_assistant.normalized_text().as_deref(),
+        Some("Visible streamed text")
+    );
+    assert!(
+        !app.blocks
+            .iter()
+            .any(|block| matches!(block, DisplayBlock::AssistantText(_)))
+    );
 }
 
 #[test]
@@ -202,35 +207,22 @@ fn text_delta_updates_live_token_estimate() {
 }
 
 #[test]
-fn late_text_deltas_after_stop_turn_extend_last_assistant_block() {
+fn final_message_event_renders_in_live_assistant_lane() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
-    app.handle_session_event(SessionEvent::TextDelta {
-        content: "I".into(),
+    app.handle_session_event(SessionEvent::Message {
+        text: "final output".into(),
+        kind: "final".into(),
     });
-    app.handle_session_event(SessionEvent::TextDelta {
-        content: "’m".into(),
-    });
-
-    app.stop_turn();
-
-    app.handle_session_event(SessionEvent::TextDelta {
-        content: " an".into(),
-    });
-    app.handle_session_event(SessionEvent::TextDelta {
-        content: " AI".into(),
-    });
-
-    let assistant_blocks: Vec<&str> = app
-        .blocks
-        .iter()
-        .filter_map(|block| match block {
-            DisplayBlock::AssistantText(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(assistant_blocks, vec!["I’m an AI"]);
+    assert_eq!(
+        app.live_assistant.normalized_text().as_deref(),
+        Some("final output")
+    );
+    assert!(
+        !app.blocks
+            .iter()
+            .any(|block| matches!(block, DisplayBlock::AssistantText(_)))
+    );
 }
 
 #[test]
@@ -384,31 +376,31 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
 }
 
 #[test]
-fn final_message_event_is_rendered() {
+fn finish_turn_from_projection_rebuilds_current_turn_from_authoritative_state() {
     let mut app = App::new("test-model".into(), "test".into());
-    app.handle_session_event(SessionEvent::Message {
-        text: "final output".into(),
-        kind: "final".into(),
-    });
-    assert!(matches!(
-        app.blocks.last(),
-        Some(DisplayBlock::AssistantText(text)) if text == "final output"
-    ));
-}
-
-#[test]
-fn finish_turn_for_projection_reconciles_authoritative_assistant_text() {
-    let mut app = App::new("test-model".into(), "test".into());
+    app.blocks
+        .push(DisplayBlock::SystemMessage("Local note".into()));
+    let turn = PreparedTurn::new("What exists now?".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
     app.start_turn();
     app.handle_session_event(SessionEvent::TextDelta {
         content: "I looked at the actual librarian prompt".into(),
     });
-    app.stop_turn();
 
-    let persisted = app.finish_turn_for_projection_with_output(Some(
-        "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now",
-    ));
+    let messages = vec![
+        text_message("u1", MessageRole::User, "What exists now?"),
+        text_message(
+            "a1",
+            MessageRole::Assistant,
+            "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now",
+        ),
+    ];
+    app.finish_turn_from_projection(&messages, &[]);
 
+    assert!(!app.running);
+    assert!(app.blocks.iter().any(|block| {
+        matches!(block, DisplayBlock::SystemMessage(text) if text == "Local note")
+    }));
     let last_block = app
         .blocks
         .iter()
@@ -422,40 +414,74 @@ fn finish_turn_for_projection_reconciles_authoritative_assistant_text() {
         last_block,
         "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now"
     );
-    assert!(persisted.plugin_panels.is_empty());
 }
 
 #[test]
-fn latest_assistant_text_ignores_reasoning_parts() {
-    let message = Message {
-        id: "a1".into(),
-        role: MessageRole::Assistant,
-        parts: vec![
-            part("a1.r", PartKind::Reasoning, "Crafting a cool poem"),
-            part("a1.t", PartKind::Text, "Neon rain on midnight street."),
-        ],
-        user_input: None,
-        origin: None,
-    };
-
-    assert_eq!(
-        latest_assistant_text_from_messages(&[message]).as_deref(),
-        Some("Neon rain on midnight street.")
-    );
-}
-
-#[test]
-fn late_reasoning_does_not_duplicate_final_assistant_text() {
+fn finish_turn_from_projection_does_not_duplicate_assistant_text_after_tool_activity() {
     let mut app = App::new("test-model".into(), "test".into());
+    let turn = PreparedTurn::new("Fix it".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
+    app.start_turn();
+    app.handle_session_event(SessionEvent::TextDelta {
+        content: "I found and fixed the 500.".into(),
+    });
+    app.handle_session_event(SessionEvent::ToolCall {
+        name: "update_plan".into(),
+        args: serde_json::json!({
+            "plan": [
+                {"step": "Inspect proxy", "status": "completed"},
+                {"step": "Patch request body handling", "status": "completed"},
+                {"step": "Verify auth fallback", "status": "completed"},
+            ]
+        }),
+        result: serde_json::json!({"ok": true}),
+        success: true,
+        duration_ms: 12,
+        call_id: Some("tc-plan".into()),
+    });
+
+    let messages = vec![
+        text_message("u1", MessageRole::User, "Fix it"),
+        text_message("a1", MessageRole::Assistant, "I found and fixed the 500."),
+    ];
+    let tool_calls = vec![ToolCallRecord {
+        call_id: Some("tc-plan".into()),
+        tool: "update_plan".into(),
+        args: serde_json::json!({
+            "plan": [
+                {"step": "Inspect proxy", "status": "completed"},
+                {"step": "Patch request body handling", "status": "completed"},
+                {"step": "Verify auth fallback", "status": "completed"},
+            ]
+        }),
+        result: serde_json::json!({"ok": true}),
+        success: true,
+        duration_ms: 12,
+    }];
+    app.finish_turn_from_projection(&messages, &tool_calls);
+
+    let assistant_texts: Vec<&str> = app
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            DisplayBlock::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["I found and fixed the 500."]);
+}
+
+#[test]
+fn finish_turn_from_projection_uses_authoritative_reasoning_and_text() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let turn = PreparedTurn::new("Write a poem".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
     app.start_turn();
     app.handle_session_event(SessionEvent::ReasoningDelta {
         content: "Crafting a cool poem".into(),
     });
     app.handle_session_event(SessionEvent::TextDelta {
         content: "Neon rain on midnight street.".into(),
-    });
-    app.handle_session_event(SessionEvent::ReasoningDelta {
-        content: "Crafting a cool poem".into(),
     });
     app.handle_session_event(SessionEvent::ReasoningDelta {
         content: "I see the user wants a cool poem.".into(),
@@ -475,9 +501,11 @@ fn late_reasoning_does_not_duplicate_final_assistant_text() {
         user_input: None,
         origin: None,
     };
-    let final_output = latest_assistant_text_from_messages(&[message]).expect("assistant text");
-
-    let _persisted = app.finish_turn_for_projection_with_output(Some(&final_output));
+    let messages = vec![
+        text_message("u1", MessageRole::User, "Write a poem"),
+        message,
+    ];
+    app.finish_turn_from_projection(&messages, &[]);
 
     let assistant_texts: Vec<&str> = app
         .blocks
@@ -521,15 +549,20 @@ fn projected_assistant_message_places_reasoning_before_text() {
 }
 
 #[test]
-fn finish_turn_for_projection_does_not_append_shorter_authoritative_text() {
+fn finish_turn_from_projection_uses_authoritative_transcript_even_when_streamed_text_differs() {
     let mut app = App::new("test-model".into(), "test".into());
+    let turn = PreparedTurn::new("Shorten it".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
     app.start_turn();
     app.handle_session_event(SessionEvent::TextDelta {
         content: "Visible streamed text".into(),
     });
-    app.stop_turn();
 
-    let persisted = app.finish_turn_for_projection_with_output(Some("Visible"));
+    let messages = vec![
+        text_message("u1", MessageRole::User, "Shorten it"),
+        text_message("a1", MessageRole::Assistant, "Visible"),
+    ];
+    app.finish_turn_from_projection(&messages, &[]);
 
     let last_block = app
         .blocks
@@ -540,35 +573,7 @@ fn finish_turn_for_projection_does_not_append_shorter_authoritative_text() {
             _ => None,
         })
         .expect("assistant block");
-    assert_eq!(last_block, "Visible streamed text");
-    assert!(persisted.plugin_panels.is_empty());
-}
-
-#[test]
-fn late_text_deltas_after_authoritative_final_output_are_ignored() {
-    let mut app = App::new("test-model".into(), "test".into());
-    let final_text = "Use this minimal set:\n\n- `code`\n- `feature`\n- `issue`\n- `decision`\n\nThat’s probably the sweet spot.";
-    app.start_turn();
-    app.handle_session_event(SessionEvent::TextDelta {
-        content: "Use this minimal set:\n\n- `code`\n- `feature`\n".into(),
-    });
-
-    let _persisted = app.finish_turn_for_projection_with_output(Some(final_text));
-
-    app.handle_session_event(SessionEvent::TextDelta {
-        content: "Yeah — **`feature` is nicer than `topic`** if you want the graph to stay product-shaped.\n\nMy take:\n\n- **`topic` is safer**".into(),
-    });
-
-    let assistant_blocks: Vec<&str> = app
-        .blocks
-        .iter()
-        .filter_map(|block| match block {
-            DisplayBlock::AssistantText(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(assistant_blocks, vec![final_text]);
+    assert_eq!(last_block, "Visible");
 }
 
 #[test]
@@ -688,25 +693,6 @@ fn tool_output_does_not_change_total_content_height() {
     });
 
     assert_eq!(app.total_content_height(32, 8), baseline);
-}
-
-#[test]
-fn finish_turn_for_projection_preserves_streaming_output_snapshot() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.start_turn();
-    app.handle_session_event(SessionEvent::Message {
-        text: "started git status --short\n".into(),
-        kind: "tool_output".into(),
-    });
-
-    let persisted = app.finish_turn_for_projection_with_output(None);
-
-    assert!(!app.running);
-    assert!(app.live_tool_output.lines.is_empty());
-    assert_eq!(
-        persisted.live_tool_output.lines,
-        vec!["started git status --short".to_string()]
-    );
 }
 
 #[test]
@@ -2350,7 +2336,7 @@ fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: None,
-        name: "search_tools".into(),
+        name: "discover_tools".into(),
         args: serde_json::json!({ "query": "queue" }),
         result: serde_json::json!([]),
         success: true,

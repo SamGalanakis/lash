@@ -29,12 +29,13 @@ use crate::repo_status::RepoStatus;
 use crate::stream_markdown::LiveMarkdown;
 use crate::util::{is_cancelled_error, manual_interrupt_message};
 
-use self::projection::{append_activity_block, push_system_message_block_if_new};
+use self::projection::{
+    append_activity_block, push_system_message_block_if_new, push_user_turn_start,
+};
 
 pub(crate) use self::projection::{
-    interrupted_assistant_tail, latest_assistant_text_from_messages, preview_text_lines,
-    project_interrupted_blocks, projected_blocks_from_state, smart_truncate_preview_line,
-    strip_ansi_escape_sequences,
+    interrupted_assistant_tail, preview_text_lines, project_interrupted_blocks,
+    projected_blocks_from_state, smart_truncate_preview_line, strip_ansi_escape_sequences,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -499,9 +500,6 @@ pub struct App {
     live_assistant: LiveMarkdown,
     /// Incremental markdown stream for reasoning in the active turn.
     live_reasoning: LiveMarkdown,
-    /// Ignore stray late TextDelta events once the latest assistant block has
-    /// been reconciled to authoritative final text.
-    assistant_text_finalized: bool,
     /// Whether the UI needs a redraw.
     pub dirty: bool,
     /// Output-following mode for the history viewport.
@@ -590,17 +588,40 @@ impl App {
         UiProjectionState::from_app(self)
     }
 
-    pub fn finish_turn_for_projection_with_output(
+    pub fn finish_turn_from_projection(
         &mut self,
-        final_assistant_text: Option<&str>,
-    ) -> UiProjectionState {
-        if let Some(text) = final_assistant_text {
-            self.commit_live_reasoning_block();
-            self.commit_final_assistant_text(text);
-        }
-        let persisted = UiProjectionState::from_app(self);
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
+        let current_turn_start = self.blocks.iter().rposition(|block| {
+            matches!(
+                block,
+                DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
+            )
+        });
+
         self.stop_turn();
-        persisted
+        let ui_state = UiProjectionState::from_app(self);
+        let projected_blocks = projected_blocks_from_state(messages, tool_calls, &ui_state);
+        let projected_turn_start = projected_blocks.iter().rposition(|block| {
+            matches!(
+                block,
+                DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
+            )
+        });
+
+        match (current_turn_start, projected_turn_start) {
+            (Some(current_start), Some(projected_start)) => {
+                self.blocks.truncate(current_start);
+                self.blocks
+                    .extend(projected_blocks.into_iter().skip(projected_start));
+            }
+            _ => {
+                self.blocks = projected_blocks;
+            }
+        }
+        self.invalidate_height_cache();
+        self.scroll_to_bottom();
     }
 
     fn ensure_live_turn(&mut self) -> &mut LiveTurnState {
@@ -615,7 +636,6 @@ impl App {
         self.iteration = 0;
         self.live_assistant.clear();
         self.live_reasoning.clear();
-        self.assistant_text_finalized = false;
         self.clear_live_tool_output();
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
@@ -628,8 +648,8 @@ impl App {
         self.running = false;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
-        self.commit_live_reasoning_block();
-        self.commit_live_assistant_block();
+        self.live_reasoning.clear();
+        self.live_assistant.clear();
         self.clear_live_tool_output();
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
@@ -798,7 +818,6 @@ impl App {
             live_turn: None,
             live_assistant: LiveMarkdown::new(MarkdownLane::Assistant),
             live_reasoning: LiveMarkdown::new(MarkdownLane::Reasoning),
-            assistant_text_finalized: false,
             dirty: true,
             follow_mode: FollowOutputMode::Bottom,
             height_cache: Vec::new(),
@@ -1092,27 +1111,6 @@ impl App {
         }
     }
 
-    fn merge_into_trailing_assistant_block(&mut self, text: &str) -> bool {
-        let Some(DisplayBlock::AssistantText(existing)) = self.blocks.last_mut() else {
-            return false;
-        };
-        let combined = if text.starts_with(existing.as_str()) {
-            text.to_string()
-        } else {
-            format!("{existing}{text}")
-        };
-        let cleaned = normalize_assistant_text(&combined);
-        if cleaned.is_empty() {
-            return false;
-        }
-        if *existing != cleaned {
-            *existing = cleaned;
-            let idx = self.blocks.len().saturating_sub(1);
-            self.invalidate_height_cache_from(idx);
-        }
-        true
-    }
-
     fn reconcile_trailing_assistant_block(&mut self, text: &str) -> bool {
         let Some(DisplayBlock::AssistantText(existing)) = self.blocks.last_mut() else {
             return false;
@@ -1129,6 +1127,24 @@ impl App {
             return true;
         }
         false
+    }
+
+    fn set_live_assistant_from_final(&mut self, text: &str) {
+        let cleaned = normalize_assistant_text(text);
+        if cleaned.is_empty() {
+            self.live_assistant.clear();
+            return;
+        }
+
+        let final_text = match self.live_assistant_normalized_text() {
+            Some(existing) if !existing.is_empty() && !cleaned.starts_with(existing.as_str()) => {
+                existing
+            }
+            _ => cleaned,
+        };
+        self.live_assistant.clear();
+        self.live_assistant.append(&final_text);
+        self.mark_visible_output();
     }
 
     fn commit_live_assistant_block(&mut self) {
@@ -1185,40 +1201,6 @@ impl App {
     fn finalize_live_markdown(&mut self) {
         self.commit_live_reasoning_block();
         self.commit_live_assistant_block();
-    }
-
-    fn commit_final_assistant_text(&mut self, text: &str) {
-        let cleaned = normalize_assistant_text(text);
-        if cleaned.is_empty() {
-            self.live_assistant.clear();
-            return;
-        }
-
-        let final_text = match self.live_assistant_normalized_text() {
-            Some(existing) if !existing.is_empty() && !cleaned.starts_with(existing.as_str()) => {
-                existing
-            }
-            _ => cleaned,
-        };
-
-        self.live_assistant.clear();
-        if self.reconcile_trailing_assistant_block(&final_text) {
-            self.assistant_text_finalized = true;
-            self.mark_visible_output();
-            return;
-        }
-
-        let changed_idx = self.blocks.len();
-        let invalidate_from = self.append_invalidation_start();
-        if push_assistant_text_block(&mut self.blocks, &final_text) {
-            self.invalidate_height_cache_from(
-                invalidate_from
-                    .min(changed_idx)
-                    .min(self.blocks.len().saturating_sub(1)),
-            );
-            self.mark_visible_output();
-        }
-        self.assistant_text_finalized = true;
     }
 
     fn accept_injected_turn_input(&mut self, messages: &[PluginMessage]) {
@@ -1313,6 +1295,7 @@ impl App {
         }
         let changed_idx = self.blocks.len();
         let invalidate_from = self.append_invalidation_start();
+        push_user_turn_start(&mut self.blocks);
         self.blocks.push(DisplayBlock::UserInput(history_text));
         self.invalidate_height_cache_from(
             invalidate_from
@@ -1344,19 +1327,6 @@ impl App {
                 self.scroll_to_bottom();
             }
             SessionEvent::TextDelta { content } => {
-                if !self.running
-                    && self.live_turn.is_none()
-                    && self.live_assistant_normalized_text().is_none()
-                    && self.live_reasoning_normalized_text().is_none()
-                {
-                    if self.assistant_text_finalized {
-                        return;
-                    }
-                    if self.merge_into_trailing_assistant_block(&content) {
-                        self.scroll_to_bottom();
-                        return;
-                    }
-                }
                 self.mark_first_token_arrived();
                 self.live_output_chars_estimate += content.chars().count() as i64;
                 self.live_output_tokens_estimate =
@@ -1448,8 +1418,7 @@ impl App {
                         self.scroll_to_bottom();
                     }
                 } else if kind == "final" {
-                    self.commit_live_reasoning_block();
-                    self.commit_final_assistant_text(&text);
+                    self.set_live_assistant_from_final(&text);
                     self.scroll_to_bottom();
                 } else {
                     // Unknown message kinds are intentionally dropped.

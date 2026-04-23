@@ -98,8 +98,9 @@ impl ToolProvider for ApplyPatchTool {
                 "apply_patch(input=\"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\")"
                     .into(),
             ],
-            enabled: true,
-            injected: true,
+            availability: crate::ToolAvailabilityConfig::documented(),
+            activation: crate::ToolActivation::Always,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             // apply_patch mutates the working tree; it must not run in

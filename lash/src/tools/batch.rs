@@ -15,8 +15,9 @@ pub fn batch_tool_definition() -> ToolDefinition {
         examples: vec![
             r#"batch(tool_calls=[{"tool":"read_file","parameters":{"path":"src/main.rs"}},{"tool":"grep","parameters":{"query":"ToolProvider lash/src/"}}])"#.to_string(),
         ],
-        enabled: true,
-        injected: true,
+        availability: crate::ToolAvailabilityConfig::documented(),
+        activation: crate::ToolActivation::Always,
+        availability_override: None,
         input_schema_override: None,
         output_schema_override: None,
         execution_mode: ToolExecutionMode::Parallel,

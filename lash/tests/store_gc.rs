@@ -18,7 +18,6 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
         dynamic_state_ref: None,
         dynamic_state: Some(DynamicStateSnapshot {
             tools: Default::default(),
-            enabled_tools: Default::default(),
             base_generation: 7,
         }),
         plugin_snapshot_ref: None,

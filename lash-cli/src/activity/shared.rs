@@ -161,7 +161,7 @@ pub(super) fn text_preview_artifact(
 
 /// Render a limited list of `{name, description}` entries as
 /// `"name: description"` detail lines. Used by the subagent and
-/// search_tools projectors.
+/// tool-discovery projectors.
 pub(super) fn named_description_detail_lines(result: &Value, limit: usize) -> Vec<String> {
     result
         .as_array()

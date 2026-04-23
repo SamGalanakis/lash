@@ -103,9 +103,6 @@ fn apply_autonomous_tool_policy(
 ) -> Result<(), ReconfigureError> {
     let mut snapshot = dynamic_tools.export_state();
     snapshot
-        .enabled_tools
-        .retain(|name| autonomous_tool_allowed(name));
-    snapshot
         .tools
         .retain(|name, _| autonomous_tool_allowed(name));
     dynamic_tools.apply_state(snapshot).map(|_| ())
@@ -587,8 +584,9 @@ mod tests {
             params: Vec::new(),
             returns: "null".to_string(),
             examples: Vec::new(),
-            enabled: true,
-            injected: false,
+            availability: lash::ToolAvailabilityConfig::callable(),
+            activation: lash::ToolActivation::Always,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             execution_mode: ToolExecutionMode::Parallel,
@@ -618,10 +616,10 @@ mod tests {
 
         apply_autonomous_tool_policy(&dynamic_tools).unwrap();
 
-        let enabled = dynamic_tools.enabled_tools();
-        assert!(enabled.contains("read_file"));
-        assert!(!enabled.contains("ask"));
-        assert!(!enabled.contains("plan_exit"));
-        assert!(!enabled.contains("showcase"));
+        let tools = dynamic_tools.export_state().tools;
+        assert!(tools.contains_key("read_file"));
+        assert!(!tools.contains_key("ask"));
+        assert!(!tools.contains_key("plan_exit"));
+        assert!(!tools.contains_key("showcase"));
     }
 }

@@ -7,7 +7,6 @@ impl App {
         self.follow_mode = FollowOutputMode::Bottom;
         self.live_assistant.clear();
         self.live_reasoning.clear();
-        self.assistant_text_finalized = false;
         self.clear_status();
         self.editor.pending_images.clear();
         self.editor.pending_large_pastes.clear();

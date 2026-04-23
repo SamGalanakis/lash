@@ -153,17 +153,6 @@ pub(crate) fn blocks_from_transcript(
     blocks
 }
 
-pub(crate) fn latest_assistant_text_from_messages(messages: &[Message]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .filter(|message| message.role == MessageRole::Assistant)
-        .find_map(|message| {
-            let text = rendered_message_text(message);
-            (!text.is_empty()).then_some(text)
-        })
-}
-
 pub(crate) fn append_activity_block(blocks: &mut Vec<DisplayBlock>, activity: ActivityBlock) {
     if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
         && existing.call.kind == ActivityKind::Exploration

@@ -121,6 +121,16 @@ fn find_sleep(effects: &[Effect]) -> Option<EffectId> {
     })
 }
 
+fn find_execution_surface_sync(effects: &[Effect]) -> Option<(EffectId, bool)> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::SyncExecutionSurface {
+            id,
+            update_machine_config,
+        } => Some((*id, *update_machine_config)),
+        _ => None,
+    })
+}
+
 struct ProseDriver;
 
 impl ProtocolDriverHandle for ProseDriver {
@@ -257,6 +267,54 @@ impl ProtocolDriverHandle for ExecDriver {
                 on_empty: CheckpointResumeAction::Finish,
             },
         ]
+    }
+}
+
+struct SyncThenAdvanceDriver;
+
+impl ProtocolDriverHandle for SyncThenAdvanceDriver {
+    fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+        vec![DriverAction::StartLlm {
+            request: ctx.build_llm_request(true),
+            driver_state: None,
+        }]
+    }
+
+    fn handle_llm_success(
+        &self,
+        ctx: DriverContextView<'_>,
+        _waiting: WaitingLlmState,
+        _llm_response: LlmResponse,
+        _text_streamed: bool,
+    ) -> Vec<DriverAction> {
+        if ctx.iteration() == ctx.run_offset() {
+            vec![
+                DriverAction::AdvanceIteration,
+                DriverAction::StartCheckpoint {
+                    checkpoint: CheckpointKind::BeforeCompletion,
+                    on_empty: CheckpointResumeAction::PrepareIteration,
+                },
+            ]
+        } else {
+            vec![DriverAction::Finish]
+        }
+    }
+
+    fn handle_tool_results(
+        &self,
+        _ctx: DriverContextView<'_>,
+        _completed: Vec<CompletedToolCall>,
+    ) -> Vec<DriverAction> {
+        Vec::new()
+    }
+
+    fn handle_exec_result(
+        &self,
+        _ctx: DriverContextView<'_>,
+        _waiting: WaitingExecState,
+        _result: Result<crate::ExecResponse, String>,
+    ) -> Vec<DriverAction> {
+        Vec::new()
     }
 }
 
@@ -505,5 +563,97 @@ fn exec_driver_state_round_trip() {
             .parts
             .iter()
             .any(|part| part.content == "exec-state")
+    }));
+}
+
+#[test]
+fn initial_execution_surface_sync_is_host_only() {
+    let mut config = test_config(Arc::new(ProseDriver));
+    config.sync_execution_surface = true;
+    let mut machine = TurnMachine::new(config, vec![user_message("hello")], 0);
+
+    let effects = drain_effects(&mut machine);
+    let (sync_id, update_machine_config) =
+        find_execution_surface_sync(&effects).expect("execution surface sync");
+    assert!(!update_machine_config);
+
+    machine.handle_response(Response::ExecutionSurfaceSynced {
+        id: sync_id,
+        result: Ok(None),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(find_llm_call(&effects).is_some());
+}
+
+#[test]
+fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
+    let mut config = test_config(Arc::new(SyncThenAdvanceDriver));
+    config.sync_execution_surface = true;
+    config.system_prompt = "initial prompt".to_string();
+    let mut machine = TurnMachine::new(config, vec![user_message("hello")], 0);
+
+    let effects = drain_effects(&mut machine);
+    let (initial_sync_id, update_machine_config) =
+        find_execution_surface_sync(&effects).expect("initial execution surface sync");
+    assert!(!update_machine_config);
+    machine.handle_response(Response::ExecutionSurfaceSynced {
+        id: initial_sync_id,
+        result: Ok(None),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call").0;
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "advance".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "advance".to_string(),
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (checkpoint_id, _) = find_checkpoint(&effects).expect("checkpoint");
+    machine.handle_response(Response::Checkpoint {
+        id: checkpoint_id,
+        messages: Vec::new(),
+        transient_messages: Vec::new(),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (sync_id, update_machine_config) =
+        find_execution_surface_sync(&effects).expect("iteration execution surface sync");
+    assert!(update_machine_config);
+
+    machine.handle_response(Response::ExecutionSurfaceSynced {
+        id: sync_id,
+        result: Ok(Some(ExecutionSurfaceSync {
+            system_prompt: "updated prompt".to_string(),
+            tool_specs: Arc::new(vec![crate::llm::types::LlmToolSpec {
+                name: "new_tool".to_string(),
+                description: "desc".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                output_schema: serde_json::json!({ "type": "object" }),
+            }]),
+        })),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (_, request) = find_llm_call(&effects).expect("second llm call");
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0].name, "new_tool");
+    assert!(request.messages.iter().any(|message| {
+        message.role == crate::llm::types::LlmRole::System
+            && message.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    crate::llm::types::LlmContentBlock::Text(text)
+                        if text == "updated prompt"
+                )
+            })
     }));
 }
