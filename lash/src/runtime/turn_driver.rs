@@ -163,10 +163,12 @@ impl RuntimeTurnDriver {
                             }
                         }
                     }
-                    Effect::SyncExecutionSurface { id } => {
+                    Effect::SyncExecutionSurface {
+                        id,
+                        update_machine_config,
+                    } => {
                         let result = self
-                            .session
-                            .refresh_tool_surface()
+                            .refresh_execution_surface(&machine, update_machine_config)
                             .await
                             .map_err(|err| err.to_string());
                         machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
@@ -281,6 +283,7 @@ impl RuntimeTurnDriver {
             mode: execution_mode,
             messages,
             run_offset,
+            tool_surface: self.session.tool_surface(&self.session_id, execution_mode),
             mode_preamble,
             prompt_template: self.host.core.prompt_template.clone(),
             prompt_contributions: all_prompt_contributions,
@@ -293,6 +296,60 @@ impl RuntimeTurnDriver {
         self.policy = session_policy;
         self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
         Ok(prepared.machine)
+    }
+
+    async fn refresh_execution_surface(
+        &mut self,
+        machine: &crate::sansio::TurnMachine,
+        update_machine_config: bool,
+    ) -> Result<Option<crate::sansio::ExecutionSurfaceSync>, crate::SessionError> {
+        self.session.refresh_tool_surface().await?;
+        if !update_machine_config {
+            return Ok(None);
+        }
+
+        let execution_mode = self.policy.execution_mode;
+        let tool_surface = self.session.tool_surface(&self.session_id, execution_mode);
+        let mode_preamble = self.session.mode_preamble(&self.session_id, execution_mode);
+        let prompt_state = SessionStateEnvelope {
+            session_id: self.session_id.clone(),
+            policy: self.policy.clone(),
+            iteration: machine.iteration(),
+            ..Default::default()
+        };
+        let plugin_prompt_contributions = self
+            .session
+            .plugins()
+            .collect_prompt_contributions(PromptHookContext {
+                session_id: self.session_id.clone(),
+                host: Arc::clone(&self.session_manager),
+                state: crate::SessionReadView::from_graph_message_sequence(
+                    &prompt_state,
+                    self.progress_graph.base_graph(),
+                    machine.message_sequence(),
+                    self.progress_graph.tool_calls_arc(),
+                ),
+                rlm_termination: self.rlm_termination.clone(),
+            })
+            .await
+            .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
+        let mut prompt_contributions = mode_preamble.prompt_contributions.clone();
+        prompt_contributions.extend(self.session.context_prompt_contributions().iter().cloned());
+        prompt_contributions.extend(plugin_prompt_contributions);
+        let prompt_contributions = tool_surface.filter_prompt_contributions(prompt_contributions);
+        let prepared_prompt = crate::build_prompt(crate::PromptBuildInput {
+            mode: execution_mode,
+            template: self.host.core.prompt_template.clone(),
+            execution_prompt: mode_preamble.execution_prompt.clone(),
+            tool_names: mode_preamble.tool_names.clone(),
+            omitted_tool_count: mode_preamble.omitted_tool_count,
+            contributions: prompt_contributions,
+        });
+
+        Ok(Some(crate::sansio::ExecutionSurfaceSync {
+            system_prompt: prepared_prompt.system_prompt,
+            tool_specs: mode_preamble.tool_specs.clone(),
+        }))
     }
 
     async fn run_llm_call(

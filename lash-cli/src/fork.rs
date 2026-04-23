@@ -595,7 +595,7 @@ mod fork_tests {
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash::DynamicStateSnapshot;
     use lash::provider::ProviderHandle;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn dummy_provider() -> ProviderHandle {
@@ -609,7 +609,6 @@ mod fork_tests {
         DynamicStateSnapshot {
             base_generation: 0,
             tools: BTreeMap::new(),
-            enabled_tools: BTreeSet::new(),
         }
     }
 

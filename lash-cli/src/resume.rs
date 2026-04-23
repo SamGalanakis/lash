@@ -460,7 +460,6 @@ mod tests {
                 dynamic_state: Some(DynamicStateSnapshot {
                     base_generation: 0,
                     tools: std::collections::BTreeMap::new(),
-                    enabled_tools: std::collections::BTreeSet::new(),
                 }),
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,

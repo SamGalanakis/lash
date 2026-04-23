@@ -53,12 +53,13 @@ pub use lash_sansio::{
     PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptPanel, PromptRequest,
     PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry,
     PromptTemplateSection, PruneState, RenderedPrompt, Response, SansIoTurnInput, SessionEvent,
-    TokenUsage, ToolCallRecord, ToolDefinition, ToolExecutionMode, ToolImage, ToolParam,
-    ToolResult, ToolSurface, ToolSurfaceBuildInput, TurnMachine, TurnMachineConfig,
-    UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
-    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
-    execution_mode_supported, messages_are_prompt_resume_safe, normalized_response_parts,
-    reasoning_part, turn_limit_exhausted_message,
+    TokenUsage, ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolCallRecord,
+    ToolDefinition, ToolExecutionMode, ToolImage, ToolParam, ToolResult, ToolSurface,
+    ToolSurfaceBuildInput, ToolSurfaceEntry, TurnMachine, TurnMachineConfig, UserInputProvenance,
+    UserInputTransform, append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
+    default_execution_mode, default_prompt_template, execution_mode_supported,
+    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part,
+    turn_limit_exhausted_message,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{

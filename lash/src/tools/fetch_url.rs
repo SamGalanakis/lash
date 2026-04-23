@@ -37,8 +37,11 @@ impl ToolProvider for FetchUrl {
             params: vec![ToolParam::typed("url", "str")],
             returns: "str".into(),
             examples: vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()],
-            enabled: true,
-            injected: true,
+            availability: crate::ToolAvailabilityConfig::same(
+                crate::ToolAvailability::Discoverable,
+            ),
+            activation: crate::ToolActivation::Loadable,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             execution_mode: ToolExecutionMode::Parallel,

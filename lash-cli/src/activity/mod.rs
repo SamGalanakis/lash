@@ -307,7 +307,7 @@ impl ActivityState {
 
         // Unregistered tool: fall back to the generic projector's
         // free function so we don't round-trip through the registry
-        // (GenericProjector is already registered under `search_tools`).
+        // (GenericProjector is already registered under `discover_tools`).
         vec![projectors::generic::fallback_block(&mut ctx, status)]
     }
 
@@ -681,7 +681,7 @@ mod tests {
     fn tool_search_and_ask_show_specific_context() {
         let mut state = ActivityState::default();
         let search_blocks = state.blocks_for_tool_call(
-            "search_tools",
+            "discover_tools",
             json!({"query":"planning"}),
             json!([
                 {

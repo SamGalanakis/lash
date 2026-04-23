@@ -36,8 +36,8 @@ pub use session_model::{
     messages_are_prompt_resume_safe,
 };
 pub use tool_surface::{
-    ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceOverride,
-    build_tool_surface,
+    ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceEntry,
+    ToolSurfaceOverride, build_tool_surface,
 };
 pub use turn::{PreparedTurnMachine, SansIoTurnInput, build_turn};
 
@@ -149,6 +149,98 @@ fn is_default_tool_execution_mode(mode: &ToolExecutionMode) -> bool {
     *mode == ToolExecutionMode::default()
 }
 
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAvailability {
+    #[default]
+    Hidden,
+    Discoverable,
+    Callable,
+    Documented,
+}
+
+impl ToolAvailability {
+    pub fn is_discoverable(self) -> bool {
+        self >= Self::Discoverable
+    }
+
+    pub fn is_callable(self) -> bool {
+        self >= Self::Callable
+    }
+
+    pub fn is_documented(self) -> bool {
+        self >= Self::Documented
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolAvailabilityConfig {
+    pub standard: ToolAvailability,
+    pub rlm: ToolAvailability,
+}
+
+impl ToolAvailabilityConfig {
+    pub const fn same(availability: ToolAvailability) -> Self {
+        Self {
+            standard: availability,
+            rlm: availability,
+        }
+    }
+
+    pub const fn documented() -> Self {
+        Self::same(ToolAvailability::Documented)
+    }
+
+    pub const fn callable() -> Self {
+        Self::same(ToolAvailability::Callable)
+    }
+
+    pub const fn hidden() -> Self {
+        Self::same(ToolAvailability::Hidden)
+    }
+
+    pub fn for_mode(self, mode: ExecutionMode) -> ToolAvailability {
+        match mode {
+            ExecutionMode::Standard => self.standard,
+            ExecutionMode::Rlm => self.rlm,
+        }
+    }
+}
+
+impl Default for ToolAvailabilityConfig {
+    fn default() -> Self {
+        Self::documented()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolActivation {
+    #[default]
+    Always,
+    Loadable,
+    Internal,
+}
+
+fn is_default_tool_availability_config(config: &ToolAvailabilityConfig) -> bool {
+    *config == ToolAvailabilityConfig::default()
+}
+
+fn is_default_tool_activation(activation: &ToolActivation) -> bool {
+    *activation == ToolActivation::default()
+}
+
 /// A tool definition exposed to the runtime.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
@@ -164,10 +256,12 @@ pub struct ToolDefinition {
     pub returns: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<String>,
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub injected: bool,
+    #[serde(default, skip_serializing_if = "is_default_tool_availability_config")]
+    pub availability: ToolAvailabilityConfig,
+    #[serde(default, skip_serializing_if = "is_default_tool_activation")]
+    pub activation: ToolActivation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_override: Option<ToolAvailability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_schema_override: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,6 +311,18 @@ impl ToolDefinition {
             display_prompt_type(&self.returns)
         };
         format!("{}({}) -> {}", self.name, params.join(", "), ret)
+    }
+
+    pub fn effective_availability(&self, mode: ExecutionMode) -> ToolAvailability {
+        self.availability_override
+            .unwrap_or_else(|| self.availability.for_mode(mode))
+    }
+
+    pub fn namespace(&self) -> Option<&str> {
+        self.name
+            .split_once("__")
+            .map(|(namespace, _)| namespace)
+            .filter(|namespace| !namespace.is_empty())
     }
 
     pub fn model_tool(&self) -> ModelTool {
@@ -327,8 +433,9 @@ mod tests {
             params: vec![ToolParam::typed("query", "str")],
             returns: "str".to_string(),
             examples: vec![],
-            enabled: true,
-            injected: true,
+            availability: ToolAvailabilityConfig::documented(),
+            activation: ToolActivation::Always,
+            availability_override: None,
             input_schema_override: Some(serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -47,7 +47,8 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "grep",
         "ls",
         "read_file",
-        "search_tools",
+        "discover_tools",
+        "load_tools",
         "search_web",
         "apply_patch",
         "plan_exit",
@@ -380,8 +381,13 @@ async fn sync_plan_exit_tool_state(
     session_id: &str,
     enabled: bool,
 ) -> Result<(), PluginError> {
+    let availability = if enabled {
+        Some(lash::ToolAvailability::Documented)
+    } else {
+        Some(lash::ToolAvailability::Hidden)
+    };
     match host
-        .set_tool_state(session_id, "plan_exit", Some(enabled), Some(enabled))
+        .set_tool_availability(session_id, "plan_exit", availability)
         .await
     {
         Ok(_) => Ok(()),
@@ -564,8 +570,9 @@ impl ToolProvider for PlanModeTools {
             params: Vec::new(),
             returns: "dict".into(),
             examples: vec!["plan_exit()".into()],
-            enabled: false,
-            injected: false,
+            availability: lash::ToolAvailabilityConfig::hidden(),
+            activation: lash::ToolActivation::Always,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             execution_mode: ToolExecutionMode::Parallel,
@@ -856,20 +863,17 @@ impl SessionPlugin for PlanModePlugin {
                 .filter(|tool| !tool_surface_config.allowed_tools.contains(&tool.name))
                 .map(|tool| ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
-                    enabled: Some(false),
-                    injected: Some(false),
+                    availability: Some(lash::ToolAvailability::Hidden),
                 })
                 .collect::<Vec<_>>();
             overrides.push(ToolSurfaceOverride {
                 tool_name: "plan_exit".to_string(),
-                enabled: Some(true),
-                injected: Some(true),
+                availability: Some(lash::ToolAvailability::Documented),
             });
             if tool_surface_config.allowed_tools.contains("apply_patch") {
                 overrides.push(ToolSurfaceOverride {
                     tool_name: "apply_patch".to_string(),
-                    enabled: Some(true),
-                    injected: Some(true),
+                    availability: Some(lash::ToolAvailability::Documented),
                 });
             }
 

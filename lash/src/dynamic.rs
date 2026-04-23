@@ -146,15 +146,12 @@ pub struct DynamicToolSpec {
 pub struct DynamicStateSnapshot {
     pub base_generation: u64,
     pub tools: BTreeMap<String, DynamicToolSpec>,
-    #[serde(default)]
-    pub enabled_tools: BTreeSet<String>,
 }
 
 #[derive(Clone)]
 struct DynamicRegistryState {
     generation: u64,
     tools: BTreeMap<String, DynamicToolSpec>,
-    enabled_tools: BTreeSet<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -179,12 +176,8 @@ impl DynamicToolProvider {
         let inprocess = Arc::new(InProcessToolExecutionAdapter::new("inprocess"));
 
         let mut tools = BTreeMap::new();
-        let mut enabled_tools = BTreeSet::new();
         for def in provider.definitions() {
             let tool_name = def.name.clone();
-            if def.enabled {
-                enabled_tools.insert(tool_name.clone());
-            }
             let delegate = Arc::clone(&provider);
             let delegate_name = tool_name.clone();
             let handler: InProcessToolHandler = Arc::new(move |args, context, progress| {
@@ -232,7 +225,6 @@ impl DynamicToolProvider {
             state: Arc::new(RwLock::new(DynamicRegistryState {
                 generation: 1,
                 tools,
-                enabled_tools,
             })),
         })
     }
@@ -253,16 +245,7 @@ impl DynamicToolProvider {
         DynamicStateSnapshot {
             base_generation: state.generation,
             tools: state.tools.clone(),
-            enabled_tools: state.enabled_tools.clone(),
         }
-    }
-
-    pub fn enabled_tools(&self) -> BTreeSet<String> {
-        self.state
-            .read()
-            .expect("dynamic state lock poisoned")
-            .enabled_tools
-            .clone()
     }
 
     pub fn apply_state(&self, next: DynamicStateSnapshot) -> Result<u64, ReconfigureError> {
@@ -294,15 +277,6 @@ impl DynamicToolProvider {
             }
         }
 
-        let available: BTreeSet<String> = next.tools.keys().cloned().collect();
-        for name in &next.enabled_tools {
-            if !available.contains(name) {
-                return Err(ReconfigureError::Validation(format!(
-                    "enabled tool not registered: {name}"
-                )));
-            }
-        }
-
         let mut state = self.state.write().expect("dynamic state lock poisoned");
         if state.generation != next.base_generation {
             return Err(ReconfigureError::GenerationMismatch {
@@ -310,10 +284,7 @@ impl DynamicToolProvider {
                 actual: state.generation,
             });
         }
-        let mut tools = next.tools;
-        sync_tool_enabled_flags(&mut tools, &next.enabled_tools);
-        state.tools = tools;
-        state.enabled_tools = next.enabled_tools;
+        state.tools = next.tools;
         state.generation += 1;
 
         Ok(state.generation)
@@ -331,17 +302,20 @@ impl DynamicToolProvider {
         }
 
         let mut state = self.state.write().expect("dynamic state lock poisoned");
-        let previously_enabled = state.enabled_tools.clone();
+        let previous_overrides = state
+            .tools
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.definition.availability_override))
+            .collect::<BTreeMap<_, _>>();
         state.tools.retain(|_, spec| spec.adapter_id != adapter_id);
-        let remaining_tool_names: BTreeSet<String> = state.tools.keys().cloned().collect();
-        state
-            .enabled_tools
-            .retain(|name| remaining_tool_names.contains(name));
 
         for mut def in advertised_tools {
             let name = def.name.clone();
-            let enabled = previously_enabled.contains(&name) || def.enabled;
-            def.enabled = enabled;
+            def.availability_override = previous_overrides
+                .get(&name)
+                .copied()
+                .flatten()
+                .or(def.availability_override);
             state.tools.insert(
                 name.clone(),
                 DynamicToolSpec {
@@ -349,11 +323,6 @@ impl DynamicToolProvider {
                     adapter_id: adapter_id.clone(),
                 },
             );
-            if enabled {
-                state.enabled_tools.insert(name);
-            } else {
-                state.enabled_tools.remove(&name);
-            }
         }
 
         state.generation += 1;
@@ -370,10 +339,6 @@ impl DynamicToolProvider {
 
         let mut state = self.state.write().expect("dynamic state lock poisoned");
         state.tools.retain(|_, spec| spec.adapter_id != adapter_id);
-        let remaining_tool_names: BTreeSet<String> = state.tools.keys().cloned().collect();
-        state
-            .enabled_tools
-            .retain(|name| remaining_tool_names.contains(name));
         state.generation += 1;
         Ok(state.generation)
     }
@@ -409,15 +374,6 @@ impl DynamicToolProvider {
             Arc::clone(&inprocess) as Arc<dyn ToolExecutionAdapter>,
         );
 
-        let available: BTreeSet<String> = snapshot.tools.keys().cloned().collect();
-        for name in &snapshot.enabled_tools {
-            if !available.contains(name) {
-                return Err(ReconfigureError::Validation(format!(
-                    "enabled tool not registered: {name}"
-                )));
-            }
-        }
-
         let generation = snapshot.base_generation.max(1);
         Ok(Self {
             adapters: Arc::new(RwLock::new(adapters)),
@@ -425,18 +381,8 @@ impl DynamicToolProvider {
             state: Arc::new(RwLock::new(DynamicRegistryState {
                 generation,
                 tools: snapshot.tools,
-                enabled_tools: snapshot.enabled_tools,
             })),
         })
-    }
-}
-
-fn sync_tool_enabled_flags(
-    tools: &mut BTreeMap<String, DynamicToolSpec>,
-    enabled_tools: &BTreeSet<String>,
-) {
-    for (name, spec) in tools.iter_mut() {
-        spec.definition.enabled = enabled_tools.contains(name);
     }
 }
 
@@ -447,7 +393,6 @@ impl ToolProvider for DynamicToolProvider {
         state
             .tools
             .values()
-            .filter(|spec| state.enabled_tools.contains(&spec.definition.name))
             .map(|spec| spec.definition.clone())
             .collect()
     }
@@ -488,16 +433,10 @@ impl ToolProvider for DynamicToolProvider {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        let (adapter_id, allowed) = {
+        let adapter_id = {
             let state = self.state.read().expect("dynamic state lock poisoned");
-            let allowed = state.enabled_tools.contains(name);
-            let adapter_id = state.tools.get(name).map(|spec| spec.adapter_id.clone());
-            (adapter_id, allowed)
+            state.tools.get(name).map(|spec| spec.adapter_id.clone())
         };
-
-        if !allowed {
-            return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
-        }
 
         let Some(adapter_id) = adapter_id else {
             return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
@@ -525,16 +464,10 @@ impl ToolProvider for DynamicToolProvider {
         context: &ToolExecutionContext,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        let (adapter_id, allowed) = {
+        let adapter_id = {
             let state = self.state.read().expect("dynamic state lock poisoned");
-            let allowed = state.enabled_tools.contains(name);
-            let adapter_id = state.tools.get(name).map(|spec| spec.adapter_id.clone());
-            (adapter_id, allowed)
+            state.tools.get(name).map(|spec| spec.adapter_id.clone())
         };
-
-        if !allowed {
-            return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
-        }
 
         let Some(adapter_id) = adapter_id else {
             return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
@@ -580,8 +513,9 @@ mod tests {
                 params: vec![],
                 returns: "str".to_string(),
                 examples: vec![],
-                enabled: true,
-                injected: false,
+                availability: crate::ToolAvailabilityConfig::callable(),
+                activation: crate::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
                 execution_mode: crate::ToolExecutionMode::Parallel,
@@ -603,8 +537,9 @@ mod tests {
                     params: vec![],
                     returns: "str".to_string(),
                     examples: vec![],
-                    enabled: true,
-                    injected: false,
+                    availability: crate::ToolAvailabilityConfig::callable(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: crate::ToolExecutionMode::Parallel,
@@ -615,8 +550,9 @@ mod tests {
                     params: vec![],
                     returns: "str".to_string(),
                     examples: vec![],
-                    enabled: false,
-                    injected: false,
+                    availability: crate::ToolAvailabilityConfig::hidden(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: crate::ToolExecutionMode::Parallel,
@@ -642,8 +578,9 @@ mod tests {
                 params: vec![ToolParam::typed("query", "str")],
                 returns: "dict".to_string(),
                 examples: vec![],
-                enabled: true,
-                injected: true,
+                availability: crate::ToolAvailabilityConfig::documented(),
+                activation: crate::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: Some(json!({
                     "type": "object",
                     "properties": {
@@ -684,8 +621,9 @@ mod tests {
                 params: vec![],
                 returns: "dict".to_string(),
                 examples: vec![],
-                enabled: false,
-                injected: true,
+                availability: crate::ToolAvailabilityConfig::hidden(),
+                activation: crate::ToolActivation::Always,
+                availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
                 execution_mode: crate::ToolExecutionMode::Parallel,
@@ -707,17 +645,26 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_registry_honors_initial_enabled_state() {
+    fn dynamic_registry_preserves_initial_availability_state() {
         let registry = DynamicToolProvider::from_tool_provider(Arc::new(MixedEnabledTool))
             .expect("dynamic registry");
         let defs = registry.definitions();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "enabled_tool");
-        assert!(registry.enabled_tools().contains("enabled_tool"));
-        assert!(!registry.enabled_tools().contains("disabled_tool"));
+        assert_eq!(defs.len(), 2);
+        assert!(defs.iter().any(|def| def.name == "enabled_tool"));
+        assert!(defs.iter().any(|def| def.name == "disabled_tool"));
         let snapshot = registry.export_state();
-        assert!(snapshot.tools["enabled_tool"].definition.enabled);
-        assert!(!snapshot.tools["disabled_tool"].definition.enabled);
+        assert_eq!(
+            snapshot.tools["enabled_tool"]
+                .definition
+                .effective_availability(crate::ExecutionMode::Standard),
+            crate::ToolAvailability::Callable
+        );
+        assert_eq!(
+            snapshot.tools["disabled_tool"]
+                .definition
+                .effective_availability(crate::ExecutionMode::Standard),
+            crate::ToolAvailability::Hidden
+        );
     }
 
     #[test]
@@ -730,11 +677,29 @@ mod tests {
     }
 
     #[test]
-    fn apply_state_rejects_unknown_enabled_tools() {
+    fn apply_state_rejects_tools_not_advertised_by_adapter() {
         let registry =
             DynamicToolProvider::from_tool_provider(Arc::new(MockTool)).expect("dynamic registry");
         let mut snapshot = registry.export_state();
-        snapshot.enabled_tools.insert("missing".to_string());
+        snapshot.tools.insert(
+            "missing".to_string(),
+            DynamicToolSpec {
+                definition: ToolDefinition {
+                    name: "missing".to_string(),
+                    description: "missing".to_string(),
+                    params: vec![],
+                    returns: "str".to_string(),
+                    examples: vec![],
+                    availability: crate::ToolAvailabilityConfig::callable(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
+                    input_schema_override: None,
+                    output_schema_override: None,
+                    execution_mode: crate::ToolExecutionMode::Parallel,
+                },
+                adapter_id: "inprocess".to_string(),
+            },
+        );
         assert!(matches!(
             registry.apply_state(snapshot),
             Err(ReconfigureError::Validation(_))
@@ -761,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_adapter_respects_disabled_advertised_tools() {
+    fn upsert_adapter_preserves_hidden_advertised_tools() {
         let registry =
             DynamicToolProvider::from_tool_provider(Arc::new(MockTool)).expect("dynamic registry");
         registry
@@ -769,10 +734,14 @@ mod tests {
             .expect("adapter registered");
 
         let defs = registry.definitions();
-        assert!(!defs.iter().any(|def| def.name == "mcp__demo__disabled"));
-        assert!(!registry.enabled_tools().contains("mcp__demo__disabled"));
+        assert!(defs.iter().any(|def| def.name == "mcp__demo__disabled"));
         let snapshot = registry.export_state();
-        assert!(!snapshot.tools["mcp__demo__disabled"].definition.enabled);
+        assert_eq!(
+            snapshot.tools["mcp__demo__disabled"]
+                .definition
+                .effective_availability(crate::ExecutionMode::Standard),
+            crate::ToolAvailability::Hidden
+        );
     }
 
     #[test]

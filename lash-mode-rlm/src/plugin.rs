@@ -4,13 +4,14 @@ use lash::plugin::{
     ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
+use lash::tools::DiscoveryToolsProvider;
 use lash::{
     ExecutionMode, ModeBuildInput, ModePreamble, PromptContribution, SessionError,
     ToolResultProjectionPluginConfig,
 };
 
 use crate::driver::build_rlm_preamble;
-use crate::rlm_support::{SearchToolsProvider, bound_variables_prompt_contributions};
+use crate::rlm_support::bound_variables_prompt_contributions;
 use crate::stream_mask;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -43,7 +44,7 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(RlmModePlugin {
             active: matches!(ctx.execution_mode, ExecutionMode::Rlm),
-            provider: Arc::new(SearchToolsProvider::new()),
+            provider: Arc::new(DiscoveryToolsProvider::new()),
             config: self.config.clone(),
         }))
     }
@@ -51,7 +52,7 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
 
 struct RlmModePlugin {
     active: bool,
-    provider: Arc<SearchToolsProvider>,
+    provider: Arc<DiscoveryToolsProvider>,
     config: RlmModePluginConfig,
 }
 

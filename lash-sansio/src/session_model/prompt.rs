@@ -169,13 +169,15 @@ pub const CORE_GUIDANCE_SECTION: &str = r#"- Be concise. Avoid filler, hedging, 
 - Do not restate a conclusion you already stated. Once a fix location is identified, act on it in the same turn.
 - Prefer the simplest correct solution over cleverness or unnecessary abstraction."#;
 
-fn grouped_contributions(prompt: &PromptContext) -> HashMap<PromptSlot, Vec<PromptContribution>> {
-    let mut grouped: HashMap<PromptSlot, Vec<PromptContribution>> = HashMap::new();
+fn grouped_contributions<'a>(
+    prompt: &'a PromptContext,
+) -> HashMap<PromptSlot, Vec<&'a PromptContribution>> {
+    let mut grouped: HashMap<PromptSlot, Vec<&'a PromptContribution>> = HashMap::new();
     for contribution in &prompt.contributions {
         grouped
             .entry(contribution.slot)
             .or_default()
-            .push(contribution.clone());
+            .push(contribution);
     }
     for entries in grouped.values_mut() {
         entries.sort_by_key(|contribution| contribution.priority);
@@ -186,7 +188,7 @@ fn grouped_contributions(prompt: &PromptContext) -> HashMap<PromptSlot, Vec<Prom
 fn render_section(
     section: &PromptTemplateSection,
     prompt: &PromptContext,
-    contributions: &HashMap<PromptSlot, Vec<PromptContribution>>,
+    contributions: &HashMap<PromptSlot, Vec<&PromptContribution>>,
 ) -> Option<String> {
     let mut parts = Vec::new();
     for entry in &section.entries {

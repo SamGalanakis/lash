@@ -42,6 +42,7 @@ use lash::session_model::{
 use lash::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
 };
+use lash::tools::DiscoveryToolsProvider;
 use lash::tools::batch::batch_tool_definition;
 use lash::{
     CheckpointKind, ExecutionMode, LlmOutputPart, LlmResponse, ModeBuildInput, ModeConfig,
@@ -95,6 +96,8 @@ impl SessionPlugin for StandardModePlugin {
             reg.mode().session(Arc::new(StandardModeSession))?;
             reg.mode()
                 .protocol_driver(Arc::new(StandardProtocolDriver))?;
+            reg.tools()
+                .provider(Arc::new(DiscoveryToolsProvider::new()))?;
         }
         // This capability is a session-wide singleton, so one plugin
         // owns the full native-tools surface regardless of execution
@@ -130,7 +133,7 @@ impl ModeProtocolDriverPlugin for StandardProtocolDriver {
         ModePreamble {
             config: ModeConfig {
                 protocol: Arc::new(StandardDriver),
-                sync_execution_surface: false,
+                sync_execution_surface: true,
             },
             tool_specs: Arc::new(input.tool_surface.model_tool_specs()),
             tool_names: input.tool_surface.tool_names(),

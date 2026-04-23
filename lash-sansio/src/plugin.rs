@@ -51,6 +51,20 @@ impl PluginMessage {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptContributionGate {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub minimum_availability: crate::ToolAvailability,
+}
+
+impl PromptContributionGate {
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptContribution {
     pub slot: crate::PromptSlot,
@@ -58,6 +72,8 @@ pub struct PromptContribution {
     pub title: Option<String>,
     #[serde(default)]
     pub priority: i32,
+    #[serde(default, skip_serializing_if = "PromptContributionGate::is_empty")]
+    pub gate: PromptContributionGate,
     pub content: String,
 }
 
@@ -73,12 +89,40 @@ impl PromptContribution {
             slot,
             title,
             priority: 0,
+            gate: PromptContributionGate {
+                tools: Vec::new(),
+                minimum_availability: crate::ToolAvailability::default(),
+            },
             content: content.into(),
         }
     }
 
     pub fn with_priority(mut self, priority: i32) -> Self {
         self.priority = priority;
+        self
+    }
+
+    pub fn requires_tool(
+        mut self,
+        tool_name: impl Into<String>,
+        minimum_availability: crate::ToolAvailability,
+    ) -> Self {
+        self.gate = PromptContributionGate {
+            tools: vec![tool_name.into()],
+            minimum_availability,
+        };
+        self
+    }
+
+    pub fn requires_any_tool(
+        mut self,
+        tool_names: impl IntoIterator<Item = impl Into<String>>,
+        minimum_availability: crate::ToolAvailability,
+    ) -> Self {
+        self.gate = PromptContributionGate {
+            tools: tool_names.into_iter().map(Into::into).collect(),
+            minimum_availability,
+        };
         self
     }
 

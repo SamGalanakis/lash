@@ -4,7 +4,7 @@ use crate::mode::ModePreamble;
 use crate::prompt::{PreparedPrompt, PromptBuildInput, build_prompt};
 use crate::sansio::{RlmTermination, TurnMachine, TurnMachineConfig};
 use crate::session_model::RetryPolicy;
-use crate::{MessageSequence, PromptContribution, PromptTemplate};
+use crate::{MessageSequence, PromptContribution, PromptTemplate, ToolSurface};
 
 pub struct SansIoTurnInput {
     pub session_id: String,
@@ -13,6 +13,7 @@ pub struct SansIoTurnInput {
     pub mode: crate::ExecutionMode,
     pub messages: MessageSequence,
     pub run_offset: usize,
+    pub tool_surface: ToolSurface,
     pub mode_preamble: Arc<ModePreamble>,
     pub prompt_template: PromptTemplate,
     pub prompt_contributions: Vec<PromptContribution>,
@@ -32,6 +33,9 @@ pub struct PreparedTurnMachine {
 pub fn build_turn(input: SansIoTurnInput) -> PreparedTurnMachine {
     let mut prompt_contributions = input.mode_preamble.prompt_contributions.clone();
     prompt_contributions.extend(input.prompt_contributions);
+    let prompt_contributions = input
+        .tool_surface
+        .filter_prompt_contributions(prompt_contributions);
     let prepared_prompt = build_prompt(PromptBuildInput {
         mode: input.mode,
         template: input.prompt_template,
@@ -89,8 +93,9 @@ mod tests {
             params: vec![ToolParam::typed("path", "str")],
             returns: "str".to_string(),
             examples: Vec::new(),
-            enabled: true,
-            injected: true,
+            availability: crate::ToolAvailabilityConfig::documented(),
+            activation: crate::ToolActivation::Always,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             execution_mode: ToolExecutionMode::Parallel,
@@ -137,7 +142,8 @@ mod tests {
 
     #[test]
     fn build_turn_creates_machine_with_rendered_system_prompt() {
-        let tool_surface = crate::ToolSurface::from_tools(vec![tool("read_file")]);
+        let tool_surface =
+            crate::ToolSurface::from_tools(vec![tool("read_file")], ExecutionMode::Standard);
         let mode_preamble = Arc::new(ModePreamble {
             config: ModeConfig {
                 protocol: Arc::new(NoopDriver),
@@ -156,6 +162,7 @@ mod tests {
             mode: ExecutionMode::Standard,
             messages: crate::MessageSequence::default(),
             run_offset: 2,
+            tool_surface: tool_surface.clone(),
             mode_preamble,
             prompt_template: default_prompt_template(),
             prompt_contributions: vec![PromptContribution::guidance("Guide", "Be precise.")],

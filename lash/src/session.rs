@@ -58,7 +58,7 @@ impl ToolSurfaceHandle {
     fn catalog(&self) -> Arc<Vec<serde_json::Value>> {
         Arc::clone(self.0.derived.catalog.get_or_init(|| {
             Arc::new(crate::tools::project_tool_catalog(
-                self.0.surface.enabled_tools_iter(),
+                self.0.surface.discoverable_tools_iter().cloned(),
             ))
         }))
     }
@@ -377,7 +377,7 @@ impl Session {
             })
             .unwrap_or_else(|err| {
                 tracing::warn!("failed to resolve tool surface: {err}");
-                crate::ToolSurface::from_tools(fallback_tools)
+                crate::ToolSurface::from_tools(fallback_tools, mode)
             });
         let input = crate::ModeBuildInput {
             mode,
@@ -1438,8 +1438,9 @@ mod tests {
                     params: vec![crate::ToolParam::typed("text", "str")],
                     returns: "dict".into(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: crate::ToolAvailabilityConfig::documented(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: crate::ToolExecutionMode::Parallel,
@@ -1450,8 +1451,9 @@ mod tests {
                     params: vec![],
                     returns: "dict".into(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: crate::ToolAvailabilityConfig::documented(),
+                    activation: crate::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: crate::ToolExecutionMode::Parallel,

@@ -52,8 +52,9 @@ impl ToolProvider for ShowSnippetToUser {
                 "show_snippet_to_user(path=\"lash-cli/src/render/mod.rs\", start_line=120, end_line=180)"
                     .into(),
             ],
-            enabled: true,
-            injected: true,
+            availability: crate::ToolAvailabilityConfig::documented(),
+            activation: crate::ToolActivation::Always,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             execution_mode: ToolExecutionMode::Parallel,

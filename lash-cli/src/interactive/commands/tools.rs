@@ -7,6 +7,33 @@ use crate::{hash12, push_system_message};
 
 use super::super::runtime::{apply_pending_reconfigure, parse_kv_args, register_builtin_tool};
 
+fn availability_label(availability: ToolAvailability) -> &'static str {
+    match availability {
+        ToolAvailability::Hidden => "hidden",
+        ToolAvailability::Discoverable => "discoverable",
+        ToolAvailability::Callable => "callable",
+        ToolAvailability::Documented => "documented",
+    }
+}
+
+fn parse_availability(raw: &str) -> Option<ToolAvailability> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "hidden" => Some(ToolAvailability::Hidden),
+        "discoverable" => Some(ToolAvailability::Discoverable),
+        "callable" => Some(ToolAvailability::Callable),
+        "documented" => Some(ToolAvailability::Documented),
+        _ => None,
+    }
+}
+
+fn update_documentation_state(availability: ToolAvailability, injected: bool) -> ToolAvailability {
+    match (availability, injected) {
+        (ToolAvailability::Documented, false) => ToolAvailability::Callable,
+        (ToolAvailability::Callable, true) => ToolAvailability::Documented,
+        (other, _) => other,
+    }
+}
+
 pub(super) fn handle_tools(
     raw: Option<String>,
     app: &mut App,
@@ -27,13 +54,15 @@ pub(super) fn handle_tools(
             ),
         ];
         for (name, spec) in &desired_dynamic.tools {
-            let enabled = desired_dynamic.enabled_tools.contains(name);
+            let availability = spec
+                .definition
+                .effective_availability(current_execution_mode);
             lines.push(format!(
-                "  - {} [{}] adapter={}{}",
+                "  - {} [{}] adapter={} availability={}",
                 name,
                 spec.definition.returns,
                 spec.adapter_id,
-                if enabled { " (enabled)" } else { " (disabled)" }
+                availability_label(availability)
             ));
         }
         if desired_dynamic.tools.is_empty() {
@@ -73,7 +102,6 @@ pub(super) fn handle_tools(
                             adapter_id: "inprocess".to_string(),
                         },
                     );
-                    desired_dynamic.enabled_tools.insert(name.to_string());
                     *pending_reconfigure = true;
                     push_system_message(
                         app,
@@ -92,7 +120,6 @@ pub(super) fn handle_tools(
                 return Ok(false);
             };
             if desired_dynamic.tools.remove(name).is_some() {
-                desired_dynamic.enabled_tools.remove(name);
                 *pending_reconfigure = true;
                 push_system_message(app, format!("Tool `{name}` staged for removal."));
             } else {
@@ -118,8 +145,23 @@ pub(super) fn handle_tools(
             if let Some(returns) = kv.get("returns") {
                 spec.definition.returns = returns.clone();
             }
+            if let Some(raw) = kv.get("availability") {
+                let Some(availability) = parse_availability(raw) else {
+                    push_system_message(
+                        app,
+                        "Invalid availability. Use: hidden, discoverable, callable, documented",
+                    );
+                    return Ok(false);
+                };
+                spec.definition.availability_override = Some(availability);
+            }
             if let Some(inject) = kv.get("injected") {
-                spec.definition.injected = inject == "true";
+                let injected = inject == "true";
+                let availability = spec
+                    .definition
+                    .effective_availability(current_execution_mode);
+                spec.definition.availability_override =
+                    Some(update_documentation_state(availability, injected));
             }
             *pending_reconfigure = true;
             push_system_message(app, format!("Tool `{name}` staged for update."));
@@ -130,7 +172,12 @@ pub(super) fn handle_tools(
                 return Ok(false);
             };
             if desired_dynamic.tools.contains_key(name) {
-                desired_dynamic.enabled_tools.insert(name.to_string());
+                desired_dynamic
+                    .tools
+                    .get_mut(name)
+                    .expect("checked contains_key")
+                    .definition
+                    .availability_override = Some(ToolAvailability::Callable);
                 *pending_reconfigure = true;
                 push_system_message(app, format!("Tool `{name}` staged for enable."));
             } else {
@@ -143,7 +190,12 @@ pub(super) fn handle_tools(
                 return Ok(false);
             };
             if desired_dynamic.tools.contains_key(name) {
-                desired_dynamic.enabled_tools.remove(name);
+                desired_dynamic
+                    .tools
+                    .get_mut(name)
+                    .expect("checked contains_key")
+                    .definition
+                    .availability_override = Some(ToolAvailability::Hidden);
                 *pending_reconfigure = true;
                 push_system_message(app, format!("Tool `{name}` staged for disable."));
             } else {

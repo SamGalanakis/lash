@@ -47,8 +47,9 @@ impl ToolProvider for PlanModeDynamicTools {
             params: Vec::new(),
             returns: "dict".to_string(),
             examples: vec!["plan_exit()".to_string()],
-            enabled: false,
-            injected: false,
+            availability: lash::ToolAvailabilityConfig::hidden(),
+            activation: lash::ToolActivation::Always,
+            availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
             execution_mode: lash::ToolExecutionMode::Parallel,
@@ -231,12 +232,11 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .dynamic_tool_state("root")
         .await
         .expect("initial dynamic tool state");
-    assert!(
-        initial
-            .tools
-            .get("plan_exit")
-            .is_some_and(|tool| !tool.definition.enabled && !tool.definition.injected)
-    );
+    assert!(initial.tools.get("plan_exit").is_some_and(|tool| {
+        tool.definition
+            .effective_availability(lash::ExecutionMode::Standard)
+            == lash::ToolAvailability::Hidden
+    }));
 
     session
         .invoke_external(
@@ -253,13 +253,11 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .dynamic_tool_state("root")
         .await
         .expect("enabled dynamic tool state");
-    assert!(
-        enabled
-            .tools
-            .get("plan_exit")
-            .is_some_and(|tool| tool.definition.enabled && tool.definition.injected)
-    );
-    assert!(enabled.enabled_tools.contains("plan_exit"));
+    assert!(enabled.tools.get("plan_exit").is_some_and(|tool| {
+        tool.definition
+            .effective_availability(lash::ExecutionMode::Standard)
+            == lash::ToolAvailability::Documented
+    }));
 
     session
         .invoke_external("plan_mode.disable", json!({}), None, true, manager_host)
@@ -270,13 +268,11 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .dynamic_tool_state("root")
         .await
         .expect("disabled dynamic tool state");
-    assert!(
-        disabled
-            .tools
-            .get("plan_exit")
-            .is_some_and(|tool| !tool.definition.enabled && !tool.definition.injected)
-    );
-    assert!(!disabled.enabled_tools.contains("plan_exit"));
+    assert!(disabled.tools.get("plan_exit").is_some_and(|tool| {
+        tool.definition
+            .effective_availability(lash::ExecutionMode::Standard)
+            == lash::ToolAvailability::Hidden
+    }));
 }
 
 #[tokio::test]
@@ -373,13 +369,14 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             mode: ExecutionMode::Standard,
             tools: vec![
                 ToolDefinition {
-                    name: "search_tools".to_string(),
+                    name: "discover_tools".to_string(),
                     description: "Discover tools".to_string(),
                     params: vec![],
                     returns: "list".to_string(),
                     examples: vec![],
-                    enabled: true,
-                    injected: false,
+                    availability: lash::ToolAvailabilityConfig::callable(),
+                    activation: lash::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: lash::ToolExecutionMode::Parallel,
@@ -390,8 +387,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     params: vec![],
                     returns: "dict".to_string(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: lash::ToolAvailabilityConfig::documented(),
+                    activation: lash::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: lash::ToolExecutionMode::Parallel,
@@ -402,8 +400,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     params: vec![],
                     returns: "str".to_string(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: lash::ToolAvailabilityConfig::documented(),
+                    activation: lash::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: lash::ToolExecutionMode::Parallel,
@@ -414,8 +413,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     params: vec![],
                     returns: "list".to_string(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: lash::ToolAvailabilityConfig::documented(),
+                    activation: lash::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: lash::ToolExecutionMode::Parallel,
@@ -426,8 +426,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     params: vec![],
                     returns: "dict".to_string(),
                     examples: vec![],
-                    enabled: true,
-                    injected: true,
+                    availability: lash::ToolAvailabilityConfig::documented(),
+                    activation: lash::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: lash::ToolExecutionMode::Serial,
@@ -438,8 +439,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     params: vec![],
                     returns: "dict".to_string(),
                     examples: vec![],
-                    enabled: false,
-                    injected: false,
+                    availability: lash::ToolAvailabilityConfig::hidden(),
+                    activation: lash::ToolActivation::Always,
+                    availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
                     execution_mode: lash::ToolExecutionMode::Parallel,
@@ -451,22 +453,22 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         surface
             .tools
             .iter()
-            .find(|tool| tool.name == "show_snippet_to_user")
-            .is_some_and(|tool| !tool.enabled && !tool.injected)
+            .find(|tool| tool.definition.name == "show_snippet_to_user")
+            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Hidden)
     );
     assert!(
         surface
             .tools
             .iter()
-            .find(|tool| tool.name == "search_web")
-            .is_some_and(|tool| tool.enabled && tool.injected)
+            .find(|tool| tool.definition.name == "search_web")
+            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Documented)
     );
     assert!(
         surface
             .tools
             .iter()
-            .find(|tool| tool.name == "plan_exit")
-            .is_some_and(|tool| tool.enabled && tool.injected)
+            .find(|tool| tool.definition.name == "plan_exit")
+            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Documented)
     );
     assert!(
         surface
@@ -892,13 +894,11 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         .dynamic_tool_state("root")
         .await
         .expect("dynamic tool state");
-    assert!(
-        dynamic
-            .tools
-            .get("plan_exit")
-            .is_some_and(|tool| !tool.definition.enabled && !tool.definition.injected)
-    );
-    assert!(!dynamic.enabled_tools.contains("plan_exit"));
+    assert!(dynamic.tools.get("plan_exit").is_some_and(|tool| {
+        tool.definition
+            .effective_availability(lash::ExecutionMode::Standard)
+            == lash::ToolAvailability::Hidden
+    }));
 }
 
 #[tokio::test]
