@@ -12,9 +12,9 @@ use lash::plugin::{
 };
 use lash::tools::{PatchAction, inspect_patch_ops};
 use lash::{
-    MessageRole, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
-    SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolDefinition,
-    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    PluginMessage, PromptRequest, PromptResponse, SessionContextSurface, SessionCreateRequest,
+    SessionPluginMode, SessionStartPoint, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
+    ToolProvider, ToolResult,
 };
 
 const PLAN_MODE_BADGE_KEY: &str = "mode";
@@ -808,9 +808,7 @@ impl SessionPlugin for PlanModePlugin {
                                 start: SessionStartPoint::Empty,
                                 policy: None,
                                 plugin_mode: SessionPluginMode::Fresh,
-                                initial_nodes: vec![lash::SessionAppendNode::message(
-                                    PluginMessage::text(MessageRole::User, seed),
-                                )],
+                                initial_nodes: Vec::new(),
                                 context_surface: SessionContextSurface::default(),
                                 mode_extras: lash::ModeExtras::default(),
                                 usage_source: Some("plan_execution".to_string()),

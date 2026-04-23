@@ -882,6 +882,15 @@ fn plan_exit_fresh_context_tool_does_not_queue_follow_up_turn() {
     );
 
     assert!(app.take_next_queued_turn().is_none());
+    let pending = app
+        .take_pending_session_switch()
+        .expect("pending session switch");
+    assert_eq!(pending.session_id, "new-plan-session");
+    let queued = pending.queued_turn.expect("queued fresh-context turn");
+    assert_eq!(
+        queued.effective_text,
+        "Do a full, faithful implementation of the plan found at: .lash/plans/session.md"
+    );
 }
 
 #[test]

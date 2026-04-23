@@ -430,13 +430,15 @@ async fn run_child(args: Args) -> Result<()> {
     let context_approach = parse_context_approach(&args.context_approach)?;
 
     let result = run_instance(
-        &run_dir,
-        &workspace_root,
-        &provider,
-        &args,
-        &resolved_model,
-        execution_mode,
-        &context_approach,
+        RunInstanceContext {
+            run_dir: &run_dir,
+            workspace_root: &workspace_root,
+            provider: &provider,
+            args: &args,
+            model: &resolved_model,
+            execution_mode,
+            context_approach: &context_approach,
+        },
         &instance,
     )
     .await
@@ -536,16 +538,29 @@ fn select_instances(mut instances: Vec<SweBenchInstance>, args: &Args) -> Vec<Sw
     instances
 }
 
-async fn run_instance(
-    run_dir: &Path,
-    workspace_root: &Path,
-    provider: &ProviderHandle,
-    args: &Args,
-    model: &str,
+struct RunInstanceContext<'a> {
+    run_dir: &'a Path,
+    workspace_root: &'a Path,
+    provider: &'a ProviderHandle,
+    args: &'a Args,
+    model: &'a str,
     execution_mode: ExecutionMode,
-    context_approach: &ContextApproach,
+    context_approach: &'a ContextApproach,
+}
+
+async fn run_instance(
+    ctx: RunInstanceContext<'_>,
     instance: &SweBenchInstance,
 ) -> Result<InstanceResult> {
+    let RunInstanceContext {
+        run_dir,
+        workspace_root,
+        provider,
+        args,
+        model,
+        execution_mode,
+        context_approach,
+    } = ctx;
     let started_at = Utc::now();
     let started_instant = Instant::now();
 
@@ -711,7 +726,7 @@ async fn run_instance(
         failure_reason,
         assistant_text,
         iterations: sink.iteration_count() as u64,
-        llm_calls: sink.llm_response_count() as u64,
+        llm_calls: sink.llm_response_count(),
         tool_calls,
         tool_breakdown,
         tokens,
