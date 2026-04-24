@@ -311,9 +311,13 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         eprintln!("warning: failed to refresh models.dev catalog: {err}");
     }
 
+    let configured_model_default = lash_config
+        .model_default(active_provider.kind())
+        .filter(|selection| !selection.model.trim().is_empty());
     let requested_model = args
         .model
         .clone()
+        .or_else(|| configured_model_default.map(|selection| selection.model.clone()))
         .unwrap_or_else(|| active_provider.default_model().to_string());
     let selection = parse_model_selection(&requested_model).map_err(anyhow::Error::msg)?;
     validate_model_selection(&active_provider, &selection).map_err(anyhow::Error::msg)?;
@@ -321,8 +325,24 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         resolve_model_selection(&active_provider, &selection, model_catalog.as_ref())
             .map_err(anyhow::Error::msg)?;
     let model = selection.model.clone();
-    let model_variant = resolve_model_variant(&active_provider, &model, args.variant.as_deref())
+    let requested_variant = args.variant.as_deref().or_else(|| {
+        if args.model.is_none() {
+            configured_model_default
+                .filter(|default| default.model == model)
+                .and_then(|default| default.variant.as_deref())
+        } else {
+            None
+        }
+    });
+    let model_variant = resolve_model_variant(&active_provider, &model, requested_variant)
         .map_err(anyhow::Error::msg)?;
+    if args.resume.is_none()
+        && args.print_prompt.is_none()
+        && (args.model.is_some() || args.variant.is_some())
+    {
+        lash_config.set_model_default(active_provider.kind(), model.clone(), model_variant.clone());
+        lash_config.save(&crate::paths::config_file())?;
+    }
     let llm_log_path = if crate::detailed_debug_logging_enabled(args.debug) {
         let dir = crate::paths::lash_home().join("sessions");
         Some(dir.join(format!(

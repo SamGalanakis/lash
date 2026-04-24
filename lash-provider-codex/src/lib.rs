@@ -1429,7 +1429,7 @@ impl Provider for CodexProvider {
     }
 
     fn default_model(&self) -> &str {
-        "gpt-5.4"
+        "gpt-5.5"
     }
 
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
@@ -1454,6 +1454,9 @@ impl Provider for CodexProvider {
         let variants = self.supported_variants(model);
         if variants.is_empty() {
             return None;
+        }
+        if model.eq_ignore_ascii_case("gpt-5.5") {
+            return Some("medium");
         }
         if variants.contains(&"xhigh") {
             Some("xhigh")
@@ -1480,8 +1483,8 @@ impl Provider for CodexProvider {
                 variant: Some("medium".to_string()),
             }),
             "high" => Some(AgentModelSelection {
-                model: "gpt-5.4".to_string(),
-                variant: Some("high".to_string()),
+                model: "gpt-5.5".to_string(),
+                variant: Some("medium".to_string()),
             }),
             _ => None,
         }

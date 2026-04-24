@@ -170,6 +170,14 @@ impl RuntimeSettings {
     }
 }
 
+/// User-selected default model for fresh sessions, scoped to a provider kind.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelDefault {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+}
+
 /// Concrete LLM backend. Each provider crate (`lash-provider-anthropic`,
 /// `lash-provider-openai`, `lash-provider-codex`, `lash-provider-google`)
 /// ships one `impl Provider` struct plus a [`ProviderFactory`] that
@@ -587,6 +595,10 @@ pub struct LashConfig {
     /// builds the subagent capability registry.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_models: BTreeMap<String, String>,
+    /// Fresh-session model defaults keyed by provider kind. Session
+    /// resumes still use the session head's persisted model instead.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_defaults: BTreeMap<String, ModelDefault>,
     #[serde(default, skip_serializing_if = "RuntimeSettings::is_default")]
     pub runtime: RuntimeSettings,
 }
@@ -605,6 +617,7 @@ impl LashConfig {
             auxiliary_secrets: AuxiliarySecrets::default(),
             mcp_servers: BTreeMap::new(),
             agent_models: BTreeMap::new(),
+            model_defaults: BTreeMap::new(),
             runtime: RuntimeSettings::default(),
         }
     }
@@ -619,6 +632,7 @@ impl LashConfig {
             auxiliary_secrets: AuxiliarySecrets::default(),
             mcp_servers: BTreeMap::new(),
             agent_models: BTreeMap::new(),
+            model_defaults: BTreeMap::new(),
             runtime: RuntimeSettings::default(),
         }
     }
@@ -679,6 +693,25 @@ impl LashConfig {
 
     pub fn provider_count(&self) -> usize {
         self.providers.len()
+    }
+
+    pub fn model_default(&self, provider_kind: &str) -> Option<&ModelDefault> {
+        self.model_defaults.get(provider_kind)
+    }
+
+    pub fn set_model_default(
+        &mut self,
+        provider_kind: impl Into<String>,
+        model: impl Into<String>,
+        variant: Option<String>,
+    ) {
+        self.model_defaults.insert(
+            provider_kind.into(),
+            ModelDefault {
+                model: model.into(),
+                variant,
+            },
+        );
     }
 
     /// Materialize the active provider via the global registry.
@@ -840,6 +873,43 @@ mod tests {
         });
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
         assert_eq!(cfg.tavily_api_key(), Some("new-key"));
+    }
+
+    #[test]
+    fn model_defaults_are_provider_scoped() {
+        let raw = serde_json::json!({
+            "active_provider": "openai-compatible",
+            "providers": {
+                "openai-compatible": {
+                    "type": "openai-compatible",
+                    "api_key": "k",
+                    "base_url": "https://example.com/v1"
+                }
+            },
+            "model_defaults": {
+                "openai-compatible": {
+                    "model": "gpt-5.4",
+                    "variant": "high"
+                }
+            }
+        });
+        let mut cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
+        assert_eq!(
+            cfg.model_default("openai-compatible"),
+            Some(&ModelDefault {
+                model: "gpt-5.4".to_string(),
+                variant: Some("high".to_string()),
+            })
+        );
+
+        cfg.set_model_default("anthropic", "claude-sonnet-4.6", None);
+        assert_eq!(
+            cfg.model_default("anthropic"),
+            Some(&ModelDefault {
+                model: "claude-sonnet-4.6".to_string(),
+                variant: None,
+            })
+        );
     }
 
     #[test]
