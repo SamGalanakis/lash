@@ -13,6 +13,25 @@ use crate::{
     resolve_model_selection, resolve_model_variant, validate_model_selection, variant_lines,
 };
 
+fn save_model_default(
+    app: &mut App,
+    provider: &ProviderHandle,
+    model: &str,
+    variant: Option<String>,
+) {
+    let mut cfg = match LashConfig::load(&crate::paths::config_file()) {
+        Some(cfg) => cfg,
+        None => LashConfig::new(provider),
+    };
+    cfg.set_model_default(provider.kind(), model.to_string(), variant);
+    if let Err(err) = cfg.save(&crate::paths::config_file()) {
+        push_system_message(
+            app,
+            format!("Model updated, but saving default failed: {}", err),
+        );
+    }
+}
+
 pub(super) async fn handle_model(
     new_model: Option<String>,
     app: &mut App,
@@ -74,6 +93,12 @@ pub(super) async fn handle_model(
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     app.model = selection.model.clone();
     app.set_model_variant(current_model_variant.clone());
+    save_model_default(
+        app,
+        provider,
+        &selection.model,
+        current_model_variant.clone(),
+    );
     let mut msg = format!("Model set to `{}`", app.model);
     if let Some(variant) = current_model_variant.as_deref() {
         msg.push_str(&format!("\nVariant reset to `{}`", variant));
@@ -121,6 +146,8 @@ pub(super) async fn handle_variant(
     }
     *current_model_variant = variant;
     app.set_model_variant(current_model_variant.clone());
+    let current_model = app.model.clone();
+    save_model_default(app, provider, &current_model, current_model_variant.clone());
     let mut lines = vec![format!("Model: `{}`", app.model)];
     if let Some(variant) = current_model_variant.as_deref() {
         lines.push(format!("Variant set to `{}`", variant));
@@ -257,7 +284,10 @@ pub(super) async fn handle_change_provider(
                     format!("Warning: failed to refresh models.dev catalog: {}", err),
                 );
             }
-            let new_model = provider.default_model().to_string();
+            let new_model = new_cfg
+                .model_default(provider.kind())
+                .map(|default| default.model.clone())
+                .unwrap_or_else(|| provider.default_model().to_string());
             let selection = match parse_model_selection(&new_model) {
                 Ok(s) => s,
                 Err(e) => {
@@ -301,9 +331,34 @@ pub(super) async fn handle_change_provider(
                         return Ok(false);
                     }
                 };
-            let model_variant = provider
-                .default_model_variant(&selection.model)
-                .map(str::to_string);
+            let saved_model_variant = new_cfg
+                .model_default(provider.kind())
+                .filter(|default| default.model == selection.model)
+                .and_then(|default| default.variant.clone());
+            let model_variant = match saved_model_variant {
+                Some(variant) => {
+                    match resolve_model_variant(provider, &selection.model, Some(variant.as_str()))
+                    {
+                        Ok(variant) => variant,
+                        Err(err) => {
+                            push_system_message(
+                                app,
+                                format!("Saved model variant failed validation: {}", err),
+                            );
+                            *provider = previous_provider;
+                            app.model = previous_model;
+                            app.context_window = previous_context_window;
+                            app.context_usage_excludes_cached_input = previous_context_usage;
+                            *current_model_variant = previous_variant;
+                            app.set_model_variant(current_model_variant.clone());
+                            return Ok(false);
+                        }
+                    }
+                }
+                None => provider
+                    .default_model_variant(&selection.model)
+                    .map(str::to_string),
+            };
             if let Some(rt) = runtime.as_mut() {
                 rt.update_session_config(
                     Some(provider.clone()),
