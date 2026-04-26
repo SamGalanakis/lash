@@ -42,6 +42,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
                     reasoning_tokens: 1,
                 },
                 last_prompt_usage: None,
+                mode_turn_options: Default::default(),
             },
             dynamic_state_ref: None,
             dynamic_state: None,

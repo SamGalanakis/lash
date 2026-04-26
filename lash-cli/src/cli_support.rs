@@ -6,7 +6,6 @@ use lash::*;
 use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
 
-use crate::ROOT_SESSION_ID;
 use crate::app::{App, DisplayBlock, PendingSessionSwitch, PreparedTurn};
 use crate::command;
 
@@ -548,8 +547,10 @@ pub(crate) fn info_text(
         format!("configured model: {}", configured_model),
         format!("resolved model: {}", resolved_model),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
-        format!("context approach: {}", context_approach.label()),
     ];
+    if *execution_mode == ExecutionMode::standard() {
+        lines.push(format!("context approach: {}", context_approach.label()));
+    }
 
     if let Some(variant) = model_variant {
         lines.push(format!("variant: {}", variant));
@@ -729,10 +730,11 @@ pub(crate) async fn sync_ui_extensions(
     plugin_host: &PluginHost,
     session_manager: Arc<dyn SessionManager>,
 ) {
+    let session_id = app.session_id.clone();
     match ui_extensions
         .sync_all(UiContext {
             plugin_host,
-            session_id: ROOT_SESSION_ID,
+            session_id: &session_id,
             session_manager,
         })
         .await
@@ -764,7 +766,7 @@ mod tests {
 
     #[test]
     fn desktop_notification_effect_respects_focus() {
-        let mut app = App::new("test-model".into(), "test".into());
+        let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
         app.focused = true;
 
         apply_ui_host_effects(

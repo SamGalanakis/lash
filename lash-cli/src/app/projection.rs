@@ -31,6 +31,7 @@ impl UiTimeline {
         self.items.last_mut()
     }
 
+    #[cfg(test)]
     pub(crate) fn items(&self) -> &[UiTimelineItem] {
         self.items.as_slice()
     }
@@ -50,7 +51,7 @@ pub(crate) enum UiTimelineItem {
     UserInput(String),
     AssistantReasoning(String),
     AssistantText(String),
-    Activity(ActivityBlock),
+    Activity(Box<ActivityBlock>),
     ShellOutput {
         command: String,
         output: String,
@@ -70,7 +71,7 @@ impl From<UiTimelineItem> for DisplayBlock {
             UiTimelineItem::UserInput(text) => DisplayBlock::UserInput(text),
             UiTimelineItem::AssistantReasoning(text) => DisplayBlock::AssistantReasoning(text),
             UiTimelineItem::AssistantText(text) => DisplayBlock::AssistantText(text),
-            UiTimelineItem::Activity(activity) => DisplayBlock::Activity(Box::new(activity)),
+            UiTimelineItem::Activity(activity) => DisplayBlock::Activity(activity),
             UiTimelineItem::ShellOutput {
                 command,
                 output,
@@ -96,7 +97,7 @@ impl From<DisplayBlock> for UiTimelineItem {
             DisplayBlock::UserInput(text) => UiTimelineItem::UserInput(text),
             DisplayBlock::AssistantReasoning(text) => UiTimelineItem::AssistantReasoning(text),
             DisplayBlock::AssistantText(text) => UiTimelineItem::AssistantText(text),
-            DisplayBlock::Activity(activity) => UiTimelineItem::Activity(*activity),
+            DisplayBlock::Activity(activity) => UiTimelineItem::Activity(activity),
             DisplayBlock::ShellOutput {
                 command,
                 output,
@@ -425,7 +426,7 @@ fn append_activity_item(timeline: &mut UiTimeline, activity: ActivityBlock) {
     {
         return;
     }
-    timeline.push(UiTimelineItem::Activity(activity));
+    timeline.push(UiTimelineItem::Activity(Box::new(activity)));
 }
 
 pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {

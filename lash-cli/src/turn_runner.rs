@@ -126,6 +126,7 @@ mod tests {
                         reasoning_tokens: 6,
                     },
                     last_prompt_usage: None,
+                    mode_turn_options: Default::default(),
                 },
                 dynamic_state_ref: None,
                 dynamic_state: None,

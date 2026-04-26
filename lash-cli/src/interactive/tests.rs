@@ -35,7 +35,7 @@ fn pending_text_delta_buffer_uses_first_chunk_deadline() {
 
 #[test]
 fn promote_pending_steers_to_queue_preserves_order() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.queue_pending_steer(PreparedTurn::new("after tool 1".into(), Vec::new()));
     app.queue_pending_steer(PreparedTurn::new("after tool 2".into(), Vec::new()));
 
@@ -51,7 +51,7 @@ fn promote_pending_steers_to_queue_preserves_order() {
 
 #[test]
 fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.push(DisplayBlock::UserInput(
         "(I want future migrations to work though!)".into(),
     ));
@@ -70,7 +70,7 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
 
 #[test]
 fn pending_monitor_wakes_inject_as_hidden_system_messages() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let bridge = TurnInputInjectionBridge::new();
     app.queue_monitor_wake("Monitor event \"build\": done".into());
 
@@ -92,7 +92,7 @@ fn pending_monitor_wakes_inject_as_hidden_system_messages() {
 
 #[test]
 fn accepted_monitor_wake_is_not_requeued_after_bridge_delivery() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let bridge = TurnInputInjectionBridge::new();
     app.queue_monitor_wake("Monitor event \"build\": done".into());
 
@@ -211,7 +211,7 @@ fn osc52_disallowed_for_unknown_terminal_without_ssh() {
 
 #[test]
 fn pasted_text_ui_action_uses_large_paste_placeholder_path() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 5);
 
     let outcome = apply_ui_action(
@@ -231,7 +231,7 @@ fn pasted_text_ui_action_uses_large_paste_placeholder_path() {
 
 #[test]
 fn word_cursor_actions_move_across_word_boundaries() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.insert_text("alpha beta_gamma-delta  omega");
 
     let outcome = apply_ui_action(

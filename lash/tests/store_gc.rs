@@ -14,6 +14,7 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
             iteration: 1,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
+            mode_turn_options: Default::default(),
         },
         dynamic_state_ref: None,
         dynamic_state: Some(DynamicStateSnapshot {

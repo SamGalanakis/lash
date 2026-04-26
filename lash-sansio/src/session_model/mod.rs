@@ -191,6 +191,8 @@ pub enum SessionEvent {
     /// non-streaming consumers.
     #[serde(rename = "typed_finish")]
     TypedFinish { value: serde_json::Value },
+    #[serde(rename = "session_handoff")]
+    SessionHandoff { session_id: String },
     #[serde(rename = "done")]
     Done,
     #[serde(rename = "error")]

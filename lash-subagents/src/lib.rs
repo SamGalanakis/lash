@@ -16,12 +16,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash::plugin::{PluginError, PluginFactory, PluginSessionContext, ToolSurfaceOverride};
+use lash::session_model::{ModeEvent, SessionEventRecord};
 use lash::{
-    InputItem, ModeExtras, PluginSpec, PluginSpecFactory, ProgressSender, SessionCreateRequest,
-    SessionPluginMode, SessionPolicy, SessionStartPoint, ToolDefinition, ToolExecutionContext,
-    ToolProvider, ToolResult, ToolSurfaceContribution, TurnInput,
+    InputItem, MessageRole, ModeExtras, PluginMessage, PluginSpec, PluginSpecFactory,
+    ProgressSender, SessionAppendNode, SessionCreateRequest, SessionPluginMode, SessionPolicy,
+    SessionStartPoint, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
+    ToolSurfaceContribution, TurnInput,
 };
-use lash_rlm_types::{RlmCreateExtras, RlmTermination, RlmpureCreateExtras};
+use lash_rlm_types::{
+    RlmCreateExtras, RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination, RlmpureCreateExtras,
+};
 use serde_json::{Value, json};
 
 pub use host::{
@@ -190,6 +194,77 @@ impl SubagentToolsProvider {
         serde_json::to_value(response).map_err(|err| err.to_string())
     }
 
+    async fn pass_baton(
+        &self,
+        args: &Value,
+        context: &ToolExecutionContext,
+    ) -> Result<Value, String> {
+        if self.execution_mode != lash::ExecutionMode::new("rlmpure") {
+            return Err("pass_baton is only available in rlmpure mode".to_string());
+        }
+
+        let task = required_string(args, "task")?;
+        let seed = match args.get("seed") {
+            None | Some(Value::Null) => serde_json::Map::new(),
+            Some(Value::Object(map)) => map.clone(),
+            Some(_) => return Err("pass_baton `seed` must be a record/dict".to_string()),
+        };
+
+        let current_snapshot = context
+            .host
+            .snapshot_session(&context.session_id)
+            .await
+            .map_err(|err| format!("failed to snapshot current session: {err}"))?;
+        let termination = context
+            .host
+            .session_mode_turn_options(&context.session_id)
+            .await
+            .map_err(|err| format!("failed to read current termination mode: {err}"))?
+            .rlm_termination();
+        let mut policy = current_snapshot.policy.clone();
+        policy.execution_mode = lash::ExecutionMode::new("rlmpure");
+
+        let successor_session_id = uuid::Uuid::new_v4().to_string();
+        let mut initial_nodes = Vec::new();
+        if !seed.is_empty() {
+            initial_nodes.push(SessionAppendNode::event(SessionEventRecord::Mode(
+                ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
+                    set: seed,
+                    unset: Vec::new(),
+                })),
+            )));
+        }
+
+        let mode_extras = ModeExtras::typed(
+            lash::ExecutionMode::new("rlmpure"),
+            RlmpureCreateExtras { termination },
+        )
+        .map_err(|err| format!("failed to encode rlmpure mode extras: {err}"))?;
+        let request = SessionCreateRequest {
+            session_id: Some(successor_session_id.clone()),
+            parent_session_id: Some(context.session_id.clone()),
+            start: SessionStartPoint::Empty,
+            policy: Some(policy),
+            plugin_mode: SessionPluginMode::Fresh,
+            initial_nodes,
+            first_turn_input: Some(PluginMessage::text(MessageRole::User, task.clone())),
+            context_surface: lash::SessionContextSurface::default(),
+            mode_extras,
+            usage_source: Some("baton".to_string()),
+        };
+        context
+            .host
+            .create_session(request)
+            .await
+            .map_err(|err| format!("failed to create baton successor: {err}"))?;
+
+        Ok(json!({
+            "ok": true,
+            "_baton": successor_session_id,
+            "task": task,
+        }))
+    }
+
     async fn send_message(
         &self,
         args: &Value,
@@ -328,6 +403,7 @@ impl ToolProvider for SubagentToolsProvider {
     ) -> ToolResult {
         let result = match name {
             "spawn_agent" => self.spawn_agent(args, context).await,
+            "pass_baton" => self.pass_baton(args, context).await,
             "send_message" => self.send_message(args, context).await,
             "followup_task" => self.followup_task(args, context).await,
             "wait_agent" => self.wait_agent(args, context).await,
@@ -669,7 +745,7 @@ fn optional_u64(args: &Value, key: &str) -> Result<Option<u64>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use lash::PersistedSessionState;
@@ -939,5 +1015,168 @@ mod tests {
         );
         assert_ne!(child_policy.model, stale_choice);
         assert_eq!(child_policy.model, "live-low");
+    }
+
+    #[tokio::test]
+    async fn pass_baton_creates_empty_rlmpure_successor_with_seed_and_task() {
+        #[derive(Default)]
+        struct BatonManager {
+            snapshot: PersistedSessionState,
+            created: Mutex<Vec<SessionCreateRequest>>,
+        }
+
+        #[async_trait]
+        impl SessionManager for BatonManager {
+            async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
+                Ok(self.snapshot.clone())
+            }
+
+            async fn snapshot_session(
+                &self,
+                _session_id: &str,
+            ) -> Result<PersistedSessionState, PluginError> {
+                Ok(self.snapshot.clone())
+            }
+
+            async fn tool_catalog(
+                &self,
+                _session_id: &str,
+            ) -> Result<Vec<serde_json::Value>, PluginError> {
+                Ok(Vec::new())
+            }
+
+            async fn create_session(
+                &self,
+                request: SessionCreateRequest,
+            ) -> Result<SessionHandle, PluginError> {
+                self.created.lock().expect("created").push(request.clone());
+                Ok(SessionHandle {
+                    session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
+                    parent_session_id: request.parent_session_id,
+                    policy: request.policy.unwrap_or_default(),
+                })
+            }
+
+            async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
+                Ok(())
+            }
+
+            async fn start_turn_stream(
+                &self,
+                _session_id: &str,
+                _input: TurnInput,
+            ) -> Result<SessionTurnHandle, PluginError> {
+                Err(PluginError::Session("not used".to_string()))
+            }
+
+            async fn await_turn(&self, _turn_id: &str) -> Result<lash::AssembledTurn, PluginError> {
+                Err(PluginError::Session("not used".to_string()))
+            }
+
+            async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
+                Ok(())
+            }
+
+            async fn session_mode_turn_options(
+                &self,
+                _session_id: &str,
+            ) -> Result<lash::ModeTurnOptions, PluginError> {
+                Ok(lash::ModeTurnOptions::rlm(RlmTermination::Finish {
+                    schema: Some(json!({
+                        "type": "object",
+                        "properties": { "answer": { "type": "string" } },
+                        "required": ["answer"]
+                    })),
+                }))
+            }
+        }
+
+        let manager = Arc::new(BatonManager {
+            snapshot: PersistedSessionState {
+                policy: SessionPolicy {
+                    execution_mode: lash::ExecutionMode::new("rlmpure"),
+                    model: "model".to_string(),
+                    max_context_tokens: Some(200_000),
+                    ..SessionPolicy::default()
+                },
+                mode_turn_options: lash::ModeTurnOptions::rlm(RlmTermination::Finish {
+                    schema: Some(json!({
+                        "type": "object",
+                        "properties": { "answer": { "type": "string" } },
+                        "required": ["answer"]
+                    })),
+                }),
+                ..PersistedSessionState::default()
+            },
+            created: Mutex::new(Vec::new()),
+        });
+        let registry = Arc::new(default_registry(
+            &std::collections::BTreeMap::new(),
+            lash::ExecutionMode::new("rlmpure"),
+        ));
+        let provider = SubagentToolsProvider {
+            execution_mode: lash::ExecutionMode::new("rlmpure"),
+            registry,
+            host: Arc::new(LocalSubagentHost::default()),
+        };
+        let context = ToolExecutionContext {
+            session_id: "parent".to_string(),
+            host: manager.clone(),
+            cancellation_token: None,
+            async_task_id: None,
+        };
+
+        let result = provider
+            .execute_with_context(
+                "pass_baton",
+                &json!({
+                    "task": "finish from here",
+                    "seed": { "x": 1, "query": "original" }
+                }),
+                &context,
+            )
+            .await;
+
+        assert!(result.success, "{:?}", result.result);
+        assert!(
+            result
+                .result
+                .get("_baton")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        let created = manager.created.lock().expect("created");
+        assert_eq!(created.len(), 1);
+        let request = &created[0];
+        assert!(matches!(request.start, SessionStartPoint::Empty));
+        assert_eq!(request.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(
+            request
+                .first_turn_input
+                .as_ref()
+                .map(|message| message.content.as_str()),
+            Some("finish from here")
+        );
+        assert_eq!(request.initial_nodes.len(), 1);
+        let SessionAppendNode::Event {
+            event: SessionEventRecord::Mode(mode_event),
+        } = &request.initial_nodes[0]
+        else {
+            panic!("expected seed globals event");
+        };
+        let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = mode_event.rlm_event() else {
+            panic!("expected RlmGlobalsPatch");
+        };
+        assert_eq!(seed.set["x"], json!(1));
+        assert_eq!(seed.set["query"], json!("original"));
+        let extras = request
+            .mode_extras
+            .decode::<RlmpureCreateExtras>(&lash::ExecutionMode::new("rlmpure"))
+            .expect("decode extras")
+            .expect("rlmpure extras");
+        assert!(matches!(
+            extras.termination,
+            RlmTermination::Finish { schema: Some(_) }
+        ));
     }
 }

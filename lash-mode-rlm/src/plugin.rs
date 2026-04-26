@@ -115,7 +115,7 @@ fn print_output_prompt_contribution(
     // focused on the recovery rule.
     PromptContribution::execution(
         "Print Output",
-        "`print` output is capped before reinjection. If you see a cap/truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
+        "`print` output is capped. If you see a truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
     )
 }
 
@@ -137,7 +137,7 @@ fn root_final_response_prompt_contribution(
     vec![
         PromptContribution::guidance(
             "Final Response Formatting",
-            "This is the root session and the final reply is rendered directly to the user. When there is no Required output schema, finish with prose or `submit` a polished Markdown string. Do not `submit` records, lists, raw tool results, or JSON-shaped diagnostics as the final root answer; use `print` for inspection and summarize the result instead. Structured records are appropriate for subagents and typed output schemas, not for untyped root replies.",
+            "Your reply renders directly to the user. With no Required output schema, finish with prose or `submit` a polished Markdown string. Don't `submit` records, lists, raw tool results, or JSON diagnostics — `print` to inspect, then `submit` a clean summary.",
         )
         .with_priority(100),
     ]
@@ -188,17 +188,13 @@ impl ModeSessionPlugin for RlmModeSession {
         nodes: &[lash::SessionAppendNode],
     ) -> Result<(), SessionError> {
         for node in nodes {
-            match node {
-                lash::SessionAppendNode::Event {
-                    event: lash::SessionEventRecord::Mode(event),
-                } => {
-                    if let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                        event.rlm_event()
-                    {
-                        ctx.apply_mode_globals_patch(&patch).await?;
-                    }
-                }
-                _ => {}
+            if let lash::SessionAppendNode::Event {
+                event: lash::SessionEventRecord::Mode(event),
+            } = node
+                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
+                    event.rlm_event()
+            {
+                ctx.apply_mode_globals_patch(&patch).await?;
             }
         }
         Ok(())

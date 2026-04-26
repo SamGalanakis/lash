@@ -157,7 +157,17 @@ impl RuntimeTurnDriver {
                     break;
                 };
                 match effect {
-                    Effect::Emit(event) => emit!(event),
+                    Effect::Emit(event) => {
+                        if let SessionEvent::TokenUsage {
+                            usage, cumulative, ..
+                        } = &event
+                        {
+                            self.progress_state.token_usage = cumulative.clone();
+                            self.progress_state.last_prompt_usage =
+                                normalize_prompt_usage(self.policy.provider.as_dyn(), usage);
+                        }
+                        emit!(event)
+                    }
                     Effect::Progress {
                         messages,
                         events,
@@ -180,6 +190,16 @@ impl RuntimeTurnDriver {
                         let (result, text_streamed) = self
                             .run_llm_call(&mut machine, id, request, iteration, &event_tx, &cancel)
                             .await;
+                        if let Ok(response) = &result {
+                            let usage = TokenUsage {
+                                input_tokens: response.usage.input_tokens,
+                                output_tokens: response.usage.output_tokens,
+                                cached_input_tokens: response.usage.cached_input_tokens,
+                                reasoning_tokens: response.usage.reasoning_tokens,
+                            };
+                            self.progress_state.last_prompt_usage =
+                                normalize_prompt_usage(self.policy.provider.as_dyn(), &usage);
+                        }
                         machine.handle_response(Response::LlmComplete {
                             id,
                             result,
@@ -378,12 +398,9 @@ impl RuntimeTurnDriver {
         let mode_preamble = self
             .session
             .mode_preamble(&self.session_id, execution_mode.clone());
-        let prompt_state = SessionStateEnvelope {
-            session_id: self.session_id.clone(),
-            policy: session_policy.clone(),
-            iteration,
-            ..Default::default()
-        };
+        let mut prompt_state = self.progress_state.export_state();
+        prompt_state.policy = session_policy.clone();
+        prompt_state.iteration = iteration;
         let plugin_prompt_contributions = self
             .session
             .plugins()
@@ -433,14 +450,10 @@ impl RuntimeTurnDriver {
         messages: crate::MessageSequence,
         iteration: usize,
     ) -> crate::SessionReadView {
-        let state = SessionStateEnvelope {
-            session_id: self.session_id.clone(),
-            policy: self.policy.clone(),
-            session_graph: crate::SessionGraph::default(),
-            iteration,
-            token_usage: TokenUsage::default(),
-            last_prompt_usage: None,
-        };
+        let mut state = self.progress_state.export_state();
+        state.policy = self.policy.clone();
+        state.iteration = iteration;
+        state.mode_turn_options = self.mode_turn_options.clone();
         crate::SessionReadView::from_graph_message_sequence(
             &state,
             self.progress_graph.base_graph(),

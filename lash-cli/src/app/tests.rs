@@ -56,7 +56,7 @@ fn other_variant_name(block: &DisplayBlock) -> &'static str {
 
 #[test]
 fn text_delta_accumulates_raw() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::TextDelta {
         content: "\n\nfirst\n".into(),
     });
@@ -76,7 +76,7 @@ fn text_delta_accumulates_raw() {
 
 #[test]
 fn text_delta_code_fence_preserved() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::TextDelta {
         content: "text\n\n```python\n".into(),
     });
@@ -93,7 +93,7 @@ fn text_delta_code_fence_preserved() {
 
 #[test]
 fn text_delta_stays_in_live_assistant_until_committed() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
 
     app.handle_session_event(SessionEvent::TextDelta {
@@ -109,7 +109,7 @@ fn text_delta_stays_in_live_assistant_until_committed() {
 
 #[test]
 fn ui_extension_commands_appear_in_editor_suggestions() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let ui_extensions = lash_ui::UiExtensions::builtin().expect("ui extensions");
     app.set_ui_extensions(Arc::new(ui_extensions));
     app.set_input("/pl".into());
@@ -155,7 +155,7 @@ fn ui_extension_argument_suggestions_complete_second_token() {
         }
     }
 
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let ui_extensions = UiExtensions::new(vec![Arc::new(DemoUiExtension)]).expect("ui extensions");
     app.set_ui_extensions(Arc::new(ui_extensions));
     app.set_input("/demo h".into());
@@ -174,7 +174,7 @@ fn ui_extension_argument_suggestions_complete_second_token() {
 
 #[test]
 fn final_message_never_replaces_visible_streamed_text_with_shorter_text() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::TextDelta {
         content: "Visible streamed text".into(),
@@ -198,7 +198,7 @@ fn final_message_never_replaces_visible_streamed_text_with_shorter_text() {
 
 #[test]
 fn text_delta_updates_live_token_estimate() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
         iteration: 0,
         message_count: 0,
@@ -216,7 +216,7 @@ fn text_delta_updates_live_token_estimate() {
 
 #[test]
 fn final_message_event_renders_in_live_assistant_lane() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::Message {
         text: "final output".into(),
@@ -235,7 +235,7 @@ fn final_message_event_renders_in_live_assistant_lane() {
 
 #[test]
 fn first_text_delta_switches_thinking_to_responding() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
         iteration: 0,
         message_count: 0,
@@ -258,7 +258,7 @@ fn first_text_delta_switches_thinking_to_responding() {
 
 #[test]
 fn llm_request_sets_plain_thinking_status() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
         iteration: 0,
         message_count: 0,
@@ -278,7 +278,7 @@ fn llm_request_sets_plain_thinking_status() {
 
 #[test]
 fn llm_request_flushes_intermediate_stream_text() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::TextDelta {
         content: "Let me continue testing.".into(),
     });
@@ -304,7 +304,7 @@ fn llm_request_flushes_intermediate_stream_text() {
 
 #[test]
 fn tool_call_flushes_intermediate_stream_text_immediately() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
 
     app.handle_session_event(SessionEvent::TextDelta {
@@ -330,7 +330,7 @@ fn tool_call_flushes_intermediate_stream_text_immediately() {
 
 #[test]
 fn token_usage_resets_live_token_estimate() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::TextDelta {
         content: "abcdefgh".into(),
     });
@@ -357,7 +357,7 @@ fn token_usage_resets_live_token_estimate() {
 
 #[test]
 fn input_only_streamed_usage_keeps_live_output_estimate() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::TextDelta {
         content: "abcdefgh".into(),
     });
@@ -385,7 +385,7 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
 
 #[test]
 fn finish_turn_from_projection_rebuilds_current_turn_from_authoritative_state() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks
         .push(DisplayBlock::SystemMessage("Local note".into()));
     let turn = PreparedTurn::new("What exists now?".into(), Vec::new());
@@ -427,7 +427,7 @@ fn finish_turn_from_projection_rebuilds_current_turn_from_authoritative_state() 
 
 #[test]
 fn finish_turn_from_projection_preserves_projected_turns_after_repeated_input() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let first_turn = PreparedTurn::new("hi".into(), Vec::new());
     app.push_prepared_user_input(&first_turn);
     app.blocks.push(DisplayBlock::AssistantText("Hi.".into()));
@@ -461,7 +461,7 @@ fn finish_turn_from_projection_preserves_projected_turns_after_repeated_input() 
 
 #[test]
 fn finish_turn_from_projection_does_not_duplicate_assistant_text_after_tool_activity() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Fix it".into(), Vec::new());
     app.push_prepared_user_input(&turn);
     app.start_turn();
@@ -517,7 +517,7 @@ fn finish_turn_from_projection_does_not_duplicate_assistant_text_after_tool_acti
 
 #[test]
 fn finish_turn_from_projection_uses_authoritative_reasoning_and_text() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Write a poem".into(), Vec::new());
     app.push_prepared_user_input(&turn);
     app.start_turn();
@@ -853,7 +853,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
 
 #[test]
 fn finish_turn_from_projection_uses_authoritative_transcript_even_when_streamed_text_differs() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Shorten it".into(), Vec::new());
     app.push_prepared_user_input(&turn);
     app.start_turn();
@@ -882,7 +882,7 @@ fn finish_turn_from_projection_uses_authoritative_transcript_even_when_streamed_
 
 #[test]
 fn tool_output_renders_during_generic_running_turn() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::Message {
         text: "started git status --short\n".into(),
@@ -897,7 +897,7 @@ fn tool_output_renders_during_generic_running_turn() {
 
 #[test]
 fn tool_output_carriage_return_rewrites_partial_line() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
 
     app.handle_session_event(SessionEvent::Message {
@@ -917,7 +917,7 @@ fn tool_output_carriage_return_rewrites_partial_line() {
 
 #[test]
 fn tool_output_crlf_commits_current_line() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
 
     app.handle_session_event(SessionEvent::Message {
@@ -934,7 +934,7 @@ fn tool_output_crlf_commits_current_line() {
 
 #[test]
 fn tool_output_strips_ansi_escape_sequences_from_live_preview() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
 
     app.handle_session_event(SessionEvent::Message {
@@ -951,7 +951,7 @@ fn tool_output_strips_ansi_escape_sequences_from_live_preview() {
 
 #[test]
 fn tool_output_strips_osc_escape_sequences_from_live_preview() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
 
     app.handle_session_event(SessionEvent::Message {
@@ -969,7 +969,7 @@ fn tool_output_strips_osc_escape_sequences_from_live_preview() {
 
 #[test]
 fn tool_output_tabs_collapse_to_single_spaces_in_live_preview() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
 
     app.handle_session_event(SessionEvent::Message {
@@ -986,7 +986,7 @@ fn tool_output_tabs_collapse_to_single_spaces_in_live_preview() {
 
 #[test]
 fn tool_output_does_not_change_total_content_height() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks = vec![DisplayBlock::UserInput("inspect this".into())];
     app.start_turn();
 
@@ -1001,7 +1001,7 @@ fn tool_output_does_not_change_total_content_height() {
 
 #[test]
 fn update_plan_panel_lights_up_plan_dock() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     assert!(
         app.plan_dock.is_none(),
@@ -1034,7 +1034,7 @@ fn update_plan_panel_lights_up_plan_dock() {
 
 #[test]
 fn plugin_panel_events_upsert_and_clear_blocks() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::PluginEvent {
         plugin_id: "demo".into(),
@@ -1069,7 +1069,7 @@ fn plugin_panel_events_upsert_and_clear_blocks() {
 
 #[test]
 fn plan_exit_tool_queues_follow_up_turn() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let ui_extensions = lash_ui::UiExtensions::builtin().expect("builtin ui extensions");
     crate::apply_ui_host_effects(
         &mut app,
@@ -1103,7 +1103,7 @@ fn plan_exit_tool_queues_follow_up_turn() {
 
 #[test]
 fn plan_exit_tool_call_consumes_pending_prompt_response() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
         request: lash::PromptRequest::single(
@@ -1152,7 +1152,7 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
 
 #[test]
 fn plan_exit_fresh_context_tool_does_not_queue_follow_up_turn() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let ui_extensions = lash_ui::UiExtensions::builtin().expect("builtin ui extensions");
     crate::apply_ui_host_effects(
         &mut app,
@@ -1183,7 +1183,7 @@ fn plan_exit_fresh_context_tool_does_not_queue_follow_up_turn() {
 
 #[test]
 fn cancelled_error_renders_as_system_message() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.note_manual_interrupt_requested();
     app.handle_session_event(SessionEvent::Error {
@@ -1206,7 +1206,7 @@ fn cancelled_error_renders_as_system_message() {
 
 #[test]
 fn cancelled_error_without_manual_request_still_stops_immediately() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::Error {
         message: "LLM error: cancelled".into(),
@@ -1228,7 +1228,7 @@ fn cancelled_error_without_manual_request_still_stops_immediately() {
 
 #[test]
 fn repeated_cancelled_errors_do_not_duplicate_system_message() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     let cancelled = SessionEvent::Error {
         message: "LLM error: cancelled".into(),
@@ -1423,7 +1423,7 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
 
 #[test]
 fn non_manual_error_sets_transient_status() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
         iteration: 0,
         message_count: 0,
@@ -1454,7 +1454,7 @@ fn non_manual_error_sets_transient_status() {
 
 #[test]
 fn retry_status_stays_visible_when_retry_request_starts() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
         iteration: 0,
         message_count: 0,
@@ -1499,7 +1499,7 @@ fn retry_status_stays_visible_when_retry_request_starts() {
 
 #[test]
 fn transient_status_expires_on_tick() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
         iteration: 0,
         message_count: 0,
@@ -1520,7 +1520,7 @@ fn transient_status_expires_on_tick() {
 
 #[test]
 fn ui_projection_state_omits_transient_live_turn() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.set_status("retrying", Some("in 5s".into()), true);
     if let Some(turn) = app.live_turn.as_mut() {
@@ -1533,7 +1533,7 @@ fn ui_projection_state_omits_transient_live_turn() {
 
 #[test]
 fn queued_turns_are_fifo_and_skip_pending_injections() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.queue_turn(PreparedTurn::new("queued-1".into(), Vec::new()));
     app.queue_turn(PreparedTurn::new("queued-2".into(), Vec::new()));
     app.queue_pending_steer(PreparedTurn::new("next-1".into(), Vec::new()));
@@ -1552,7 +1552,7 @@ fn queued_turns_are_fifo_and_skip_pending_injections() {
 
 #[test]
 fn take_last_queued_turn_restores_explicit_queue_only() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.queue_pending_steer(PreparedTurn::new("next".into(), Vec::new()));
     app.queue_turn(PreparedTurn::new("queued".into(), vec![vec![1, 2, 3]]));
 
@@ -1569,7 +1569,7 @@ fn take_last_queued_turn_restores_explicit_queue_only() {
 
 #[test]
 fn wake_session_effect_uses_hidden_monitor_queue() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
 
     crate::apply_ui_host_effects(
         &mut app,
@@ -1587,7 +1587,7 @@ fn wake_session_effect_uses_hidden_monitor_queue() {
 
 #[test]
 fn acknowledged_monitor_wakes_do_not_requeue() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.queue_monitor_wake("Monitor event \"build\": done".into());
     let wakes = app.take_pending_monitor_wakes();
     app.mark_monitor_wakes_in_flight(&wakes);
@@ -1603,7 +1603,7 @@ fn acknowledged_monitor_wakes_do_not_requeue() {
 
 #[test]
 fn accepted_injected_turn_input_renders_matching_pending_steer() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("follow up".into(), Vec::new());
     app.queue_pending_steer(turn.clone());
 
@@ -1622,7 +1622,7 @@ fn accepted_injected_turn_input_renders_matching_pending_steer() {
 
 #[test]
 fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_text_differs() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let mut turn = PreparedTurn::new("/localref lash for context if needed".into(), Vec::new());
     turn.input_provenance.transforms = vec![lash::UserInputTransform::SkillBlockAppend {
         skill_name: "localref".into(),
@@ -1647,7 +1647,7 @@ fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_tex
 
 #[test]
 fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
         messages: vec![PluginMessage {
@@ -1689,7 +1689,7 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
 
 #[test]
 fn accepted_injected_turn_input_removes_matching_pending_steer_without_popping_wrong_one() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.queue_pending_steer(PreparedTurn::new("first queued steer".into(), Vec::new()));
     app.queue_pending_steer(PreparedTurn::new(
         "uhh do not switch nvm".into(),
@@ -1715,7 +1715,7 @@ fn injected_messages_committed_do_not_duplicate_user_input_after_assistant_work(
     // tool-calls flow), the existing UserInput block is no longer at the
     // tail of `app.blocks` — so the old `blocks.last()` dedup let a duplicate
     // through. Dedup must scan the whole current turn.
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Why are you still dillydallying".into(), Vec::new());
     app.push_prepared_user_input(&turn);
     app.queue_pending_steer(turn.clone());
@@ -1758,7 +1758,7 @@ fn injected_messages_committed_do_not_duplicate_user_input_after_assistant_work(
 
 #[test]
 fn injected_messages_committed_do_not_duplicate_existing_visible_user_input() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new(
         "(I want future migrations to work though!)".into(),
         Vec::new(),
@@ -1791,7 +1791,7 @@ fn injected_messages_committed_do_not_duplicate_existing_visible_user_input() {
 
 #[test]
 fn queued_injection_stays_out_of_history_until_committed() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("follow up now".into(), Vec::new());
 
     app.queue_pending_steer(turn.clone());
@@ -1805,7 +1805,7 @@ fn queued_injection_stays_out_of_history_until_committed() {
 
 #[test]
 fn regular_queued_turn_stays_out_of_history_until_dispatched() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("queued text".into(), Vec::new());
     app.queue_turn(turn);
 
@@ -1818,7 +1818,7 @@ fn regular_queued_turn_stays_out_of_history_until_dispatched() {
 
 #[test]
 fn history_up_restores_last_queued_turn_before_history() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.editor.input_history = vec!["older turn".into()];
     app.queue_turn(PreparedTurn::new("queued text".into(), vec![vec![1, 2, 3]]));
 
@@ -1834,7 +1834,7 @@ fn history_up_restores_last_queued_turn_before_history() {
 
 #[test]
 fn restore_prepared_turn_clears_history_selection() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.editor.input_history = vec!["older turn".into()];
     app.editor.input_history_idx = Some(0);
     app.start_input_selection(1);
@@ -1849,7 +1849,7 @@ fn restore_prepared_turn_clears_history_selection() {
 
 #[test]
 fn backspace_deletes_image_marker_atomically() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("hello [Image #2] world".into());
     app.editor.cursor_pos = "hello [Image #2]".len();
     app.editor.pending_images = vec![PendingImage {
@@ -1866,7 +1866,7 @@ fn backspace_deletes_image_marker_atomically() {
 
 #[test]
 fn next_image_marker_id_tracks_highest_visible_marker() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("[Image #2] [Image #5]".into());
     app.editor.pending_images = vec![PendingImage {
         id: 2,
@@ -1878,7 +1878,7 @@ fn next_image_marker_id_tracks_highest_visible_marker() {
 
 #[test]
 fn add_pending_image_uses_highest_marker_plus_one() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("before [Image #4] after".into());
     app.editor.pending_images = vec![PendingImage {
         id: 2,
@@ -1893,7 +1893,7 @@ fn add_pending_image_uses_highest_marker_plus_one() {
 
 #[test]
 fn complete_pending_image_only_attaches_when_marker_still_exists() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("before [Image #3] after".into());
     app.begin_pending_image(3);
 
@@ -1909,7 +1909,7 @@ fn complete_pending_image_only_attaches_when_marker_still_exists() {
 
 #[test]
 fn fail_pending_image_removes_marker_and_inflight_state() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("before [Image #7] after".into());
     app.editor.cursor_pos = app.input().len();
     app.begin_pending_image(7);
@@ -1921,7 +1921,7 @@ fn fail_pending_image_removes_marker_and_inflight_state() {
 
 #[test]
 fn pending_image_jobs_only_count_visible_markers() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.begin_pending_image(2);
     assert!(!app.has_pending_image_jobs());
 
@@ -1935,7 +1935,7 @@ fn pending_image_jobs_only_count_visible_markers() {
 
 #[test]
 fn try_take_prepared_turn_waits_for_visible_inflight_images() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("[Image #1]".into());
     app.begin_pending_image(1);
 
@@ -1946,7 +1946,7 @@ fn try_take_prepared_turn_waits_for_visible_inflight_images() {
 
 #[test]
 fn take_prompt_response_renders_visible_user_block() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
         request: lash::PromptRequest::freeform("Pick one"),
@@ -1978,7 +1978,7 @@ fn take_prompt_response_renders_visible_user_block() {
 
 #[test]
 fn dismiss_prompt_marks_ui_dirty() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
         request: lash::PromptRequest::single("Pick one", vec!["red".into()]),
@@ -2006,7 +2006,7 @@ fn dismiss_prompt_marks_ui_dirty() {
 
 #[test]
 fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
     for idx in 0..6 {
         app.blocks
@@ -2044,7 +2044,7 @@ fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
 
 #[test]
 fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
     for idx in 0..6 {
         app.blocks
@@ -2070,7 +2070,7 @@ fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
 
 #[test]
 fn splash_collapses_to_compact_scrollback_height_once_history_exists() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks
         .push(DisplayBlock::UserInput("short prompt".into()));
 
@@ -2084,7 +2084,7 @@ fn splash_collapses_to_compact_scrollback_height_once_history_exists() {
 
 #[test]
 fn dismiss_splash_removes_empty_state_before_history_content() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.dismiss_splash();
 
     assert!(app.blocks.is_empty());
@@ -2098,7 +2098,7 @@ fn dismiss_splash_removes_empty_state_before_history_content() {
 
 #[test]
 fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
 
     app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
@@ -2120,7 +2120,7 @@ fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
 
 #[test]
 fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
 
     app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
@@ -2151,7 +2151,7 @@ fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
 
 #[test]
 fn resume_follow_output_reenables_bottom_following() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
     app.blocks.push(DisplayBlock::UserInput("hello".into()));
     app.blocks.push(DisplayBlock::AssistantText("world".into()));
@@ -2166,7 +2166,7 @@ fn resume_follow_output_reenables_bottom_following() {
 
 #[test]
 fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
     app.blocks.push(DisplayBlock::UserInput("hello".into()));
     app.blocks.push(DisplayBlock::AssistantText(
@@ -2190,7 +2190,7 @@ fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
 
 #[test]
 fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
     app.blocks
         .push(DisplayBlock::AssistantText("older history".into()));
@@ -2231,7 +2231,7 @@ fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
 
 #[test]
 fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
     app.blocks.push(DisplayBlock::UserInput("prompt".into()));
     app.start_turn();
@@ -2248,7 +2248,7 @@ fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
 
 #[test]
 fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
     app.blocks.push(DisplayBlock::UserInput("prompt".into()));
     app.start_turn();
@@ -2287,7 +2287,7 @@ fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
 
 #[test]
 fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.push(DisplayBlock::UserInput(
         "A long prompt that should stay visible while we are waiting for first token output".into(),
     ));
@@ -2307,7 +2307,7 @@ fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
 
 #[test]
 fn handle_tool_call_merges_contiguous_exploration_activity() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
 
     app.handle_session_event(SessionEvent::ToolCall {
@@ -2354,7 +2354,7 @@ fn handle_tool_call_merges_contiguous_exploration_activity() {
 
 #[test]
 fn handle_tool_call_merges_contiguous_edit_activity() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
 
     app.handle_session_event(SessionEvent::ToolCall {
@@ -2413,7 +2413,7 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
 
 #[test]
 fn insert_text_inserts_literal_payload_at_cursor() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("startend".into());
     app.editor.cursor_pos = "start".len();
 
@@ -2425,7 +2425,7 @@ fn insert_text_inserts_literal_payload_at_cursor() {
 
 #[test]
 fn insert_pasted_text_large_uses_placeholder_and_prepare_expands() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 5);
 
     app.insert_pasted_text(&large);
@@ -2444,7 +2444,7 @@ fn insert_pasted_text_large_uses_placeholder_and_prepare_expands() {
 
 #[test]
 fn backspace_deletes_large_paste_placeholder_atomically() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 2);
 
     app.insert_pasted_text(&large);
@@ -2459,7 +2459,7 @@ fn backspace_deletes_large_paste_placeholder_atomically() {
 
 #[test]
 fn repeated_same_size_large_pastes_get_numbered_placeholders() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 4);
     let base = format!("[Pasted Content {} chars]", large.chars().count());
 
@@ -2532,7 +2532,7 @@ fn prepared_turn_history_text_keeps_long_user_text_without_middle_truncation() {
 
 #[test]
 fn prompt_insert_text_inserts_literal_payload_at_cursor() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
         request: lash::PromptRequest::freeform("Question?"),
         focus: crate::overlay::PromptFocus::Text,
@@ -2553,7 +2553,7 @@ fn prompt_insert_text_inserts_literal_payload_at_cursor() {
 
 #[test]
 fn prompt_toggle_current_option_ignores_freeform_prompts() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
         request: lash::PromptRequest::freeform("Question?"),
         focus: crate::overlay::PromptFocus::Text,
@@ -2575,7 +2575,7 @@ fn prompt_toggle_current_option_ignores_freeform_prompts() {
 
 #[test]
 fn prompt_toggle_note_focus_switches_between_choices_and_note() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
         request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
             .with_optional_note(),
@@ -2600,7 +2600,7 @@ fn prompt_toggle_note_focus_switches_between_choices_and_note() {
 
 #[test]
 fn take_prompt_response_defers_option_prompt_display() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
         request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
@@ -2636,7 +2636,7 @@ fn take_prompt_response_defers_option_prompt_display() {
 
 #[test]
 fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
         request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()]),
@@ -2670,7 +2670,7 @@ fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
 
 #[test]
 fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
         request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
@@ -2727,7 +2727,7 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
 
 #[test]
 fn live_batch_tool_call_expands_children_without_parent_batch_block() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks.clear();
 
     app.handle_session_event(SessionEvent::ToolCall {

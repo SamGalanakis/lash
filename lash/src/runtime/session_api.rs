@@ -1,6 +1,10 @@
 use super::*;
 
 impl LashRuntime {
+    pub fn session_id(&self) -> &str {
+        &self.state.session_id
+    }
+
     pub(super) fn stamp_live_plugin_state(&mut self) {
         if let Some(session) = self.session.as_ref() {
             if let Some(dynamic_tools) = session.plugins().dynamic_tools() {
@@ -50,6 +54,7 @@ impl LashRuntime {
     }
     /// Override mode-owned turn options for this session.
     pub(crate) fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
+        self.state.mode_turn_options = options.clone();
         self.mode_turn_options = options;
     }
 
@@ -77,6 +82,7 @@ impl LashRuntime {
     /// refreshed from the live session.
     pub fn export_persisted_state(&self) -> PersistedSessionState {
         let mut state = self.state.clone();
+        state.mode_turn_options = self.mode_turn_options.clone();
         if let Some(session) = self.session.as_ref() {
             if let Some(dynamic_tools) = session.plugins().dynamic_tools() {
                 let snapshot = dynamic_tools.export_state();

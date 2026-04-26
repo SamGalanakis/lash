@@ -465,8 +465,11 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         host_docs.dir().to_path_buf(),
     );
     let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
+    let resolved_session_id = run_session_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let root_plugins = plugin_host.build_session(
-        "root",
+        &resolved_session_id,
         execution_mode.clone(),
         session_policy.context_approach.clone(),
         None,
@@ -512,7 +515,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     }
     let initial_model_variant = session_policy.model_variant.clone();
     let session_name = session_bootstrap.session_name();
-    let mut logger = session_bootstrap.logger(&model, run_session_id)?;
+    let mut logger = session_bootstrap.logger(&model, run_session_id.clone())?;
     let initial_graph = session_bootstrap.initial_graph();
     let services = lash::PersistentRuntimeServices::new_with_bridges(
         root_plugins,
@@ -521,7 +524,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         store.clone() as Arc<dyn RuntimeStore>,
     );
     let state = PersistedSessionState {
-        session_id: "root".to_string(),
+        session_id: resolved_session_id.clone(),
         policy: session_policy.clone(),
         session_graph: initial_graph,
         ..PersistedSessionState::default()

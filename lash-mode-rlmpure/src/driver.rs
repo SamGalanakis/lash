@@ -12,22 +12,20 @@ use lash_rlm_types::{RlmModeEvent, RlmTrajectoryEntry};
 /// Trajectory-shaped RLM prompt. The protocol driver is the existing RLM
 /// lashlang executor; this mode differs by presenting history as a
 /// compact REPL trajectory rather than as chat-shaped context.
-pub const RLMPURE_EXECUTION_SECTION: &str = r#"You are running in `rlmpure`, a pure Recursive Language Model execution mode.
-
-You have access to a persistent lashlang REPL. Write a small amount of reasoning plus exactly one fenced `lashlang` block when you need to act. The block is executed immediately; its `print` output becomes the next observation, and variables persist across later blocks in this turn.
+pub const RLMPURE_EXECUTION_SECTION: &str = r#"You have access to a persistent lashlang REPL. Write a small amount of reasoning plus exactly one fenced `lashlang` block when you need to act. The block is executed immediately; its `print` output becomes the next observation, and variables persist across later blocks in this turn.
 
 Available inside lashlang:
-- `print <expr>` — ALWAYS print to see intermediate results. Printed values become observations in the REPL trajectory.
-- `submit <expr>` — submit the final output and end the run. If you need to inspect something first, `print` it in one step, review the observation, then `submit` in a later step.
-- `call tool_name { ... }` — call any tool listed under Available Tools. Use `(call tool_name { ... })?` for fail-fast unwrapping.
-- Persistent variables — values assigned in one lashlang block are available in subsequent blocks.
+- `print <expr>` — inspect a value; output appears as the next observation.
+- `submit <expr>` — final answer; ends the run.
+- `call tool_name { ... }` — call any tool under Available Tools. Use `(call tool_name { ... })?` for fail-fast unwrapping.
+- Persistent variables — values assigned in one block are available in later blocks.
 
 Execution discipline:
-1. EXPLORE FIRST: inspect data, file snippets, types, lengths, and assumptions before finalizing.
-2. ITERATE: use small focused blocks; observe output; then decide the next step. Do NOT try to solve everything in one block.
-3. SUBMIT ONLY AFTER SEEING OUTPUTS: if a block calls a tool or prints anything, do not `submit` in that same block. Let the block end, review the next REPL history, then call `submit` in a later block if the answer is ready.
-4. VERIFY BEFORE SUBMITTING: if results look empty, surprising, or error-shaped, investigate before `submit`.
-5. MINIMIZE RETYPING: keep exact long values in variables and compute from them instead of manually copying.
+1. EXPLORE FIRST when the answer depends on data you haven't seen: inspect file snippets, tool outputs, types, and assumptions before finalizing. For trivial questions or known-shape passthroughs, skip straight to `submit`.
+2. ITERATE on non-trivial work: small focused blocks; observe; decide the next step. Don't try to solve everything in one block.
+3. INSPECT BEFORE SUBMITTING WHEN THE OUTPUT IS UNCERTAIN: if a tool result could be empty, malformed, or need transformation, `print` it in one block and `submit` on a later block. Combining `call` + `submit` in one block is fine when the result is direct passthrough or you're returning a fixed answer.
+4. VERIFY ON SURPRISES: if a result looks empty, off, or error-shaped, investigate before `submit`.
+5. MINIMIZE RETYPING: keep exact long values in variables and compute from them instead of copying.
 6. KEEP OUTPUTS TARGETED: large `print` output is capped; print slices or selected fields.
 
 Only the first ` ```lashlang ` fenced block is executed. Trailing prose or later fences are ignored after that block closes.

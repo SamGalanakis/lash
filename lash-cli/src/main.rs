@@ -64,7 +64,6 @@ pub(crate) use interactive::{injected_image_part_indices, make_injected_plugin_m
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_GIT_HEAD: &str = env!("LASH_BUILD_GIT_HEAD");
-const ROOT_SESSION_ID: &str = "root";
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\n",
@@ -471,7 +470,7 @@ mod tests {
 
     #[test]
     fn insert_inline_marker_adds_spaces_when_touching_text() {
-        let mut app = App::new("model".into(), "session".into());
+        let mut app = App::new("model".into(), "session".into(), "test-session-id".into());
         app.set_input("hello world".into());
         app.editor.cursor_pos = 5;
         insert_inline_marker(&mut app, "[Image #1]");
@@ -480,7 +479,7 @@ mod tests {
 
     #[test]
     fn insert_inline_marker_keeps_existing_spacing() {
-        let mut app = App::new("model".into(), "session".into());
+        let mut app = App::new("model".into(), "session".into(), "test-session-id".into());
         app.set_input("hello ".into());
         app.editor.cursor_pos = app.input().len();
         insert_inline_marker(&mut app, "[Image #1]");

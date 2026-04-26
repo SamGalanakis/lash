@@ -230,12 +230,16 @@ async fn apply_graph_resume_state(
         }
         let persisted_graph_node_count = graph.nodes.len();
         let mut restored_state = PersistedSessionState {
-            session_id: crate::ROOT_SESSION_ID.to_string(),
+            session_id: app.session_id.clone(),
             policy: restored_policy,
             session_graph: graph,
             iteration: *turn_counter,
             token_usage: app.token_usage.clone(),
             last_prompt_usage: app.last_prompt_usage.clone(),
+            mode_turn_options: checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.turn_state.mode_turn_options.clone())
+                .unwrap_or_default(),
             dynamic_state_ref: checkpoint
                 .as_ref()
                 .and_then(|checkpoint| checkpoint.dynamic_state_ref.clone()),
@@ -424,6 +428,7 @@ mod tests {
                     iteration,
                     token_usage,
                     last_prompt_usage,
+                    mode_turn_options: Default::default(),
                 },
                 dynamic_state_ref: None,
                 dynamic_state: Some(DynamicStateSnapshot {
@@ -533,7 +538,11 @@ mod tests {
         let (dynamic_tools, mut desired_dynamic, model_catalog, runtime) =
             build_runtime(&provider).await;
 
-        let mut app = App::new("gpt-5".into(), "resume-usage".into());
+        let mut app = App::new(
+            "gpt-5".into(),
+            "resume-usage".into(),
+            "test-session-id".into(),
+        );
         let mut history = Vec::new();
         let mut runtime = Some(runtime);
         let mut turn_counter = 0;

@@ -50,7 +50,7 @@ pub(super) fn handle_surface_input(
         event,
         UiContext {
             plugin_host,
-            session_id: crate::ROOT_SESSION_ID,
+            session_id: app.session_id.as_str(),
             session_manager: Arc::clone(session_manager),
         },
     ) {
@@ -194,6 +194,7 @@ pub(super) async fn load_session_switch(
             iteration: *turn_counter,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
+            mode_turn_options: rt.export_state().mode_turn_options,
         };
         state.replace_projection(history, &[]);
         rt.set_persisted_state(lash::PersistedSessionState::from_state(state));
@@ -1039,7 +1040,7 @@ pub(super) async fn handle_key_event(
                 &shortcut,
                 UiContext {
                     plugin_host,
-                    session_id: crate::ROOT_SESSION_ID,
+                    session_id: app.session_id.as_str(),
                     session_manager: Arc::clone(session_manager),
                 },
             )

@@ -31,6 +31,8 @@ pub struct SessionStateEnvelope {
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
+    #[serde(default)]
+    pub mode_turn_options: crate::ModeTurnOptions,
 }
 
 impl SessionStateEnvelope {
@@ -86,6 +88,7 @@ impl Default for SessionStateEnvelope {
             iteration: 0,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
+            mode_turn_options: crate::ModeTurnOptions::default(),
         }
     }
 }
@@ -104,6 +107,8 @@ pub struct PersistedSessionState {
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
+    #[serde(default)]
+    pub mode_turn_options: crate::ModeTurnOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_state_ref: Option<crate::store::BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +160,7 @@ impl PersistedSessionState {
             iteration: state.iteration,
             token_usage: state.token_usage,
             last_prompt_usage: state.last_prompt_usage,
+            mode_turn_options: state.mode_turn_options,
             dynamic_state_ref: None,
             dynamic_state_generation: None,
             dynamic_state_snapshot: None,
@@ -178,6 +184,7 @@ impl PersistedSessionState {
             iteration: self.iteration,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
+            mode_turn_options: self.mode_turn_options.clone(),
         }
     }
 
@@ -188,6 +195,7 @@ impl PersistedSessionState {
         self.iteration = state.iteration;
         self.token_usage = state.token_usage.clone();
         self.last_prompt_usage = state.last_prompt_usage.clone();
+        self.mode_turn_options = state.mode_turn_options.clone();
     }
 
     pub fn stamp_runtime_state(
@@ -266,6 +274,7 @@ impl PersistedSessionState {
             iteration: self.iteration,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
+            mode_turn_options: self.mode_turn_options.clone(),
         }
     }
 
@@ -333,6 +342,7 @@ impl Default for PersistedSessionState {
             iteration: 0,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
+            mode_turn_options: crate::ModeTurnOptions::default(),
             dynamic_state_ref: None,
             dynamic_state_generation: None,
             dynamic_state_snapshot: None,
@@ -393,6 +403,7 @@ pub(super) fn apply_session_checkpoint(
     state.iteration = checkpoint.turn_state.iteration;
     state.token_usage = checkpoint.turn_state.token_usage;
     state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
+    state.mode_turn_options = checkpoint.turn_state.mode_turn_options;
     state.dynamic_state_ref = checkpoint.dynamic_state_ref.clone();
     state.dynamic_state_generation = checkpoint
         .dynamic_state

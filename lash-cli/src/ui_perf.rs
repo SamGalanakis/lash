@@ -613,7 +613,11 @@ fn build_benchmark_harness(scenario: UiPerfScenario) -> UiPerfHarness {
 }
 
 fn build_benchmark_app() -> App {
-    let mut app = App::new("gpt-5.4".to_string(), "ui-perf".to_string());
+    let mut app = App::new(
+        "gpt-5.4".to_string(),
+        "ui-perf".to_string(),
+        "test-session-id".into(),
+    );
     app.blocks.clear();
     app.token_usage = TokenUsage {
         input_tokens: 208_000,

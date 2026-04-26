@@ -50,6 +50,7 @@ pub(super) async fn handle_clear(
             iteration: *turn_counter,
             token_usage: app.token_usage.clone(),
             last_prompt_usage: None,
+            mode_turn_options: rt.export_state().mode_turn_options,
         };
         state.replace_projection(history, &[]);
         rt.set_persisted_state(lash::PersistedSessionState::from_state(state));

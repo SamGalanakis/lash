@@ -547,6 +547,27 @@ impl SessionManager for RuntimeSessionManager {
             .remove(session_id))
     }
 
+    async fn session_mode_turn_options(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::ModeTurnOptions, crate::PluginError> {
+        if session_id == self.current_session_id {
+            let runtime = {
+                let registry = self.registry.lock().await;
+                registry.get(session_id).cloned()
+            };
+            if let Some(runtime) = runtime {
+                return Ok(runtime.lock().await.mode_turn_options.clone());
+            }
+        }
+        let runtime = {
+            let registry = self.registry.lock().await;
+            registry.get(session_id).cloned()
+        }
+        .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
+        Ok(runtime.lock().await.mode_turn_options.clone())
+    }
+
     async fn inject_turn_input(
         &self,
         session_id: &str,

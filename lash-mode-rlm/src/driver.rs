@@ -26,23 +26,22 @@ use lash::{
 use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
 
-pub const RLM_EXECUTION_SECTION: &str = r#"In RLM mode, **all execution goes through `lashlang`**. The API request intentionally sends **no** native tool schema (the `tools` array is empty by design) — **this does not mean you have no tools**. Every tool listed under **Available Tools** below is callable via `call tool_name { ... }` from inside a fenced `lashlang` block. Never tell the user you cannot inspect files, run commands, or use tools; you can. Emit a lashlang block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value from prior results. Plain prose is **only** for direct conversational replies that need no action.
+pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Every tool listed under **Available Tools** is callable as `call tool_name { ... }` from inside a fenced `lashlang` block. Emit a block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value. Plain prose is for direct conversational replies that need no action.
 
-### Two terminators — the distinction matters
+### `print` vs `submit`
 
-- `print <expr>` — **inspect a value; keep going.** Output is added to this turn's observations and shows up on the next step so you can refine. Use this to peek at tool results, check a slice of a file, or confirm a value before acting. The program does **not** end.
-- `submit <expr>` — **this is my final answer; end the turn.** The program ends and `<expr>` becomes the assistant's reply to the user (strings pass through; other values are pretty-JSON). If a **Required output** schema is present, the value must match it.
+- `print <expr>` — inspect a value and keep going. Output appears on the next step so you can refine. Use this to peek at tool results, check a slice of a file, or confirm a value before acting.
+- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply; other values render as pretty JSON. If a **Required output** schema is present, the value must match it.
 
-Never `submit` a raw tool-result dump to end the turn. If you need to look at something, `print` it and continue on the next step with a prose summary or a schema-shaped submit.
+Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
 
 ### Turn shape
 
-**Exactly one ` ```lashlang ` fenced block per response.** The runtime aborts the LLM stream the instant your first block closes (` ``` ` on its own line) and runs it immediately. A second fenced block, or trailing prose after the first one, is silently dropped. Only ` ```lashlang ` is recognised — `rlm` and other labels are treated as plain prose. Do not speculate about what the block will return; that's what the next turn is for.
+**Exactly one ` ```lashlang ` fenced block per response.** Anything after the first block closes is dropped. Only ` ```lashlang ` is recognised — `rlm` and other labels are treated as plain prose.
 
-- **Write small blocks.** Each block should do one focused step: call a tool or two, `print` what you need to see, then stop. Do not paste a whole program that reads five files and submits them.
-- Keep prose around the block to one or two sentences of reasoning. Do not describe an action in prose instead of executing it; if you say you will read a file, the block must contain the `call read_file`.
-- After each result, decide: another fenced block (more work), or finish.
-- Submit the final result with `submit <expr>`. Root-session `submit` values are rendered as-is; formatting requirements (Markdown, schema) are covered below.
+- Write small blocks. Each should do one focused step: call a tool or two, `print` what you need to see, then stop.
+- Keep prose around the block to one or two sentences of reasoning. Don't describe an action in prose instead of executing it.
+- After each result, decide: another block (more work), or finish.
 
 Example — inspect, then submit:
 
@@ -338,6 +337,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
         })];
 
         let mut assistant_text = String::new();
+        let mut reasoning_text = String::new();
         for part in normalized_response_parts(&llm_response) {
             match part {
                 LlmOutputPart::Text { text } => {
@@ -349,13 +349,13 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     } else {
                         text
                     };
-                    append_assistant_text_part(&mut assistant_text, &reasoning);
+                    append_assistant_text_part(&mut reasoning_text, &reasoning);
                 }
                 LlmOutputPart::ToolCall { .. } => {}
             }
         }
 
-        if assistant_text.trim().is_empty() {
+        if assistant_text.trim().is_empty() && reasoning_text.trim().is_empty() {
             actions.push(DriverAction::Emit(make_error_event(
                 "llm_provider",
                 Some("empty_response"),
@@ -368,15 +368,32 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
 
         let extraction = extract_first_lashlang_fence(&assistant_text);
         let Some(fence) = extraction else {
-            actions.push(DriverAction::AppendEvents(vec![
-                conversation_event(assistant_prose_message(assistant_text)),
-                conversation_event(typed_rlm_finish_reminder_message()),
-            ]));
-            actions.push(DriverAction::AdvanceIteration);
-            actions.push(DriverAction::StartCheckpoint {
-                checkpoint: CheckpointKind::AfterWork,
-                on_empty: CheckpointResumeAction::PrepareIteration,
-            });
+            match ctx.termination().rlm_termination() {
+                RlmTermination::ProseWithoutFence => {
+                    if !assistant_text.trim().is_empty() {
+                        actions.push(DriverAction::AppendEvents(vec![conversation_event(
+                            assistant_prose_message(assistant_text),
+                        )]));
+                    }
+                    actions.push(DriverAction::StartCheckpoint {
+                        checkpoint: CheckpointKind::BeforeCompletion,
+                        on_empty: CheckpointResumeAction::Finish,
+                    });
+                }
+                RlmTermination::Finish { .. } => {
+                    let mut events = Vec::new();
+                    if !assistant_text.trim().is_empty() {
+                        events.push(conversation_event(assistant_prose_message(assistant_text)));
+                    }
+                    events.push(conversation_event(submit_required_reminder_message()));
+                    actions.push(DriverAction::AppendEvents(events));
+                    actions.push(DriverAction::AdvanceIteration);
+                    actions.push(DriverAction::StartCheckpoint {
+                        checkpoint: CheckpointKind::AfterWork,
+                        on_empty: CheckpointResumeAction::PrepareIteration,
+                    });
+                }
+            }
             return actions;
         };
 
@@ -386,7 +403,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             .take_driver_state::<RlmDriverState>()
             .unwrap_or_default();
         state.executed_code = Some(fence.code.clone());
-        state.reasoning = assistant_text.clone();
+        state.reasoning = combine_reasoning_and_text(&reasoning_text, &assistant_text);
 
         // Emit the raw lashlang source as a `Message` with kind
         // `lashlang_code` so the CLI can reveal it in the full-expand
@@ -423,6 +440,10 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
 
         match result {
             Ok(response) => {
+                let baton_successor = response
+                    .tool_calls
+                    .iter()
+                    .find_map(baton_successor_from_tool_result);
                 for tool_call in &response.tool_calls {
                     actions.push(DriverAction::Emit(SessionEvent::ToolCall {
                         call_id: None,
@@ -458,6 +479,19 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 if let Some(finish_value) = response.terminal_finish {
                     state.terminal_finish = Some(finish_value);
                 }
+                if let Some(successor_session_id) = baton_successor {
+                    actions.push(DriverAction::AppendEvents(vec![trajectory_event(
+                        trajectory_entry(ctx.iteration(), &state, None, None),
+                    )]));
+                    actions.push(DriverAction::Emit(SessionEvent::SessionHandoff {
+                        session_id: successor_session_id,
+                    }));
+                    actions.push(DriverAction::StartCheckpoint {
+                        checkpoint: CheckpointKind::BeforeCompletion,
+                        on_empty: CheckpointResumeAction::Finish,
+                    });
+                    return actions;
+                }
             }
             Err(error) => {
                 state.exec_error = Some(error);
@@ -480,7 +514,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                         Some(error_text.clone()),
                         None,
                     )),
-                    conversation_event(typed_rlm_schema_error_message(&error_text)),
+                    conversation_event(submit_schema_mismatch_message(&error_text)),
                 ]));
                 actions.push(DriverAction::AdvanceIteration);
                 actions.push(DriverAction::StartCheckpoint {
@@ -537,6 +571,18 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
         });
         actions
     }
+}
+
+fn baton_successor_from_tool_result(record: &ToolCallRecord) -> Option<String> {
+    if record.tool != "pass_baton" || !record.success {
+        return None;
+    }
+    record
+        .result
+        .get("_baton")
+        .and_then(Value::as_str)
+        .filter(|session_id| !session_id.trim().is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn trajectory_entry(
@@ -635,6 +681,15 @@ fn extract_first_lashlang_fence(text: &str) -> Option<FenceExtraction> {
     })
 }
 
+fn combine_reasoning_and_text(reasoning: &str, text: &str) -> String {
+    match (reasoning.trim().is_empty(), text.trim().is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => text.to_string(),
+        (false, true) => reasoning.to_string(),
+        (false, false) => format!("{reasoning}\n\n{text}"),
+    }
+}
+
 fn assistant_prose_message(content: String) -> Message {
     let id = fresh_message_id();
     Message {
@@ -657,7 +712,7 @@ fn assistant_prose_message(content: String) -> Message {
     }
 }
 
-fn typed_rlm_finish_reminder_message() -> Message {
+fn submit_required_reminder_message() -> Message {
     let id = fresh_message_id();
     Message {
         id: id.clone(),
@@ -665,7 +720,7 @@ fn typed_rlm_finish_reminder_message() -> Message {
         parts: vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
-            content: "[runtime] You're in a typed RLM session. End by emitting a fenced ```lashlang block that calls `submit <expr>` with a value matching the required output schema. Prose-only replies are not accepted as the final answer here.".to_string(),
+            content: "[runtime] An output schema is required for the final answer. Wrap your reply in a fenced ```lashlang block and call `submit <value>` with a value matching the schema. Plain text outside a fence is not delivered.".to_string(),
             attachment: None,
             tool_call_id: None,
             tool_name: None,
@@ -679,7 +734,7 @@ fn typed_rlm_finish_reminder_message() -> Message {
     }
 }
 
-fn typed_rlm_schema_error_message(error_text: &str) -> Message {
+fn submit_schema_mismatch_message(error_text: &str) -> Message {
     let id = fresh_message_id();
     Message {
         id: id.clone(),

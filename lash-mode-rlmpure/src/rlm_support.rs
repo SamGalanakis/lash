@@ -3,6 +3,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use lash::PromptContribution;
 use lash::plugin::PromptHookContext;
 
+pub fn budget_prompt_contributions(
+    ctx: &PromptHookContext,
+    max_budget_tokens: Option<usize>,
+) -> Vec<PromptContribution> {
+    let Some(max) = max_budget_tokens else {
+        return Vec::new();
+    };
+    let used = ctx.state.token_usage().total().max(0) as usize;
+    if used == 0 {
+        return Vec::new();
+    }
+    let pct = (used * 100).checked_div(max).unwrap_or(0);
+    vec![PromptContribution::execution(
+        "Context Budget",
+        format!(
+            "Used: {used} / {max} tokens ({pct}%)\nHand off via `pass_baton` when this becomes inefficient. The next agent starts fresh."
+        ),
+    )]
+}
+
 pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
     let globals = ctx.state.projected_rlm_globals();
     if globals.is_empty() {

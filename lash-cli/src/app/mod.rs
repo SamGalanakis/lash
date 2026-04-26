@@ -573,6 +573,9 @@ pub struct App {
     pub live_output_tokens_estimate: i64,
     /// Unique session name (e.g. "alpine-canyon").
     pub session_name: String,
+    /// Live session id (UUID) for the active runtime. Updated on resume,
+    /// fork, and handoff so UI sync calls target the real session.
+    pub session_id: String,
     /// Repo/branch/worktree metadata for the current cwd, when available.
     pub repo_status: Option<RepoStatus>,
     /// Active plugin-owned mode indicators rendered in the input chrome.
@@ -809,7 +812,7 @@ impl App {
         self.keep_latest_user_block_visible();
     }
 
-    pub fn new(model: String, session_name: String) -> Self {
+    pub fn new(model: String, session_name: String, session_id: String) -> Self {
         let cwd = {
             let home = std::env::var("HOME").unwrap_or_default();
             let dir = std::env::current_dir()
@@ -860,6 +863,7 @@ impl App {
             live_output_chars_estimate: 0,
             live_output_tokens_estimate: 0,
             session_name,
+            session_id,
             repo_status: std::env::current_dir()
                 .ok()
                 .and_then(|cwd| crate::repo_status::detect_repo_status(&cwd)),
@@ -1563,6 +1567,9 @@ impl App {
             }
             SessionEvent::InjectedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
+            }
+            SessionEvent::SessionHandoff { session_id } => {
+                self.queue_session_switch(PendingSessionSwitch::new(session_id, None));
             }
             SessionEvent::TypedFinish { .. } => {}
             SessionEvent::LlmResponse { .. } => {}

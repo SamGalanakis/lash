@@ -151,6 +151,8 @@ pub struct PersistedTurnState {
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
+    #[serde(default)]
+    pub mode_turn_options: crate::ModeTurnOptions,
 }
 
 #[derive(Clone, Debug)]

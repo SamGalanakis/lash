@@ -437,6 +437,7 @@ fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::Pe
         iteration: state.iteration,
         token_usage: state.token_usage.clone(),
         last_prompt_usage: state.last_prompt_usage.clone(),
+        mode_turn_options: state.mode_turn_options.clone(),
     }
 }
 
@@ -518,6 +519,7 @@ fn persisted_session_state_from_head(
         iteration: 0,
         token_usage: crate::TokenUsage::default(),
         last_prompt_usage: None,
+        mode_turn_options: crate::ModeTurnOptions::default(),
         dynamic_state_ref: None,
         dynamic_state_generation: None,
         dynamic_state_snapshot: None,
@@ -543,6 +545,7 @@ fn persisted_session_state_from_head(
         state.iteration = checkpoint.turn_state.iteration;
         state.token_usage = checkpoint.turn_state.token_usage;
         state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
+        state.mode_turn_options = checkpoint.turn_state.mode_turn_options;
         state.dynamic_state_ref = checkpoint.dynamic_state_ref.clone();
         state.dynamic_state_generation = checkpoint
             .dynamic_state
@@ -2179,6 +2182,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 last_prompt_usage: None,
+                mode_turn_options: Default::default(),
             },
             dynamic_state_ref: None,
             dynamic_state: None,

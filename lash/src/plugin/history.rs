@@ -105,6 +105,7 @@ impl SessionReadMeta {
             iteration: self.iteration,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
+            mode_turn_options: crate::ModeTurnOptions::default(),
         }
     }
 }

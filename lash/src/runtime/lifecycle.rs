@@ -8,7 +8,7 @@ impl LashRuntime {
         mut state: PersistedSessionState,
     ) -> Result<Self, SessionError> {
         if state.session_id.is_empty() {
-            state.session_id = "root".to_string();
+            state.session_id = uuid::Uuid::new_v4().to_string();
         }
         // Defaulted state (e.g. `PersistedSessionState::default()` used
         // by fresh-session constructors) carries an unconfigured policy.
@@ -58,6 +58,7 @@ impl LashRuntime {
                 state.read_view(),
             ))
             .await;
+        let mode_turn_options = state.mode_turn_options.clone();
         Ok(Self {
             session: Some(session),
             policy,
@@ -68,7 +69,7 @@ impl LashRuntime {
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
             overflow_recovery_attempted: false,
-            mode_turn_options: crate::ModeTurnOptions::default(),
+            mode_turn_options,
             shared_token_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_sync_needed: Arc::new(AtomicBool::new(false)),
             pending_first_turn_inputs: Arc::new(std::sync::Mutex::new(HashMap::new())),

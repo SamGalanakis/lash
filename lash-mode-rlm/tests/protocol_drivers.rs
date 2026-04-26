@@ -45,12 +45,6 @@ fn test_config_with_termination(
     }
 }
 
-fn autonomous_rlm_config() -> TurnMachineConfig {
-    let mut config = test_config(ExecutionMode::new("rlm"));
-    config.autonomous = true;
-    config
-}
-
 fn user_message(content: &str) -> Message {
     Message {
         id: "m0".to_string(),
@@ -376,8 +370,41 @@ fn standard_max_turns_stops_iteration() {
 }
 
 #[test]
-fn rlm_prose_only_response_requests_lashlang_submit() {
+fn rlm_prose_only_response_emits_done() {
     let config = test_config(ExecutionMode::new("rlm"));
+    let msgs = vec![user_message("hello")];
+    let mut machine = TurnMachine::new(config, msgs, 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "Hello there!".to_string(),
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+    machine.handle_response(Response::Checkpoint {
+        id: checkpoint_id,
+        messages: Vec::new(),
+        transient_messages: Vec::new(),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(find_done(&effects).is_some());
+}
+
+#[test]
+fn typed_rlm_prose_only_response_requests_submit() {
+    let config = test_config_with_termination(
+        ExecutionMode::new("rlm"),
+        RlmTermination::Finish { schema: None },
+    );
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, 0);
 
@@ -397,47 +424,10 @@ fn rlm_prose_only_response_requests_lashlang_submit() {
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     assert!(machine.messages().iter().any(|message| {
         message.role == MessageRole::User
-            && message
-                .parts
-                .iter()
-                .any(|part| part.content.contains("Prose-only replies are not accepted"))
-    }));
-    machine.handle_response(Response::Checkpoint {
-        id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
-    });
-
-    let effects = drain_effects(&mut machine);
-    assert!(find_llm_call(&effects).is_some());
-}
-
-#[test]
-fn autonomous_rlm_prose_only_response_continues_iteration() {
-    let config = autonomous_rlm_config();
-    let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
-
-    let effects = drain_effects(&mut machine);
-    let llm_id = *find_llm_call(&effects).expect("llm call");
-    machine.handle_response(Response::LlmComplete {
-        id: llm_id,
-        text_streamed: false,
-        result: Ok(LlmResponse {
-            full_text: "I should inspect the files first.".to_string(),
-            ..LlmResponse::default()
-        }),
-    });
-
-    let effects = drain_effects(&mut machine);
-    let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-    assert_eq!(checkpoint, CheckpointKind::AfterWork);
-    assert!(machine.messages().iter().any(|message| {
-        message.role == MessageRole::User
-            && message
-                .parts
-                .iter()
-                .any(|part| part.content.contains("Prose-only replies are not accepted"))
+            && message.parts.iter().any(|part| {
+                part.content.contains("output schema is required")
+                    && part.content.contains("submit")
+            })
     }));
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,

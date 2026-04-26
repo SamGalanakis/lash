@@ -548,6 +548,7 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 fn materialize_child_from_graph(
+    child_session_id: &str,
     child_store: &lash::Store,
     parent_store: &lash::Store,
     graph: &lash::SessionGraph,
@@ -561,7 +562,7 @@ fn materialize_child_from_graph(
             .map(|checkpoint| child_store.put_checkpoint(&checkpoint).checkpoint_ref)
     });
     child_store.save_session_head(lash::SessionHead {
-        session_id: crate::ROOT_SESSION_ID.to_string(),
+        session_id: child_session_id.to_string(),
         graph: child_graph.clone(),
         config: config.clone(),
         checkpoint_ref: child_checkpoint_ref.clone(),
@@ -588,11 +589,16 @@ pub async fn fork_current_session(
     if let Some(runtime) = runtime {
         persist_parent_root_snapshot(runtime, logger.store().as_ref()).await?;
     }
+    let child_bootstrap = SessionBootstrap::fork_child(&logger.session_id, configured_model)?;
+    let child_store = child_bootstrap.store();
+    let child_meta = child_store
+        .load_session_meta()
+        .ok_or_else(|| anyhow!("Fork child session metadata was not created"))?;
     let parent_head = logger
         .store()
         .load_session_head()
         .unwrap_or(lash::SessionHead {
-            session_id: crate::ROOT_SESSION_ID.to_string(),
+            session_id: child_meta.session_id.clone(),
             graph: lash::SessionGraph::default(),
             config: lash::PersistedSessionConfig {
                 provider_id: _provider.kind().to_string(),
@@ -605,13 +611,8 @@ pub async fn fork_current_session(
             checkpoint_ref: None,
             token_ledger: Vec::new(),
         });
-
-    let child_bootstrap = SessionBootstrap::fork_child(&logger.session_id, configured_model)?;
-    let child_store = child_bootstrap.store();
-    let child_meta = child_store
-        .load_session_meta()
-        .ok_or_else(|| anyhow!("Fork child session metadata was not created"))?;
     materialize_child_from_graph(
+        &child_meta.session_id,
         child_store.as_ref(),
         logger.store().as_ref(),
         &parent_head.graph,
@@ -664,6 +665,7 @@ mod fork_tests {
                     reasoning_tokens: 2,
                 },
                 last_prompt_usage: None,
+                mode_turn_options: Default::default(),
             },
             dynamic_state_ref: None,
             dynamic_state: Some(empty_dynamic_state()),

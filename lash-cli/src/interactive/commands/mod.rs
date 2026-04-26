@@ -54,7 +54,7 @@ async fn handle_ui_command(
             &invocation,
             UiContext {
                 plugin_host,
-                session_id: crate::ROOT_SESSION_ID,
+                session_id: app.session_id.as_str(),
                 session_manager: Arc::clone(session_manager),
             },
         )

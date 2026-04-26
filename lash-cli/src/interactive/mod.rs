@@ -84,7 +84,8 @@ pub(crate) async fn run_app(
     initial_execution_mode: ExecutionMode,
     startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut app = App::new(model, session_name);
+    let initial_session_id = runtime.session_id().to_string();
+    let mut app = App::new(model, session_name, initial_session_id);
     let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = vec![Arc::new(
         lash_autoresearch::AutoresearchUiExtension::default(),
     )];

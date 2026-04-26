@@ -359,6 +359,7 @@ mod tests {
                     iteration: 1,
                     token_usage,
                     last_prompt_usage: None,
+                    mode_turn_options: Default::default(),
                 },
                 dynamic_state_ref: None,
                 dynamic_state: Some(lash::DynamicStateSnapshot {

@@ -1,18 +1,19 @@
 use std::sync::{Arc, Mutex};
 
 use lash::plugin::{
-    ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
-    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+    CheckpointHookContext, ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext,
+    ModeSessionPlugin, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
+    PluginSessionContext, SessionPlugin,
 };
 use lash::tools::DiscoveryToolsProvider;
 use lash::{
-    ExecutionMode, ModeBuildInput, ModePreamble, PromptContribution, SessionError,
+    CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, PromptContribution, SessionError,
     ToolResultProjectionPluginConfig,
 };
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmpureCreateExtras};
 
 use crate::driver::{RlmpureProjectorConfig, build_rlmpure_preamble};
-use crate::rlm_support::bound_variables_prompt_contributions;
+use crate::rlm_support::{bound_variables_prompt_contributions, budget_prompt_contributions};
 use crate::stream_mask;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -21,10 +22,16 @@ pub struct RlmpureModePluginConfig {
     pub observe_projection: ToolResultProjectionPluginConfig,
     #[serde(default = "default_max_output_chars")]
     pub max_output_chars: usize,
+    #[serde(default = "default_baton_soft_warn_tokens")]
+    pub baton_soft_warn_tokens: Option<usize>,
 }
 
 fn default_max_output_chars() -> usize {
     10_000
+}
+
+fn default_baton_soft_warn_tokens() -> Option<usize> {
+    Some(100_000)
 }
 
 impl Default for RlmpureModePluginConfig {
@@ -32,6 +39,7 @@ impl Default for RlmpureModePluginConfig {
         Self {
             observe_projection: ToolResultProjectionPluginConfig::default(),
             max_output_chars: default_max_output_chars(),
+            baton_soft_warn_tokens: default_baton_soft_warn_tokens(),
         }
     }
 }
@@ -81,8 +89,8 @@ impl SessionPlugin for RlmpureModePlugin {
         if !self.active {
             return Ok(());
         }
-        reg.mode()
-            .session(Arc::new(RlmpureModeSession::new(self.config.clone())))?;
+        let mode_session = Arc::new(RlmpureModeSession::new(self.config.clone()));
+        reg.mode().session(mode_session.clone())?;
         reg.mode().protocol_driver(Arc::new(RlmpureProtocolDriver {
             config: self.config.clone(),
         }))?;
@@ -94,10 +102,22 @@ impl SessionPlugin for RlmpureModePlugin {
         });
         reg.prompt().contribute(bound_vars_hook);
 
+        let max_budget_tokens = self.config.baton_soft_warn_tokens;
+        let budget_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
+            Box::pin(async move { Ok(budget_prompt_contributions(&ctx, max_budget_tokens)) })
+        });
+        reg.prompt().contribute(budget_hook);
+
         let print_output_hook: lash::plugin::PromptContributor = Arc::new(move |_ctx| {
             Box::pin(async move { Ok(vec![print_output_prompt_contribution()]) })
         });
         reg.prompt().contribute(print_output_hook);
+
+        let warn_session = mode_session.clone();
+        reg.turn().checkpoint(Arc::new(move |ctx| {
+            let session = warn_session.clone();
+            Box::pin(async move { session.soft_warn_directives(ctx) })
+        }));
 
         stream_mask::register_stream_mask(reg)?;
         Ok(())
@@ -126,13 +146,14 @@ impl ModeProtocolDriverPlugin for RlmpureProtocolDriver {
 fn print_output_prompt_contribution() -> PromptContribution {
     PromptContribution::execution(
         "Print Output",
-        "`print` output is capped before reinjection into the REPL trajectory. If you see truncation, print narrower slices or specific fields instead of dumping the whole value.",
+        "`print` output is capped. If you see truncation, print narrower slices or specific fields instead of dumping the whole value.",
     )
 }
 
 struct RlmpureModeSession {
     config: RlmpureModePluginConfig,
     user_input_count: Mutex<usize>,
+    warned_at_threshold: Mutex<bool>,
 }
 
 impl RlmpureModeSession {
@@ -140,7 +161,43 @@ impl RlmpureModeSession {
         Self {
             config,
             user_input_count: Mutex::new(0),
+            warned_at_threshold: Mutex::new(false),
         }
+    }
+
+    fn soft_warn_directives(
+        &self,
+        ctx: CheckpointHookContext,
+    ) -> Result<Vec<PluginDirective>, PluginError> {
+        if ctx.checkpoint != CheckpointKind::AfterWork {
+            return Ok(Vec::new());
+        }
+        let Some(threshold) = self.config.baton_soft_warn_tokens else {
+            return Ok(Vec::new());
+        };
+        let used = ctx.state.token_usage().total().max(0) as usize;
+        if used == 0 {
+            return Ok(Vec::new());
+        }
+        if used < threshold {
+            return Ok(Vec::new());
+        }
+        let mut warned = self
+            .warned_at_threshold
+            .lock()
+            .map_err(|_| PluginError::Session("rlmpure soft-warning state poisoned".to_string()))?;
+        if *warned {
+            return Ok(Vec::new());
+        }
+        *warned = true;
+        Ok(vec![PluginDirective::EnqueueMessages {
+            messages: vec![lash::PluginMessage::text(
+                lash::MessageRole::User,
+                format!(
+                    "[runtime] Context budget at {used} tokens, past the {threshold}-token warning threshold. If your progress is captured in named lashlang variables, prefer `pass_baton(task=..., seed={{...}})` over continuing here. Otherwise, continue but keep the budget in mind."
+                ),
+            )],
+        }])
     }
 }
 
@@ -203,15 +260,12 @@ impl ModeSessionPlugin for RlmpureModeSession {
             .expect("rlmpure user input count lock") = next_count;
 
         for node in nodes {
-            match node {
-                lash::SessionAppendNode::Event {
-                    event: lash::SessionEventRecord::Mode(event),
-                } => {
-                    if let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = event.rlm_event() {
-                        ctx.apply_mode_globals_patch(&patch).await?;
-                    }
-                }
-                _ => {}
+            if let lash::SessionAppendNode::Event {
+                event: lash::SessionEventRecord::Mode(event),
+            } = node
+                && let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = event.rlm_event()
+            {
+                ctx.apply_mode_globals_patch(&patch).await?;
             }
         }
         Ok(())
@@ -242,9 +296,9 @@ fn user_input_patch_from_nodes(
         let text = match node {
             lash::SessionAppendNode::Event {
                 event: lash::SessionEventRecord::Conversation(record),
-            } if record.role == lash::MessageRole::User => conversation_text(record),
+            } if should_bind_conversation_user_input(record) => conversation_text(record),
             lash::SessionAppendNode::Message { message }
-                if message.role == lash::MessageRole::User =>
+                if should_bind_plugin_message_user_input(message) =>
             {
                 plugin_message_text(message)
             }
@@ -272,7 +326,7 @@ fn user_input_patch_from_events<'a>(
         let lash::SessionEventRecord::Conversation(record) = event else {
             continue;
         };
-        if record.role != lash::MessageRole::User {
+        if !should_bind_conversation_user_input(record) {
             continue;
         }
         let Some(text) = conversation_text(record) else {
@@ -287,11 +341,23 @@ fn user_input_patch_from_events<'a>(
     (patch, next_index)
 }
 
+fn should_bind_conversation_user_input(record: &lash::ConversationRecord) -> bool {
+    record.role == lash::MessageRole::User
+        && !matches!(
+            record.origin.as_ref(),
+            Some(lash::MessageOrigin::Plugin { .. })
+        )
+}
+
+fn should_bind_plugin_message_user_input(_message: &lash::PluginMessage) -> bool {
+    false
+}
+
 fn conversation_text(record: &lash::ConversationRecord) -> Option<String> {
-    if let Some(user_input) = &record.user_input {
-        if !user_input.effective_text.trim().is_empty() {
-            return Some(user_input.effective_text.clone());
-        }
+    if let Some(user_input) = &record.user_input
+        && !user_input.effective_text.trim().is_empty()
+    {
+        return Some(user_input.effective_text.clone());
     }
     let chunks = record
         .parts
@@ -304,10 +370,10 @@ fn conversation_text(record: &lash::ConversationRecord) -> Option<String> {
 }
 
 fn plugin_message_text(message: &lash::PluginMessage) -> Option<String> {
-    if let Some(user_input) = &message.user_input {
-        if !user_input.effective_text.trim().is_empty() {
-            return Some(user_input.effective_text.clone());
-        }
+    if let Some(user_input) = &message.user_input
+        && !user_input.effective_text.trim().is_empty()
+    {
+        return Some(user_input.effective_text.clone());
     }
     if !message.content.trim().is_empty() {
         return Some(message.content.clone());
@@ -325,6 +391,61 @@ fn plugin_message_text(message: &lash::PluginMessage) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NoopPromptManager;
+
+    #[async_trait::async_trait]
+    impl lash::plugin::SessionManager for NoopPromptManager {
+        async fn snapshot_current(
+            &self,
+        ) -> Result<lash::PersistedSessionState, lash::plugin::PluginError> {
+            Err(lash::plugin::PluginError::Session("not used".to_string()))
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<lash::PersistedSessionState, lash::plugin::PluginError> {
+            Err(lash::plugin::PluginError::Session("not used".to_string()))
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, lash::plugin::PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            _request: lash::SessionCreateRequest,
+        ) -> Result<lash::SessionHandle, lash::plugin::PluginError> {
+            Err(lash::plugin::PluginError::Session("not used".to_string()))
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), lash::plugin::PluginError> {
+            Ok(())
+        }
+
+        async fn start_turn_stream(
+            &self,
+            _session_id: &str,
+            _input: lash::TurnInput,
+        ) -> Result<lash::SessionTurnHandle, lash::plugin::PluginError> {
+            Err(lash::plugin::PluginError::Session("not used".to_string()))
+        }
+
+        async fn await_turn(
+            &self,
+            _turn_id: &str,
+        ) -> Result<lash::AssembledTurn, lash::plugin::PluginError> {
+            Err(lash::plugin::PluginError::Session("not used".to_string()))
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::plugin::PluginError> {
+            Ok(())
+        }
+    }
 
     fn user_event(id: &str, text: &str) -> lash::SessionEventRecord {
         lash::SessionEventRecord::Conversation(lash::ConversationRecord {
@@ -349,7 +470,7 @@ mod tests {
 
     #[test]
     fn user_input_patch_from_events_binds_messages_in_order() {
-        let events = vec![
+        let events = [
             user_event("u1", "first"),
             lash::SessionEventRecord::Conversation(lash::ConversationRecord {
                 id: "a1".to_string(),
@@ -370,12 +491,104 @@ mod tests {
 
     #[test]
     fn user_input_patch_from_nodes_continues_existing_count() {
-        let nodes = vec![lash::SessionAppendNode::Message {
-            message: lash::PluginMessage::text(lash::MessageRole::User, "third"),
+        let nodes = vec![lash::SessionAppendNode::Event {
+            event: user_event("u3", "third"),
         }];
         let (patch, count) = user_input_patch_from_nodes(&nodes, 2);
 
         assert_eq!(count, 3);
         assert_eq!(patch.set["user_input_3"], serde_json::json!("third"));
+    }
+
+    #[test]
+    fn plugin_origin_user_message_does_not_pollute_user_input_count() {
+        let mut event = user_event("plugin", "soft warning");
+        let lash::SessionEventRecord::Conversation(record) = &mut event else {
+            unreachable!("user_event returns conversation")
+        };
+        record.origin = Some(lash::MessageOrigin::Plugin {
+            plugin_id: "mode_rlmpure".to_string(),
+            transient: false,
+        });
+
+        let (patch, count) = user_input_patch_from_events([event].iter(), 0);
+
+        assert_eq!(count, 0);
+        assert!(patch.set.is_empty());
+    }
+
+    #[test]
+    fn budget_prompt_contribution_renders_used_over_configured_budget() {
+        let state = lash::SessionStateEnvelope {
+            policy: lash::SessionPolicy {
+                max_context_tokens: Some(1_050_000),
+                ..Default::default()
+            },
+            token_usage: lash::TokenUsage {
+                input_tokens: 40_000,
+                output_tokens: 7_000,
+                reasoning_tokens: 213,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = lash::plugin::PromptHookContext {
+            session_id: "root".to_string(),
+            host: std::sync::Arc::new(NoopPromptManager),
+            state: lash::SessionReadView::new(state),
+            mode_turn_options: lash::ModeTurnOptions::default(),
+        };
+
+        let contributions = budget_prompt_contributions(&ctx, Some(200_000));
+
+        assert_eq!(contributions.len(), 1);
+        assert!(contributions[0].content.contains("47213 / 200000"));
+        assert!(contributions[0].content.contains("23%"));
+    }
+
+    #[test]
+    fn budget_prompt_contribution_omits_without_configured_budget() {
+        let state = lash::SessionStateEnvelope {
+            policy: lash::SessionPolicy {
+                max_context_tokens: Some(1_050_000),
+                ..Default::default()
+            },
+            token_usage: lash::TokenUsage {
+                input_tokens: 47_213,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = lash::plugin::PromptHookContext {
+            session_id: "root".to_string(),
+            host: std::sync::Arc::new(NoopPromptManager),
+            state: lash::SessionReadView::new(state),
+            mode_turn_options: lash::ModeTurnOptions::default(),
+        };
+
+        let contributions = budget_prompt_contributions(&ctx, None);
+
+        assert!(contributions.is_empty());
+    }
+
+    #[test]
+    fn budget_prompt_contribution_omits_without_used_tokens() {
+        let state = lash::SessionStateEnvelope {
+            policy: lash::SessionPolicy {
+                max_context_tokens: Some(1_050_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = lash::plugin::PromptHookContext {
+            session_id: "root".to_string(),
+            host: std::sync::Arc::new(NoopPromptManager),
+            state: lash::SessionReadView::new(state),
+            mode_turn_options: lash::ModeTurnOptions::default(),
+        };
+
+        let contributions = budget_prompt_contributions(&ctx, Some(200_000));
+
+        assert!(contributions.is_empty());
     }
 }
