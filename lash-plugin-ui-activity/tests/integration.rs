@@ -12,7 +12,7 @@ fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
     PersistedSessionState::from_state(SessionStateEnvelope {
         session_id: "root".to_string(),
         policy: SessionPolicy {
-            execution_mode: ExecutionMode::Standard,
+            execution_mode: ExecutionMode::standard(),
             session_id: Some(run_session_id.to_string()),
             ..Default::default()
         },

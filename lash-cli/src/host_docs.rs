@@ -246,7 +246,7 @@ mod tests {
                 session_id: "root".to_string(),
                 host: Arc::new(lash::testing::MockSessionManager::default()),
                 state: lash::SessionReadView::new(lash::SessionStateEnvelope::default()),
-                rlm_termination: lash::RlmTermination::default(),
+                mode_turn_options: lash::ModeTurnOptions::default(),
             })
             .await
             .expect("prompt contributions");

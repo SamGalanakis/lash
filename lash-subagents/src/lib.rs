@@ -17,11 +17,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lash::plugin::{PluginError, PluginFactory, PluginSessionContext, ToolSurfaceOverride};
 use lash::{
-    InputItem, ModeExtras, PluginSpec, PluginSpecFactory, ProgressSender, RlmCreateExtras,
-    RlmTermination, SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionStartPoint,
-    ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult, ToolSurfaceContribution,
-    TurnInput,
+    InputItem, ModeExtras, PluginSpec, PluginSpecFactory, ProgressSender, SessionCreateRequest,
+    SessionPluginMode, SessionPolicy, SessionStartPoint, ToolDefinition, ToolExecutionContext,
+    ToolProvider, ToolResult, ToolSurfaceContribution, TurnInput,
 };
+use lash_rlm_types::{RlmCreateExtras, RlmTermination, RlmpureCreateExtras};
 use serde_json::{Value, json};
 
 pub use host::{
@@ -79,7 +79,9 @@ impl SubagentToolsProvider {
             provider: current_policy.provider.clone(),
             max_context_tokens: current_policy.max_context_tokens,
             max_turns: None,
-            execution_mode: spec.execution_mode.unwrap_or(current_policy.execution_mode),
+            execution_mode: spec
+                .execution_mode
+                .unwrap_or_else(|| current_policy.execution_mode.clone()),
             ..Default::default()
         })
     }
@@ -99,12 +101,24 @@ impl SubagentToolsProvider {
         let mut policy = self.build_session_policy(&current_snapshot.policy, capability_name)?;
         let mut mode_extras = ModeExtras::default();
         if let Some(schema) = output_schema.clone() {
-            policy.execution_mode = lash::ExecutionMode::Rlm;
-            mode_extras = ModeExtras::Rlm(RlmCreateExtras {
-                termination: RlmTermination::Finish {
-                    schema: Some(schema),
-                },
-            });
+            let termination = RlmTermination::Finish {
+                schema: Some(schema),
+            };
+            if current_snapshot.policy.execution_mode == lash::ExecutionMode::new("rlmpure") {
+                policy.execution_mode = lash::ExecutionMode::new("rlmpure");
+                mode_extras = ModeExtras::typed(
+                    lash::ExecutionMode::new("rlmpure"),
+                    RlmpureCreateExtras { termination },
+                )
+                .map_err(|err| format!("failed to encode rlmpure mode extras: {err}"))?;
+            } else {
+                policy.execution_mode = lash::ExecutionMode::new("rlm");
+                mode_extras = ModeExtras::typed(
+                    lash::ExecutionMode::new("rlm"),
+                    RlmCreateExtras { termination },
+                )
+                .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
+            }
         }
         let start = match fork_turns {
             ForkTurns::None => SessionStartPoint::Empty,
@@ -123,6 +137,7 @@ impl SubagentToolsProvider {
             policy: Some(policy),
             plugin_mode: SessionPluginMode::Fresh,
             initial_nodes: Vec::new(),
+            first_turn_input: None,
             context_surface: lash::SessionContextSurface::default(),
             mode_extras,
             usage_source: Some("subagent".to_string()),
@@ -157,7 +172,7 @@ impl SubagentToolsProvider {
             image_blobs: std::collections::HashMap::new(),
             user_input: None,
             mode: None,
-            rlm_termination_override: None,
+            mode_turn_options: None,
         };
         let response = self
             .host
@@ -206,12 +221,12 @@ impl SubagentToolsProvider {
         // subagent. When `output` is omitted, the follow-up explicitly
         // drops any inherited schema by running with
         // `ProseWithoutFence`.
-        let rlm_termination_override = Some(match output_schema.clone() {
+        let mode_turn_options = Some(lash::ModeTurnOptions::rlm(match output_schema.clone() {
             Some(schema) => RlmTermination::Finish {
                 schema: Some(schema),
             },
             None => RlmTermination::ProseWithoutFence,
-        });
+        }));
         let response = self
             .host
             .followup_task(
@@ -229,7 +244,7 @@ impl SubagentToolsProvider {
                         image_blobs: std::collections::HashMap::new(),
                         user_input: None,
                         mode: None,
-                        rlm_termination_override,
+                        mode_turn_options,
                     },
                     task,
                     delivery: DeliveryMode::parse(args.get("delivery").and_then(Value::as_str))?,
@@ -296,7 +311,7 @@ impl SubagentToolsProvider {
 #[async_trait]
 impl ToolProvider for SubagentToolsProvider {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        subagent_tool_definitions(self.execution_mode, &self.registry)
+        subagent_tool_definitions(self.execution_mode.clone(), &self.registry)
     }
 
     async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
@@ -367,9 +382,9 @@ impl PluginFactory for SubagentsPluginFactory {
         ctx: &PluginSessionContext,
     ) -> Result<Arc<dyn lash::SessionPlugin>, PluginError> {
         let mut policy = self.policy.clone();
-        policy.execution_mode = ctx.execution_mode;
+        policy.execution_mode = ctx.execution_mode.clone();
         let provider = Arc::new(SubagentToolsProvider {
-            execution_mode: ctx.execution_mode,
+            execution_mode: ctx.execution_mode.clone(),
             registry: Arc::clone(&self.registry),
             host: Arc::clone(&self.host),
         });
@@ -737,10 +752,10 @@ mod tests {
     fn tool_definitions_are_mode_specific_but_mode_neutral_in_description() {
         let registry = default_registry(
             &std::collections::BTreeMap::new(),
-            lash::ExecutionMode::Standard,
+            lash::ExecutionMode::standard(),
         );
-        let standard = subagent_tool_definitions(lash::ExecutionMode::Standard, &registry);
-        let rlm = subagent_tool_definitions(lash::ExecutionMode::Rlm, &registry);
+        let standard = subagent_tool_definitions(lash::ExecutionMode::standard(), &registry);
+        let rlm = subagent_tool_definitions(lash::ExecutionMode::new("rlm"), &registry);
 
         let standard_spawn = standard
             .iter()
@@ -873,21 +888,21 @@ mod tests {
         }
         let stale_policy = SessionPolicy {
             provider: tiered_provider("stale").into_handle(),
-            execution_mode: lash::ExecutionMode::Standard,
+            execution_mode: lash::ExecutionMode::standard(),
             ..SessionPolicy::default()
         };
         let live_policy = SessionPolicy {
             provider: tiered_provider("live").into_handle(),
-            execution_mode: lash::ExecutionMode::Standard,
+            execution_mode: lash::ExecutionMode::standard(),
             max_context_tokens: Some(1234),
             ..SessionPolicy::default()
         };
         let registry = Arc::new(default_registry(
             &std::collections::BTreeMap::new(),
-            lash::ExecutionMode::Standard,
+            lash::ExecutionMode::standard(),
         ));
         let provider = SubagentToolsProvider {
-            execution_mode: lash::ExecutionMode::Standard,
+            execution_mode: lash::ExecutionMode::standard(),
             registry: Arc::clone(&registry),
             host: Arc::new(LocalSubagentHost::default()),
         };

@@ -380,7 +380,7 @@ fn persisted_session_config_from_state(
         provider_id: state.policy.provider.kind().to_string(),
         configured_model: state.policy.model.clone(),
         context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
-        execution_mode: state.policy.execution_mode,
+        execution_mode: state.policy.execution_mode.clone(),
         context_approach: state.policy.context_approach.clone(),
         model_variant: state.policy.model_variant.clone(),
     }
@@ -1075,7 +1075,13 @@ pub fn decode_checkpoint(bytes: &[u8]) -> Option<SessionCheckpoint> {
 }
 
 fn encode_msgpack<T: serde::Serialize>(value: &T) -> Vec<u8> {
-    rmp_serde::to_vec_named(value).expect("value should serialize")
+    // Pre-size the buffer so the per-byte writes inside rmp_serde don't
+    // walk the Vec through 0→4→8→16→32… reallocations on every call.
+    // 1 KiB covers most small records (head meta, ledger entries) without
+    // wasting much for the rare large blob.
+    let mut buf = Vec::with_capacity(1024);
+    rmp_serde::encode::write_named(&mut buf, value).expect("value should serialize");
+    buf
 }
 
 fn decode_msgpack<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
@@ -2091,7 +2097,7 @@ mod tests {
         target.head_copy_from_store(&source);
 
         let graph = target.load_session_head().expect("session head").graph;
-        let messages = graph.project_messages();
+        let messages = graph.project_conversation_messages();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].parts[0].content, "hello");
         assert_eq!(messages[1].parts[0].content, "world");
@@ -2123,7 +2129,7 @@ mod tests {
         });
 
         let graph = store.load_session_head().expect("session head").graph;
-        let messages = graph.project_messages();
+        let messages = graph.project_conversation_messages();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].parts[0].content, "updated");
     }

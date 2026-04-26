@@ -1,40 +1,54 @@
 use std::sync::Arc;
 
-use lash::ExecutionMode;
-use lash::sansio::{self, Effect, ProtocolDriverHandle, Response, TurnMachine, TurnMachineConfig};
+use lash::sansio::{self, ChatContextProjector, ProtocolDriverHandle, Response};
+use lash::{Effect, ExecutionMode, TurnMachine, TurnMachineConfig};
 use lash_mode_rlm::RlmDriver;
 use lash_mode_standard::StandardDriver;
+use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 use lash_sansio::{
     CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, RetryPolicy, SessionEvent,
 };
 
 fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
-    test_config_with_termination(mode, sansio::RlmTermination::default())
+    test_config_with_termination(mode, RlmTermination::default())
 }
 
 fn test_config_with_termination(
     mode: ExecutionMode,
-    rlm_termination: sansio::RlmTermination,
+    rlm_termination: RlmTermination,
 ) -> TurnMachineConfig {
-    let protocol_driver: Arc<dyn ProtocolDriverHandle> = match mode {
-        ExecutionMode::Standard => Arc::new(StandardDriver),
-        ExecutionMode::Rlm => Arc::new(RlmDriver),
+    let protocol_driver: Arc<dyn ProtocolDriverHandle<lash::HostModeProtocol>> = match &mode {
+        mode if *mode == ExecutionMode::standard() => Arc::new(StandardDriver),
+        mode if *mode == ExecutionMode::new("rlm") || *mode == ExecutionMode::new("rlmpure") => {
+            Arc::new(RlmDriver)
+        }
+        _ => Arc::new(StandardDriver),
     };
     TurnMachineConfig {
         protocol_driver,
-        sync_execution_surface: matches!(mode, ExecutionMode::Rlm),
+        projector: Arc::new(ChatContextProjector),
+        sync_execution_surface: mode == ExecutionMode::new("rlm")
+            || mode == ExecutionMode::new("rlmpure"),
         model: "test-model".to_string(),
         max_turns: None,
         model_variant: None,
         run_session_id: None,
+        autonomous: false,
         tool_specs: Vec::new().into(),
-        system_prompt: String::new(),
+        system_prompt: std::sync::Arc::new(String::new()),
         session_id: "test".to_string(),
         emit_llm_debug_log: false,
-        rlm_termination,
+        termination: lash::ModeTurnOptions::rlm(rlm_termination),
         retry_policy: RetryPolicy::default(),
+        initial_events: Arc::new(Vec::new()),
     }
+}
+
+fn autonomous_rlm_config() -> TurnMachineConfig {
+    let mut config = test_config(ExecutionMode::new("rlm"));
+    config.autonomous = true;
+    config
 }
 
 fn user_message(content: &str) -> Message {
@@ -66,7 +80,7 @@ fn drain_effects(machine: &mut TurnMachine) -> Vec<Effect> {
             machine.handle_response(Response::ExecutionSurfaceSynced {
                 id,
                 result: Ok(Some(sansio::ExecutionSurfaceSync {
-                    system_prompt: String::new(),
+                    system_prompt: std::sync::Arc::new(String::new()),
                     tool_specs: Arc::new(Vec::new()),
                 })),
             });
@@ -102,15 +116,30 @@ fn find_done(effects: &[Effect]) -> Option<(&lash_sansio::MessageSequence, usize
     effects.iter().find_map(|e| match e {
         Effect::Done {
             messages,
+            events: _,
             iteration,
         } => Some((messages, *iteration)),
         _ => None,
     })
 }
 
+fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntry> {
+    machine
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            lash::SessionEventRecord::Mode(event) => match event.rlm_event() {
+                Some(RlmModeEvent::RlmTrajectoryEntry(entry)) => Some(entry),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn standard_prose_only_response_emits_done() {
-    let config = test_config(ExecutionMode::Standard);
+    let config = test_config(ExecutionMode::standard());
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, 0);
 
@@ -144,7 +173,7 @@ fn standard_prose_only_response_emits_done() {
 
 #[test]
 fn standard_tool_calls_produce_effects_and_loop() {
-    let config = test_config(ExecutionMode::Standard);
+    let config = test_config(ExecutionMode::standard());
     let msgs = vec![user_message("read file")];
     let mut machine = TurnMachine::new(config, msgs, 0);
 
@@ -213,7 +242,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
 
 #[test]
 fn standard_empty_final_after_tool_result_finishes_without_error() {
-    let config = test_config(ExecutionMode::Standard);
+    let config = test_config(ExecutionMode::standard());
     let msgs = vec![user_message("update the plan and do nothing else")];
     let mut machine = TurnMachine::new(config, msgs, 0);
 
@@ -299,7 +328,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
 
 #[test]
 fn standard_max_turns_stops_iteration() {
-    let mut config = test_config(ExecutionMode::Standard);
+    let mut config = test_config(ExecutionMode::standard());
     config.max_turns = Some(1);
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, 0);
@@ -347,8 +376,8 @@ fn standard_max_turns_stops_iteration() {
 }
 
 #[test]
-fn rlm_prose_only_response_emits_done() {
-    let config = test_config(ExecutionMode::Rlm);
+fn rlm_prose_only_response_requests_lashlang_submit() {
+    let config = test_config(ExecutionMode::new("rlm"));
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, 0);
 
@@ -365,7 +394,14 @@ fn rlm_prose_only_response_emits_done() {
 
     let effects = drain_effects(&mut machine);
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-    assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+    assert_eq!(checkpoint, CheckpointKind::AfterWork);
+    assert!(machine.messages().iter().any(|message| {
+        message.role == MessageRole::User
+            && message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("Prose-only replies are not accepted"))
+    }));
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
         messages: Vec::new(),
@@ -373,12 +409,49 @@ fn rlm_prose_only_response_emits_done() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(find_done(&effects).is_some());
+    assert!(find_llm_call(&effects).is_some());
+}
+
+#[test]
+fn autonomous_rlm_prose_only_response_continues_iteration() {
+    let config = autonomous_rlm_config();
+    let msgs = vec![user_message("hello")];
+    let mut machine = TurnMachine::new(config, msgs, 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "I should inspect the files first.".to_string(),
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::AfterWork);
+    assert!(machine.messages().iter().any(|message| {
+        message.role == MessageRole::User
+            && message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("Prose-only replies are not accepted"))
+    }));
+    machine.handle_response(Response::Checkpoint {
+        id: checkpoint_id,
+        messages: Vec::new(),
+        transient_messages: Vec::new(),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(find_llm_call(&effects).is_some());
 }
 
 #[test]
 fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
-    let config = test_config(ExecutionMode::Rlm);
+    let config = test_config(ExecutionMode::new("rlm"));
     let msgs = vec![user_message("run some code")];
     let mut machine = TurnMachine::new(config, msgs, 0);
 
@@ -423,33 +496,11 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
     });
 
     let effects = drain_effects(&mut machine);
-    let messages = machine.messages();
-    let rlm_result = messages
-        .iter()
-        .rev()
-        .find(|message| {
-            message.role == MessageRole::User
-                && message
-                    .parts
-                    .iter()
-                    .any(|part| part.content.contains("[Lashlang execution result]"))
-        })
-        .expect("rlm result message");
-    let result_part = rlm_result
-        .parts
-        .iter()
-        .find(|part| part.content.contains("[Lashlang execution result]"))
-        .expect("result part");
-    // Post-fix: RLM exec output is a plain user-role text
-    // observation (not a synthetic `role=tool` pairing), so providers
-    // that enforce tool_call ↔ tool_result pairing accept the
-    // message. `tool_call_id` + `tool_name` stay on the Text part so
-    // the interrupted-session projection can still render it as an
-    // `execute_lashlang` activity — the Part→LlmContentBlock mapping
-    // ignores both fields when `kind == Text`.
-    assert!(matches!(result_part.kind, PartKind::Text));
-    assert_eq!(result_part.tool_call_id.as_deref(), Some("rlm_exec_0"));
-    assert_eq!(result_part.tool_name.as_deref(), Some("execute_lashlang"),);
+    let trajectory = machine_trajectory(&machine);
+    let entry = trajectory.last().expect("rlm trajectory entry");
+    assert_eq!(entry.code, "print \"hi\"");
+    assert_eq!(entry.output, "hi\n");
+    assert!(entry.final_output.is_none());
 
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
@@ -466,8 +517,8 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
 #[test]
 fn typed_rlm_finish_emits_typed_finish_and_done() {
     let config = test_config_with_termination(
-        ExecutionMode::Rlm,
-        sansio::RlmTermination::Finish { schema: None },
+        ExecutionMode::new("rlm"),
+        RlmTermination::Finish { schema: None },
     );
     let msgs = vec![user_message("return typed data")];
     let mut machine = TurnMachine::new(config, msgs, 0);
@@ -510,6 +561,11 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
     let effects = drain_effects(&mut machine);
     assert!(effects.iter().any(|e| matches!(
         e,
+        Effect::Emit(lash_sansio::SessionEvent::Message { text, kind })
+            if text.contains("\"ok\": true") && kind == "final"
+    )));
+    assert!(effects.iter().any(|e| matches!(
+        e,
         Effect::Emit(lash_sansio::SessionEvent::TypedFinish { value })
             if *value == serde_json::json!({ "ok": true })
     )));
@@ -526,10 +582,79 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
 }
 
 #[test]
+fn rlm_reasoning_part_is_preserved_in_trajectory() {
+    let config = test_config_with_termination(
+        ExecutionMode::new("rlmpure"),
+        RlmTermination::Finish { schema: None },
+    );
+    let msgs = vec![user_message("say hi")];
+    let mut machine = TurnMachine::new(config, msgs, 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: true,
+        result: Ok(LlmResponse {
+            full_text: "```lashlang\nsubmit \"Hi.\"\n```".to_string(),
+            parts: vec![
+                LlmOutputPart::Reasoning {
+                    text: "I'll answer directly.".to_string(),
+                    signature: None,
+                    redacted: false,
+                    item_id: None,
+                    encrypted_content: None,
+                    summary: Vec::new(),
+                },
+                LlmOutputPart::Text {
+                    text: "```lashlang\nsubmit \"Hi.\"\n```".to_string(),
+                },
+            ],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let exec_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("exec effect");
+    machine.handle_response(Response::ExecResult {
+        id: exec_id,
+        result: Ok(lash_sansio::ExecResponse {
+            output: String::new(),
+            observations: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            error: None,
+            duration_ms: 1,
+            terminal_finish: Some(serde_json::json!("Hi.")),
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Emit(lash_sansio::SessionEvent::Message { text, kind })
+                if text == "Hi." && kind == "final"
+        )
+    }));
+    let trajectory = machine_trajectory(&machine);
+    let entry = trajectory.last().expect("trajectory entry");
+    assert!(entry.reasoning.contains("I'll answer directly."));
+    assert!(entry.reasoning.contains("```lashlang"));
+    assert_eq!(entry.final_output, Some(serde_json::json!("Hi.")));
+}
+
+#[test]
 fn typed_rlm_schema_mismatch_loops_with_feedback() {
     let config = test_config_with_termination(
-        ExecutionMode::Rlm,
-        sansio::RlmTermination::Finish {
+        ExecutionMode::new("rlm"),
+        RlmTermination::Finish {
             schema: Some(serde_json::json!({
                 "type": "object",
                 "properties": {

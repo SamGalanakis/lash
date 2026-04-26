@@ -31,13 +31,14 @@ use lash::runtime_controls::{
     tasks_stop_tool_definition,
 };
 use lash::sansio::{
-    CheckpointResumeAction, CompletedToolCall, DriverAction, DriverContextView, PendingToolCall,
-    ProtocolDriverHandle, WaitingExecState, WaitingLlmState,
+    CheckpointResumeAction, CompletedToolCall, PendingToolCall, ProtocolDriverHandle,
+    WaitingExecState, WaitingLlmState,
 };
 use lash::session_model::message::{PartAttachment, ReasoningMeta, data_url_for_bytes};
 use lash::session_model::{
-    Message, MessageRole, Part, PartKind, PruneState, SessionEvent, format_tool_result_content,
-    fresh_message_id, make_error_event, reassign_part_ids,
+    ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
+    SessionEventRecord, format_tool_result_content, fresh_message_id, make_error_event,
+    reassign_part_ids,
 };
 use lash::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
@@ -45,10 +46,10 @@ use lash::tool_dispatch::{
 use lash::tools::DiscoveryToolsProvider;
 use lash::tools::batch::batch_tool_definition;
 use lash::{
-    CheckpointKind, ExecutionMode, LlmOutputPart, LlmResponse, ModeBuildInput, ModeConfig,
-    ModePreamble, ProgressSender, SessionError, ToolCallRecord, ToolDefinition, ToolExecutionMode,
-    ToolImage, ToolResult, append_assistant_text_part, normalized_response_parts, reasoning_part,
-    turn_limit_exhausted_message,
+    CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
+    ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolCallRecord,
+    ToolDefinition, ToolExecutionMode, ToolImage, ToolResult, append_assistant_text_part,
+    normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
 };
 use serde_json::Value;
 
@@ -77,7 +78,7 @@ impl PluginFactory for BuiltinStandardModePluginFactory {
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(StandardModePlugin {
-            active: matches!(ctx.execution_mode, ExecutionMode::Standard),
+            active: ctx.execution_mode == ExecutionMode::standard(),
         }))
     }
 }
@@ -125,16 +126,13 @@ impl ModeSessionPlugin for StandardModeSession {
 struct StandardProtocolDriver;
 
 impl ModeProtocolDriverPlugin for StandardProtocolDriver {
-    fn mode_id(&self) -> &'static str {
-        ExecutionMode::Standard.plugin_id()
+    fn mode_id(&self) -> &str {
+        "standard"
     }
 
     fn build_preamble(&self, input: ModeBuildInput) -> ModePreamble {
         ModePreamble {
-            config: ModeConfig {
-                protocol: Arc::new(StandardDriver),
-                sync_execution_surface: true,
-            },
+            config: ModeConfig::chat(Arc::new(StandardDriver), true),
             tool_specs: Arc::new(input.tool_surface.model_tool_specs()),
             tool_names: input.tool_surface.tool_names(),
             omitted_tool_count: 0,
@@ -365,10 +363,10 @@ fn last_message_has_tool_result(ctx: &DriverContextView<'_>) -> bool {
     })
 }
 
-impl ProtocolDriverHandle for StandardDriver {
+impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
     fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
-            request: ctx.build_llm_request(true),
+            request: ctx.project_llm_request(true),
             driver_state: None,
         }]
     }
@@ -507,13 +505,15 @@ impl ProtocolDriverHandle for StandardDriver {
                 actions.push(DriverAction::Finish);
                 return actions;
             }
-            actions.push(DriverAction::AppendMessages(vec![Message {
-                id: asst_id,
-                role: MessageRole::Assistant,
-                parts: parts_out,
-                user_input: None,
-                origin: None,
-            }]));
+            actions.push(DriverAction::AppendEvents(vec![conversation_event(
+                Message {
+                    id: asst_id,
+                    role: MessageRole::Assistant,
+                    parts: parts_out,
+                    user_input: None,
+                    origin: None,
+                },
+            )]));
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish,
@@ -579,13 +579,15 @@ impl ProtocolDriverHandle for StandardDriver {
         }
 
         if !assistant_parts.is_empty() {
-            actions.push(DriverAction::AppendMessages(vec![Message {
-                id: asst_id,
-                role: MessageRole::Assistant,
-                parts: assistant_parts,
-                user_input: None,
-                origin: None,
-            }]));
+            actions.push(DriverAction::AppendEvents(vec![conversation_event(
+                Message {
+                    id: asst_id,
+                    role: MessageRole::Assistant,
+                    parts: assistant_parts,
+                    user_input: None,
+                    origin: None,
+                },
+            )]));
         }
 
         actions.push(DriverAction::StartTools { calls });
@@ -652,13 +654,15 @@ impl ProtocolDriverHandle for StandardDriver {
         if !result_parts.is_empty() {
             let user_id = fresh_message_id();
             reassign_part_ids(&user_id, &mut result_parts);
-            actions.push(DriverAction::AppendMessages(vec![Message {
-                id: user_id,
-                role: MessageRole::User,
-                parts: result_parts,
-                user_input: None,
-                origin: None,
-            }]));
+            actions.push(DriverAction::AppendEvents(vec![conversation_event(
+                Message {
+                    id: user_id,
+                    role: MessageRole::User,
+                    parts: result_parts,
+                    user_input: None,
+                    origin: None,
+                },
+            )]));
         }
 
         actions.push(DriverAction::AdvanceIteration);
@@ -666,9 +670,9 @@ impl ProtocolDriverHandle for StandardDriver {
         if let Some(max_turns) = ctx.max_turns()
             && next_iteration >= ctx.run_offset() + max_turns
         {
-            actions.push(DriverAction::AppendMessages(vec![
+            actions.push(DriverAction::AppendEvents(vec![conversation_event(
                 turn_limit_exhausted_message(max_turns),
-            ]));
+            )]));
             actions.push(DriverAction::Finish);
             return actions;
         }
@@ -688,6 +692,10 @@ impl ProtocolDriverHandle for StandardDriver {
     ) -> Vec<DriverAction> {
         Vec::new()
     }
+}
+
+fn conversation_event(message: Message) -> SessionEventRecord {
+    SessionEventRecord::Conversation(ConversationRecord::from_message(message))
 }
 
 // Silence unused-import warnings if any

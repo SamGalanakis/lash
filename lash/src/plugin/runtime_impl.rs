@@ -72,7 +72,7 @@ impl PluginHost {
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session(
             session_id,
-            ExecutionMode::Standard,
+            ExecutionMode::standard(),
             crate::ContextApproach::default(),
             snapshot,
         )
@@ -164,7 +164,7 @@ impl PluginHost {
         }
         let ctx = PluginSessionContext {
             session_id,
-            execution_mode,
+            execution_mode: execution_mode.clone(),
             context_approach: context_approach.clone(),
             parent_session_id,
         };
@@ -246,7 +246,7 @@ impl PluginHost {
         let session = Arc::new(PluginSession {
             host: self.clone(),
             session_id: ctx.session_id,
-            execution_mode,
+            execution_mode: execution_mode.clone(),
             plugins,
             tools,
             dynamic_tools,

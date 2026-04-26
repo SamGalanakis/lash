@@ -1,4 +1,6 @@
 use super::*;
+use crate::{ModePreamble, PluginError, ToolSurface};
+use lash_sansio::{PreparedPrompt, PromptCache, PromptContribution, PromptTemplate};
 
 mod effects;
 mod streaming;
@@ -22,14 +24,47 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     pub(super) session_manager: Arc<dyn SessionManager>,
     pub(super) prompt_bridge: HostPromptBridge,
-    pub(super) rlm_termination: crate::RlmTermination,
+    pub(super) mode_turn_options: crate::ModeTurnOptions,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
+}
+
+struct PreparedExecutionSurface {
+    execution_mode: ExecutionMode,
+    tool_surface: ToolSurface,
+    mode_preamble: Arc<ModePreamble>,
+    prompt_contributions: Vec<PromptContribution>,
+}
+
+impl PreparedExecutionSurface {
+    fn build_prompt(
+        &self,
+        template: PromptTemplate,
+        prompt_cache: Option<Arc<PromptCache>>,
+    ) -> PreparedPrompt {
+        let mut prompt_contributions = self.mode_preamble.prompt_contributions.clone();
+        prompt_contributions.extend(self.prompt_contributions.iter().cloned());
+        let prompt_contributions = self
+            .tool_surface
+            .filter_prompt_contributions(prompt_contributions);
+        lash_sansio::build_prompt_cached(
+            crate::PromptBuildInput {
+                mode: self.execution_mode.clone(),
+                template,
+                execution_prompt: self.mode_preamble.execution_prompt.clone(),
+                tool_names: self.mode_preamble.tool_names.clone(),
+                omitted_tool_count: self.mode_preamble.omitted_tool_count,
+                contributions: prompt_contributions,
+            },
+            prompt_cache.as_deref(),
+        )
+    }
 }
 
 impl RuntimeTurnDriver {
     async fn persist_progress_boundary(
         &mut self,
         messages: crate::MessageSequence,
+        events: Arc<Vec<crate::SessionEventRecord>>,
         iteration: usize,
     ) {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
@@ -41,12 +76,17 @@ impl RuntimeTurnDriver {
 
         self.progress_state.policy = self.policy.clone();
         self.progress_state.iteration = iteration;
+        let existing_events = self.progress_graph.active_events_arc().len();
+        if events.len() > existing_events {
+            self.progress_graph
+                .append_events(events[existing_events..].iter().cloned());
+        }
         if let Some(appended_messages) = self
             .progress_graph
             .message_delta_if_current_preserved(messages.iter())
         {
             self.progress_graph
-                .append_projected_messages(&appended_messages);
+                .append_projected_conversation_messages(&appended_messages);
         } else {
             let projected_messages = messages.shared();
             let tool_calls = self.progress_graph.tool_calls_arc();
@@ -120,10 +160,15 @@ impl RuntimeTurnDriver {
                     Effect::Emit(event) => emit!(event),
                     Effect::Progress {
                         messages,
+                        events,
                         iteration,
-                    } => self.persist_progress_boundary(messages, iteration).await,
+                    } => {
+                        self.persist_progress_boundary(messages, events, iteration)
+                            .await
+                    }
                     Effect::Done {
                         messages,
+                        events: _,
                         iteration,
                     } => return (messages, iteration),
                     Effect::LlmCall { id, request } => {
@@ -194,6 +239,10 @@ impl RuntimeTurnDriver {
                     Effect::CancelLlm { .. } => {}
                     Effect::ExecCode { id, code } => {
                         let result = self.run_exec_code(&code, &event_tx).await;
+                        if let Ok(output) = &result {
+                            self.progress_graph
+                                .record_tool_calls(output.tool_calls.iter().cloned());
+                        }
                         let response = match result {
                             Ok(output) => Response::ExecResult {
                                 id,
@@ -228,7 +277,7 @@ impl RuntimeTurnDriver {
             };
         }
 
-        let execution_mode = self.policy.execution_mode;
+        let execution_mode = self.policy.execution_mode.clone();
         let mut session_policy = self.runtime_session_policy();
         let model = match self.prepare_provider(&mut session_policy).await {
             Ok(model) => model,
@@ -239,30 +288,16 @@ impl RuntimeTurnDriver {
             }
         };
         self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
-        let mode_preamble = self.session.mode_preamble(&self.session_id, execution_mode);
-        let prompt_state = SessionStateEnvelope {
-            session_id: self.session_id.clone(),
-            policy: session_policy.clone(),
-            iteration: run_offset,
-            ..Default::default()
-        };
-        let plugin_prompt_contributions = match self
-            .session
-            .plugins()
-            .collect_prompt_contributions(PromptHookContext {
-                session_id: self.session_id.clone(),
-                host: Arc::clone(&self.session_manager),
-                state: crate::SessionReadView::from_graph_message_sequence(
-                    &prompt_state,
-                    self.progress_graph.base_graph(),
-                    messages.clone(),
-                    self.progress_graph.tool_calls_arc(),
-                ),
-                rlm_termination: self.rlm_termination.clone(),
-            })
+        let execution_surface = match self
+            .prepare_execution_surface(
+                execution_mode,
+                &session_policy,
+                run_offset,
+                messages.clone(),
+            )
             .await
         {
-            Ok(contributions) => contributions,
+            Ok(surface) => surface,
             Err(err) => {
                 emit!(make_error_event(
                     "plugin_prompt",
@@ -274,24 +309,25 @@ impl RuntimeTurnDriver {
                 return Err((messages, run_offset));
             }
         };
-        let mut all_prompt_contributions = self.session.context_prompt_contributions().to_vec();
-        all_prompt_contributions.extend(plugin_prompt_contributions);
         let prepared = crate::build_turn(crate::SansIoTurnInput {
             session_id: self.session_id.clone(),
             run_session_id: session_policy.session_id.clone(),
+            autonomous: session_policy.autonomous,
             model,
-            mode: execution_mode,
+            mode: execution_surface.execution_mode,
             messages,
+            events: self.progress_state.shared_active_events(),
             run_offset,
-            tool_surface: self.session.tool_surface(&self.session_id, execution_mode),
-            mode_preamble,
+            tool_surface: execution_surface.tool_surface,
+            mode_preamble: execution_surface.mode_preamble,
             prompt_template: self.host.core.prompt_template.clone(),
-            prompt_contributions: all_prompt_contributions,
+            prompt_contributions: execution_surface.prompt_contributions,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model_variant.clone(),
             emit_llm_debug_log: self.host.core.llm_logger.is_some(),
-            rlm_termination: self.rlm_termination.clone(),
+            termination: self.mode_turn_options.clone(),
             retry_policy: self.host.core.retry_policy.clone(),
+            prompt_cache: Some(self.session.prompt_cache()),
         });
         self.policy = session_policy;
         self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
@@ -300,7 +336,7 @@ impl RuntimeTurnDriver {
 
     async fn refresh_execution_surface(
         &mut self,
-        machine: &crate::sansio::TurnMachine,
+        machine: &crate::TurnMachine,
         update_machine_config: bool,
     ) -> Result<Option<crate::sansio::ExecutionSurfaceSync>, crate::SessionError> {
         self.session.refresh_tool_surface().await?;
@@ -308,13 +344,44 @@ impl RuntimeTurnDriver {
             return Ok(None);
         }
 
-        let execution_mode = self.policy.execution_mode;
-        let tool_surface = self.session.tool_surface(&self.session_id, execution_mode);
-        let mode_preamble = self.session.mode_preamble(&self.session_id, execution_mode);
+        let policy = self.policy.clone();
+        let execution_surface = self
+            .prepare_execution_surface(
+                policy.execution_mode.clone(),
+                &policy,
+                machine.iteration(),
+                machine.message_sequence(),
+            )
+            .await
+            .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
+        let prepared_prompt = execution_surface.build_prompt(
+            self.host.core.prompt_template.clone(),
+            Some(self.session.prompt_cache()),
+        );
+
+        Ok(Some(crate::sansio::ExecutionSurfaceSync {
+            system_prompt: prepared_prompt.system_prompt,
+            tool_specs: execution_surface.mode_preamble.tool_specs.clone(),
+        }))
+    }
+
+    async fn prepare_execution_surface(
+        &mut self,
+        execution_mode: ExecutionMode,
+        session_policy: &SessionPolicy,
+        iteration: usize,
+        messages: crate::MessageSequence,
+    ) -> Result<PreparedExecutionSurface, PluginError> {
+        let tool_surface = self
+            .session
+            .tool_surface(&self.session_id, execution_mode.clone());
+        let mode_preamble = self
+            .session
+            .mode_preamble(&self.session_id, execution_mode.clone());
         let prompt_state = SessionStateEnvelope {
             session_id: self.session_id.clone(),
-            policy: self.policy.clone(),
-            iteration: machine.iteration(),
+            policy: session_policy.clone(),
+            iteration,
             ..Default::default()
         };
         let plugin_prompt_contributions = self
@@ -326,30 +393,20 @@ impl RuntimeTurnDriver {
                 state: crate::SessionReadView::from_graph_message_sequence(
                     &prompt_state,
                     self.progress_graph.base_graph(),
-                    machine.message_sequence(),
+                    messages,
                     self.progress_graph.tool_calls_arc(),
                 ),
-                rlm_termination: self.rlm_termination.clone(),
+                mode_turn_options: self.mode_turn_options.clone(),
             })
-            .await
-            .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
-        let mut prompt_contributions = mode_preamble.prompt_contributions.clone();
-        prompt_contributions.extend(self.session.context_prompt_contributions().iter().cloned());
+            .await?;
+        let mut prompt_contributions = self.session.context_prompt_contributions().to_vec();
         prompt_contributions.extend(plugin_prompt_contributions);
-        let prompt_contributions = tool_surface.filter_prompt_contributions(prompt_contributions);
-        let prepared_prompt = crate::build_prompt(crate::PromptBuildInput {
-            mode: execution_mode,
-            template: self.host.core.prompt_template.clone(),
-            execution_prompt: mode_preamble.execution_prompt.clone(),
-            tool_names: mode_preamble.tool_names.clone(),
-            omitted_tool_count: mode_preamble.omitted_tool_count,
-            contributions: prompt_contributions,
-        });
-
-        Ok(Some(crate::sansio::ExecutionSurfaceSync {
-            system_prompt: prepared_prompt.system_prompt,
-            tool_specs: mode_preamble.tool_specs.clone(),
-        }))
+        Ok(PreparedExecutionSurface {
+            execution_mode,
+            tool_surface,
+            mode_preamble,
+            prompt_contributions,
+        })
     }
 
     async fn run_llm_call(
@@ -361,18 +418,10 @@ impl RuntimeTurnDriver {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
-        match self.policy.execution_mode {
-            ExecutionMode::Standard => {
-                self.run_standard_llm_call(request, iteration, event_tx, cancel)
-                    .await
-            }
-            ExecutionMode::Rlm => {
-                let _ = machine;
-                let _ = effect_id;
-                self.run_standard_llm_call(request, iteration, event_tx, cancel)
-                    .await
-            }
-        }
+        let _ = machine;
+        let _ = effect_id;
+        self.run_standard_llm_call(request, iteration, event_tx, cancel)
+            .await
     }
 
     fn runtime_session_policy(&self) -> SessionPolicy {

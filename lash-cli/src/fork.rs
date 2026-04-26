@@ -24,7 +24,44 @@ fn find_program_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_launchable_file(candidate))
+}
+
+fn is_launchable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+pub fn resolve_resume_executable() -> Result<PathBuf> {
+    if std::env::var_os("LASH_DEV_LAUNCH_CWD").is_some()
+        && let Some(exe) = find_program_on_path("lash")
+    {
+        return Ok(exe);
+    }
+
+    match std::env::current_exe() {
+        Ok(exe) if is_launchable_file(&exe) => Ok(exe),
+        Ok(exe) => find_program_on_path("lash").ok_or_else(|| {
+            anyhow!(
+                "current executable `{}` is not launchable and `lash` was not found on PATH",
+                exe.display()
+            )
+        }),
+        Err(err) => find_program_on_path("lash")
+            .ok_or_else(|| anyhow!("launcher lookup failed: {err}; `lash` was not found on PATH")),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -561,7 +598,7 @@ pub async fn fork_current_session(
                 provider_id: _provider.kind().to_string(),
                 configured_model: configured_model.to_string(),
                 context_window: _context_window,
-                execution_mode: lash::ExecutionMode::Standard,
+                execution_mode: lash::ExecutionMode::standard(),
                 context_approach: lash::ContextApproach::default(),
                 model_variant: _model_variant.map(str::to_string),
             },
@@ -649,13 +686,34 @@ mod fork_tests {
                 provider_id: dummy_provider().kind().to_string(),
                 configured_model: "gpt-test".to_string(),
                 context_window: 1024,
-                execution_mode: lash::ExecutionMode::Standard,
+                execution_mode: lash::ExecutionMode::standard(),
                 context_approach: lash::ContextApproach::default(),
                 model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: Vec::new(),
         });
+    }
+
+    #[tokio::test]
+    async fn resume_executable_prefers_dev_wrapper_when_present() {
+        let _env_guard = env_lock().lock().await;
+        let temp = TempDirGuard::new("lash-fork-path");
+        let lash_bin = temp.path().join("lash");
+        std::fs::write(&lash_bin, "#!/usr/bin/env sh\nexit 0\n").expect("write lash wrapper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&lash_bin, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod lash wrapper");
+        }
+        let _path = EnvVarGuard::set("PATH", temp.path());
+        let _dev_cwd = EnvVarGuard::set("LASH_DEV_LAUNCH_CWD", temp.path());
+
+        assert_eq!(
+            resolve_resume_executable().expect("resolve executable"),
+            lash_bin
+        );
     }
 
     #[tokio::test]
@@ -729,7 +787,7 @@ mod fork_tests {
             .turn_state;
         assert_eq!(child_turn.iteration, 1);
 
-        let child_messages = child_graph.project_messages();
+        let child_messages = child_graph.project_conversation_messages();
         assert_eq!(child_messages.len(), 1);
         assert_eq!(child_messages[0].parts[0].content, "hello");
     }

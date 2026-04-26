@@ -244,7 +244,7 @@ async fn run_parent(args: Args) -> Result<()> {
     let (_provider, provider_kind, resolved_model) = resolve_provider(&args)?;
     let execution_mode = parse_execution_mode(&args.execution_mode)?;
     let context_approach = parse_context_approach(&args.context_approach)?;
-    let execution_mode_label = execution_mode_label(execution_mode).to_string();
+    let execution_mode_label = execution_mode_label(&execution_mode).to_string();
     let context_approach_label = context_approach_label(&context_approach).to_string();
 
     let completed = if args.resume {
@@ -602,13 +602,14 @@ async fn run_instance(
         model: model.to_string(),
         provider: provider.clone(),
         max_context_tokens: Some(args.max_context_tokens),
-        execution_mode,
+        execution_mode: execution_mode.clone(),
         context_approach: context_approach.clone(),
         model_variant: Some(args.variant.clone()),
         max_turns: Some(args.max_turns),
         ..SessionPolicy::default()
     };
-    let plugin_session = build_plugin_session(execution_mode, context_approach.clone(), &policy)?;
+    let plugin_session =
+        build_plugin_session(execution_mode.clone(), context_approach.clone(), &policy)?;
     let services = PersistentRuntimeServices::new_with_bridges(
         plugin_session,
         TurnInjectionBridge::new(),
@@ -655,7 +656,7 @@ async fn run_instance(
                 image_blobs: Default::default(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             sink_trait.as_ref(),
             cancel,
@@ -720,7 +721,7 @@ async fn run_instance(
         repo: instance.repo.clone(),
         base_commit: instance.base_commit.clone(),
         model: model.to_string(),
-        execution_mode_label: execution_mode_label(execution_mode).to_string(),
+        execution_mode_label: execution_mode_label(&execution_mode).to_string(),
         model_patch,
         grade: grade.to_string(),
         failure_reason,
@@ -917,13 +918,16 @@ fn build_plugin_session(
     factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
+    factories.push(Arc::new(
+        lash_mode_rlmpure::BuiltinRlmpureModePluginFactory::default(),
+    ));
 
     // Tool bundles only — core/context/mode plugins are registered
     // above, so we ask `tool_plugin_factories` for just the tool
     // surfaces (shell, apply_patch, read/ls/grep/glob). No `ask`
     // (autonomous run) and no web tools.
     let mut tool_factories = tool_plugin_factories(DefaultToolPluginOptions {
-        execution_mode,
+        execution_mode: execution_mode.clone(),
         context_approach: context_approach.clone(),
         bundles: vec![
             DefaultToolBundle::Shell,
@@ -983,8 +987,9 @@ fn resolve_provider(args: &Args) -> Result<(ProviderHandle, String, String)> {
 
 fn parse_execution_mode(raw: &str) -> Result<ExecutionMode> {
     match raw {
-        "rlm" => Ok(ExecutionMode::Rlm),
-        "standard" => Ok(ExecutionMode::Standard),
+        "rlm" => Ok(ExecutionMode::new("rlm")),
+        "rlmpure" | "rlm-pure" | "rlm_pure" => Ok(ExecutionMode::new("rlmpure")),
+        "standard" => Ok(ExecutionMode::standard()),
         other => bail!("unsupported execution mode `{other}`"),
     }
 }
@@ -997,11 +1002,8 @@ fn parse_context_approach(raw: &str) -> Result<ContextApproach> {
     }
 }
 
-fn execution_mode_label(mode: ExecutionMode) -> &'static str {
-    match mode {
-        ExecutionMode::Rlm => "rlm",
-        ExecutionMode::Standard => "standard",
-    }
+fn execution_mode_label(mode: &ExecutionMode) -> &str {
+    mode.plugin_id()
 }
 
 fn context_approach_label(approach: &ContextApproach) -> &'static str {

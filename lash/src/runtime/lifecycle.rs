@@ -28,7 +28,7 @@ impl LashRuntime {
         let mut session = Session::new(
             services.clone(),
             &state.session_id,
-            state.policy.execution_mode,
+            state.policy.execution_mode.clone(),
         )
         .await?;
         if let Some(dynamic_state) = state.dynamic_state_snapshot.clone()
@@ -68,9 +68,10 @@ impl LashRuntime {
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
             overflow_recovery_attempted: false,
-            rlm_termination: crate::RlmTermination::default(),
+            mode_turn_options: crate::ModeTurnOptions::default(),
             shared_token_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_sync_needed: Arc::new(AtomicBool::new(false)),
+            pending_first_turn_inputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
             turn_phase_probe: None,
         })
     }
@@ -159,7 +160,7 @@ impl LashRuntime {
         let plugin_session = plugin_host
             .build_session(
                 state.session_id.as_str(),
-                policy.execution_mode,
+                policy.execution_mode.clone(),
                 policy.context_approach.clone(),
                 state.plugin_snapshot.as_ref(),
             )

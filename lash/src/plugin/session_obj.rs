@@ -106,7 +106,7 @@ impl PluginSession {
     }
 
     pub fn execution_mode(&self) -> ExecutionMode {
-        self.execution_mode
+        self.execution_mode.clone()
     }
 
     pub fn host(&self) -> &PluginHost {
@@ -143,7 +143,7 @@ impl PluginSession {
         }
         self.resolve_tool_surface(ToolSurfaceContext {
             session_id: session_id.to_string(),
-            mode,
+            mode: mode.clone(),
             tools: tools.clone(),
         })
         .unwrap_or_else(|err| {
@@ -165,7 +165,7 @@ impl PluginSession {
             &self.tool_surface_contributors,
             ToolSurfaceContext {
                 session_id: ctx.session_id.clone(),
-                mode: ctx.mode,
+                mode: ctx.mode.clone(),
                 tools: ctx.tools.clone(),
             },
             |hook, ctx| hook(ctx),
@@ -562,7 +562,9 @@ impl PluginSession {
                 } => {
                     let messages = updated_messages.get_or_insert_with(|| {
                         crate::MessageSequence::from_base(
-                            turn.state.session_graph.shared_projected_messages(),
+                            turn.state
+                                .session_graph
+                                .shared_projected_conversation_messages(),
                         )
                     });
                     append_plugin_messages(messages, &plugin_messages);

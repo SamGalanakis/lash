@@ -65,6 +65,10 @@ pub(super) struct RuntimeSessionManager {
     background_sync_needed: Arc<AtomicBool>,
     /// Maps child session_id → usage_source label.
     child_usage_sources: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// Maps child session_id → seed PluginMessage queued via
+    /// `SessionCreateRequest::first_turn_input`. Drained by
+    /// `take_first_turn_input` when a host claims it.
+    pending_first_turn_inputs: Arc<std::sync::Mutex<HashMap<String, crate::PluginMessage>>>,
     /// Tracks live child-turn usage already bubbled into the shared
     /// token ledger so `await_turn` can reconcile the final turn usage
     /// without double counting.
@@ -119,7 +123,10 @@ impl RuntimeSessionManager {
             } else {
                 CurrentSnapshot::Projection {
                     meta: Self::current_snapshot_meta_without_graph(runtime),
-                    messages: runtime.state.session_graph.shared_projected_messages(),
+                    messages: runtime
+                        .state
+                        .session_graph
+                        .shared_projected_conversation_messages(),
                     tool_calls: runtime.state.session_graph.shared_projected_tool_calls(),
                 }
             },
@@ -134,6 +141,7 @@ impl RuntimeSessionManager {
             token_ledger: Arc::clone(&runtime.shared_token_ledger),
             background_sync_needed: Arc::clone(&runtime.background_sync_needed),
             child_usage_sources: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pending_first_turn_inputs: Arc::clone(&runtime.pending_first_turn_inputs),
             child_turn_live_usage: Arc::new(std::sync::Mutex::new(HashMap::new())),
             child_usage_event_relay,
             persist_usage_to_store,
@@ -244,7 +252,7 @@ impl RuntimeSessionManager {
             if self.current_plugins.dynamic_tools().is_some() {
                 return Ok(self
                     .current_plugins
-                    .tool_catalog(session_id, self.current_policy.execution_mode));
+                    .tool_catalog(session_id, self.current_policy.execution_mode.clone()));
             }
             return Ok(self.current_tool_catalog.as_ref().clone());
         }

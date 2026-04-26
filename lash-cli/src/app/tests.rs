@@ -30,6 +30,14 @@ fn part(id: &str, kind: PartKind, content: &str) -> Part {
     }
 }
 
+fn conversation_event(message: Message) -> lash::SessionEventRecord {
+    lash::SessionEventRecord::Conversation(lash::ConversationRecord::from_message(message))
+}
+
+fn events_from_messages(messages: &[Message]) -> Vec<lash::SessionEventRecord> {
+    messages.iter().cloned().map(conversation_event).collect()
+}
+
 fn other_variant_name(block: &DisplayBlock) -> &'static str {
     match block {
         DisplayBlock::TurnStart(_) => "TurnStart",
@@ -395,7 +403,8 @@ fn finish_turn_from_projection_rebuilds_current_turn_from_authoritative_state() 
             "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now",
         ),
     ];
-    app.finish_turn_from_projection(&messages, &[]);
+    let events = events_from_messages(&messages);
+    app.finish_turn_from_projection(&events, &messages, &[]);
 
     assert!(!app.running);
     assert!(app.blocks.iter().any(|block| {
@@ -414,6 +423,40 @@ fn finish_turn_from_projection_rebuilds_current_turn_from_authoritative_state() 
         last_block,
         "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now"
     );
+}
+
+#[test]
+fn finish_turn_from_projection_preserves_projected_turns_after_repeated_input() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let first_turn = PreparedTurn::new("hi".into(), Vec::new());
+    app.push_prepared_user_input(&first_turn);
+    app.blocks.push(DisplayBlock::AssistantText("Hi.".into()));
+    app.start_turn();
+
+    let messages = vec![
+        text_message("u1", MessageRole::User, "hi"),
+        text_message("a1", MessageRole::Assistant, "Hi."),
+        text_message("u2", MessageRole::User, "hi"),
+        text_message("a2", MessageRole::Assistant, "Hi."),
+        text_message("u3", MessageRole::User, "hi"),
+        text_message("a3", MessageRole::Assistant, "Hi."),
+    ];
+    let events = events_from_messages(&messages);
+
+    app.finish_turn_from_projection(&events, &messages, &[]);
+
+    let user_inputs = app
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, DisplayBlock::UserInput(_)))
+        .count();
+    let assistant_texts = app
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, DisplayBlock::AssistantText(_)))
+        .count();
+    assert_eq!(user_inputs, 3);
+    assert_eq!(assistant_texts, 3);
 }
 
 #[test]
@@ -458,7 +501,8 @@ fn finish_turn_from_projection_does_not_duplicate_assistant_text_after_tool_acti
         success: true,
         duration_ms: 12,
     }];
-    app.finish_turn_from_projection(&messages, &tool_calls);
+    let events = events_from_messages(&messages);
+    app.finish_turn_from_projection(&events, &messages, &tool_calls);
 
     let assistant_texts: Vec<&str> = app
         .blocks
@@ -505,7 +549,8 @@ fn finish_turn_from_projection_uses_authoritative_reasoning_and_text() {
         text_message("u1", MessageRole::User, "Write a poem"),
         message,
     ];
-    app.finish_turn_from_projection(&messages, &[]);
+    let events = events_from_messages(&messages);
+    app.finish_turn_from_projection(&events, &messages, &[]);
 
     let assistant_texts: Vec<&str> = app
         .blocks
@@ -543,9 +588,267 @@ fn projected_assistant_message_places_reasoning_before_text() {
         origin: None,
     };
 
-    let blocks = projected_blocks_from_state(&[message], &[], &UiProjectionState::default());
+    let events = events_from_messages(std::slice::from_ref(&message));
+    let blocks =
+        projected_blocks_from_state(&events, &[message], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "AssistantText"]);
+}
+
+#[test]
+fn projected_timeline_round_trips_to_existing_display_blocks() {
+    let user = text_message("u1", MessageRole::User, "Summarize this");
+    let assistant = text_message("a1", MessageRole::Assistant, "Summary.");
+    let events = events_from_messages(&[user.clone(), assistant.clone()]);
+    let ui_state = UiProjectionState {
+        live_reasoning_text: Some("Checking final wording.".to_string()),
+        live_assistant_text: Some("Summary.\n\nOne more sentence.".to_string()),
+        ..UiProjectionState::default()
+    };
+
+    let timeline =
+        projection::projected_timeline_from_state(&events, &[user, assistant], &[], &ui_state);
+    let blocks = projected_blocks_from_state(
+        &events,
+        &[
+            text_message("u1", MessageRole::User, "Summarize this"),
+            text_message("a1", MessageRole::Assistant, "Summary."),
+        ],
+        &[],
+        &ui_state,
+    );
+
+    assert_eq!(timeline.to_display_blocks(), blocks);
+    let variants = timeline
+        .items()
+        .iter()
+        .map(|item| match item {
+            projection::UiTimelineItem::TurnStart(_) => "TurnStart",
+            projection::UiTimelineItem::UserInput(_) => "UserInput",
+            projection::UiTimelineItem::AssistantText(_) => "AssistantText",
+            projection::UiTimelineItem::AssistantReasoning(_) => "AssistantReasoning",
+            projection::UiTimelineItem::Activity(_) => "Activity",
+            projection::UiTimelineItem::ShellOutput { .. } => "ShellOutput",
+            projection::UiTimelineItem::Error(_) => "Error",
+            projection::UiTimelineItem::SystemMessage(_) => "SystemMessage",
+            projection::UiTimelineItem::PluginPanel(_) => "PluginPanel",
+            projection::UiTimelineItem::LashlangCode(_) => "LashlangCode",
+            projection::UiTimelineItem::Splash => "Splash",
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        variants,
+        vec![
+            "TurnStart",
+            "UserInput",
+            "AssistantText",
+            "AssistantReasoning",
+            "AssistantText",
+        ]
+    );
+}
+
+#[test]
+fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "rlm_step_0".to_string(),
+        iteration: 0,
+        reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"hi\"\n```".to_string(),
+        code: "submit \"hi\"".to_string(),
+        output: String::new(),
+        observations: Vec::new(),
+        tool_calls: Vec::new(),
+        error: None,
+        final_output: None,
+        output_raw_len: 0,
+    };
+    let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+        lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
+    ))];
+
+    let blocks = projected_blocks_from_state(&events, &[], &[], &UiProjectionState::default());
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
+
+    let reasoning = blocks.iter().find_map(|block| match block {
+        DisplayBlock::AssistantReasoning(text) => Some(text.as_str()),
+        _ => None,
+    });
+    assert_eq!(reasoning, Some("I'll reply directly."));
+}
+
+#[test]
+fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversation() {
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "rlm_step_0".to_string(),
+        iteration: 0,
+        reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
+        code: "submit \"Hi!\"".to_string(),
+        output: String::new(),
+        observations: Vec::new(),
+        tool_calls: Vec::new(),
+        error: None,
+        final_output: Some(serde_json::json!("Hi!")),
+        output_raw_len: 0,
+    };
+    let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+        lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
+    ))];
+
+    let blocks = projected_blocks_from_state(&events, &[], &[], &UiProjectionState::default());
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
+}
+
+#[test]
+fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
+    let user = text_message("u1", MessageRole::User, "hi");
+    let assistant = text_message("a1", MessageRole::Assistant, "Hi!");
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "rlm_step_0".to_string(),
+        iteration: 0,
+        reasoning: "I'll answer directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
+        code: "submit \"Hi!\"".to_string(),
+        output: String::new(),
+        observations: Vec::new(),
+        tool_calls: Vec::new(),
+        error: None,
+        final_output: Some(serde_json::json!("Hi!")),
+        output_raw_len: 0,
+    };
+    let events = vec![
+        conversation_event(user.clone()),
+        lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
+        )),
+        conversation_event(assistant.clone()),
+    ];
+
+    let blocks = projected_blocks_from_state(
+        &events,
+        &[user, assistant],
+        &[],
+        &UiProjectionState::default(),
+    );
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(
+        variants,
+        vec![
+            "TurnStart",
+            "UserInput",
+            "AssistantReasoning",
+            "LashlangCode",
+            "AssistantText",
+        ]
+    );
+}
+
+#[test]
+fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "rlm_step_0".to_string(),
+        iteration: 0,
+        reasoning: "I'll inspect the environment.".to_string(),
+        code: "now = (call exec_command { cmd: \"date -u\" })?\nprint now".to_string(),
+        output: "2026-04-25 20:05:57 UTC\n".to_string(),
+        observations: vec!["2026-04-25 20:05:57 UTC".to_string()],
+        tool_calls: vec![ToolCallRecord {
+            call_id: None,
+            tool: "exec_command".to_string(),
+            args: serde_json::json!({ "cmd": "date -u" }),
+            result: serde_json::json!({
+                "output": "2026-04-25 20:05:57 UTC\n",
+                "exit_code": 0
+            }),
+            success: true,
+            duration_ms: 12,
+        }],
+        error: None,
+        final_output: None,
+        output_raw_len: 24,
+    };
+    let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+        lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
+    ))];
+
+    let blocks = projected_blocks_from_state(&events, &[], &[], &UiProjectionState::default());
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(
+        variants,
+        vec!["AssistantReasoning", "LashlangCode", "Activity"]
+    );
+    assert!(matches!(
+        blocks.get(2),
+        Some(DisplayBlock::Activity(activity)) if activity.call.tool_name == "exec_command"
+    ));
+}
+
+#[test]
+fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
+    let first = lash_rlm_types::RlmTrajectoryEntry {
+        id: "rlm_step_0".to_string(),
+        iteration: 0,
+        reasoning: "First check the time.".to_string(),
+        code: "now = (call exec_command { cmd: \"date -u\" })?\nprint now".to_string(),
+        output: "time\n".to_string(),
+        observations: vec!["time".to_string()],
+        tool_calls: vec![ToolCallRecord {
+            call_id: None,
+            tool: "exec_command".to_string(),
+            args: serde_json::json!({ "cmd": "date -u" }),
+            result: serde_json::json!({ "output": "time\n", "exit_code": 0 }),
+            success: true,
+            duration_ms: 3,
+        }],
+        error: None,
+        final_output: None,
+        output_raw_len: 5,
+    };
+    let second = lash_rlm_types::RlmTrajectoryEntry {
+        id: "rlm_step_1".to_string(),
+        iteration: 1,
+        reasoning: "Then check files.".to_string(),
+        code: "files = (call ls { path: \".\" })?\nprint files".to_string(),
+        output: "files\n".to_string(),
+        observations: vec!["files".to_string()],
+        tool_calls: vec![ToolCallRecord {
+            call_id: None,
+            tool: "ls".to_string(),
+            args: serde_json::json!({ "path": "." }),
+            result: serde_json::json!({ "entries": ["Cargo.toml"] }),
+            success: true,
+            duration_ms: 4,
+        }],
+        error: None,
+        final_output: None,
+        output_raw_len: 6,
+    };
+    let assistant = text_message("a1", MessageRole::Assistant, "Done.");
+    let events = vec![
+        lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(first),
+        )),
+        lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(second),
+        )),
+        conversation_event(assistant.clone()),
+    ];
+
+    let blocks =
+        projected_blocks_from_state(&events, &[assistant], &[], &UiProjectionState::default());
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(
+        variants,
+        vec![
+            "AssistantReasoning",
+            "LashlangCode",
+            "Activity",
+            "AssistantReasoning",
+            "LashlangCode",
+            "Activity",
+            "AssistantText",
+        ]
+    );
 }
 
 #[test]
@@ -562,7 +865,8 @@ fn finish_turn_from_projection_uses_authoritative_transcript_even_when_streamed_
         text_message("u1", MessageRole::User, "Shorten it"),
         text_message("a1", MessageRole::Assistant, "Visible"),
     ];
-    app.finish_turn_from_projection(&messages, &[]);
+    let events = events_from_messages(&messages);
+    app.finish_turn_from_projection(&events, &messages, &[]);
 
     let last_block = app
         .blocks
@@ -860,7 +1164,6 @@ fn plan_exit_fresh_context_tool_does_not_queue_follow_up_turn() {
                 "approved": true,
                 "execution_mode": "fresh_context",
                 "session_id": "new-plan-session",
-                "fresh_context_input": "Do a full, faithful implementation of the plan found at: .lash/plans/session.md"
             }),
             success: true,
             duration_ms: 5,
@@ -872,10 +1175,9 @@ fn plan_exit_fresh_context_tool_does_not_queue_follow_up_turn() {
         .take_pending_session_switch()
         .expect("pending session switch");
     assert_eq!(pending.session_id, "new-plan-session");
-    let queued = pending.queued_turn.expect("queued fresh-context turn");
-    assert_eq!(
-        queued.effective_text,
-        "Do a full, faithful implementation of the plan found at: .lash/plans/session.md"
+    assert!(
+        pending.queued_turn.is_none(),
+        "seed turn is now sourced from SessionManager::take_first_turn_input, not the tool result"
     );
 }
 
@@ -959,6 +1261,7 @@ fn interrupted_projection_preserves_partial_assistant_text() {
     let blocks = project_interrupted_blocks(
         &[],
         &[],
+        &[],
         &UiProjectionState {
             live_assistant_text: Some("Partial streamed answer".to_string()),
             ..UiProjectionState::default()
@@ -988,7 +1291,9 @@ fn interrupted_projection_does_not_duplicate_already_committed_prose() {
         text_message("m1", MessageRole::Assistant, "first prose"),
         text_message("m2", MessageRole::Assistant, "second prose"),
     ];
+    let events = events_from_messages(&messages);
     let blocks = project_interrupted_blocks(
+        &events,
         &messages,
         &[],
         &UiProjectionState {
@@ -1014,7 +1319,9 @@ fn interrupted_projection_appends_only_uncommitted_tail() {
     // PLUS a trailing chunk the model was mid-stream on when the abort
     // landed, only that trailing chunk should be appended as a new block.
     let messages = vec![text_message("m0", MessageRole::Assistant, "first prose")];
+    let events = events_from_messages(&messages);
     let blocks = project_interrupted_blocks(
+        &events,
         &messages,
         &[],
         &UiProjectionState {
@@ -1064,11 +1371,10 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
         id: "m1".to_string(),
         role: MessageRole::User,
         parts: vec![Part {
-            // RLM exec results are stored as `PartKind::Text` with
-            // `tool_call_id` + `tool_name` preserved, so the adapter
-            // serializes them as a plain user-role message (no fake
-            // `role=tool` pairing) while projection can still detect
-            // them as activities.
+            // Legacy RLM exec results were stored as user text with
+            // `tool_call_id` + `tool_name` preserved. Projection should
+            // hide them without rendering a fake execute_lashlang
+            // activity.
             id: "m1.p0".to_string(),
             kind: PartKind::Text,
             content: "[Lashlang execution result]\n\nobservations:\nraw dump".to_string(),
@@ -1094,8 +1400,11 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
         success: true,
         duration_ms: 0,
     }];
+    let messages = vec![text_message("m0", MessageRole::User, "go"), result_message];
+    let events = events_from_messages(&messages);
     let blocks = project_interrupted_blocks(
-        &[text_message("m0", MessageRole::User, "go"), result_message],
+        &events,
+        &messages,
         &tool_calls,
         &UiProjectionState::default(),
         "Cancelled.",
@@ -1104,12 +1413,10 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
     assert!(blocks.iter().all(|block| {
         !matches!(block, DisplayBlock::UserInput(text) if text.contains("[Lashlang execution result]"))
     }));
-    assert!(blocks.iter().any(|block| {
-        matches!(
+    assert!(blocks.iter().all(|block| {
+        !matches!(
             block,
-            DisplayBlock::Activity(activity)
-                if activity.call.kind == ActivityKind::Hidden
-                    && activity.call.tool_name == "execute_lashlang"
+            DisplayBlock::Activity(activity) if activity.call.tool_name == "execute_lashlang"
         )
     }));
 }
@@ -1624,6 +1931,17 @@ fn pending_image_jobs_only_count_visible_markers() {
 
     app.backspace();
     assert!(!app.has_pending_image_jobs());
+}
+
+#[test]
+fn try_take_prepared_turn_waits_for_visible_inflight_images() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.set_input("[Image #1]".into());
+    app.begin_pending_image(1);
+
+    assert!(app.try_take_prepared_turn().is_none());
+    assert_eq!(app.input(), "[Image #1]");
+    assert!(app.has_pending_image_jobs());
 }
 
 #[test]

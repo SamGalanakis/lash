@@ -33,10 +33,12 @@ pub(super) async fn handle_plugin(
             Ok(true) => {
                 let state = rt.export_state();
                 history.clear();
-                let projected_messages = state.project_messages();
+                let projected_events = state.active_events();
+                let projected_messages = state.project_conversation_messages();
                 let projected_tool_calls = state.project_tool_calls();
                 history.extend(projected_messages.clone());
                 app.blocks = projected_blocks_from_state(
+                    &projected_events,
                     &projected_messages,
                     &projected_tool_calls,
                     &app.ui_projection_state(),

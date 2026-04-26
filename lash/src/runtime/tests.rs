@@ -16,14 +16,28 @@ fn default_state() -> PersistedSessionState {
     PersistedSessionState::default()
 }
 
+#[test]
+fn stream_fallback_merges_adjacent_display_reasoning_chunks() {
+    let mut fallback = StandardStreamFallback::default();
+    fallback.push_reasoning("I'll".to_string(), None, Vec::new(), None);
+    fallback.push_reasoning(" check".to_string(), None, Vec::new(), None);
+    fallback.push_reasoning(" the time.".to_string(), None, Vec::new(), None);
+
+    assert_eq!(fallback.parts.len(), 1);
+    assert!(matches!(
+        &fallback.parts[0],
+        LlmOutputPart::Reasoning { text, .. } if text == "I'll check the time."
+    ));
+}
+
 trait ProjectionState {
-    fn projected_messages(&self) -> &[Message];
+    fn projected_conversation_messages(&self) -> &[Message];
     fn projected_tool_calls(&self) -> &[ToolCallRecord];
 }
 
 impl ProjectionState for SessionStateEnvelope {
-    fn projected_messages(&self) -> &[Message] {
-        self.projected_messages()
+    fn projected_conversation_messages(&self) -> &[Message] {
+        self.projected_conversation_messages()
     }
 
     fn projected_tool_calls(&self) -> &[ToolCallRecord] {
@@ -32,8 +46,8 @@ impl ProjectionState for SessionStateEnvelope {
 }
 
 impl ProjectionState for PersistedSessionState {
-    fn projected_messages(&self) -> &[Message] {
-        self.projected_messages()
+    fn projected_conversation_messages(&self) -> &[Message] {
+        self.projected_conversation_messages()
     }
 
     fn projected_tool_calls(&self) -> &[ToolCallRecord] {
@@ -57,8 +71,8 @@ impl ProjectionStateMut for PersistedSessionState {
     }
 }
 
-fn projected_messages(state: &impl ProjectionState) -> &[Message] {
-    state.projected_messages()
+fn projected_conversation_messages(state: &impl ProjectionState) -> &[Message] {
+    state.projected_conversation_messages()
 }
 
 fn projected_tool_calls(state: &impl ProjectionState) -> &[ToolCallRecord] {
@@ -184,7 +198,7 @@ fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
 
 fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
-        execution_mode: ExecutionMode::Standard,
+        execution_mode: ExecutionMode::standard(),
         provider: mock_provider(Vec::new()).into_handle(),
         model: "mock-model".to_string(),
         max_context_tokens: Some(200_000),
@@ -322,7 +336,7 @@ async fn standard_runtime_with_transport(transport: TestProvider) -> LashRuntime
         test_host_config(),
         crate::RuntimeServices::new(plugin_session_with_tools(
             "root",
-            ExecutionMode::Standard,
+            ExecutionMode::standard(),
             tools,
         )),
         PersistedSessionState::default(),
@@ -340,7 +354,7 @@ fn plugin_host_rejects_observational_memory_without_supporting_plugin() {
     )]);
     let result = host.build_session(
         "root",
-        ExecutionMode::Standard,
+        ExecutionMode::standard(),
         crate::ContextApproach::ObservationalMemory(crate::ObservationalMemoryConfig::default()),
         None,
     );
@@ -367,7 +381,7 @@ async fn standard_runtime_with_transport_and_background(transport: TestProvider)
         host,
         crate::RuntimeServices::new(plugin_session_with_tools(
             "root",
-            ExecutionMode::Standard,
+            ExecutionMode::standard(),
             tools,
         )),
         PersistedSessionState::default(),
@@ -389,7 +403,7 @@ async fn standard_runtime_with_shared_background_executor(
         host,
         crate::RuntimeServices::new(plugin_session_with_tools(
             "root",
-            ExecutionMode::Standard,
+            ExecutionMode::standard(),
             tools,
         )),
         PersistedSessionState::default(),
@@ -410,7 +424,7 @@ async fn standard_runtime_with_transport_and_host(
         host,
         crate::RuntimeServices::new(plugin_session_with_tools(
             "root",
-            ExecutionMode::Standard,
+            ExecutionMode::standard(),
             tools,
         )),
         PersistedSessionState::default(),
@@ -426,7 +440,7 @@ async fn runtime_requires_explicit_max_context_tokens() {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let result = LashRuntime::from_embedded_state(
         SessionPolicy {
-            execution_mode: ExecutionMode::Standard,
+            execution_mode: ExecutionMode::standard(),
             provider: mock_provider(Vec::new()).into_handle(),
             model: "mock-model".to_string(),
             max_context_tokens: None,
@@ -435,7 +449,7 @@ async fn runtime_requires_explicit_max_context_tokens() {
         test_host_config(),
         crate::RuntimeServices::new(plugin_session_with_tools(
             "root",
-            ExecutionMode::Standard,
+            ExecutionMode::standard(),
             tools,
         )),
         PersistedSessionState::default(),
@@ -453,7 +467,7 @@ async fn runtime_requires_explicit_max_context_tokens() {
 #[cfg(feature = "tool-impls")]
 fn rlm_test_policy() -> SessionPolicy {
     SessionPolicy {
-        execution_mode: ExecutionMode::Rlm,
+        execution_mode: ExecutionMode::new("rlm"),
         provider: mock_provider(Vec::new()).into_handle(),
         model: "mock-model".to_string(),
         max_context_tokens: Some(200_000),
@@ -463,7 +477,7 @@ fn rlm_test_policy() -> SessionPolicy {
 
 #[cfg(feature = "tool-impls")]
 async fn rlm_runtime_with_transport(transport: TestProvider) -> LashRuntime {
-    let plugins = default_tool_session("root", ExecutionMode::Rlm, true);
+    let plugins = default_tool_session("root", ExecutionMode::new("rlm"), true);
     let mut runtime = LashRuntime::from_embedded_state(
         rlm_test_policy(),
         test_host_config(),
@@ -474,7 +488,7 @@ async fn rlm_runtime_with_transport(transport: TestProvider) -> LashRuntime {
         ),
         PersistedSessionState::from_state(SessionStateEnvelope {
             policy: SessionPolicy {
-                execution_mode: ExecutionMode::Rlm,
+                execution_mode: ExecutionMode::new("rlm"),
                 ..Default::default()
             },
             ..SessionStateEnvelope::default()
@@ -491,7 +505,7 @@ async fn rlm_runtime_with_transport_and_store(
     transport: TestProvider,
     store: Arc<dyn crate::store::RuntimeStore>,
 ) -> LashRuntime {
-    let plugins = default_tool_session("root", ExecutionMode::Rlm, true);
+    let plugins = default_tool_session("root", ExecutionMode::new("rlm"), true);
     let mut runtime = LashRuntime::from_persistent_embedded_state(
         rlm_test_policy(),
         test_host_config(),
@@ -503,7 +517,7 @@ async fn rlm_runtime_with_transport_and_store(
         ),
         PersistedSessionState::from_state(SessionStateEnvelope {
             policy: SessionPolicy {
-                execution_mode: ExecutionMode::Rlm,
+                execution_mode: ExecutionMode::new("rlm"),
                 ..Default::default()
             },
             ..SessionStateEnvelope::default()
@@ -521,10 +535,14 @@ async fn active_tool_catalog_uses_runtime_execution_mode() {
     let runtime = LashRuntime::from_embedded_state(
         rlm_test_policy(),
         test_host_config(),
-        crate::RuntimeServices::new(default_tool_session("root", ExecutionMode::Rlm, false)),
+        crate::RuntimeServices::new(default_tool_session(
+            "root",
+            ExecutionMode::new("rlm"),
+            false,
+        )),
         PersistedSessionState::from_state(SessionStateEnvelope {
             policy: SessionPolicy {
-                execution_mode: ExecutionMode::Rlm,
+                execution_mode: ExecutionMode::new("rlm"),
                 ..Default::default()
             },
             ..SessionStateEnvelope::default()
@@ -552,7 +570,7 @@ async fn standard_runtime_with_bridge(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new_with_bridges(
-            plugin_session_with_tools("root", ExecutionMode::Standard, tools),
+            plugin_session_with_tools("root", ExecutionMode::standard(), tools),
             turn_injection_bridge,
             crate::TurnInputInjectionBridge::new(),
         ),
@@ -573,7 +591,7 @@ async fn standard_runtime_with_input_bridge(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new_with_bridges(
-            plugin_session_with_tools("root", ExecutionMode::Standard, tools),
+            plugin_session_with_tools("root", ExecutionMode::standard(), tools),
             crate::TurnInjectionBridge::new(),
             turn_input_injection_bridge,
         ),
@@ -872,7 +890,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -882,12 +900,16 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
     assert_eq!(turn.status, TurnStatus::Failed);
     assert_eq!(turn.done_reason, DoneReason::RuntimeError);
     assert!(turn.errors.iter().any(|issue| issue.kind == "plugin"));
-    assert!(projected_messages(&turn.state).iter().any(|message| {
-        message
-            .parts
+    assert!(
+        projected_conversation_messages(&turn.state)
             .iter()
-            .any(|part| part.content.contains("plugin preface"))
-    }));
+            .any(|message| {
+                message
+                    .parts
+                    .iter()
+                    .any(|part| part.content.contains("plugin preface"))
+            })
+    );
 }
 
 #[tokio::test]
@@ -920,7 +942,7 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
                     }],
                 }),
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -929,7 +951,7 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
 
     let user_message = turn
         .state
-        .projected_messages()
+        .projected_conversation_messages()
         .iter()
         .find(|message| message.role == MessageRole::User)
         .expect("user message");
@@ -996,7 +1018,7 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -1054,27 +1076,35 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
         .await
         .expect("turn");
 
-    assert!(projected_messages(&turn.state).iter().any(|message| {
-        message.role == MessageRole::Assistant
-            && message
-                .parts
-                .iter()
-                .any(|part| part.content.contains("Second answer."))
-    }));
-    assert!(projected_messages(&turn.state).iter().all(|message| {
-        !(message.role == MessageRole::User
-            && message
-                .parts
-                .iter()
-                .any(|part| part.content == "one more thing"))
-    }));
+    assert!(
+        projected_conversation_messages(&turn.state)
+            .iter()
+            .any(|message| {
+                message.role == MessageRole::Assistant
+                    && message
+                        .parts
+                        .iter()
+                        .any(|part| part.content.contains("Second answer."))
+            })
+    );
+    assert!(
+        projected_conversation_messages(&turn.state)
+            .iter()
+            .all(|message| {
+                !(message.role == MessageRole::User
+                    && message
+                        .parts
+                        .iter()
+                        .any(|part| part.content == "one more thing"))
+            })
+    );
 }
 
 #[tokio::test]
@@ -1154,20 +1184,23 @@ async fn bridge_checkpoint_injection_preserves_images() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
         .await
         .expect("turn");
 
-    assert!(projected_messages(&turn.state).iter().any(|message| {
-        message.role == MessageRole::User
-            && message
-                .parts
-                .iter()
-                .any(|part| matches!(part.kind, PartKind::Image) && part.attachment.is_some())
-    }));
+    assert!(
+        projected_conversation_messages(&turn.state)
+            .iter()
+            .any(|message| {
+                message.role == MessageRole::User
+                    && message.parts.iter().any(|part| {
+                        matches!(part.kind, PartKind::Image) && part.attachment.is_some()
+                    })
+            })
+    );
 }
 
 #[tokio::test]
@@ -1229,20 +1262,24 @@ async fn checkpoint_hook_can_inject_messages() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
         .await
         .expect("turn");
 
-    assert!(projected_messages(&turn.state).iter().any(|message| {
-        message.role == MessageRole::System
-            && message
-                .parts
-                .iter()
-                .any(|part| part.content == "checkpoint injected")
-    }));
+    assert!(
+        projected_conversation_messages(&turn.state)
+            .iter()
+            .any(|message| {
+                message.role == MessageRole::System
+                    && message
+                        .parts
+                        .iter()
+                        .any(|part| part.content == "checkpoint injected")
+            })
+    );
 }
 
 #[tokio::test]
@@ -1286,7 +1323,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             &sink,
             CancellationToken::new(),
@@ -1307,7 +1344,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
         "expected injected turn input accepted event"
     );
 
-    let projected = projected_messages(&assembled.state);
+    let projected = projected_conversation_messages(&assembled.state);
     let follow_up_count = projected
         .iter()
         .filter(|message| {
@@ -1360,6 +1397,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                                 "branch seed",
                                             ),
                                         )],
+                                        first_turn_input: None,
                                         context_surface: crate::SessionContextSurface::default(),
                                         mode_extras: crate::ModeExtras::default(),
                                         usage_source: None,
@@ -1378,7 +1416,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                         match snapshot {
                                             Ok(snapshot) => crate::ToolResult::ok(json!({
                                                 "session_id": handle.session_id,
-                                                "message_count": snapshot.projected_messages().len(),
+                                                "message_count": snapshot.projected_conversation_messages().len(),
                                             })),
                                             Err(err) => err,
                                         }
@@ -1471,6 +1509,7 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
+            first_turn_input: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -1487,7 +1526,7 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
         )
         .await
@@ -1559,6 +1598,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
+            first_turn_input: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -1574,7 +1614,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     assert_eq!(meta.parent_session_id.as_deref(), Some("root"));
     let head = stores[0].load_session_head().expect("session head");
     let graph = head.graph;
-    let messages = graph.project_messages();
+    let messages = graph.project_conversation_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].parts[0].content, "parent hello");
     let checkpoint = head
@@ -1598,6 +1638,7 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
+            first_turn_input: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -1613,6 +1654,7 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
+            first_turn_input: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -1686,6 +1728,7 @@ impl crate::ToolProvider for ChildSessionTool {
                 policy: None,
                 plugin_mode: crate::SessionPluginMode::InheritCurrent,
                 initial_nodes: Vec::new(),
+                first_turn_input: None,
                 context_surface: crate::SessionContextSurface::default(),
                 mode_extras: crate::ModeExtras::default(),
                 usage_source: Some("subagent".to_string()),
@@ -1707,7 +1750,7 @@ impl crate::ToolProvider for ChildSessionTool {
                     image_blobs: HashMap::new(),
                     user_input: None,
                     mode: None,
-                    rlm_termination_override: None,
+                    mode_turn_options: None,
                 },
             )
             .await
@@ -1749,6 +1792,7 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
             policy: None,
             plugin_mode: crate::SessionPluginMode::Fresh,
             initial_nodes: Vec::new(),
+            first_turn_input: None,
             context_surface: crate::SessionContextSurface {
                 include_base_tools: false,
                 tool_providers: vec![Arc::new(MemoryProbeTool)],
@@ -1834,7 +1878,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             &sink,
             CancellationToken::new(),
@@ -1935,7 +1979,7 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             &sink,
             CancellationToken::new(),
@@ -2031,6 +2075,69 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
     assert_eq!(out.assistant_output.safe_text, "stored");
     assert_eq!(out.assistant_output.raw_text, "stored");
     assert_eq!(out.assistant_output.state, OutputState::Usable);
+}
+
+#[test]
+fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
+    let mut state = default_state();
+    append_message(
+        &mut state,
+        Message {
+            id: "a0".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![Part {
+                id: "a0.p0".to_string(),
+                kind: PartKind::Prose,
+                content: "previous assistant answer".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_item_id: None,
+                tool_signature: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+            }],
+            user_input: None,
+            origin: None,
+        },
+    );
+    append_message(
+        &mut state,
+        Message {
+            id: "u1".to_string(),
+            role: MessageRole::User,
+            parts: vec![Part {
+                id: "u1.p0".to_string(),
+                kind: PartKind::Text,
+                content: "new prompt".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_item_id: None,
+                tool_signature: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+            }],
+            user_input: Some(crate::UserInputProvenance {
+                display_text: "new prompt".to_string(),
+                effective_text: "new prompt".to_string(),
+                transforms: Vec::new(),
+            }),
+            origin: None,
+        },
+    );
+
+    let out = TurnAssembler::default().finish(
+        state.export_state(),
+        true,
+        None,
+        &SanitizerPolicy::default(),
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(out.status, TurnStatus::Interrupted);
+    assert!(out.assistant_output.safe_text.is_empty());
+    assert!(out.assistant_output.raw_text.is_empty());
 }
 
 #[test]
@@ -2340,7 +2447,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             &sink,
             CancellationToken::new(),
@@ -2388,7 +2495,7 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             &sink,
             CancellationToken::new(),
@@ -2472,7 +2579,7 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             cancel,
         )
@@ -2537,7 +2644,7 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -2587,7 +2694,7 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             &sink,
             CancellationToken::new(),
@@ -2690,7 +2797,7 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -2739,7 +2846,7 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -2797,7 +2904,7 @@ async fn standard_runtime_debug_log_records_stream_event_entries() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -2915,7 +3022,7 @@ async fn standard_runtime_debug_log_records_failed_llm_calls() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -3068,18 +3175,23 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
         .await
         .expect("turn");
 
-    assert!(projected_messages(&turn.state).iter().any(|message| {
-        message.parts.iter().any(|part| {
-            part.content.contains("model projection") && matches!(part.kind, PartKind::ToolResult)
-        })
-    }));
+    assert!(
+        projected_conversation_messages(&turn.state)
+            .iter()
+            .any(|message| {
+                message.parts.iter().any(|part| {
+                    part.content.contains("model projection")
+                        && matches!(part.kind, PartKind::ToolResult)
+                })
+            })
+    );
     let committed = committed_results.lock().await;
     assert_eq!(
         committed.as_slice(),
@@ -3125,7 +3237,8 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
     }]);
 
     let store = Arc::new(RecordingStore::default());
-    let plugins = plugin_session_with_tools("root", ExecutionMode::Standard, Arc::new(EmptyTools));
+    let plugins =
+        plugin_session_with_tools("root", ExecutionMode::standard(), Arc::new(EmptyTools));
     let mut runtime = LashRuntime::from_persistent_embedded_state(
         standard_test_policy(),
         test_host_config(),
@@ -3148,7 +3261,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -3160,7 +3273,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
         .await
         .expect("session head")
         .graph
-        .project_messages();
+        .project_conversation_messages();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, MessageRole::User);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
@@ -3228,7 +3341,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -3237,7 +3350,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
 
     let head = store.load_session_head().expect("session head");
     let graph = head.graph;
-    let messages = graph.project_messages();
+    let messages = graph.project_conversation_messages();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
     assert_eq!(messages[1].parts[0].content, "Stored answer");
@@ -3315,7 +3428,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )
@@ -3336,14 +3449,14 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
         rlm_test_policy(),
         test_host_config(),
         crate::PersistentRuntimeServices::new_with_bridges(
-            default_tool_session("root", ExecutionMode::Rlm, true),
+            default_tool_session("root", ExecutionMode::new("rlm"), true),
             crate::TurnInjectionBridge::new(),
             crate::TurnInputInjectionBridge::new(),
             store.clone() as Arc<dyn crate::store::RuntimeStore>,
         ),
         PersistedSessionState {
             policy: SessionPolicy {
-                execution_mode: ExecutionMode::Rlm,
+                execution_mode: ExecutionMode::new("rlm"),
                 ..Default::default()
             },
             session_graph: resumed_head.graph,
@@ -3377,7 +3490,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             CancellationToken::new(),
         )

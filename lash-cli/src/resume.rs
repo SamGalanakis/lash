@@ -158,7 +158,7 @@ async fn apply_graph_resume_state(
     if graph.heal_orphaned_leaf() {
         tracing::warn!("session graph leaf was orphaned on resume; healed to most recent message");
     }
-    let messages = graph.project_messages();
+    let messages = graph.project_conversation_messages();
     let tool_calls = graph.project_tool_calls();
     *history = messages.clone();
 
@@ -194,18 +194,19 @@ async fn apply_graph_resume_state(
         });
     app.set_model_variant(current_model_variant.clone());
 
-    let requested_execution_mode = config.as_ref().map(|state| state.execution_mode);
+    let requested_execution_mode = config.as_ref().map(|state| state.execution_mode.clone());
     let restored_execution_mode = requested_execution_mode
+        .clone()
         .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
         .unwrap_or_else(lash::default_execution_mode);
-    *execution_mode = restored_execution_mode;
+    *execution_mode = restored_execution_mode.clone();
 
     if let Some(requested_execution_mode) = requested_execution_mode.as_ref()
-        && !lash::execution_mode_supported(restored_execution_mode)
+        && !lash::execution_mode_supported(&restored_execution_mode)
     {
         app.blocks.push(DisplayBlock::SystemMessage(format!(
             "This build does not support `{}` mode; resuming in `standard`.",
-            crate::execution_mode_label(*requested_execution_mode)
+            crate::execution_mode_label(requested_execution_mode)
         )));
     }
 
@@ -317,38 +318,6 @@ pub async fn load_resumed_session(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn load_resumed_session_by_id(
-    session_id: &str,
-    app: &mut App,
-    history: &mut Vec<Message>,
-    runtime: &mut Option<LashRuntime>,
-    turn_counter: &mut usize,
-    execution_mode: &mut ExecutionMode,
-    provider: &ProviderHandle,
-    current_model_variant: &mut Option<String>,
-    dynamic_tools: &Arc<DynamicToolProvider>,
-    desired_dynamic: &mut DynamicStateSnapshot,
-    model_catalog: &CachedModelCatalog,
-) -> Result<(), String> {
-    let filename = session_log::filename_for_session_id(session_id)
-        .ok_or_else(|| format!("Could not find session `{session_id}`"))?;
-    load_resumed_session(
-        &filename,
-        app,
-        history,
-        runtime,
-        turn_counter,
-        execution_mode,
-        provider,
-        current_model_variant,
-        dynamic_tools,
-        desired_dynamic,
-        model_catalog,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn restore_session_state(
     session_filename: &str,
     history: &mut Vec<Message>,
@@ -433,7 +402,7 @@ mod tests {
                 provider_id: "openai_generic".to_string(),
                 configured_model: "gpt-5".to_string(),
                 context_window: 200_000,
-                execution_mode: ExecutionMode::Standard,
+                execution_mode: ExecutionMode::standard(),
                 context_approach: lash::ContextApproach::default(),
                 model_variant: None,
             },
@@ -513,7 +482,7 @@ mod tests {
         let runtime_services = RuntimeServices::new(plugins);
         let runtime = LashRuntime::from_embedded_state(
             lash::SessionPolicy {
-                execution_mode: ExecutionMode::Standard,
+                execution_mode: ExecutionMode::standard(),
                 provider: provider.clone(),
                 model: "gpt-5".into(),
                 max_context_tokens: Some(200_000),
@@ -568,7 +537,7 @@ mod tests {
         let mut history = Vec::new();
         let mut runtime = Some(runtime);
         let mut turn_counter = 0;
-        let mut execution_mode = ExecutionMode::Standard;
+        let mut execution_mode = ExecutionMode::standard();
         let mut current_model_variant = None;
 
         restore_session_state(
@@ -588,7 +557,7 @@ mod tests {
         .expect("restore");
 
         assert_eq!(turn_counter, 7);
-        assert_eq!(execution_mode, ExecutionMode::Standard);
+        assert_eq!(execution_mode, ExecutionMode::standard());
         assert_eq!(app.token_usage.input_tokens, 1200);
         assert_eq!(app.token_usage.output_tokens, 340);
         assert_eq!(app.token_usage.cached_input_tokens, 80);

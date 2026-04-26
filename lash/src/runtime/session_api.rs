@@ -29,7 +29,8 @@ impl LashRuntime {
         self.session
             .as_ref()
             .map(|session| {
-                session.shared_tool_catalog(&self.state.session_id, self.policy.execution_mode)
+                session
+                    .shared_tool_catalog(&self.state.session_id, self.policy.execution_mode.clone())
             })
             .unwrap_or_else(|| Arc::new(Vec::new()))
     }
@@ -47,12 +48,9 @@ impl LashRuntime {
         };
         Ok(dynamic_tools.export_state())
     }
-    /// Override the RLM termination contract for this session. Defaults
-    /// to `ProseWithoutFence` (today's chat-style behavior). Typed
-    /// subagent sessions call this with `Finish { schema }` to require
-    /// typed termination.
-    pub(crate) fn set_repl_termination(&mut self, termination: crate::RlmTermination) {
-        self.rlm_termination = termination;
+    /// Override mode-owned turn options for this session.
+    pub(crate) fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
+        self.mode_turn_options = options;
     }
 
     /// Export current session state for inspection/UI purposes.

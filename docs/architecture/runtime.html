@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lash Architecture - Modules + Runtime</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" defer></script>
+<script src="./mermaid.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Architecture page 01</div>
+          <h1>modules<span class="slash">/</span>runtime</h1>
+          <p>Runtime behavior is layered around a pure sans-IO turn machine. The async runtime hosts providers, plugins, stores, tool dispatch, lashlang execution, and session graph persistence.</p>
+        </div>
+        <div class="hero-meta">
+          <article class="card"><div class="micro-label">Kernel</div><strong><code>lash-sansio</code></strong><span>Messages, prompts, tools, mode config, effects, and turn machine.</span></article>
+          <article class="card"><div class="micro-label">Host</div><strong><code>lash</code></strong><span>Runtime lifecycle, session APIs, plugins, tool execution, storage, and providers.</span></article>
+          <article class="card"><div class="micro-label">App</div><strong><code>lash-cli</code></strong><span>TUI, bootstrap, commands, rendering, session resume/fork, and host docs.</span></article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a href="./index.html">Overview</a>
+        <a class="active" href="./runtime.html">Modules + Runtime</a>
+        <a href="./execution-modes.html">Execution Modes</a>
+        <a href="./lashlang.html">Lashlang</a>
+        <a href="./reference.html">Reference</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>Turn Construction</h2>
+            <p><code>lash-sansio::build_turn</code> is the boundary where mode preamble, current messages/events, tool surface, prompt template, and RLM trajectory become a configured turn machine.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Build-turn inputs</div>
+            <div class="mermaid">
+flowchart LR
+  Policy["SessionPolicy<br/>mode, model, variant"]
+  Mode["ModePreamble<br/>driver, projector,<br/>tool specs, execution prompt"]
+  Tools["ToolSurface<br/>visible docs, model specs,<br/>tool names"]
+  Prompt["PromptTemplate<br/>slots + built-ins"]
+  Messages["MessageSequence<br/>conversation context"]
+  Events["SessionEventRecord[]<br/>graph active path"]
+  Traj["RlmTrajectoryEntry[]<br/>REPL history"]
+  Build["lash-sansio::build_turn"]
+  Machine["TurnMachineConfig<br/>+ TurnMachine"]
+  ProviderReq["LlmRequest"]
+
+  Policy --> Build
+  Mode --> Build
+  Tools --> Build
+  Prompt --> Build
+  Messages --> Build
+  Events --> Build
+  Traj --> Build
+  Build --> Machine
+  Machine --> ProviderReq
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Runtime Loop</h2>
+            <p>The runtime polls sans-IO effects and performs the host work: provider calls, tool execution, lashlang code execution, checkpointing, graph persistence, and stream forwarding.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Turn driver responsibilities</div>
+            <div class="mermaid">
+sequenceDiagram
+  participant Host as CLI / Embedder
+  participant Runtime as LashRuntime
+  participant Machine as TurnMachine
+  participant Provider as Provider
+  participant Tools as ToolProvider
+  participant Repl as lashlang runtime
+  participant Graph as TurnGraphOverlay
+  participant Store as RuntimeStore
+
+  Host->>Runtime: stream_turn(input)
+  Runtime->>Machine: build from ModePreamble + PromptTemplate
+  loop poll effect
+    Machine-->>Runtime: Effect
+    alt LlmCall
+      Runtime->>Provider: request from ContextProjector
+      Provider-->>Runtime: LlmResponse / stream events
+      Runtime->>Machine: Response::LlmSuccess
+    else ToolCalls
+      Runtime->>Tools: run native model tools
+      Runtime->>Graph: record tool invocations
+      Tools-->>Runtime: results
+      Runtime->>Machine: Response::ToolResults
+    else ExecCode
+      Runtime->>Repl: execute lashlang
+      Repl-->>Runtime: ExecResponse + tool calls
+      Runtime->>Graph: record lashlang tool invocations
+      Runtime->>Machine: Response::ExecResult
+    else Progress
+      Runtime->>Store: persist graph tail + snapshots
+    end
+  end
+  Runtime-->>Host: AssembledTurn + events
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Major Modules</h2>
+            <p>Paths are grouped by ownership, not by build order.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><small>Pure protocol</small><h3>lash-sansio</h3><p>Owns <code>TurnMachine</code>, <code>ModeConfig</code>, prompt templates, message/session model types, tool definitions, and typed turn effects.</p></article>
+            <article class="panel"><small>Async runtime</small><h3>lash/src/runtime</h3><p><code>lifecycle.rs</code> builds/resumes runtime, <code>session_api.rs</code> exposes host APIs, <code>turn_loop.rs</code> finalizes turns, and <code>turn_driver/</code> performs provider/tool/code effects.</p></article>
+            <article class="panel"><small>Session runtime</small><h3>lash/src/session.rs</h3><p>Maintains per-session tool surface, plugin session, lashlang runtime, globals patches, execution surface sync, and dynamic tool visibility.</p></article>
+            <article class="panel"><small>Durable timeline</small><h3>lash/src/session_graph.rs</h3><p>Persists conversation events, tool invocation events, mode events such as RLM trajectory, state snapshots, plugin nodes, and active path metadata.</p></article>
+            <article class="panel"><small>Plugin API</small><h3>lash/src/plugin</h3><p>Mode protocol drivers, mode session plugins, native tools, prompt hooks, context surface, child session creation, and runtime extension points.</p></article>
+            <article class="panel"><small>CLI host</small><h3>lash-cli</h3><p>Bootstrap, provider setup, TUI state, rendering, slash commands, resume/fork, session logs, and host-managed docs.</p></article>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">Runtime source anchors: <code>lash-sansio/src/turn.rs</code>, <code>lash/src/runtime/turn_driver.rs</code>, <code>lash/src/session_graph.rs</code></footer>
+    </main>
+  </div>
+</body>
+</html>

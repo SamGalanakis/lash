@@ -35,7 +35,7 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
             provider_id: "openai-compatible".into(),
             configured_model: "gpt-5.4-mini".into(),
             context_window: 200_000,
-            execution_mode: ExecutionMode::Standard,
+            execution_mode: ExecutionMode::standard(),
             context_approach: ContextApproach::default(),
             model_variant: None,
         },

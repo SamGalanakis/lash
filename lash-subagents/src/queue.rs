@@ -242,7 +242,9 @@ pub(crate) fn message_turn_input(from: &str, message: &str) -> TurnInput {
         image_blobs: HashMap::new(),
         user_input: None,
         mode: None,
-        rlm_termination_override: Some(lash::RlmTermination::ProseWithoutFence),
+        mode_turn_options: Some(lash::ModeTurnOptions::rlm(
+            lash_rlm_types::RlmTermination::ProseWithoutFence,
+        )),
     }
 }
 

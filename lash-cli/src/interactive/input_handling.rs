@@ -148,51 +148,70 @@ pub(super) async fn load_session_switch(
     runtime: &mut Option<LashRuntime>,
     turn_counter: &mut usize,
     current_execution_mode: &mut ExecutionMode,
-    provider: &ProviderHandle,
+    _provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    dynamic_tools: &Arc<DynamicToolProvider>,
-    desired_dynamic: &mut DynamicStateSnapshot,
-    model_catalog: &CachedModelCatalog,
+    _dynamic_tools: &Arc<DynamicToolProvider>,
+    _desired_dynamic: &mut DynamicStateSnapshot,
+    _model_catalog: &CachedModelCatalog,
     session_manager: &mut Arc<dyn SessionManager>,
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
 ) -> bool {
-    match resume::load_resumed_session_by_id(
-        &pending_switch.session_id,
-        app,
-        history,
-        runtime,
-        turn_counter,
-        current_execution_mode,
-        provider,
-        current_model_variant,
-        dynamic_tools,
-        desired_dynamic,
-        model_catalog,
-    )
-    .await
+    let mut queued_turn = pending_switch.queued_turn;
+    if queued_turn.is_none()
+        && let Ok(Some(seed)) = session_manager
+            .take_first_turn_input(&pending_switch.session_id)
+            .await
+        && !seed.content.trim().is_empty()
     {
-        Ok(()) => {
-            if let Some(turn) = pending_switch.queued_turn {
-                app.queue_turn(turn);
+        queued_turn = Some(PreparedTurn::prepare_with_effective_text(
+            seed.content.clone(),
+            seed.content,
+            Vec::new(),
+        ));
+    }
+
+    // Brand-new session: reset the foreground runtime and UI in place
+    // instead of going through the resume path. The resume path is
+    // built to recover history, blocks, and checkpoints from disk; for
+    // a fresh session there's nothing to recover, and any branch in it
+    // that bails early leaks parent state (notably the cumulative
+    // `app.token_usage`) into the new session.
+    app.clear();
+    app.set_model_variant(current_model_variant.clone());
+    history.clear();
+    *turn_counter = 0;
+
+    if let Some(rt) = runtime.as_mut() {
+        let _ = rt.reset_session().await;
+        let mut state = SessionStateEnvelope {
+            session_id: pending_switch.session_id.clone(),
+            policy: SessionPolicy {
+                execution_mode: current_execution_mode.clone(),
+                ..rt.export_state().policy
+            },
+            session_graph: lash::SessionGraph::default(),
+            iteration: *turn_counter,
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: None,
+        };
+        state.replace_projection(history, &[]);
+        rt.set_persisted_state(lash::PersistedSessionState::from_state(state));
+        match rt.session_manager() {
+            Ok(manager) => *session_manager = manager,
+            Err(err) => {
+                push_system_message(app, format!("Failed to refresh session manager: {}", err))
             }
-            if let Some(rt) = runtime.as_ref() {
-                match rt.session_manager() {
-                    Ok(manager) => *session_manager = manager,
-                    Err(err) => push_system_message(
-                        app,
-                        format!("Failed to refresh session manager: {}", err),
-                    ),
-                }
-            }
-            sync_ui_extensions(app, ui_extensions, plugin_host, Arc::clone(session_manager)).await;
-            true
-        }
-        Err(err) => {
-            push_system_message(app, err);
-            false
         }
     }
+
+    sync_ui_extensions(app, ui_extensions, plugin_host, Arc::clone(session_manager)).await;
+
+    if let Some(turn) = queued_turn {
+        app.queue_turn(turn);
+    }
+
+    true
 }
 
 pub(super) fn enqueue_pending_monitor_wakes(
@@ -245,7 +264,7 @@ pub(super) async fn process_pending_monitor_wakes(
         image_blobs: Default::default(),
         user_input: None,
         mode: Some(RunMode::Normal),
-        rlm_termination_override: None,
+        mode_turn_options: None,
     };
     send_user_message(
         prepared_turn,
@@ -1041,17 +1060,15 @@ pub(super) async fn handle_key_event(
             let _ = apply_terminal_action(app, terminal, UiAction::SuggestionComplete);
         }
         KeyCode::Tab => {
-            let queued =
-                normalize_prepared_turn_for_dispatch(app.take_prepared_turn(), &app.skills);
-            app.update_suggestions();
-            if app.has_pending_image_jobs() {
-                app.restore_prepared_turn(queued);
+            let Some(queued) = app.try_take_prepared_turn() else {
                 push_system_message(
                     app,
                     "Wait for pasted images to finish processing before sending or queueing this draft.",
                 );
                 return Ok(false);
-            }
+            };
+            let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
+            app.update_suggestions();
             let parsed_command = parse_slash_command(
                 &queued.display_text,
                 &app.skills,
@@ -1143,7 +1160,7 @@ pub(super) async fn handle_key_event(
             *last_turn = Some(TurnReplayPayload {
                 prepared_turn: queued,
                 turn_input,
-                execution_mode: *current_execution_mode,
+                execution_mode: current_execution_mode.clone(),
             });
         }
         // Up/Down: navigate suggestions when popup is visible
@@ -1169,17 +1186,15 @@ pub(super) async fn handle_key_event(
                 return Ok(false);
             }
 
-            let queued =
-                normalize_prepared_turn_for_dispatch(app.take_prepared_turn(), &app.skills);
-            app.update_suggestions();
-            if app.has_pending_image_jobs() {
-                app.restore_prepared_turn(queued);
+            let Some(queued) = app.try_take_prepared_turn() else {
                 push_system_message(
                     app,
                     "Wait for pasted images to finish processing before sending or queueing this draft.",
                 );
                 return Ok(false);
-            }
+            };
+            let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
+            app.update_suggestions();
             if queued.is_empty() {
                 return Ok(false);
             }
@@ -1424,7 +1439,7 @@ pub(super) async fn handle_key_event(
             *last_turn = Some(TurnReplayPayload {
                 prepared_turn: queued,
                 turn_input,
-                execution_mode: *current_execution_mode,
+                execution_mode: current_execution_mode.clone(),
             });
         }
         KeyCode::Backspace => {

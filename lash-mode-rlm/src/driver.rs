@@ -2,7 +2,7 @@
 //!
 //! - The [`RlmDriver`] itself — extracts the first fenced `lashlang`
 //!   block from the assistant text and dispatches `StartExec`.
-//! - The [`RLM_EXECUTION_SECTION`] prompt copy.
+//! - The [`rlm_execution_section`] prompt copy.
 //! - Fence-extraction utilities (`extract_first_lashlang_fence`,
 //!   [`contains_closed_lashlang_fence`]).
 //! - Typed-RLM schema validation and the auxiliary messages used when
@@ -11,19 +11,19 @@
 use std::sync::Arc;
 
 use lash::sansio::{
-    CheckpointResumeAction, CompletedToolCall, DriverAction, DriverContextView,
-    ProtocolDriverHandle, RlmTermination, WaitingExecState, WaitingLlmState, driver_state,
+    CheckpointResumeAction, CompletedToolCall, ContextProjector, ProtocolDriverHandle,
+    WaitingExecState, WaitingLlmState, driver_state,
 };
-use lash::session_model::message::{PartAttachment, data_url_for_bytes};
 use lash::session_model::{
-    Message, MessageRole, Part, PartKind, PruneState, SessionEvent, fresh_message_id,
-    make_error_event,
+    ConversationRecord, Message, MessageRole, ModeEvent, Part, PartKind, PruneState, SessionEvent,
+    SessionEventRecord, fresh_message_id, make_error_event,
 };
 use lash::{
-    CheckpointKind, ExecResponse, LlmOutputPart, LlmResponse, ModeBuildInput, ModeConfig,
-    ModePreamble, PromptContribution, ToolCallRecord, ToolImage, append_assistant_text_part,
-    normalized_response_parts,
+    CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart, LlmResponse,
+    ModeBuildInput, ModeConfig, ModePreamble, ProjectorContext, PromptContribution, ToolCallRecord,
+    append_assistant_text_part, head_tail_truncate, normalized_response_parts,
 };
+use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
 
 pub const RLM_EXECUTION_SECTION: &str = r#"In RLM mode, **all execution goes through `lashlang`**. The API request intentionally sends **no** native tool schema (the `tools` array is empty by design) — **this does not mean you have no tools**. Every tool listed under **Available Tools** below is callable via `call tool_name { ... }` from inside a fenced `lashlang` block. Never tell the user you cannot inspect files, run commands, or use tools; you can. Emit a lashlang block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value from prior results. Plain prose is **only** for direct conversational replies that need no action.
@@ -41,8 +41,8 @@ Never `submit` a raw tool-result dump to end the turn. If you need to look at so
 
 - **Write small blocks.** Each block should do one focused step: call a tool or two, `print` what you need to see, then stop. Do not paste a whole program that reads five files and submits them.
 - Keep prose around the block to one or two sentences of reasoning. Do not describe an action in prose instead of executing it; if you say you will read a file, the block must contain the `call read_file`.
-- After each result, decide: another fenced block (more work), or `submit <final>` / a prose-only reply (done).
-- In interactive chat you may also end by replying with prose and no fenced block — useful for streamed text. Either way the turn ends. Root-session `submit` values are rendered as-is; formatting requirements (Markdown, schema) are covered below.
+- After each result, decide: another fenced block (more work), or finish.
+- Submit the final result with `submit <expr>`. Root-session `submit` values are rendered as-is; formatting requirements (Markdown, schema) are covered below.
 
 Example — inspect, then submit:
 
@@ -63,7 +63,9 @@ submit "The bound version is 0.2.61."
 ```
 ````
 
-### Language
+"#;
+
+pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
 
 - Values: null, booleans, numbers, strings, lists, records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
 - Assign with `name = expr`. Variables persist across fenced blocks within the turn.
@@ -89,7 +91,7 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `keys(record)` / `values(record)`
 - `to_string(x)` / `to_int(x)` / `to_float(x)`
 - `json_parse(s)` — parse a JSON string into a value
-- `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces
+- `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces. Do not wrap args in a list: use `format("It is {}.", trim(now.output))`, not `format("It is {}.", [trim(now.output)])`.
 - `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error
 
 ### Type literals
@@ -102,8 +104,9 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - **Nullable field** — use a union with `null`: `email: str | null` means the field is required and its value is either a string or null.
 - **Unions** — `a | b | c`, e.g. `status: str | int`, `value: str | null`.
 - Nested shapes require the `Type` keyword: `nested: Type { ok: bool }` (bare `{ ok: bool }` is rejected — that's a record value, not a type).
+"#;
 
-### Decomposition
+const RLM_DECOMPOSITION_SECTION: &str = r#"### Decomposition
 
 - Break big tasks into small steps. Prefer narrow `print`-then-continue checks over brute-force scans.
 - Use `print` to verify a subquestion before acting on it. Use `submit` only when you are ready to deliver the final answer.
@@ -120,6 +123,12 @@ events = await {
 }
 submit [events.a?.completion.result, events.b?.completion.result]
 ```"#;
+
+pub fn rlm_execution_section() -> String {
+    format!(
+        "{RLM_EXECUTION_SECTION}\n\n{LASHLANG_LANGUAGE_REFERENCE}\n\n{RLM_DECOMPOSITION_SECTION}"
+    )
+}
 
 /// Build the RLM-mode preamble. Called by the plugin factory from
 /// `build_preamble`.
@@ -142,22 +151,160 @@ pub fn build_rlm_preamble(input: ModeBuildInput) -> ModePreamble {
     ModePreamble {
         config: ModeConfig {
             protocol: Arc::new(RlmDriver),
+            projector: Arc::new(RlmContextProjector),
             sync_execution_surface: true,
         },
         tool_specs: Arc::new(Vec::new()),
         tool_names: input.tool_surface.tool_names(),
         omitted_tool_count,
-        execution_prompt: RLM_EXECUTION_SECTION.to_string(),
+        execution_prompt: rlm_execution_section(),
         prompt_contributions,
     }
 }
 
 pub struct RlmDriver;
 
+struct RlmContextProjector;
+
+impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
+    fn project(&self, ctx: ProjectorContext<'_>) -> lash::LlmRequest {
+        let task_context = build_task_context(ctx.messages.as_slice());
+
+        let rlm_trajectory = rlm_trajectory_from_events(ctx.events);
+        let repl_history = format_rlm_trajectory(&rlm_trajectory, 10_000);
+        let user_prompt = format!(
+            "Task\n{task_context}\n\nREPL history\n{repl_history}\n\nIteration\n{}\n\nFinalization\nCall `submit <value>` from lashlang when the task is complete. Do not answer in prose without a lashlang block.",
+            ctx.iteration + 1
+        );
+
+        let mut messages = Vec::new();
+        if !ctx.config.system_prompt.trim().is_empty() {
+            messages.push(lash::llm::types::LlmMessage::text(
+                lash::llm::types::LlmRole::System,
+                ctx.config.system_prompt.as_str().to_owned(),
+            ));
+        }
+        messages.push(lash::llm::types::LlmMessage::text(
+            lash::llm::types::LlmRole::User,
+            user_prompt,
+        ));
+
+        lash::LlmRequest {
+            model: ctx.config.model.clone(),
+            messages,
+            attachments: Vec::new(),
+            tools: Arc::new(Vec::new()),
+            tool_choice: lash::llm::types::LlmToolChoice::None,
+            model_variant: ctx.config.model_variant.clone(),
+            session_id: ctx.config.run_session_id.clone(),
+            output_spec: None,
+            stream_events: None,
+        }
+    }
+}
+
+const MAX_TASK_CONTEXT_USER_MESSAGES: usize = 4;
+const MAX_RLM_TRAJECTORY_STEPS: usize = 12;
+
+fn build_task_context(messages: &[Message]) -> String {
+    let mut user_chunks: Vec<&str> = Vec::new();
+    for message in messages {
+        if !matches!(message.role, MessageRole::User) {
+            continue;
+        }
+        for part in &message.parts {
+            if matches!(part.kind, PartKind::Text | PartKind::Prose) {
+                let trimmed = part.content.trim();
+                if !trimmed.is_empty() {
+                    user_chunks.push(trimmed);
+                }
+            }
+        }
+    }
+    if user_chunks.is_empty() {
+        return "No user task context is available.".to_string();
+    }
+
+    let total_user_chunks = user_chunks.len();
+    let mut selected: Vec<&str> = Vec::new();
+    if total_user_chunks <= MAX_TASK_CONTEXT_USER_MESSAGES {
+        selected = user_chunks;
+    } else {
+        selected.push(user_chunks[0]);
+        let tail_count = MAX_TASK_CONTEXT_USER_MESSAGES.saturating_sub(1);
+        selected.extend(
+            user_chunks[user_chunks.len().saturating_sub(tail_count)..]
+                .iter()
+                .copied(),
+        );
+    }
+
+    let mut out = String::with_capacity(selected.iter().map(|s| s.len() + 8).sum());
+    for (idx, chunk) in selected.iter().enumerate() {
+        if idx == 1 && total_user_chunks > MAX_TASK_CONTEXT_USER_MESSAGES {
+            let hidden = total_user_chunks.saturating_sub(MAX_TASK_CONTEXT_USER_MESSAGES);
+            use std::fmt::Write as _;
+            let _ = write!(out, "[{hidden} earlier user messages omitted]\n\n");
+        }
+        out.push_str("User: ");
+        out.push_str(chunk);
+        out.push_str("\n\n");
+    }
+    out
+}
+
+fn format_rlm_trajectory(entries: &[RlmTrajectoryEntry], max_output_chars: usize) -> String {
+    if entries.is_empty() {
+        return "You have not interacted with the lashlang REPL yet.".to_string();
+    }
+    let start = entries.len().saturating_sub(MAX_RLM_TRAJECTORY_STEPS);
+    let visible = &entries[start..];
+    let mut out = String::new();
+    if start > 0 {
+        use std::fmt::Write as _;
+        let _ = write!(out, "[{start} earlier REPL steps omitted]\n\n");
+    }
+    for (idx, entry) in visible.iter().enumerate() {
+        let (preview, raw_len) = head_tail_truncate(&entry.output, max_output_chars);
+        if idx > 0 {
+            out.push_str("\n\n");
+        }
+        use std::fmt::Write as _;
+        let _ = write!(
+            out,
+            "=== Step {} ===\nReasoning: {}\nCode:\n```lashlang\n{}\n```\nOutput ({raw_len} chars):\n{}",
+            start + idx + 1,
+            entry.reasoning.trim(),
+            entry.code.trim(),
+            preview
+        );
+        if let Some(error) = &entry.error {
+            out.push_str("\nError:\n");
+            out.push_str(error);
+        }
+        if let Some(final_output) = &entry.final_output {
+            out.push_str("\nFinal output:\n");
+            out.push_str(
+                &serde_json::to_string_pretty(final_output)
+                    .unwrap_or_else(|_| final_output.to_string()),
+            );
+        }
+    }
+    out
+}
+
+fn rlm_trajectory_from_events(events: &[SessionEventRecord]) -> Vec<RlmTrajectoryEntry> {
+    lash_rlm_types::project_trajectory(events.iter().filter_map(|event| match event {
+        SessionEventRecord::Mode(event) => event.rlm_event(),
+        _ => None,
+    }))
+}
+
 #[derive(Default)]
 struct RlmDriverState {
+    reasoning: String,
     tool_calls: Vec<ToolCallRecord>,
-    images: Vec<ToolImage>,
+    observations: Vec<String>,
     combined_output: String,
     exec_error: Option<String>,
     executed_code: Option<String>,
@@ -169,10 +316,10 @@ struct FenceExtraction {
     had_extra_fences: bool,
 }
 
-impl ProtocolDriverHandle for RlmDriver {
+impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
     fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
-            request: ctx.build_llm_request(false),
+            request: ctx.project_llm_request(false),
             driver_state: Some(driver_state(RlmDriverState::default())),
         }]
     }
@@ -196,9 +343,14 @@ impl ProtocolDriverHandle for RlmDriver {
                 LlmOutputPart::Text { text } => {
                     append_assistant_text_part(&mut assistant_text, &text);
                 }
-                // RLM mode never re-feeds reasoning items to the model and
-                // doesn't surface them to the user — drop them silently.
-                LlmOutputPart::Reasoning { .. } => {}
+                LlmOutputPart::Reasoning { text, summary, .. } => {
+                    let reasoning = if text.trim().is_empty() {
+                        summary.join("\n\n")
+                    } else {
+                        text
+                    };
+                    append_assistant_text_part(&mut assistant_text, &reasoning);
+                }
                 LlmOutputPart::ToolCall { .. } => {}
             }
         }
@@ -216,28 +368,15 @@ impl ProtocolDriverHandle for RlmDriver {
 
         let extraction = extract_first_lashlang_fence(&assistant_text);
         let Some(fence) = extraction else {
-            match ctx.rlm_termination() {
-                RlmTermination::ProseWithoutFence => {
-                    actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
-                        assistant_text,
-                    )]));
-                    actions.push(DriverAction::StartCheckpoint {
-                        checkpoint: CheckpointKind::BeforeCompletion,
-                        on_empty: CheckpointResumeAction::Finish,
-                    });
-                }
-                RlmTermination::Finish { .. } => {
-                    actions.push(DriverAction::AppendMessages(vec![
-                        assistant_prose_message(assistant_text),
-                        typed_rlm_finish_reminder_message(),
-                    ]));
-                    actions.push(DriverAction::AdvanceIteration);
-                    actions.push(DriverAction::StartCheckpoint {
-                        checkpoint: CheckpointKind::AfterWork,
-                        on_empty: CheckpointResumeAction::PrepareIteration,
-                    });
-                }
-            }
+            actions.push(DriverAction::AppendEvents(vec![
+                conversation_event(assistant_prose_message(assistant_text)),
+                conversation_event(typed_rlm_finish_reminder_message()),
+            ]));
+            actions.push(DriverAction::AdvanceIteration);
+            actions.push(DriverAction::StartCheckpoint {
+                checkpoint: CheckpointKind::AfterWork,
+                on_empty: CheckpointResumeAction::PrepareIteration,
+            });
             return actions;
         };
 
@@ -247,10 +386,8 @@ impl ProtocolDriverHandle for RlmDriver {
             .take_driver_state::<RlmDriverState>()
             .unwrap_or_default();
         state.executed_code = Some(fence.code.clone());
+        state.reasoning = assistant_text.clone();
 
-        actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
-            assistant_text,
-        )]));
         // Emit the raw lashlang source as a `Message` with kind
         // `lashlang_code` so the CLI can reveal it in the full-expand
         // view (Alt+O) above the tool activities it produced.
@@ -297,12 +434,13 @@ impl ProtocolDriverHandle for RlmDriver {
                     }));
                 }
                 state.tool_calls.extend(response.tool_calls);
-                state.images.extend(response.images);
+                let _ = response.images;
                 if !response.output.is_empty() {
                     state.combined_output.push_str(&response.output);
                 }
                 for observation in response.observations {
                     if !observation.is_empty() {
+                        state.observations.push(observation.clone());
                         if !state.combined_output.is_empty()
                             && !state.combined_output.ends_with('\n')
                         {
@@ -332,11 +470,17 @@ impl ProtocolDriverHandle for RlmDriver {
             // through to the shared terminate-with-value path below.
             if let RlmTermination::Finish {
                 schema: Some(schema),
-            } = ctx.rlm_termination()
-                && let Err(error_text) = validate_finish_value(finish_value, schema)
+            } = ctx.termination().rlm_termination()
+                && let Err(error_text) = validate_finish_value(finish_value, &schema)
             {
-                actions.push(DriverAction::AppendMessages(vec![
-                    typed_rlm_schema_error_message(&error_text),
+                actions.push(DriverAction::AppendEvents(vec![
+                    trajectory_event(trajectory_entry(
+                        ctx.iteration(),
+                        &state,
+                        Some(error_text.clone()),
+                        None,
+                    )),
+                    conversation_event(typed_rlm_schema_error_message(&error_text)),
                 ]));
                 actions.push(DriverAction::AdvanceIteration);
                 actions.push(DriverAction::StartCheckpoint {
@@ -351,12 +495,22 @@ impl ProtocolDriverHandle for RlmDriver {
                 Value::String(text) => text.clone(),
                 other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
             };
+            actions.push(DriverAction::AppendEvents(vec![trajectory_event(
+                trajectory_entry(ctx.iteration(), &state, None, Some(finish_value.clone())),
+            )]));
             if !rendered.trim().is_empty() {
-                actions.push(DriverAction::AppendMessages(vec![assistant_prose_message(
-                    rendered,
+                actions.push(DriverAction::Emit(SessionEvent::Message {
+                    text: rendered.clone(),
+                    kind: "final".to_string(),
+                }));
+                actions.push(DriverAction::AppendEvents(vec![conversation_event(
+                    assistant_prose_message(rendered),
                 )]));
             }
-            if matches!(ctx.rlm_termination(), RlmTermination::Finish { .. }) {
+            if matches!(
+                ctx.termination().rlm_termination(),
+                RlmTermination::Finish { .. }
+            ) {
                 actions.push(DriverAction::Emit(SessionEvent::TypedFinish {
                     value: finish_value.clone(),
                 }));
@@ -368,47 +522,8 @@ impl ProtocolDriverHandle for RlmDriver {
             return actions;
         }
 
-        let mut result_payload = serde_json::json!({
-            "observations": state.combined_output,
-            "tool_calls": state.tool_calls,
-            "error": state.exec_error,
-        });
-        if !state.images.is_empty() {
-            let images = state
-                .images
-                .iter()
-                .map(|img| {
-                    serde_json::json!({
-                        "label": img.label,
-                        "mime": img.mime,
-                    })
-                })
-                .collect::<Vec<_>>();
-            result_payload["images"] = Value::Array(images);
-        }
-
-        let success = result_payload
-            .get("error")
-            .is_none_or(|value| value.is_null());
-        let result_call_id = format!("rlm_exec_{}", ctx.iteration());
-        let execute_args = state
-            .executed_code
-            .as_ref()
-            .map(|code| serde_json::json!({ "code": code }))
-            .unwrap_or_else(|| serde_json::json!({}));
-        actions.push(DriverAction::Emit(SessionEvent::ToolCall {
-            call_id: Some(result_call_id.clone()),
-            name: "execute_lashlang".to_string(),
-            args: execute_args,
-            result: result_payload.clone(),
-            success,
-            duration_ms: 0,
-        }));
-        actions.push(DriverAction::AppendMessages(vec![rlm_result_message(
-            &result_call_id,
-            success,
-            &result_payload,
-            &state.images,
+        actions.push(DriverAction::AppendEvents(vec![trajectory_event(
+            trajectory_entry(ctx.iteration(), &state, None, None),
         )]));
         actions.push(DriverAction::AdvanceIteration);
         if ctx.should_force_exit_after_grace_turn() {
@@ -422,6 +537,36 @@ impl ProtocolDriverHandle for RlmDriver {
         });
         actions
     }
+}
+
+fn trajectory_entry(
+    iteration: usize,
+    state: &RlmDriverState,
+    validation_error: Option<String>,
+    final_output: Option<Value>,
+) -> RlmTrajectoryEntry {
+    let output = state.combined_output.clone();
+    let output_raw_len = output.chars().count();
+    RlmTrajectoryEntry {
+        id: format!("rlm_step_{iteration}"),
+        iteration,
+        reasoning: state.reasoning.clone(),
+        code: state.executed_code.clone().unwrap_or_default(),
+        output,
+        observations: state.observations.clone(),
+        tool_calls: state.tool_calls.clone(),
+        error: validation_error.or_else(|| state.exec_error.clone()),
+        final_output,
+        output_raw_len,
+    }
+}
+
+fn conversation_event(message: Message) -> SessionEventRecord {
+    SessionEventRecord::Conversation(ConversationRecord::from_message(message))
+}
+
+fn trajectory_event(entry: RlmTrajectoryEntry) -> SessionEventRecord {
+    SessionEventRecord::Mode(ModeEvent::rlm(RlmModeEvent::RlmTrajectoryEntry(entry)))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -556,123 +701,6 @@ fn typed_rlm_schema_error_message(error_text: &str) -> Message {
         user_input: None,
         origin: None,
     }
-}
-
-fn rlm_result_message(
-    result_call_id: &str,
-    success: bool,
-    result_payload: &Value,
-    images: &[ToolImage],
-) -> Message {
-    // Emit the exec output as a plain `PartKind::Text` under a
-    // user-role message instead of a synthetic `PartKind::ToolResult`
-    // tied to a `tool_call_id` the model never produced. Providers
-    // that strictly enforce tool_call ↔ tool_result pairing (e.g.
-    // Azure's OpenAI endpoint) reject the orphan `role=tool` message
-    // the adapter would otherwise emit. This matches dspy.RLM's
-    // semantic: the exec output is an observation the runtime feeds
-    // back as user content, not a response to a tool the model
-    // called.
-    //
-    // We keep `tool_call_id` + `tool_name` on the Text part so the
-    // interrupted-session projection (see `project_interrupted_blocks`)
-    // can still identify these messages as RLM exec results and
-    // render them as activities rather than raw user input. The
-    // Part→LlmContentBlock mapping ignores both fields when
-    // `kind == Text`, so the wire format is `role=user, content=…`
-    // with no tool-call fakery.
-    let id = fresh_message_id();
-    let mut parts = vec![Part {
-        id: format!("{id}.p0"),
-        kind: PartKind::Text,
-        content: format_repl_result_text(success, result_payload),
-        attachment: None,
-        tool_call_id: Some(result_call_id.to_string()),
-        tool_name: Some("execute_lashlang".to_string()),
-        tool_item_id: None,
-        tool_signature: None,
-        prune_state: PruneState::Intact,
-        reasoning_meta: None,
-    }];
-    for (image_offset, image) in images.iter().enumerate() {
-        parts.push(Part {
-            id: format!("{id}.p{}", parts.len()),
-            kind: PartKind::Text,
-            content: format!("[Tool image: {}]", image.label),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-        });
-        parts.push(Part {
-            id: format!("{id}.p{}", parts.len()),
-            kind: PartKind::Image,
-            content: String::new(),
-            attachment: Some(PartAttachment {
-                mime: image.mime.clone(),
-                url: data_url_for_bytes(&image.mime, &image.data),
-                filename: Some(format!("tool-image-{image_offset}")),
-            }),
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-        });
-    }
-    Message {
-        id,
-        role: MessageRole::User,
-        parts,
-        user_input: None,
-        origin: None,
-    }
-}
-
-fn format_repl_result_text(success: bool, result_payload: &Value) -> String {
-    let mut sections = vec!["[Lashlang execution result]".to_string()];
-    if !success {
-        sections.push("status: error".to_string());
-    }
-    if let Some(observations) = result_payload
-        .get("observations")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        sections.push(format!("observations:\n{observations}"));
-    }
-    if let Some(arr) = result_payload
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .filter(|arr| !arr.is_empty())
-    {
-        sections.push(format!(
-            "tool_calls: {}",
-            serde_json::to_string(arr).unwrap_or_else(|_| "[]".into())
-        ));
-    }
-    if let Some(error) = result_payload
-        .get("error")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        sections.push(format!("error:\n{error}"));
-    }
-    if let Some(images) = result_payload
-        .get("images")
-        .and_then(Value::as_array)
-        .filter(|arr| !arr.is_empty())
-    {
-        sections.push(format!(
-            "images: {}",
-            serde_json::to_string(images).unwrap_or_else(|_| "[]".into())
-        ));
-    }
-    sections.join("\n\n")
 }
 
 fn validate_finish_value(value: &Value, schema: &Value) -> Result<(), String> {

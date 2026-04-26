@@ -230,10 +230,12 @@ dependencies = [
  "lash",
  "lash-export",
  "lash-mode-rlm",
+ "lash-mode-rlmpure",
  "lash-mode-standard",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
  "lash-provider-openai",
+ "lash-rlm-types",
  "lash-subagents",
  "regex",
  "serde",
@@ -255,6 +257,7 @@ dependencies = [
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
  "lash-provider-openai",
+ "lash-rlm-types",
  "lash-subagents",
  "regex",
  "reqwest",
@@ -277,6 +280,7 @@ dependencies = [
  "lash",
  "lash-default-tools",
  "lash-mode-rlm",
+ "lash-mode-rlmpure",
  "lash-mode-standard",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
@@ -1864,6 +1868,7 @@ dependencies = [
  "futures-util",
  "globset",
  "ignore",
+ "lash-rlm-types",
  "lash-sansio",
  "lashlang",
  "libc",
@@ -1919,6 +1924,7 @@ dependencies = [
  "lash-default-tools",
  "lash-export",
  "lash-mode-rlm",
+ "lash-mode-rlmpure",
  "lash-mode-standard",
  "lash-plugin-plan-mode",
  "lash-plugin-prompt-context",
@@ -1928,6 +1934,7 @@ dependencies = [
  "lash-provider-google",
  "lash-provider-openai",
  "lash-providers-builtin",
+ "lash-rlm-types",
  "lash-subagents",
  "lash-tui",
  "lash-ui",
@@ -1975,10 +1982,23 @@ dependencies = [
  "async-trait",
  "lash",
  "lash-mode-standard",
+ "lash-rlm-types",
  "lash-sansio",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "lash-mode-rlmpure"
+version = "0.2.70"
+dependencies = [
+ "async-trait",
+ "lash",
+ "lash-mode-rlm",
+ "lash-rlm-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2117,6 +2137,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-rlm-types"
+version = "0.2.70"
+dependencies = [
+ "lash-sansio",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lash-sansio"
 version = "0.2.71"
 dependencies = [
@@ -2132,6 +2161,7 @@ version = "0.2.71"
 dependencies = [
  "async-trait",
  "lash",
+ "lash-rlm-types",
  "lashlang",
  "serde",
  "serde_json",

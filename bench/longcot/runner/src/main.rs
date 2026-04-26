@@ -16,15 +16,16 @@ use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
     PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot,
-    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderHandle,
-    RlmGlobalsPatchPluginBody, RuntimeCoreConfig, RuntimeStore, SessionAppendNode, SessionEvent,
-    SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge,
-    TurnInput, TurnInputInjectionBridge, diff_usage_reports,
+    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
+    RuntimeStore, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
+    diff_usage_reports,
 };
 use lash_export::{ExportFormat, SessionSelector, export};
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
+use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -53,7 +54,7 @@ const LONGCOT_USER_DIRECTIVE: &str = concat!(
 // upstream `src/configs/oai_gpt52.yaml`: `reasoning.effort=high` and
 // `max_output_tokens=125000`. Matching those keeps our numbers
 // directly comparable to the published leaderboard. `max_turns=50`
-// still lines up with the RLM blog's dspy.RLM iteration cap; the
+// still lines up with the reference RLM iteration cap; the
 // execution engine is always lash's `lashlang`-backed RLM.
 const DEFAULT_MODEL: &str = "openai/gpt-5.2";
 const DEFAULT_VARIANT: &str = "high";
@@ -206,11 +207,11 @@ impl Default for ReferenceSettings {
             upstream_repo: "https://github.com/LongHorizonReasoning/longcot".to_string(),
             reference_blog: "https://raw.works/longcot-a-benchmark-worthy-of-a-rlms-attention/"
                 .to_string(),
-            reference_framework: "dspy.RLM v3.1.3".to_string(),
+            reference_framework: "reference RLM runtime".to_string(),
             note:
                 "This harness runs LongCoT through lash's lashlang-backed RLM. The iteration cap \
                  (50) and max-output cap (64k) match the reference writeup; the execution engine \
-                 is lash, not dspy.RLM."
+                 is lash, not the reference runtime."
                     .to_string(),
         }
     }
@@ -335,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
         variant: Some(args.variant.clone()),
         base_url: resolve_base_url(&args),
         harness: args.harness.clone(),
-        execution_mode: execution_mode_label(execution_mode).to_string(),
+        execution_mode: execution_mode_label(&execution_mode).to_string(),
         context_approach: context_approach_label(&context_approach).to_string(),
         max_turns: args.max_turns,
         max_context_tokens: args.max_context_tokens,
@@ -429,6 +430,7 @@ async fn main() -> anyhow::Result<()> {
         let output_dir = output_dir_shared.clone();
         let responses_path = responses_path_shared.clone();
         let context_approach = context_approach.clone();
+        let execution_mode = execution_mode.clone();
         join_set.spawn(async move {
             let _permit = permit;
             let result = run_question(
@@ -602,14 +604,15 @@ async fn run_question(
         model: args.model.clone(),
         provider: provider.clone(),
         max_context_tokens: Some(args.max_context_tokens),
-        execution_mode,
+        execution_mode: execution_mode.clone(),
         context_approach: context_approach.clone(),
         model_variant: Some(args.variant.clone()),
         max_turns: Some(args.max_turns),
         ..SessionPolicy::default()
     };
 
-    let plugin_session = build_plugin_session(execution_mode, context_approach.clone(), &policy)?;
+    let plugin_session =
+        build_plugin_session(execution_mode.clone(), context_approach.clone(), &policy)?;
     let services = PersistentRuntimeServices::new_with_bridges(
         plugin_session,
         TurnInjectionBridge::new(),
@@ -639,14 +642,15 @@ async fn run_question(
     // Bind the problem as an RLM global so it sits in structured state rather
     // than the message body. The model sees an `input = { prompt, ... }` entry
     // in its Bound Variables preamble and can `observe input.prompt` from
-    // inside a lashlang block, which is the lash analog of dspy's
-    // `LongCoTSolve.prompt: dspy.InputField(...)`.
+    // inside a lashlang block, which is the lash analog of the benchmark
+    // prompt input field.
     runtime
         .append_session_nodes(AppendSessionNodesRequest {
-            nodes: vec![SessionAppendNode::plugin(
-                lash::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
-                serde_json::to_value(build_globals_patch(&question))?,
-            )],
+            nodes: vec![SessionAppendNode::event(lash::SessionEventRecord::Mode(
+                lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(build_globals_patch(
+                    &question,
+                ))),
+            ))],
             requires_ancestor_node_id: None,
         })
         .await
@@ -666,7 +670,7 @@ async fn run_question(
                 image_blobs: Default::default(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             sink_trait.as_ref(),
             cancel,
@@ -723,7 +727,7 @@ async fn run_question(
         done_reason,
         failure_reason,
         lash: LashRunSnapshot {
-            execution_mode: execution_mode_label(execution_mode).to_string(),
+            execution_mode: execution_mode_label(&execution_mode).to_string(),
             context_approach: context_approach_label(context_approach).to_string(),
             variant: Some(args.variant.clone()),
             max_turns: args.max_turns,
@@ -809,7 +813,7 @@ fn extract_text(content: Option<&Value>) -> String {
 
 /// Build a minimal plugin stack: rolling-history context, tool-result
 /// projection, and subagents (so RLM mode can spawn sub-agents for recursive
-/// decomposition — the closest analogue to dspy.RLM). No benchmark-specific
+/// decomposition — the closest analogue to the reference RLM setup). No benchmark-specific
 /// tools: LongCoT prompts explicitly forbid external tool use.
 fn build_plugin_session(
     execution_mode: ExecutionMode,
@@ -833,6 +837,9 @@ fn build_plugin_session(
     ));
     factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
+    ));
+    factories.push(Arc::new(
+        lash_mode_rlmpure::BuiltinRlmpureModePluginFactory::default(),
     ));
     // Single capability `default` that inherits the root session's
     // model, variant, and execution mode. We deliberately drop the
@@ -873,7 +880,7 @@ fn build_plugin_session(
 /// problems.
 /// Decomposition-focused template. The benchmark intentionally forbids code
 /// execution or external solvers, but recursive self-calls via `spawn_agent`
-/// are in-bounds — that's exactly the dspy.RLM strategy that takes the blog's
+/// are in-bounds — that's exactly the recursive strategy that takes the blog's
 /// numbers from 2.6% → 45%. Each subagent gets a fresh context window, so a
 /// 50k-token monolithic problem can be tackled as a chain of bounded 3-8k
 /// sub-tasks. This template nudges the model toward that pattern rather than
@@ -1005,8 +1012,9 @@ fn read_env_var(name: &str) -> Option<String> {
 
 fn parse_execution_mode(raw: &str) -> anyhow::Result<ExecutionMode> {
     match raw {
-        "rlm" => Ok(ExecutionMode::Rlm),
-        "standard" => Ok(ExecutionMode::Standard),
+        "rlm" => Ok(ExecutionMode::new("rlm")),
+        "rlmpure" | "rlm-pure" | "rlm_pure" => Ok(ExecutionMode::new("rlmpure")),
+        "standard" => Ok(ExecutionMode::standard()),
         _ => bail!("unsupported execution mode `{raw}`"),
     }
 }
@@ -1019,11 +1027,8 @@ fn parse_context_approach(raw: &str) -> anyhow::Result<ContextApproach> {
     }
 }
 
-fn execution_mode_label(mode: ExecutionMode) -> &'static str {
-    match mode {
-        ExecutionMode::Rlm => "rlm",
-        ExecutionMode::Standard => "standard",
-    }
+fn execution_mode_label(mode: &ExecutionMode) -> &str {
+    mode.plugin_id()
 }
 
 fn context_approach_label(approach: &ContextApproach) -> &'static str {

@@ -185,6 +185,24 @@ impl StandardStreamFallback {
         summary: Vec<String>,
         encrypted_content: Option<String>,
     ) {
+        if let Some(LlmOutputPart::Reasoning {
+            text: existing,
+            signature: None,
+            redacted: false,
+            item_id: existing_item_id,
+            encrypted_content: existing_encrypted_content,
+            summary: existing_summary,
+        }) = self.parts.last_mut()
+            && existing_item_id.is_none()
+            && existing_encrypted_content.is_none()
+            && existing_summary.is_empty()
+            && item_id.is_none()
+            && encrypted_content.is_none()
+            && summary.is_empty()
+        {
+            append_stream_piece(existing, &text);
+            return;
+        }
         self.parts.push(LlmOutputPart::Reasoning {
             text,
             signature: None,
@@ -350,13 +368,18 @@ impl TurnAssembler {
         if let Some(issue) = force_runtime_error {
             issues.push(issue);
         }
-        let max_turn_reached = state.projected_messages().iter().rev().take(8).any(|msg| {
-            msg.role == MessageRole::System
-                && msg
-                    .parts
-                    .iter()
-                    .any(|part| part.content.contains("Turn limit reached ("))
-        });
+        let max_turn_reached = state
+            .projected_conversation_messages()
+            .iter()
+            .rev()
+            .take(8)
+            .any(|msg| {
+                msg.role == MessageRole::System
+                    && msg
+                        .parts
+                        .iter()
+                        .any(|part| part.content.contains("Turn limit reached ("))
+            });
 
         let raw_output = if let Some(final_message) = self.final_message {
             final_message
@@ -394,7 +417,7 @@ impl TurnAssembler {
 
         AssembledTurn {
             execution: ExecutionSummary {
-                mode: state.policy.execution_mode,
+                mode: state.policy.execution_mode.clone(),
                 had_tool_calls: !self.tool_calls.is_empty(),
                 had_code_execution: false,
             },
@@ -420,8 +443,21 @@ impl TurnAssembler {
 }
 
 pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope) -> String {
-    state
-        .projected_messages()
+    let messages = state.projected_conversation_messages();
+    let latest_user_input_idx = messages
+        .iter()
+        .rposition(|message| {
+            matches!(message.role, MessageRole::User) && message.user_input.is_some()
+        })
+        .or_else(|| {
+            messages
+                .iter()
+                .rposition(|message| matches!(message.role, MessageRole::User))
+        });
+    let search_messages = latest_user_input_idx
+        .map(|idx| &messages[idx.saturating_add(1)..])
+        .unwrap_or(messages);
+    search_messages
         .iter()
         .rev()
         .find(|message| message.role == MessageRole::Assistant)

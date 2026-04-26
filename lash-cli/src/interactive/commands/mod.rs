@@ -201,7 +201,7 @@ pub(super) async fn dispatch_next_queued_turn(
         *last_turn = Some(TurnReplayPayload {
             prepared_turn: queued,
             turn_input,
-            execution_mode: *current_execution_mode,
+            execution_mode: current_execution_mode.clone(),
         });
         return Ok(());
     }
@@ -349,7 +349,7 @@ async fn handle_slash_command(
                     provider,
                     &model,
                     current_model_variant.as_deref(),
-                    *current_execution_mode,
+                    current_execution_mode,
                     &context_approach,
                     context_window,
                     dynamic_tools.definitions().len(),
@@ -461,7 +461,7 @@ async fn handle_slash_command(
             dynamic_tools,
             desired_dynamic,
             pending_reconfigure,
-            *current_execution_mode,
+            current_execution_mode.clone(),
         ),
         command::Command::Reconfigure(raw) => {
             tools::handle_reconfigure(

@@ -211,7 +211,7 @@ impl EmbeddedRuntimeBuilder {
                 .isolated_registry()
                 .build_session(
                     state.session_id.clone(),
-                    state.policy.execution_mode,
+                    state.policy.execution_mode.clone(),
                     state.policy.context_approach.clone(),
                     None,
                 )

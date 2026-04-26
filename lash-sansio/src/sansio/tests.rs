@@ -3,22 +3,28 @@ use std::sync::Arc;
 use super::*;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 use crate::session_model::message::{PartAttachment, data_url_for_bytes};
-use crate::session_model::{Message, MessageRole, MessageSequence, Part, PartKind, PruneState};
+use crate::session_model::{
+    ConversationRecord, Message, MessageRole, MessageSequence, Part, PartKind, PruneState,
+    SessionEventRecord,
+};
 
 fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineConfig {
     TurnMachineConfig {
         protocol_driver,
+        projector: Arc::new(ChatContextProjector),
         sync_execution_surface: false,
         model: "test-model".to_string(),
         max_turns: None,
         model_variant: None,
         run_session_id: None,
+        autonomous: false,
         tool_specs: Vec::new().into(),
-        system_prompt: String::new(),
+        system_prompt: Arc::new(String::new()),
         session_id: "test".to_string(),
         emit_llm_debug_log: false,
-        rlm_termination: RlmTermination::default(),
+        termination: (),
         retry_policy: RetryPolicy::default(),
+        initial_events: Arc::new(Vec::new()),
     }
 }
 
@@ -41,6 +47,10 @@ fn user_message(content: &str) -> Message {
         user_input: None,
         origin: None,
     }
+}
+
+fn conversation_event(message: Message) -> SessionEventRecord {
+    SessionEventRecord::Conversation(ConversationRecord::from_message(message))
 }
 
 fn text_message(role: MessageRole, content: impl Into<String>) -> Message {
@@ -98,6 +108,7 @@ fn find_progress(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
     effects.iter().find_map(|effect| match effect {
         Effect::Progress {
             messages,
+            events: _,
             iteration,
         } => Some((messages, *iteration)),
         _ => None,
@@ -108,6 +119,7 @@ fn find_done(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
     effects.iter().find_map(|effect| match effect {
         Effect::Done {
             messages,
+            events: _,
             iteration,
         } => Some((messages, *iteration)),
         _ => None,
@@ -136,7 +148,7 @@ struct ProseDriver;
 impl ProtocolDriverHandle for ProseDriver {
     fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
-            request: ctx.build_llm_request(false),
+            request: ctx.project_llm_request(false),
             driver_state: None,
         }]
     }
@@ -149,7 +161,10 @@ impl ProtocolDriverHandle for ProseDriver {
         _text_streamed: bool,
     ) -> Vec<DriverAction> {
         vec![
-            DriverAction::AppendMessages(vec![text_message(MessageRole::Assistant, "done")]),
+            DriverAction::AppendEvents(vec![conversation_event(text_message(
+                MessageRole::Assistant,
+                "done",
+            ))]),
             DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish,
@@ -180,7 +195,7 @@ struct RetryStateDriver;
 impl ProtocolDriverHandle for RetryStateDriver {
     fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
-            request: ctx.build_llm_request(false),
+            request: ctx.project_llm_request(false),
             driver_state: Some(driver_state(7usize)),
         }]
     }
@@ -194,10 +209,10 @@ impl ProtocolDriverHandle for RetryStateDriver {
     ) -> Vec<DriverAction> {
         let marker = waiting.take_driver_state::<usize>().expect("driver state");
         vec![
-            DriverAction::AppendMessages(vec![text_message(
+            DriverAction::AppendEvents(vec![conversation_event(text_message(
                 MessageRole::Assistant,
                 format!("state={marker}"),
-            )]),
+            ))]),
             DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish,
@@ -261,7 +276,10 @@ impl ProtocolDriverHandle for ExecDriver {
             .into_driver_state::<String>()
             .expect("exec driver state");
         vec![
-            DriverAction::AppendMessages(vec![text_message(MessageRole::User, state)]),
+            DriverAction::AppendEvents(vec![conversation_event(text_message(
+                MessageRole::User,
+                state,
+            ))]),
             DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish,
@@ -275,7 +293,7 @@ struct SyncThenAdvanceDriver;
 impl ProtocolDriverHandle for SyncThenAdvanceDriver {
     fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
-            request: ctx.build_llm_request(true),
+            request: ctx.project_llm_request(true),
             driver_state: None,
         }]
     }
@@ -590,7 +608,7 @@ fn initial_execution_surface_sync_is_host_only() {
 fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
     let mut config = test_config(Arc::new(SyncThenAdvanceDriver));
     config.sync_execution_surface = true;
-    config.system_prompt = "initial prompt".to_string();
+    config.system_prompt = Arc::new("initial prompt".to_string());
     let mut machine = TurnMachine::new(config, vec![user_message("hello")], 0);
 
     let effects = drain_effects(&mut machine);
@@ -632,7 +650,7 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
     machine.handle_response(Response::ExecutionSurfaceSynced {
         id: sync_id,
         result: Ok(Some(ExecutionSurfaceSync {
-            system_prompt: "updated prompt".to_string(),
+            system_prompt: Arc::new("updated prompt".to_string()),
             tool_specs: Arc::new(vec![crate::llm::types::LlmToolSpec {
                 name: "new_tool".to_string(),
                 description: "desc".to_string(),

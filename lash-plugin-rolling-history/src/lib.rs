@@ -535,7 +535,7 @@ async fn summarize_compaction_prefix(
     }
 
     let mut snapshot = lash::PersistedSessionState::from_state(state.clone());
-    snapshot.policy.execution_mode = ExecutionMode::Standard;
+    snapshot.policy.execution_mode = ExecutionMode::standard();
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;
     strip_all_image_attachments(&mut messages, COMPACTED_IMAGE_PLACEHOLDER);
@@ -557,7 +557,7 @@ async fn summarize_compaction_prefix(
 
     let compaction_session_id = format!("{session_id}-compaction");
     let mut policy = snapshot.policy.clone();
-    policy.execution_mode = ExecutionMode::Standard;
+    policy.execution_mode = ExecutionMode::standard();
     policy.max_turns = Some(1);
     let handle = host
         .create_session(SessionCreateRequest {
@@ -569,6 +569,7 @@ async fn summarize_compaction_prefix(
             policy: Some(policy),
             plugin_mode: SessionPluginMode::Fresh,
             initial_nodes: Vec::new(),
+            first_turn_input: None,
             context_surface: SessionContextSurface {
                 include_base_tools: false,
                 tool_providers: Vec::new(),
@@ -594,7 +595,7 @@ async fn summarize_compaction_prefix(
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
         )
         .await;
@@ -689,7 +690,9 @@ impl PluginFactory for RollingHistoryPluginFactory {
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        if !matches!(ctx.context_approach, ContextApproach::RollingHistory(_)) {
+        if ctx.execution_mode != ExecutionMode::standard()
+            || !matches!(ctx.context_approach, ContextApproach::RollingHistory(_))
+        {
             return Ok(Arc::new(DisabledRollingHistoryPlugin));
         }
         Ok(Arc::new(RollingHistoryPlugin {
@@ -1230,7 +1233,7 @@ mod tests {
         let state = SessionStateEnvelope {
             session_id: "root".to_string(),
             policy: SessionPolicy {
-                execution_mode: ExecutionMode::Standard,
+                execution_mode: ExecutionMode::standard(),
                 ..Default::default()
             },
             ..Default::default()

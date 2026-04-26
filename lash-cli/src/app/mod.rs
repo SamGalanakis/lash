@@ -38,6 +38,20 @@ pub(crate) use self::projection::{
     projected_blocks_from_state, smart_truncate_preview_line, strip_ansi_escape_sequences,
 };
 
+fn user_turn_start_indices(blocks: &[DisplayBlock]) -> Vec<usize> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, block)| {
+            matches!(
+                block,
+                DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
+            )
+            .then_some(idx)
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginPanelBlock {
     pub plugin_id: String,
@@ -590,25 +604,25 @@ impl App {
 
     pub fn finish_turn_from_projection(
         &mut self,
+        events: &[lash::SessionEventRecord],
         messages: &[Message],
         tool_calls: &[ToolCallRecord],
     ) {
-        let current_turn_start = self.blocks.iter().rposition(|block| {
-            matches!(
-                block,
-                DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
-            )
-        });
+        let current_turn_starts = user_turn_start_indices(&self.blocks);
+        let current_turn_start = current_turn_starts.last().copied();
 
         self.stop_turn();
         let ui_state = UiProjectionState::from_app(self);
-        let projected_blocks = projected_blocks_from_state(messages, tool_calls, &ui_state);
-        let projected_turn_start = projected_blocks.iter().rposition(|block| {
-            matches!(
-                block,
-                DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
-            )
-        });
+        let projected_blocks = projected_blocks_from_state(events, messages, tool_calls, &ui_state);
+        let projected_turn_starts = user_turn_start_indices(&projected_blocks);
+        let projected_turn_start = current_turn_start
+            .and_then(|_| {
+                current_turn_starts
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|ordinal| projected_turn_starts.get(ordinal).copied())
+            })
+            .or_else(|| projected_turn_starts.last().copied());
 
         match (current_turn_start, projected_turn_start) {
             (Some(current_start), Some(projected_start)) => {
@@ -878,6 +892,13 @@ impl App {
         let images = self.take_pending_images();
         let large_pastes = self.take_large_pastes();
         PreparedTurn::prepare_with_large_pastes(input, images, &self.skills, large_pastes)
+    }
+
+    pub fn try_take_prepared_turn(&mut self) -> Option<PreparedTurn> {
+        if self.has_pending_image_jobs() {
+            return None;
+        }
+        Some(self.take_prepared_turn())
     }
 
     /// Take pending images, preserving their stable inline ids for marker parsing.

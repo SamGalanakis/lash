@@ -15,6 +15,7 @@ use crate::plugin::{
     SessionTurnHandle,
 };
 use crate::provider::{AgentModelSelection, ProviderHandle, VariantRequestConfig};
+use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, ExecutionSummary, OutputState,
     PersistedSessionState, Provider, ProviderOptions, SessionPolicy, SessionStateEnvelope,
@@ -274,7 +275,7 @@ pub fn mock_session_policy() -> SessionPolicy {
             .build()
             .into_handle(),
         model: "mock-model".to_string(),
-        execution_mode: ExecutionMode::Standard,
+        execution_mode: ExecutionMode::standard(),
         ..Default::default()
     }
 }
@@ -285,7 +286,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
         state: SessionStateEnvelope {
             session_id: session_id.to_string(),
             policy: SessionPolicy {
-                execution_mode: ExecutionMode::Standard,
+                execution_mode: ExecutionMode::standard(),
                 ..Default::default()
             },
             ..Default::default()
@@ -299,7 +300,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
         has_plugin_visible_output: false,
         done_reason: DoneReason::ModelStop,
         execution: ExecutionSummary {
-            mode: ExecutionMode::Standard,
+            mode: ExecutionMode::standard(),
             had_tool_calls: false,
             had_code_execution: false,
         },
@@ -535,10 +536,11 @@ mod test_mode_fakes {
         PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     };
     use crate::sansio::{
-        CompletedToolCall, DriverAction, DriverContextView, ProtocolDriverHandle, WaitingExecState,
-        WaitingLlmState,
+        CompletedToolCall, ProtocolDriverHandle, WaitingExecState, WaitingLlmState,
     };
-    use crate::{ExecResponse, ModeBuildInput, ModeConfig, ModePreamble};
+    use crate::{
+        DriverAction, DriverContextView, ExecResponse, ModeBuildInput, ModeConfig, ModePreamble,
+    };
     use lash_sansio::llm::types::LlmResponse;
 
     /// Factories that register minimal fake mode plugins for lash's own
@@ -549,11 +551,11 @@ mod test_mode_fakes {
         vec![
             Arc::new(TestModeFactory {
                 id: "mode_standard",
-                mode: ExecutionMode::Standard,
+                mode: ExecutionMode::standard(),
             }),
             Arc::new(TestModeFactory {
                 id: "mode_rlm",
-                mode: ExecutionMode::Rlm,
+                mode: ExecutionMode::new("rlm"),
             }),
         ]
     }
@@ -572,7 +574,7 @@ mod test_mode_fakes {
             Ok(Arc::new(TestModePlugin {
                 id: self.id,
                 active: ctx.execution_mode == self.mode,
-                mode: self.mode,
+                mode: self.mode.clone(),
             }))
         }
     }
@@ -592,12 +594,15 @@ mod test_mode_fakes {
             if !self.active {
                 return Ok(());
             }
-            reg.mode()
-                .session(Arc::new(TestModeSession { mode: self.mode }))?;
-            reg.mode()
-                .native_tools(Arc::new(TestModeNativeTools { mode: self.mode }))?;
-            reg.mode()
-                .protocol_driver(Arc::new(TestProtocolDriver { mode: self.mode }))?;
+            reg.mode().session(Arc::new(TestModeSession {
+                mode: self.mode.clone(),
+            }))?;
+            reg.mode().native_tools(Arc::new(TestModeNativeTools {
+                mode: self.mode.clone(),
+            }))?;
+            reg.mode().protocol_driver(Arc::new(TestProtocolDriver {
+                mode: self.mode.clone(),
+            }))?;
             Ok(())
         }
     }
@@ -612,7 +617,7 @@ mod test_mode_fakes {
             &self,
             mut ctx: ModeSessionContext<'_>,
         ) -> Result<(), crate::SessionError> {
-            if matches!(self.mode, ExecutionMode::Rlm) {
+            if self.mode == ExecutionMode::new("rlm") {
                 ctx.start_lashlang_runtime().await?;
             }
             Ok(())
@@ -623,10 +628,12 @@ mod test_mode_fakes {
             mut ctx: ModeRuntimeContext<'_>,
             request: &crate::SessionCreateRequest,
         ) {
-            if matches!(self.mode, ExecutionMode::Rlm)
-                && let crate::ModeExtras::Rlm(extras) = &request.mode_extras
+            if self.mode == ExecutionMode::new("rlm")
+                && let Ok(Some(extras)) = request
+                    .mode_extras
+                    .decode::<lash_rlm_types::RlmCreateExtras>(&ExecutionMode::new("rlm"))
             {
-                ctx.set_termination_mode(extras.termination.clone());
+                ctx.set_rlm_termination_mode(extras.termination);
             }
         }
     }
@@ -647,7 +654,7 @@ mod test_mode_fakes {
                 tasks_list_tool_definition(),
                 tasks_stop_tool_definition(),
             ];
-            if self.mode == ExecutionMode::Standard {
+            if self.mode == ExecutionMode::standard() {
                 tools.insert(0, batch_tool_definition());
             }
             tools
@@ -665,7 +672,7 @@ mod test_mode_fakes {
                 execute_tasks_stop_tool_call,
             };
             match name {
-                "batch" if self.mode == ExecutionMode::Standard => {
+                "batch" if self.mode == ExecutionMode::standard() => {
                     Some(execute_test_batch(context, args, progress).await)
                 }
                 "monitor" => {
@@ -793,16 +800,13 @@ mod test_mode_fakes {
     }
 
     impl ModeProtocolDriverPlugin for TestProtocolDriver {
-        fn mode_id(&self) -> &'static str {
+        fn mode_id(&self) -> &str {
             self.mode.plugin_id()
         }
 
         fn build_preamble(&self, input: ModeBuildInput) -> ModePreamble {
             ModePreamble {
-                config: ModeConfig {
-                    protocol: Arc::new(TestDriver),
-                    sync_execution_surface: false,
-                },
+                config: ModeConfig::chat(Arc::new(TestDriver), false),
                 tool_specs: Arc::new(input.tool_surface.model_tool_specs()),
                 tool_names: input.tool_surface.tool_names(),
                 omitted_tool_count: 0,
@@ -821,10 +825,10 @@ mod test_mode_fakes {
     /// no test asserts that ordering.
     struct TestDriver;
 
-    impl ProtocolDriverHandle for TestDriver {
+    impl ProtocolDriverHandle<crate::HostModeProtocol> for TestDriver {
         fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
             vec![DriverAction::StartLlm {
-                request: ctx.build_llm_request(true),
+                request: ctx.project_llm_request(true),
                 driver_state: None,
             }]
         }
@@ -905,13 +909,15 @@ mod test_mode_fakes {
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                 }];
-                actions.push(DriverAction::AppendMessages(vec![Message {
-                    id: asst_id,
-                    role: MessageRole::Assistant,
-                    parts: parts_out,
-                    user_input: None,
-                    origin: None,
-                }]));
+                actions.push(DriverAction::AppendEvents(vec![
+                    SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
+                        id: asst_id,
+                        role: MessageRole::Assistant,
+                        parts: parts_out,
+                        user_input: None,
+                        origin: None,
+                    })),
+                ]));
                 actions.push(DriverAction::StartCheckpoint {
                     checkpoint: CheckpointKind::BeforeCompletion,
                     on_empty: CheckpointResumeAction::Finish,
@@ -959,13 +965,15 @@ mod test_mode_fakes {
                 });
             }
             if !assistant_parts.is_empty() {
-                actions.push(DriverAction::AppendMessages(vec![Message {
-                    id: asst_id,
-                    role: MessageRole::Assistant,
-                    parts: assistant_parts,
-                    user_input: None,
-                    origin: None,
-                }]));
+                actions.push(DriverAction::AppendEvents(vec![
+                    SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
+                        id: asst_id,
+                        role: MessageRole::Assistant,
+                        parts: assistant_parts,
+                        user_input: None,
+                        origin: None,
+                    })),
+                ]));
             }
             actions.push(DriverAction::StartTools { calls });
             actions
@@ -1005,21 +1013,25 @@ mod test_mode_fakes {
             if !result_parts.is_empty() {
                 let user_id = fresh_message_id();
                 reassign_part_ids(&user_id, &mut result_parts);
-                actions.push(DriverAction::AppendMessages(vec![Message {
-                    id: user_id,
-                    role: MessageRole::User,
-                    parts: result_parts,
-                    user_input: None,
-                    origin: None,
-                }]));
+                actions.push(DriverAction::AppendEvents(vec![
+                    SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
+                        id: user_id,
+                        role: MessageRole::User,
+                        parts: result_parts,
+                        user_input: None,
+                        origin: None,
+                    })),
+                ]));
             }
             actions.push(DriverAction::AdvanceIteration);
             let next_iteration = ctx.iteration() + 1;
             if let Some(max_turns) = ctx.max_turns()
                 && next_iteration >= ctx.run_offset() + max_turns
             {
-                actions.push(DriverAction::AppendMessages(vec![
-                    crate::turn_limit_exhausted_message(max_turns),
+                actions.push(DriverAction::AppendEvents(vec![
+                    SessionEventRecord::Conversation(ConversationRecord::from_message(
+                        crate::turn_limit_exhausted_message(max_turns),
+                    )),
                 ]));
                 actions.push(DriverAction::Finish);
                 let _ = SessionEvent::Done;

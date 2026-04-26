@@ -14,9 +14,14 @@ pub(super) fn subagent_tool_definitions(
     registry: &CapabilityRegistry,
 ) -> Vec<ToolDefinition> {
     let names = registry.names();
-    match execution_mode {
-        lash::ExecutionMode::Standard => standard_subagent_tool_definitions(&names),
-        lash::ExecutionMode::Rlm => rlm_subagent_tool_definitions(&names),
+    if execution_mode == lash::ExecutionMode::standard() {
+        standard_subagent_tool_definitions(&names)
+    } else if execution_mode == lash::ExecutionMode::new("rlm")
+        || execution_mode == lash::ExecutionMode::new("rlmpure")
+    {
+        rlm_subagent_tool_definitions(&names)
+    } else {
+        standard_subagent_tool_definitions(&names)
     }
 }
 

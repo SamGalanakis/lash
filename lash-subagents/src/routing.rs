@@ -198,7 +198,7 @@ pub fn truncate_snapshot_to_recent_turns(
         return snapshot;
     }
 
-    let messages = snapshot.project_messages();
+    let messages = snapshot.project_conversation_messages();
     let user_turn_starts = messages
         .iter()
         .enumerate()

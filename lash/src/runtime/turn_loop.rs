@@ -55,10 +55,11 @@ impl LashRuntime {
         self.state.policy = self.policy.clone();
         self.state.iteration = iteration;
         if let Some(appended_messages) = projection_message_delta_if_base_preserved(
-            self.state.projected_messages(),
+            self.state.projected_conversation_messages(),
             messages.iter(),
         ) {
-            self.state.append_projected_messages(&appended_messages);
+            self.state
+                .append_projected_conversation_messages(&appended_messages);
         } else {
             let projected_messages = messages.shared();
             self.state
@@ -142,7 +143,10 @@ impl LashRuntime {
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        let saved_messages = self.state.session_graph.shared_projected_messages();
+        let saved_messages = self
+            .state
+            .session_graph
+            .shared_projected_conversation_messages();
         let saved_tool_calls = self.state.session_graph.shared_projected_tool_calls();
         let saved_prompt_usage = self.state.last_prompt_usage.clone();
 
@@ -204,8 +208,10 @@ impl LashRuntime {
             }
         };
 
-        let base_messages = self.state.session_graph.shared_projected_messages();
-        let base_rendered_prompt = self.state.session_graph.shared_projected_rendered_prompt();
+        let base_messages = self
+            .state
+            .session_graph
+            .shared_projected_conversation_messages();
         let mut turn_delta = Vec::new();
         let mode = input.mode.unwrap_or(RunMode::Normal);
         let mode_msg = match mode {
@@ -329,8 +335,7 @@ impl LashRuntime {
                     messages: crate::MessageSequence::from_base_and_delta(
                         base_messages,
                         turn_delta,
-                    )
-                    .with_base_rendered_prompt(Some(base_rendered_prompt)),
+                    ),
                     ..Default::default()
                 },
             )
@@ -359,7 +364,7 @@ impl LashRuntime {
         self.stream_prepared_turn(
             messages,
             previous_prompt_usage,
-            input.rlm_termination_override.clone(),
+            input.mode_turn_options.clone(),
             events,
             cancel,
         )
@@ -380,7 +385,7 @@ impl LashRuntime {
         &mut self,
         messages: crate::MessageSequence,
         _previous_prompt_usage: Option<PromptUsage>,
-        rlm_termination_override: Option<crate::RlmTermination>,
+        mode_turn_options: Option<crate::ModeTurnOptions>,
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
@@ -472,10 +477,10 @@ impl LashRuntime {
 
             let mut state = self.state.clone();
             if let Some(appended_messages) = projection_message_delta_if_base_preserved(
-                state.projected_messages(),
+                state.projected_conversation_messages(),
                 prepared.messages.as_slice(),
             ) {
-                state.append_projected_messages(&appended_messages);
+                state.append_projected_conversation_messages(&appended_messages);
             } else {
                 let tool_calls = state.project_tool_calls();
                 state.replace_projection(prepared.messages.as_slice(), &tool_calls);
@@ -521,8 +526,10 @@ impl LashRuntime {
             .expect("lash runtime session must be available");
         let progress_graph = TurnGraphOverlay::new(
             Arc::new(self.state.session_graph.clone()),
-            self.state.session_graph.shared_projected_messages(),
-            self.state.session_graph.shared_projected_rendered_prompt(),
+            self.state.session_graph.shared_active_events(),
+            self.state
+                .session_graph
+                .shared_projected_conversation_messages(),
             self.state.session_graph.shared_projected_tool_calls(),
         );
         let mut driver = RuntimeTurnDriver {
@@ -535,9 +542,9 @@ impl LashRuntime {
             llm_stream_summaries: HashMap::new(),
             session_manager: manager,
             prompt_bridge,
-            rlm_termination: rlm_termination_override
+            mode_turn_options: mode_turn_options
                 .clone()
-                .unwrap_or_else(|| self.rlm_termination.clone()),
+                .unwrap_or_else(|| self.mode_turn_options.clone()),
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let run_offset = self.state.iteration;
@@ -659,7 +666,7 @@ impl LashRuntime {
             };
         if let Some(appended_messages) = appended_messages {
             if assembler.tool_calls.is_empty() {
-                progress_graph.append_projected_messages(&appended_messages);
+                progress_graph.append_projected_conversation_messages(&appended_messages);
             } else {
                 progress_graph.append_projection_delta(&appended_messages, &assembler.tool_calls);
             }
@@ -697,7 +704,7 @@ impl LashRuntime {
         };
         tracing::debug!(
             rss_kb = debug_rss_kb(),
-            state_message_count = self.state.projected_messages().len(),
+            state_message_count = self.state.projected_conversation_messages().len(),
             graph_node_count = self.state.session_graph.nodes.len(),
             token_ledger_entries = self.state.token_ledger.len(),
             "runtime before assembler.finish"
@@ -713,7 +720,7 @@ impl LashRuntime {
         );
         tracing::debug!(
             rss_kb = debug_rss_kb(),
-            assembled_message_count = assembled.state.projected_messages().len(),
+            assembled_message_count = assembled.state.projected_conversation_messages().len(),
             assembled_graph_node_count = assembled.state.session_graph.nodes.len(),
             "runtime after assembler.finish"
         );
@@ -732,7 +739,8 @@ impl LashRuntime {
             self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                finalized_message_count = finalized.turn.state.projected_messages().len(),
+                finalized_message_count =
+                    finalized.turn.state.projected_conversation_messages().len(),
                 "runtime after finalize_turn"
             );
             let mut returned_turn = finalized.turn;
@@ -750,7 +758,7 @@ impl LashRuntime {
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
                 persisted_graph_node_count = assembled_state.session_graph.nodes.len(),
-                persisted_message_count = assembled_state.projected_messages().len(),
+                persisted_message_count = assembled_state.projected_conversation_messages().len(),
                 "runtime after stamp_runtime_state"
             );
             if let Some(store) = self

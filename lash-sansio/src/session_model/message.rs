@@ -305,7 +305,6 @@ pub struct MessageSequence {
     delta: Vec<Message>,
     owned: Option<Vec<Message>>,
     materialized: OnceLock<Arc<Vec<Message>>>,
-    base_rendered_prompt: Option<Arc<RenderedPrompt>>,
 }
 
 impl Clone for MessageSequence {
@@ -315,7 +314,6 @@ impl Clone for MessageSequence {
             delta: self.delta.clone(),
             owned: self.owned.clone(),
             materialized: OnceLock::new(),
-            base_rendered_prompt: self.base_rendered_prompt.clone(),
         }
     }
 }
@@ -347,7 +345,6 @@ impl MessageSequence {
             delta: Vec::new(),
             owned: Some(messages),
             materialized: OnceLock::new(),
-            base_rendered_prompt: None,
         }
     }
 
@@ -357,7 +354,6 @@ impl MessageSequence {
             delta: Vec::new(),
             owned: None,
             materialized: OnceLock::new(),
-            base_rendered_prompt: None,
         }
     }
 
@@ -367,13 +363,7 @@ impl MessageSequence {
             delta,
             owned: None,
             materialized: OnceLock::new(),
-            base_rendered_prompt: None,
         }
-    }
-
-    pub fn with_base_rendered_prompt(mut self, rendered: Option<Arc<RenderedPrompt>>) -> Self {
-        self.base_rendered_prompt = rendered;
-        self
     }
 
     pub fn len(&self) -> usize {
@@ -443,7 +433,6 @@ impl MessageSequence {
             self.delta.clear();
         }
         self.materialized = OnceLock::new();
-        self.base_rendered_prompt = None;
         self.owned.as_mut().expect("message sequence owned state")
     }
 
@@ -473,7 +462,6 @@ impl MessageSequence {
         self.delta.clear();
         self.owned = Some(messages);
         self.materialized = OnceLock::new();
-        self.base_rendered_prompt = None;
     }
 
     pub fn into_vec(self) -> Vec<Message> {
@@ -499,11 +487,7 @@ impl MessageSequence {
         if self.base.is_empty() {
             return render_prompt(self.delta.as_slice());
         }
-        let mut rendered = self
-            .base_rendered_prompt
-            .as_ref()
-            .map(|prompt| prompt.as_ref().clone())
-            .unwrap_or_else(|| render_prompt(self.base.as_slice()));
+        let mut rendered = render_prompt(self.base.as_slice());
         if !self.delta.is_empty() {
             append_rendered_prompt(&mut rendered, self.delta.as_slice());
         }

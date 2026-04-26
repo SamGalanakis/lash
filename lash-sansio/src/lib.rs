@@ -18,21 +18,25 @@ pub use plugin::{
     CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, UserInputProvenance,
     UserInputTransform,
 };
-pub use prompt::{PreparedPrompt, PromptBuildInput, build_prompt};
+pub use prompt::{
+    PreparedPrompt, PromptBuildInput, PromptCache, build_prompt, build_prompt_cached,
+};
 pub use sansio::{
-    CheckpointResumeAction, CompletedToolCall, DriverAction, DriverContextView, Effect, EffectId,
-    LlmCallError, PendingToolCall, ProtocolDriverHandle, Response, RlmTermination, TurnMachine,
-    TurnMachineConfig, WaitingExecState, WaitingLlmState, driver_state,
+    ChatContextProjector, CheckpointResumeAction, CompletedToolCall, ContextProjector,
+    DriverAction, DriverContextView, Effect, EffectId, LlmCallError, ModeProtocol, PendingToolCall,
+    ProjectorContext, ProtocolDriverHandle, Response, TurnMachine, TurnMachineConfig,
+    UnitModeProtocol, WaitingExecState, WaitingLlmState, driver_state,
 };
 pub use session::{
     CompletedTurn, ExecResponse, PromptUsage, SansIoSessionState, apply_completed_turn,
 };
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
-    CORE_GUIDANCE_SECTION, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, MessageSequence,
-    Part, PartKind, PromptBuiltin, PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode,
-    PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState,
-    RenderedPrompt, RetryPolicy, SessionEvent, TokenUsage, default_prompt_template,
+    CORE_GUIDANCE_SECTION, ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO, Message,
+    MessageRole, MessageSequence, Part, PartKind, PromptBuiltin, PromptPanel, PromptRequest,
+    PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, PruneState, RenderedPrompt, RetryPolicy, SessionEvent,
+    SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent, default_prompt_template,
     messages_are_prompt_resume_safe,
 };
 pub use tool_surface::{
@@ -41,32 +45,57 @@ pub use tool_surface::{
 };
 pub use turn::{PreparedTurnMachine, SansIoTurnInput, build_turn};
 
-/// Execution backend for session turns.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionMode {
-    Rlm,
-    #[default]
-    Standard,
-}
-
-pub fn execution_mode_supported(mode: ExecutionMode) -> bool {
-    match mode {
-        ExecutionMode::Rlm | ExecutionMode::Standard => true,
-    }
-}
+/// Stable string id for the execution backend that owns a session turn.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ExecutionMode(std::sync::Arc<str>);
 
 impl ExecutionMode {
-    /// Stable string id used by mode plugins to claim the
-    /// `ModeProtocolDriverPlugin` singleton slot. A plugin returning
-    /// `"rlm"` from its `mode_id()` handles sessions whose
-    /// `ExecutionMode` is `Rlm`, and so on.
-    pub const fn plugin_id(self) -> &'static str {
-        match self {
-            Self::Rlm => "rlm",
-            Self::Standard => "standard",
-        }
+    pub fn new(id: impl Into<std::sync::Arc<str>>) -> Self {
+        Self(id.into())
     }
+
+    pub fn standard() -> Self {
+        Self::new("standard")
+    }
+
+    pub fn plugin_id(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+impl std::fmt::Display for ExecutionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.plugin_id())
+    }
+}
+
+impl serde::Serialize for ExecutionMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.plugin_id())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ExecutionMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let id = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self::new(id))
+    }
+}
+
+pub fn execution_mode_supported(_mode: &ExecutionMode) -> bool {
+    true
 }
 
 pub fn default_execution_mode() -> ExecutionMode {
@@ -77,7 +106,7 @@ pub fn default_execution_mode() -> ExecutionMode {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ToolParam {
     pub name: String,
-    /// RLM type: "str", "int", "float", "bool", "list", "dict", "any"
+    /// Type hint: "str", "int", "float", "bool", "list", "dict", "any"
     #[serde(default = "ToolParam::default_type")]
     pub r#type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -129,7 +158,7 @@ impl ToolParam {
 /// and avoids interleaving with each other.
 ///
 /// The name is intentionally distinct from the turn-level [`ExecutionMode`]
-/// (which selects the `Rlm` vs `Standard` driver) so the two concepts don't
+/// (which selects the execution driver) so the two concepts don't
 /// collide in scope.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,37 +213,38 @@ impl ToolAvailability {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolAvailabilityConfig {
     pub standard: ToolAvailability,
-    pub rlm: ToolAvailability,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub modes: std::collections::HashMap<String, ToolAvailability>,
 }
 
 impl ToolAvailabilityConfig {
-    pub const fn same(availability: ToolAvailability) -> Self {
+    pub fn same(availability: ToolAvailability) -> Self {
         Self {
             standard: availability,
-            rlm: availability,
+            modes: std::collections::HashMap::new(),
         }
     }
 
-    pub const fn documented() -> Self {
+    pub fn documented() -> Self {
         Self::same(ToolAvailability::Documented)
     }
 
-    pub const fn callable() -> Self {
+    pub fn callable() -> Self {
         Self::same(ToolAvailability::Callable)
     }
 
-    pub const fn hidden() -> Self {
+    pub fn hidden() -> Self {
         Self::same(ToolAvailability::Hidden)
     }
 
-    pub fn for_mode(self, mode: ExecutionMode) -> ToolAvailability {
-        match mode {
-            ExecutionMode::Standard => self.standard,
-            ExecutionMode::Rlm => self.rlm,
-        }
+    pub fn for_mode(&self, mode: &ExecutionMode) -> ToolAvailability {
+        self.modes
+            .get(mode.plugin_id())
+            .copied()
+            .unwrap_or(self.standard)
     }
 }
 
@@ -313,7 +343,7 @@ impl ToolDefinition {
         format!("{}({}) -> {}", self.name, params.join(", "), ret)
     }
 
-    pub fn effective_availability(&self, mode: ExecutionMode) -> ToolAvailability {
+    pub fn effective_availability(&self, mode: &ExecutionMode) -> ToolAvailability {
         self.availability_override
             .unwrap_or_else(|| self.availability.for_mode(mode))
     }
@@ -594,7 +624,7 @@ where
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
@@ -603,6 +633,29 @@ pub struct ToolCallRecord {
     pub result: serde_json::Value,
     pub success: bool,
     pub duration_ms: u64,
+}
+
+pub fn head_tail_truncate(value: &str, max_chars: usize) -> (String, usize) {
+    let raw_len = value.chars().count();
+    if max_chars == 0 || raw_len <= max_chars {
+        return (value.to_string(), raw_len);
+    }
+    let head_len = max_chars / 2;
+    let tail_len = max_chars.saturating_sub(head_len);
+    let head = value.chars().take(head_len).collect::<String>();
+    let tail = value
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let omitted = raw_len.saturating_sub(head_len + tail_len);
+    (
+        format!("{head}\n\n... ({omitted} characters omitted) ...\n\n{tail}"),
+        raw_len,
+    )
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]

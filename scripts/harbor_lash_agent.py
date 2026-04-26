@@ -40,15 +40,13 @@ stop promptly once the required end state exists.
 
 Most terminal-bench tasks are graded by inspecting the environment
 after you stop — files, services, running processes, configuration
-state — NOT by reading a value you `submit`. For these tasks:
+state. For these tasks:
 
 - Make the required changes directly to the filesystem / services.
 - Verify the end state from inside lashlang (re-open files, re-run the
   service's own check, probe the port, read the expected output).
-- **Stop without `submit`**: let your last lashlang block finish with
-  its verifying `call`/`exec` and no `submit`, or reply in plain prose
-  once you've confirmed the state. The verifier reads the environment
-  after you stop.
+- Submit the final result with `submit <expr>` once you've confirmed the
+  required end state.
 
 Only `submit <value>` when the task explicitly asks you to return a
 computed value (e.g. "print the total count"). Never submit

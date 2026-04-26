@@ -1749,6 +1749,12 @@ def delete_run(results_dir: Path, run_id: str) -> bool:
             and (job_name is None or source_job_dir.name == job_name)
             and source_job_dir != run_dir
         ):
-            shutil.rmtree(source_job_dir)
+            try:
+                shutil.rmtree(source_job_dir)
+            except OSError:
+                # Harbor job dirs can contain container-owned artifacts. Keep the
+                # dashboard delete path working by removing the exported snapshot
+                # even when the original job dir is not writable from the host.
+                pass
     shutil.rmtree(run_dir)
     return True

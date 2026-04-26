@@ -6,9 +6,13 @@
 //! modules (`mod.rs`, `session_manager.rs`) can reach them via
 //! `super::*`.
 
+use std::sync::Arc;
+
 use lash_sansio::PromptUsage;
 
-use crate::session_model::{Message, SessionPolicy, TokenUsage, plugin_message_to_message};
+use crate::session_model::{
+    Message, SessionEventRecord, SessionPolicy, TokenUsage, plugin_message_to_message,
+};
 use crate::{PersistedTurnState, ToolCallRecord};
 
 use super::usage::TokenLedgerEntry;
@@ -30,12 +34,20 @@ pub struct SessionStateEnvelope {
 }
 
 impl SessionStateEnvelope {
-    pub fn projected_messages(&self) -> &[Message] {
-        self.session_graph.projected_messages()
+    pub fn active_events(&self) -> Vec<SessionEventRecord> {
+        self.session_graph.active_events()
     }
 
-    pub fn project_messages(&self) -> Vec<Message> {
-        self.session_graph.project_messages()
+    pub fn shared_active_events(&self) -> Arc<Vec<SessionEventRecord>> {
+        self.session_graph.shared_active_events()
+    }
+
+    pub fn projected_conversation_messages(&self) -> &[Message] {
+        self.session_graph.projected_conversation_messages()
+    }
+
+    pub fn project_conversation_messages(&self) -> Vec<Message> {
+        self.session_graph.project_conversation_messages()
     }
 
     pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
@@ -192,12 +204,20 @@ impl PersistedSessionState {
         super::usage::SessionUsageReport::from_entries(&self.token_ledger)
     }
 
-    pub fn projected_messages(&self) -> &[Message] {
-        self.session_graph.projected_messages()
+    pub fn projected_conversation_messages(&self) -> &[Message] {
+        self.session_graph.projected_conversation_messages()
     }
 
-    pub fn project_messages(&self) -> Vec<Message> {
-        self.session_graph.project_messages()
+    pub fn active_events(&self) -> Vec<SessionEventRecord> {
+        self.session_graph.active_events()
+    }
+
+    pub fn shared_active_events(&self) -> Arc<Vec<SessionEventRecord>> {
+        self.session_graph.shared_active_events()
+    }
+
+    pub fn project_conversation_messages(&self) -> Vec<Message> {
+        self.session_graph.project_conversation_messages()
     }
 
     pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
@@ -224,8 +244,9 @@ impl PersistedSessionState {
             .append_projection_delta(messages, tool_calls);
     }
 
-    pub fn append_projected_messages(&mut self, messages: &[Message]) {
-        self.session_graph.append_projected_messages(messages);
+    pub fn append_projected_conversation_messages(&mut self, messages: &[Message]) {
+        self.session_graph
+            .append_projected_conversation_messages(messages);
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
@@ -333,7 +354,7 @@ pub(super) fn persisted_session_config(policy: &SessionPolicy) -> crate::Persist
         provider_id: policy.provider.kind().to_string(),
         configured_model: policy.model.clone(),
         context_window: policy.max_context_tokens.unwrap_or_default() as u64,
-        execution_mode: policy.execution_mode,
+        execution_mode: policy.execution_mode.clone(),
         context_approach: policy.context_approach.clone(),
         model_variant: policy.model_variant.clone(),
     }
@@ -349,7 +370,7 @@ pub(super) fn apply_persisted_session_config(
     if config.context_window > 0 {
         policy.max_context_tokens = Some(config.context_window as usize);
     }
-    policy.execution_mode = config.execution_mode;
+    policy.execution_mode = config.execution_mode.clone();
     policy.context_approach = config.context_approach.clone();
     policy.model_variant = config.model_variant.clone();
 }
@@ -469,7 +490,16 @@ pub(super) fn append_session_nodes_to_state(
         match node {
             crate::SessionAppendNode::Message { message } => {
                 let message = plugin_message_to_message(message, None);
-                node_ids.push(state.session_graph.append_message(message));
+                node_ids.push(
+                    state
+                        .session_graph
+                        .append_event(SessionEventRecord::Conversation(
+                            crate::session_model::ConversationRecord::from_message(message),
+                        )),
+                );
+            }
+            crate::SessionAppendNode::Event { event } => {
+                node_ids.push(state.session_graph.append_event(event.clone()));
             }
             crate::SessionAppendNode::Plugin { plugin_type, body } => {
                 node_ids.push(

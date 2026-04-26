@@ -23,7 +23,7 @@ fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
     PersistedSessionState::from_state(SessionStateEnvelope {
         session_id: "root".to_string(),
         policy: SessionPolicy {
-            execution_mode: ExecutionMode::Standard,
+            execution_mode: ExecutionMode::standard(),
             session_id: Some(run_session_id.to_string()),
             ..Default::default()
         },
@@ -234,7 +234,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .expect("initial dynamic tool state");
     assert!(initial.tools.get("plan_exit").is_some_and(|tool| {
         tool.definition
-            .effective_availability(lash::ExecutionMode::Standard)
+            .effective_availability(&lash::ExecutionMode::standard())
             == lash::ToolAvailability::Hidden
     }));
 
@@ -255,7 +255,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .expect("enabled dynamic tool state");
     assert!(enabled.tools.get("plan_exit").is_some_and(|tool| {
         tool.definition
-            .effective_availability(lash::ExecutionMode::Standard)
+            .effective_availability(&lash::ExecutionMode::standard())
             == lash::ToolAvailability::Documented
     }));
 
@@ -270,7 +270,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .expect("disabled dynamic tool state");
     assert!(disabled.tools.get("plan_exit").is_some_and(|tool| {
         tool.definition
-            .effective_availability(lash::ExecutionMode::Standard)
+            .effective_availability(&lash::ExecutionMode::standard())
             == lash::ToolAvailability::Hidden
     }));
 }
@@ -366,7 +366,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let surface = session
         .resolve_tool_surface(ToolSurfaceContext {
             session_id: "root".to_string(),
-            mode: ExecutionMode::Standard,
+            mode: ExecutionMode::standard(),
             tools: vec![
                 ToolDefinition {
                     name: "discover_tools".to_string(),
@@ -896,7 +896,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         .expect("dynamic tool state");
     assert!(dynamic.tools.get("plan_exit").is_some_and(|tool| {
         tool.definition
-            .effective_availability(lash::ExecutionMode::Standard)
+            .effective_availability(&lash::ExecutionMode::standard())
             == lash::ToolAvailability::Hidden
     }));
 }
@@ -1147,12 +1147,9 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             .and_then(|value| value.as_str()),
         Some("fresh_context")
     );
-    assert_eq!(
-        result
-            .result
-            .get("fresh_context_input")
-            .and_then(|value| value.as_str()),
-        Some("Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md")
+    assert!(
+        result.result.get("fresh_context_input").is_none(),
+        "seed prompt is now carried by SessionCreateRequest::first_turn_input, not the tool result"
     );
 }
 
@@ -1240,7 +1237,6 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
                 "approved": true,
                 "plan_path": ".lash/plans/run-session.md",
                 "execution_mode": "fresh_context",
-                "fresh_context_input": "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
             })),
             duration_ms: 1,
             host: manager.clone(),
@@ -1260,7 +1256,16 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     assert_eq!(create_request.plugin_mode, SessionPluginMode::Fresh);
     assert!(
         create_request.initial_nodes.is_empty(),
-        "fresh-context execution should let the CLI auto-send the seed prompt as the first user turn"
+        "fresh-context execution should let the host drive the seed prompt as the first user turn"
+    );
+    let seed = create_request
+        .first_turn_input
+        .as_ref()
+        .expect("first_turn_input set on CreateSession directive");
+    assert_eq!(seed.role, lash::MessageRole::User);
+    assert_eq!(
+        seed.content,
+        "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
     );
     assert!(
         directives

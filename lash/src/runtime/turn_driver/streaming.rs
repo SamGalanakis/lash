@@ -7,6 +7,7 @@ use super::*;
 /// lashlang fence).
 pub(super) struct StreamChunkOutcome {
     pub(super) chunk: String,
+    pub(super) reasoning_deltas: Vec<String>,
     pub(super) abort_requested: bool,
 }
 
@@ -29,6 +30,7 @@ impl RuntimeTurnDriver {
         if !self.session.plugins().has_assistant_stream_hooks() {
             return Ok(StreamChunkOutcome {
                 chunk,
+                reasoning_deltas: Vec::new(),
                 abort_requested: false,
             });
         }
@@ -49,11 +51,13 @@ impl RuntimeTurnDriver {
         let mut current = String::new();
         let mut first = true;
         let mut abort_requested = false;
+        let mut reasoning_deltas = Vec::new();
         for emitted in transforms {
             if first {
                 first = false;
             }
             current = emitted.value.chunk.clone();
+            reasoning_deltas.extend(emitted.value.reasoning_deltas.clone());
             if emitted.value.abort_stream {
                 abort_requested = true;
             }
@@ -63,6 +67,7 @@ impl RuntimeTurnDriver {
         let chunk = if first { original } else { current };
         Ok(StreamChunkOutcome {
             chunk,
+            reasoning_deltas,
             abort_requested,
         })
     }
@@ -446,6 +451,23 @@ impl RuntimeTurnDriver {
                     if outcome.abort_requested {
                         *state.abort_requested = true;
                     }
+                    for reasoning_delta in outcome.reasoning_deltas {
+                        if state.buffer_stream_fallback {
+                            state.streamed_output.push_reasoning(
+                                reasoning_delta.clone(),
+                                None,
+                                Vec::new(),
+                                None,
+                            );
+                        }
+                        send_session_event(
+                            event_tx,
+                            SessionEvent::ReasoningDelta {
+                                content: reasoning_delta,
+                            },
+                        )
+                        .await;
+                    }
                     let delta = outcome.chunk;
                     self.log_llm_stream_event(
                         state.debug,
@@ -507,6 +529,23 @@ impl RuntimeTurnDriver {
                         .await?;
                     if outcome.abort_requested {
                         *state.abort_requested = true;
+                    }
+                    for reasoning_delta in outcome.reasoning_deltas {
+                        if state.buffer_stream_fallback {
+                            state.streamed_output.push_reasoning(
+                                reasoning_delta.clone(),
+                                None,
+                                Vec::new(),
+                                None,
+                            );
+                        }
+                        send_session_event(
+                            event_tx,
+                            SessionEvent::ReasoningDelta {
+                                content: reasoning_delta,
+                            },
+                        )
+                        .await;
                     }
                     let text = outcome.chunk;
                     self.log_llm_stream_event(

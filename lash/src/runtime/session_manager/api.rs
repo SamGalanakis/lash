@@ -126,7 +126,7 @@ impl SessionManager for RuntimeSessionManager {
                 .build_session_with_parent(
                     &session_id,
                     request.parent_session_id.clone(),
-                    policy.execution_mode,
+                    policy.execution_mode.clone(),
                     policy.context_approach.clone(),
                     None,
                 )
@@ -135,7 +135,7 @@ impl SessionManager for RuntimeSessionManager {
                 .current_plugins
                 .fork_for_session(
                     &session_id,
-                    policy.execution_mode,
+                    policy.execution_mode.clone(),
                     policy.context_approach.clone(),
                 )
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
@@ -254,6 +254,12 @@ impl SessionManager for RuntimeSessionManager {
                 .expect("child usage sources lock")
                 .insert(session_id.clone(), source.clone());
         }
+        if let Some(seed) = request.first_turn_input.clone() {
+            self.pending_first_turn_inputs
+                .lock()
+                .expect("pending first turn inputs lock")
+                .insert(session_id.clone(), seed);
+        }
         Ok(SessionHandle {
             session_id,
             parent_session_id: request.parent_session_id,
@@ -282,6 +288,10 @@ impl SessionManager for RuntimeSessionManager {
         self.child_usage_sources
             .lock()
             .expect("child usage sources lock")
+            .remove(session_id);
+        self.pending_first_turn_inputs
+            .lock()
+            .expect("pending first turn inputs lock")
             .remove(session_id);
         self.current_plugins.host().unregister_session(session_id)?;
         Ok(())
@@ -524,6 +534,17 @@ impl SessionManager for RuntimeSessionManager {
         executor
             .mark_live_state(&self.background_scope_key(session_id), task_id, run_state)
             .await;
+    }
+
+    async fn take_first_turn_input(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::PluginMessage>, crate::PluginError> {
+        Ok(self
+            .pending_first_turn_inputs
+            .lock()
+            .expect("pending first turn inputs lock")
+            .remove(session_id))
     }
 
     async fn inject_turn_input(

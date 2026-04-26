@@ -60,7 +60,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
             provider_id: "openai-compatible".into(),
             configured_model: "gpt-5.4-mini".into(),
             context_window: 200_000,
-            execution_mode: ExecutionMode::Standard,
+            execution_mode: ExecutionMode::standard(),
             context_approach: lash::ContextApproach::default(),
             model_variant: None,
         },
@@ -78,9 +78,9 @@ async fn embedded_runtime_builder_loads_state_from_store() {
         .expect("runtime");
 
     let state = runtime.export_state();
-    assert_eq!(state.projected_messages().len(), 1);
+    assert_eq!(state.projected_conversation_messages().len(), 1);
     assert_eq!(
-        state.projected_messages()[0].parts[0].content,
+        state.projected_conversation_messages()[0].parts[0].content,
         "stored question"
     );
     assert_eq!(state.iteration, 3);
@@ -99,7 +99,7 @@ async fn embedded_runtime_builder_rejects_store_bound_to_different_session_id() 
             provider_id: "openai-compatible".into(),
             configured_model: "gpt-5.4-mini".into(),
             context_window: 200_000,
-            execution_mode: ExecutionMode::Standard,
+            execution_mode: ExecutionMode::standard(),
             context_approach: lash::ContextApproach::default(),
             model_variant: None,
         },

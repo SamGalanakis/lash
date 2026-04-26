@@ -201,6 +201,7 @@ impl AsyncToolReply {
 
 pub struct Session {
     session_id: String,
+    execution_mode: crate::ExecutionMode,
     rlm_runtime: Option<LashlangRuntime>,
     last_repl_tools_json: Option<Arc<String>>,
     services: RuntimeServices,
@@ -214,6 +215,11 @@ pub struct Session {
     scratch_dir: tempfile::TempDir,
     rlm_observe_projection_config: crate::ToolResultProjectionPluginConfig,
     tool_surface_cache: std::sync::Mutex<Vec<(ToolSurfaceCacheKey, ToolSurfaceHandle)>>,
+    /// Memoizes the rendered system prompt across turns. Most consecutive
+    /// turns reuse the same template + context surface, so the cache hits
+    /// and we skip the section/Vec-join work in
+    /// `lash_sansio::PromptTemplate::render`.
+    prompt_cache: Arc<lash_sansio::PromptCache>,
     async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
 }
 
@@ -221,12 +227,13 @@ impl Session {
     pub async fn new(
         services: RuntimeServices,
         session_id: &str,
-        _execution_mode: crate::ExecutionMode,
+        execution_mode: crate::ExecutionMode,
     ) -> Result<Self, SessionError> {
         let scratch_dir = tempfile::TempDir::new()?;
 
         let mut session = Self {
             session_id: session_id.to_string(),
+            execution_mode,
             rlm_runtime: None,
             last_repl_tools_json: None,
             services,
@@ -240,6 +247,7 @@ impl Session {
             scratch_dir,
             rlm_observe_projection_config: crate::ToolResultProjectionPluginConfig::default(),
             tool_surface_cache: std::sync::Mutex::new(Vec::new()),
+            prompt_cache: Arc::new(lash_sansio::PromptCache::new()),
             async_tool_handles: Arc::new(StdMutex::new(HashMap::new())),
         };
 
@@ -273,7 +281,7 @@ impl Session {
 
     pub(crate) fn mode_extra_prompt_contributions(
         &self,
-        _mode: crate::ExecutionMode,
+        _mode: &crate::ExecutionMode,
     ) -> Vec<PromptContribution> {
         // Mode-specific prompt contributions are owned by the mode
         // plugins (`lash-mode-standard`, `lash-mode-rlm`) via their
@@ -340,6 +348,10 @@ impl Session {
             .clear();
     }
 
+    pub fn prompt_cache(&self) -> Arc<lash_sansio::PromptCache> {
+        Arc::clone(&self.prompt_cache)
+    }
+
     pub fn context_prompt_contributions(&self) -> &[PromptContribution] {
         &self.context_prompt_contributions
     }
@@ -348,9 +360,9 @@ impl Session {
         self.services.store.clone()
     }
 
-    fn tool_surface_cache_key(&self, mode: crate::ExecutionMode) -> ToolSurfaceCacheKey {
+    fn tool_surface_cache_key(&self, mode: &crate::ExecutionMode) -> ToolSurfaceCacheKey {
         ToolSurfaceCacheKey {
-            mode,
+            mode: mode.clone(),
             include_base_tools: self.include_base_tools,
             context_surface_revision: self.context_surface_revision,
             dynamic_generation: self.tools().dynamic_generation().unwrap_or(0),
@@ -372,17 +384,17 @@ impl Session {
             .plugins()
             .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
                 session_id: session_id.to_string(),
-                mode,
+                mode: mode.clone(),
                 tools,
             })
             .unwrap_or_else(|err| {
                 tracing::warn!("failed to resolve tool surface: {err}");
-                crate::ToolSurface::from_tools(fallback_tools, mode)
+                crate::ToolSurface::from_tools(fallback_tools, mode.clone())
             });
         let input = crate::ModeBuildInput {
-            mode,
+            mode: mode.clone(),
             tool_surface: surface.clone(),
-            extra_prompt_contributions: self.mode_extra_prompt_contributions(mode),
+            extra_prompt_contributions: self.mode_extra_prompt_contributions(&mode),
         };
         let driver = self.plugins().mode_protocol_driver().unwrap_or_else(|| {
             panic!(
@@ -414,7 +426,7 @@ impl Session {
         session_id: &str,
         mode: crate::ExecutionMode,
     ) -> ToolSurfaceHandle {
-        let key = self.tool_surface_cache_key(mode);
+        let key = self.tool_surface_cache_key(&mode);
         let mut cache = self
             .tool_surface_cache
             .lock()
@@ -459,7 +471,7 @@ impl Session {
     }
 
     fn rlm_tools_json(&self, session_id: &str) -> Arc<String> {
-        let entry = self.tool_surface_cache_entry(session_id, crate::ExecutionMode::Rlm);
+        let entry = self.tool_surface_cache_entry(session_id, self.execution_mode.clone());
         let catalog = entry.catalog();
         tracing::debug!(
             session_id,
@@ -814,7 +826,7 @@ impl Session {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
             tools: self.tools(),
-            surface: self.tool_surface(session_id, crate::ExecutionMode::Rlm),
+            surface: self.tool_surface(session_id, self.execution_mode.clone()),
             host,
             session_id: session_id.to_string(),
             event_tx: event_tx.clone(),
@@ -1082,9 +1094,9 @@ impl Session {
 
     /// Apply an in-place patch to the lashlang `FlowState.globals`
     /// without replacing the rest of the execution snapshot.
-    pub async fn apply_rlm_globals_patch(
+    pub async fn apply_mode_globals_patch(
         &mut self,
-        patch: &crate::RlmGlobalsPatchPluginBody,
+        patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
     ) -> Result<(), SessionError> {
         if !self.supports_repl() || patch.is_empty() {
             return Ok(());
@@ -1500,7 +1512,7 @@ mod tests {
         let plugin_session = plugin_host
             .build_session(
                 "root",
-                crate::ExecutionMode::Standard,
+                crate::ExecutionMode::standard(),
                 crate::ContextApproach::default(),
                 None,
             )
@@ -1508,7 +1520,7 @@ mod tests {
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
             "root",
-            crate::ExecutionMode::Standard,
+            crate::ExecutionMode::standard(),
         )
         .await
         .expect("session");
@@ -1540,7 +1552,7 @@ mod tests {
         let plugin_session = plugin_host
             .build_session(
                 "root",
-                crate::ExecutionMode::Rlm,
+                crate::ExecutionMode::new("rlm"),
                 crate::ContextApproach::default(),
                 None,
             )
@@ -1548,7 +1560,7 @@ mod tests {
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
             "root",
-            crate::ExecutionMode::Rlm,
+            crate::ExecutionMode::new("rlm"),
         )
         .await
         .expect("session");
@@ -1608,7 +1620,7 @@ submit "ok"
         let plugin_session = plugin_host
             .build_session(
                 "root",
-                crate::ExecutionMode::Rlm,
+                crate::ExecutionMode::new("rlm"),
                 crate::ContextApproach::default(),
                 None,
             )
@@ -1616,7 +1628,7 @@ submit "ok"
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
             "root",
-            crate::ExecutionMode::Rlm,
+            crate::ExecutionMode::new("rlm"),
         )
         .await
         .expect("session");
@@ -1664,7 +1676,7 @@ print match
         let plugin_session = plugin_host
             .build_session(
                 "root",
-                crate::ExecutionMode::Rlm,
+                crate::ExecutionMode::new("rlm"),
                 crate::ContextApproach::default(),
                 None,
             )
@@ -1672,7 +1684,7 @@ print match
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
             "root",
-            crate::ExecutionMode::Rlm,
+            crate::ExecutionMode::new("rlm"),
         )
         .await
         .expect("session");
@@ -1732,7 +1744,7 @@ print result
         let plugin_session = plugin_host
             .build_session(
                 "root",
-                crate::ExecutionMode::Rlm,
+                crate::ExecutionMode::new("rlm"),
                 crate::ContextApproach::default(),
                 None,
             )
@@ -1740,7 +1752,7 @@ print result
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
             "root",
-            crate::ExecutionMode::Rlm,
+            crate::ExecutionMode::new("rlm"),
         )
         .await
         .expect("session");

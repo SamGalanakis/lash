@@ -11,9 +11,70 @@ pub use prompt::{
     PromptTemplateEntry, PromptTemplateSection, default_prompt_template,
 };
 
+use std::collections::HashMap;
+
 use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
-use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
+use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent, UserInputProvenance};
+use crate::{MessageOrigin, ToolCallRecord};
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum SessionEventRecord<ME = ()> {
+    Conversation(ConversationRecord),
+    Tool(ToolEvent),
+    Mode(ME),
+    StateSnapshot(StateSnapshotEvent),
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConversationRecord {
+    pub id: String,
+    pub role: MessageRole,
+    pub parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input: Option<UserInputProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<MessageOrigin>,
+}
+
+impl ConversationRecord {
+    pub fn from_message(message: Message) -> Self {
+        Self {
+            id: message.id,
+            role: message.role,
+            parts: message.parts,
+            user_input: message.user_input,
+            origin: message.origin,
+        }
+    }
+
+    pub fn to_message(&self) -> Message {
+        Message {
+            id: self.id.clone(),
+            role: self.role,
+            parts: self.parts.clone(),
+            user_input: self.user_input.clone(),
+            origin: self.origin.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum ToolEvent {
+    Invocation {
+        stable_key: String,
+        record: ToolCallRecord,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum StateSnapshotEvent {
+    Lashlang {
+        version: u32,
+        data: String,
+        files: HashMap<String, String>,
+    },
+}
 
 /// Token usage statistics from an LLM call.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -122,7 +183,7 @@ pub enum SessionEvent {
         plugin_id: String,
         event: PluginSurfaceEvent,
     },
-    /// Emitted when a typed RLM session terminates via `submit <expr>`.
+    /// Emitted when a typed execution session terminates via `submit <expr>`.
     /// The `value` is the captured (and schema-validated) result.
     /// Hosts that want the typed shape back (e.g. the parent of a
     /// typed subagent workflow) listen for this event on the child's stream;
@@ -361,7 +422,7 @@ impl TurnTerminationPolicyState {
                         1. Summary of what you accomplished\n\
                         2. List of remaining tasks not yet completed\n\
                         3. Recommended next steps\n\
-                        Do NOT make any more tool calls and do NOT emit `<rlm>`."
+                        Do NOT make any more tool calls and do NOT emit a mode-specific tag."
                 ),
                 attachment: None,
                 tool_call_id: None,

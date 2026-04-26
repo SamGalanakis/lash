@@ -435,7 +435,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(MockTools));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
         ToolDispatchContext {
             plugins,
             tools,
@@ -454,7 +454,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
         ToolDispatchContext {
             plugins,
             tools,
@@ -659,7 +659,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(SerialProbeTools { log }));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
         ToolDispatchContext {
             plugins,
             tools,
@@ -814,7 +814,7 @@ mod tests {
         });
         let plugins = test_plugins(provider);
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
         let context = Arc::new(ToolDispatchContext {
             plugins,
             tools,

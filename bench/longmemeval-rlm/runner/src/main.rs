@@ -18,14 +18,15 @@ use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
     PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RlmGlobalsPatchPluginBody,
-    RuntimeCoreConfig, RuntimeStore, SessionAppendNode, SessionEvent, SessionPolicy,
-    SessionUsageReport, Store, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput,
-    TurnInputInjectionBridge, diff_usage_reports,
+    PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig, RuntimeStore,
+    SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
+    diff_usage_reports,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
+use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -339,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
         model: args.model.clone(),
         provider_id: args.provider_id.clone(),
         variant: args.variant.clone(),
-        execution_mode: execution_mode_label(execution_mode).to_string(),
+        execution_mode: execution_mode_label(&execution_mode).to_string(),
         context_approach: context_approach_label(&context_approach).to_string(),
         prompt_profile: match args.prompt_profile {
             PromptProfile::Baseline => "baseline",
@@ -409,6 +410,7 @@ async fn main() -> anyhow::Result<()> {
         let provider = provider.clone();
         let args = args.clone();
         let context_approach = context_approach.clone();
+        let execution_mode = execution_mode.clone();
         join_set.spawn(async move {
             let _permit = permit;
             let result = run_question(
@@ -582,7 +584,7 @@ async fn run_question(
         model: args.model.clone(),
         provider: provider.clone(),
         max_context_tokens: Some(args.max_context_tokens),
-        execution_mode,
+        execution_mode: execution_mode.clone(),
         context_approach: context_approach.clone(),
         model_variant: args.variant.clone(),
         ..SessionPolicy::default()
@@ -622,10 +624,11 @@ async fn run_question(
 
     runtime
         .append_session_nodes(AppendSessionNodesRequest {
-            nodes: vec![SessionAppendNode::plugin(
-                lash::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
-                serde_json::to_value(build_globals_patch(&question))?,
-            )],
+            nodes: vec![SessionAppendNode::event(lash::SessionEventRecord::Mode(
+                lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(build_globals_patch(
+                    &question,
+                ))),
+            ))],
             requires_ancestor_node_id: None,
         })
         .await
@@ -646,7 +649,7 @@ async fn run_question(
                 image_blobs: Default::default(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
             &sink,
             cancel,
@@ -757,7 +760,7 @@ fn build_plugin_session(
     subagent_models.insert("high".to_string(), session_policy.model.clone());
     let registry = std::sync::Arc::new(lash_subagents::default_registry(
         &subagent_models,
-        ExecutionMode::Standard,
+        ExecutionMode::standard(),
     ));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
     factories.push(Arc::new(SubagentsPluginFactory::new(
@@ -970,8 +973,9 @@ fn read_env_var(name: &str) -> Option<String> {
 
 fn parse_execution_mode(raw: &str) -> anyhow::Result<ExecutionMode> {
     match raw {
-        "rlm" => Ok(ExecutionMode::Rlm),
-        "standard" => Ok(ExecutionMode::Standard),
+        "rlm" => Ok(ExecutionMode::new("rlm")),
+        "rlmpure" | "rlm-pure" | "rlm_pure" => Ok(ExecutionMode::new("rlmpure")),
+        "standard" => Ok(ExecutionMode::standard()),
         _ => bail!("unsupported execution mode `{raw}`"),
     }
 }
@@ -984,11 +988,8 @@ fn parse_context_approach(raw: &str) -> anyhow::Result<ContextApproach> {
     }
 }
 
-fn execution_mode_label(mode: ExecutionMode) -> &'static str {
-    match mode {
-        ExecutionMode::Rlm => "rlm",
-        ExecutionMode::Standard => "standard",
-    }
+fn execution_mode_label(mode: &ExecutionMode) -> &str {
+    mode.plugin_id()
 }
 
 fn context_approach_label(approach: &ContextApproach) -> &'static str {

@@ -233,10 +233,11 @@ fn parse_variant_input(input: &str) -> Result<String, String> {
 pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Execution mode cannot be empty.".to_string()),
-        "rlm" => Ok(ExecutionMode::Rlm),
-        "standard" | "tools" => Ok(ExecutionMode::Standard),
+        "rlm" => Ok(ExecutionMode::new("rlm")),
+        "rlmpure" | "rlm-pure" | "rlm_pure" => Ok(ExecutionMode::new("rlmpure")),
+        "standard" | "tools" => Ok(ExecutionMode::standard()),
         other => Err(format!(
-            "Unknown execution mode `{other}`. Expected `rlm` or `standard`."
+            "Unknown execution mode `{other}`. Expected `rlm`, `rlmpure`, or `standard`."
         )),
     }
 }
@@ -358,8 +359,8 @@ pub(crate) fn apply_context_approach_overrides(
 }
 
 pub(crate) fn execution_mode_usage() -> &'static str {
-    if lash::execution_mode_supported(ExecutionMode::Rlm) {
-        "<rlm|standard>"
+    if lash::execution_mode_supported(&ExecutionMode::new("rlm")) {
+        "<rlm|rlmpure|standard>"
     } else {
         "<standard>"
     }
@@ -368,21 +369,21 @@ pub(crate) fn execution_mode_usage() -> &'static str {
 pub(crate) fn ensure_supported_execution_mode(
     mode: ExecutionMode,
 ) -> Result<ExecutionMode, String> {
-    if lash::execution_mode_supported(mode) {
+    if lash::execution_mode_supported(&mode) {
         Ok(mode)
     } else {
-        Err(match mode {
-            ExecutionMode::Rlm => "RLM mode is not available in this build.".to_string(),
-            ExecutionMode::Standard => "Execution mode is not available.".to_string(),
+        Err(if mode == ExecutionMode::new("rlm") {
+            "RLM mode is not available in this build.".to_string()
+        } else if mode == ExecutionMode::new("rlmpure") {
+            "RLM pure mode is not available in this build.".to_string()
+        } else {
+            "Execution mode is not available.".to_string()
         })
     }
 }
 
-pub(crate) fn execution_mode_label(mode: ExecutionMode) -> &'static str {
-    match mode {
-        ExecutionMode::Rlm => "rlm",
-        ExecutionMode::Standard => "standard",
-    }
+pub(crate) fn execution_mode_label(mode: &ExecutionMode) -> &str {
+    mode.plugin_id()
 }
 
 pub(crate) fn validate_model_selection(
@@ -501,7 +502,7 @@ lash-sansio {}",
     )
 }
 
-pub(crate) fn info_text_unconfigured(execution_mode: ExecutionMode, cwd: &str) -> String {
+pub(crate) fn info_text_unconfigured(execution_mode: &ExecutionMode, cwd: &str) -> String {
     [
         format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash::SANSIO_VERSION),
@@ -525,7 +526,7 @@ pub(crate) fn info_text(
     provider: &ProviderHandle,
     configured_model: &str,
     model_variant: Option<&str>,
-    execution_mode: ExecutionMode,
+    execution_mode: &ExecutionMode,
     context_approach: &lash::ContextApproach,
     context_window: Option<u64>,
     tool_count: usize,
@@ -893,7 +894,7 @@ mod tests {
             &provider,
             "google/gemini-3-flash-preview",
             None,
-            ExecutionMode::Rlm,
+            &ExecutionMode::new("rlm"),
             &lash::ContextApproach::default(),
             Some(123_000),
             7,

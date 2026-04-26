@@ -8,11 +8,12 @@
 //! Split out of `plugin/mod.rs` for file size; `pub use` there keeps
 //! the outer module path.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::{RlmTermination, SessionAppendNode, SessionCreateRequest};
+use super::{SessionAppendNode, SessionCreateRequest};
 use crate::runtime::PersistedSessionState;
-use crate::{ToolDefinition, ToolResult};
+use crate::{ExecutionMode, ToolDefinition, ToolResult};
 
 /// Session-scoped plugin that initializes, restores, and extends mode
 /// state across a session's lifecycle. External mode crates implement
@@ -107,13 +108,14 @@ impl<'a> ModeSessionContext<'a> {
         self.session.restore_execution_state(data).await
     }
 
-    /// Apply an RLM globals patch (assignments + unsets) from either
-    /// the session graph or an incoming append-nodes request.
-    pub async fn apply_rlm_globals_patch(
+    /// Apply a mode-owned globals/state patch from either the session
+    /// graph or an incoming append-nodes request. Today the only
+    /// patch payload is the RLM lashlang globals patch.
+    pub async fn apply_mode_globals_patch(
         &mut self,
-        patch: &crate::RlmGlobalsPatchPluginBody,
+        patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
     ) -> Result<(), crate::SessionError> {
-        self.session.apply_rlm_globals_patch(patch).await
+        self.session.apply_mode_globals_patch(patch).await
     }
 }
 
@@ -135,8 +137,13 @@ impl<'a> ModeRuntimeContext<'a> {
     /// Set how the session's embedded lashlang runtime terminates:
     /// `ProseWithoutFence` for chat-style sessions, or `Finish` with
     /// an optional output schema for typed-RLM sessions.
-    pub fn set_termination_mode(&mut self, termination: crate::RlmTermination) {
-        self.runtime.set_repl_termination(termination);
+    pub fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
+        self.runtime.set_mode_turn_options(options);
+    }
+
+    pub fn set_rlm_termination_mode(&mut self, termination: lash_rlm_types::RlmTermination) {
+        self.runtime
+            .set_mode_turn_options(crate::ModeTurnOptions::rlm(termination));
     }
 }
 
@@ -164,7 +171,7 @@ pub trait ModeProtocolDriverPlugin: Send + Sync {
     /// Execution-mode identifier this driver implements (e.g.
     /// `"standard"`, `"rlm"`). Matched against
     /// `ExecutionMode::plugin_id()` at preamble-build time.
-    fn mode_id(&self) -> &'static str;
+    fn mode_id(&self) -> &str;
 
     /// Build the `ModePreamble` (driver handle + prompt text + tool
     /// surface metadata) for a turn in this mode.
@@ -177,26 +184,122 @@ pub trait ModeProtocolDriverPlugin: Send + Sync {
 /// settings only that mode cares about. Adding a new mode means adding
 /// a new variant with its own struct — no mode-specific fields ever
 /// leak into the base request.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum ModeExtras {
-    Standard(StandardCreateExtras),
-    Rlm(RlmCreateExtras),
+#[derive(Clone, Debug, Serialize)]
+pub struct ModeExtras {
+    pub mode_id: ExecutionMode,
+    #[serde(default)]
+    pub payload: serde_json::Value,
 }
 
 impl Default for ModeExtras {
     fn default() -> Self {
-        Self::Standard(StandardCreateExtras::default())
+        Self::empty(ExecutionMode::standard())
+    }
+}
+
+impl ModeExtras {
+    pub fn empty(mode_id: ExecutionMode) -> Self {
+        Self {
+            mode_id,
+            payload: serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    pub fn typed<T>(mode_id: ExecutionMode, extras: T) -> Result<Self, serde_json::Error>
+    where
+        T: Serialize,
+    {
+        Ok(Self {
+            mode_id,
+            payload: serde_json::to_value(extras)?,
+        })
+    }
+
+    pub fn decode<T>(&self, expected_mode: &ExecutionMode) -> Result<Option<T>, serde_json::Error>
+    where
+        T: DeserializeOwned,
+    {
+        if &self.mode_id != expected_mode {
+            return Ok(None);
+        }
+        serde_json::from_value(self.payload.clone()).map(Some)
+    }
+}
+
+impl<'de> Deserialize<'de> for ModeExtras {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object() {
+            if let (Some(mode_id), Some(payload)) = (object.get("mode_id"), object.get("payload")) {
+                let mode_id = ExecutionMode::deserialize(mode_id.clone())
+                    .map_err(serde::de::Error::custom)?;
+                return Ok(Self {
+                    mode_id,
+                    payload: payload.clone(),
+                });
+            }
+            if let Some(mode) = object.get("mode").and_then(serde_json::Value::as_str) {
+                let mut payload = object.clone();
+                payload.remove("mode");
+                return Ok(Self {
+                    mode_id: ExecutionMode::new(mode),
+                    payload: serde_json::Value::Object(payload),
+                });
+            }
+        }
+        Err(serde::de::Error::custom("invalid mode extras payload"))
     }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StandardCreateExtras {}
 
-/// RLM-mode session config. Carries the choice of how the model
-/// terminates the session (prose vs `submit`-with-optional-schema).
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct RlmCreateExtras {
-    #[serde(default)]
-    pub termination: RlmTermination,
+pub use lash_rlm_types::{RlmCreateExtras, RlmpureCreateExtras};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_extras_reads_legacy_tagged_rlm_payload() {
+        let extras: ModeExtras = serde_json::from_value(serde_json::json!({
+            "mode": "rlm",
+            "termination": {
+                "kind": "finish",
+                "schema": null
+            }
+        }))
+        .expect("legacy extras");
+        assert_eq!(extras.mode_id, ExecutionMode::new("rlm"));
+        let decoded = extras
+            .decode::<RlmCreateExtras>(&ExecutionMode::new("rlm"))
+            .expect("decode")
+            .expect("matching mode");
+        assert!(matches!(
+            decoded.termination,
+            lash_rlm_types::RlmTermination::Finish { schema: None }
+        ));
+    }
+
+    #[test]
+    fn mode_extras_round_trips_open_payload() {
+        let standard = ModeExtras::default();
+        assert_eq!(standard.mode_id, ExecutionMode::standard());
+        assert_eq!(standard.payload, serde_json::json!({}));
+
+        let extras = ModeExtras::typed(
+            ExecutionMode::new("rlmpure"),
+            RlmpureCreateExtras {
+                termination: lash_rlm_types::RlmTermination::ProseWithoutFence,
+            },
+        )
+        .expect("encode");
+        let json = serde_json::to_value(&extras).expect("serialize");
+        assert_eq!(json["mode_id"], "rlmpure");
+        let decoded: ModeExtras = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.mode_id, ExecutionMode::new("rlmpure"));
+    }
 }

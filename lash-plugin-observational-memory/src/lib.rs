@@ -267,17 +267,10 @@ struct OmGraphState {
     buffered_reflection: Option<BufferedReflectionState>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug)]
 struct MessageNode {
     timestamp: String,
     message: Message,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct MessageNodeRef<'a> {
-    timestamp: &'a str,
-    message: &'a Message,
 }
 
 trait ObservedMessageNode {
@@ -285,7 +278,6 @@ trait ObservedMessageNode {
     fn message(&self) -> &Message;
 }
 
-#[cfg(test)]
 impl ObservedMessageNode for MessageNode {
     fn timestamp(&self) -> &str {
         &self.timestamp
@@ -293,16 +285,6 @@ impl ObservedMessageNode for MessageNode {
 
     fn message(&self) -> &Message {
         &self.message
-    }
-}
-
-impl<'a> ObservedMessageNode for MessageNodeRef<'a> {
-    fn timestamp(&self) -> &str {
-        self.timestamp
-    }
-
-    fn message(&self) -> &Message {
-        self.message
     }
 }
 
@@ -326,6 +308,9 @@ impl PluginFactory for ObservationalMemoryPluginFactory {
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        if ctx.execution_mode != lash::ExecutionMode::standard() {
+            return Ok(Arc::new(DisabledObservationalMemoryPlugin));
+        }
         let ContextApproach::ObservationalMemory(config) = &ctx.context_approach else {
             return Ok(Arc::new(DisabledObservationalMemoryPlugin));
         };
@@ -1181,10 +1166,10 @@ fn build_graph_state(graph: &SessionGraph) -> OmGraphState {
     state
 }
 
-fn active_unobserved_message_nodes<'a>(
-    graph: &'a SessionGraph,
+fn active_unobserved_message_nodes(
+    graph: &SessionGraph,
     observed_through_message_id: Option<&str>,
-) -> Vec<MessageNodeRef<'a>> {
+) -> Vec<MessageNode> {
     let mut seen_observed = observed_through_message_id.is_none();
     graph
         .active_path_nodes()
@@ -1200,8 +1185,8 @@ fn active_unobserved_message_nodes<'a>(
                 }
                 return None;
             }
-            Some(MessageNodeRef {
-                timestamp: node.timestamp.as_str(),
+            Some(MessageNode {
+                timestamp: node.timestamp.clone(),
                 message,
             })
         })

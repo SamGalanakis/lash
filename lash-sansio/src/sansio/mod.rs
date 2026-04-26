@@ -6,9 +6,12 @@
 
 use std::any::Any;
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::llm::types::{
@@ -17,12 +20,25 @@ use crate::llm::types::{
 use crate::session_model::message::{MessageOrigin, PartAttachment, data_url_for_bytes};
 use crate::session_model::{
     Message, MessageRole, MessageSequence, Part, PartKind, PruneState, RetryPolicy, SessionEvent,
-    TokenUsage, TurnTerminationPolicyState, fresh_message_id, make_error_envelope,
-    make_error_event, reassign_part_ids,
+    SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, fresh_message_id,
+    make_error_envelope, make_error_event, reassign_part_ids,
 };
 use crate::{CheckpointKind, PluginMessage, ToolResult};
 
 // ─── Public types ───
+
+pub trait ModeProtocol: Send + Sync + 'static {
+    type Event: Clone + Serialize + DeserializeOwned + Debug + Send + Sync + 'static;
+    type Termination: Clone + Default + Debug + Send + Sync + 'static;
+}
+
+#[derive(Clone, Debug)]
+pub struct UnitModeProtocol;
+
+impl ModeProtocol for UnitModeProtocol {
+    type Event = ();
+    type Termination = ();
+}
 
 /// Opaque identifier linking an effect to its response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -75,7 +91,7 @@ pub enum LogEvent {
 
 /// An effect the host must fulfil.
 #[derive(Debug)]
-pub enum Effect {
+pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
     /// Sync the live execution surface before the turn proceeds.
     ///
     /// `update_machine_config` is only needed after the turn has
@@ -96,7 +112,7 @@ pub enum Effect {
         id: EffectId,
         calls: Vec<PendingToolCall>,
     },
-    /// Execute a RLM code block.
+    /// Execute a mode-owned code block.
     ExecCode { id: EffectId, code: String },
     /// Run a host/plugin checkpoint before the machine continues or completes.
     Checkpoint {
@@ -116,11 +132,13 @@ pub enum Effect {
     /// state machine has applied semantic message/iteration changes.
     Progress {
         messages: MessageSequence,
+        events: Arc<Vec<SessionEventRecord<M::Event>>>,
         iteration: usize,
     },
     /// Turn is done.
     Done {
         messages: MessageSequence,
+        events: Arc<Vec<SessionEventRecord<M::Event>>>,
         iteration: usize,
     },
 }
@@ -137,7 +155,7 @@ pub struct LlmCallError {
 
 /// A response to a previously emitted effect.
 pub enum Response {
-    /// Live RLM execution surface sync completed.
+    /// Live execution surface sync completed.
     ExecutionSurfaceSynced {
         id: EffectId,
         result: Result<Option<ExecutionSurfaceSync>, String>,
@@ -155,7 +173,7 @@ pub enum Response {
         id: EffectId,
         results: Vec<CompletedToolCall>,
     },
-    /// RLM code execution result.
+    /// Mode code execution result.
     ExecResult {
         id: EffectId,
         result: Result<crate::ExecResponse, String>,
@@ -172,7 +190,7 @@ pub enum Response {
 
 #[derive(Clone)]
 pub struct ExecutionSurfaceSync {
-    pub system_prompt: String,
+    pub system_prompt: Arc<String>,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
 }
 
@@ -222,9 +240,9 @@ pub enum CheckpointResumeAction {
     Finish,
 }
 
-pub enum DriverAction {
+pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
     Emit(SessionEvent),
-    AppendMessages(Vec<Message>),
+    AppendEvents(Vec<SessionEventRecord<M::Event>>),
     StartLlm {
         request: LlmRequest,
         driver_state: Option<DriverState>,
@@ -245,48 +263,24 @@ pub enum DriverAction {
     Finish,
 }
 
-pub struct DriverContextView<'a> {
-    config: &'a TurnMachineConfig,
+pub struct DriverContextView<'a, M: ModeProtocol = UnitModeProtocol> {
+    config: &'a TurnMachineConfig<M>,
     messages: &'a MessageSequence,
+    events: &'a [SessionEventRecord<M::Event>],
     iteration: usize,
     run_offset: usize,
     termination: &'a TurnTerminationPolicyState,
 }
 
-impl<'a> DriverContextView<'a> {
-    pub fn build_llm_request(&self, use_tools: bool) -> LlmRequest {
-        let rendered_prompt = self.messages.render_prompt();
-        let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
-        let mut messages = rendered_prompt.messages;
-        if !self.config.system_prompt.trim().is_empty() {
-            messages.insert(
-                0,
-                crate::llm::types::LlmMessage::text(
-                    crate::llm::types::LlmRole::System,
-                    self.config.system_prompt.clone(),
-                ),
-            );
-        }
-
-        LlmRequest {
-            model: self.config.model.clone(),
-            messages,
-            attachments,
-            tools: if use_tools {
-                Arc::clone(&self.config.tool_specs)
-            } else {
-                Arc::new(Vec::new())
-            },
-            tool_choice: if use_tools {
-                LlmToolChoice::Auto
-            } else {
-                LlmToolChoice::None
-            },
-            model_variant: self.config.model_variant.clone(),
-            session_id: self.config.run_session_id.clone(),
-            output_spec: None,
-            stream_events: None,
-        }
+impl<'a, M: ModeProtocol> DriverContextView<'a, M> {
+    pub fn project_llm_request(&self, use_tools: bool) -> LlmRequest {
+        self.config.projector.project(ProjectorContext {
+            config: self.config,
+            messages: self.messages,
+            events: self.events,
+            iteration: self.iteration,
+            use_tools,
+        })
     }
 
     pub fn iteration(&self) -> usize {
@@ -301,8 +295,12 @@ impl<'a> DriverContextView<'a> {
         self.config.max_turns
     }
 
-    pub fn rlm_termination(&self) -> &RlmTermination {
-        &self.config.rlm_termination
+    pub fn termination(&self) -> &M::Termination {
+        &self.config.termination
+    }
+
+    pub fn autonomous(&self) -> bool {
+        self.config.autonomous
     }
 
     pub fn should_force_exit_after_grace_turn(&self) -> bool {
@@ -312,57 +310,103 @@ impl<'a> DriverContextView<'a> {
     pub fn messages(&self) -> &MessageSequence {
         self.messages
     }
+
+    pub fn events(&self) -> &[SessionEventRecord<M::Event>] {
+        self.events
+    }
 }
 
-pub trait ProtocolDriverHandle: Send + Sync {
-    fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction>;
+pub struct ProjectorContext<'a, M: ModeProtocol = UnitModeProtocol> {
+    pub config: &'a TurnMachineConfig<M>,
+    pub messages: &'a MessageSequence,
+    pub events: &'a [SessionEventRecord<M::Event>],
+    pub iteration: usize,
+    pub use_tools: bool,
+}
+
+pub trait ContextProjector<M: ModeProtocol = UnitModeProtocol>: Send + Sync {
+    fn project(&self, ctx: ProjectorContext<'_, M>) -> LlmRequest;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ChatContextProjector;
+
+impl<M: ModeProtocol> ContextProjector<M> for ChatContextProjector {
+    fn project(&self, ctx: ProjectorContext<'_, M>) -> LlmRequest {
+        let rendered_prompt = ctx.messages.render_prompt();
+        let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
+        let mut messages = rendered_prompt.messages;
+        if !ctx.config.system_prompt.trim().is_empty() {
+            messages.insert(
+                0,
+                crate::llm::types::LlmMessage::text(
+                    crate::llm::types::LlmRole::System,
+                    ctx.config.system_prompt.as_str().to_owned(),
+                ),
+            );
+        }
+
+        LlmRequest {
+            model: ctx.config.model.clone(),
+            messages,
+            attachments,
+            tools: if ctx.use_tools {
+                Arc::clone(&ctx.config.tool_specs)
+            } else {
+                Arc::new(Vec::new())
+            },
+            tool_choice: if ctx.use_tools {
+                LlmToolChoice::Auto
+            } else {
+                LlmToolChoice::None
+            },
+            model_variant: ctx.config.model_variant.clone(),
+            session_id: ctx.config.run_session_id.clone(),
+            output_spec: None,
+            stream_events: None,
+        }
+    }
+}
+
+pub trait ProtocolDriverHandle<M: ModeProtocol = UnitModeProtocol>: Send + Sync {
+    fn prepare_iteration(&self, ctx: DriverContextView<'_, M>) -> Vec<DriverAction<M>>;
     fn handle_llm_success(
         &self,
-        ctx: DriverContextView<'_>,
+        ctx: DriverContextView<'_, M>,
         waiting: WaitingLlmState,
         llm_response: LlmResponse,
         text_streamed: bool,
-    ) -> Vec<DriverAction>;
+    ) -> Vec<DriverAction<M>>;
     fn handle_tool_results(
         &self,
-        ctx: DriverContextView<'_>,
+        ctx: DriverContextView<'_, M>,
         completed: Vec<CompletedToolCall>,
-    ) -> Vec<DriverAction>;
+    ) -> Vec<DriverAction<M>>;
     fn handle_exec_result(
         &self,
-        ctx: DriverContextView<'_>,
+        ctx: DriverContextView<'_, M>,
         waiting: WaitingExecState,
         result: Result<crate::ExecResponse, String>,
-    ) -> Vec<DriverAction>;
+    ) -> Vec<DriverAction<M>>;
 }
 
 /// Configuration for a `TurnMachine` instance.
-pub struct TurnMachineConfig {
-    pub protocol_driver: Arc<dyn ProtocolDriverHandle>,
+pub struct TurnMachineConfig<M: ModeProtocol = UnitModeProtocol> {
+    pub protocol_driver: Arc<dyn ProtocolDriverHandle<M>>,
+    pub projector: Arc<dyn ContextProjector<M>>,
     pub sync_execution_surface: bool,
     pub model: String,
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
     pub run_session_id: Option<String>,
+    pub autonomous: bool,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
-    pub system_prompt: String,
+    pub system_prompt: Arc<String>,
     pub session_id: String,
     pub emit_llm_debug_log: bool,
-    pub rlm_termination: RlmTermination,
+    pub termination: M::Termination,
     pub retry_policy: RetryPolicy,
-}
-
-/// How a RLM session terminates. Mirrors `lash::RlmTermination`;
-/// duplicated here so the sans-io layer doesn't depend on the lash
-/// host crate.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RlmTermination {
-    /// Prose with no fenced lashlang block terminates the turn.
-    #[default]
-    ProseWithoutFence,
-    /// The session terminates only when the code calls `submit <expr>`.
-    Finish { schema: Option<serde_json::Value> },
+    pub initial_events: Arc<Vec<SessionEventRecord<M::Event>>>,
 }
 
 // ─── Internal state ───
@@ -401,12 +445,13 @@ enum MachineState {
 }
 
 /// Sans-IO state machine for a single session run (multi-turn).
-pub struct TurnMachine {
-    config: TurnMachineConfig,
+pub struct TurnMachine<M: ModeProtocol = UnitModeProtocol> {
+    config: TurnMachineConfig<M>,
     state: MachineState,
-    pending_effects: VecDeque<Effect>,
+    pending_effects: VecDeque<Effect<M>>,
     next_effect_id: u64,
     messages: MessageSequence,
+    events: Arc<Vec<SessionEventRecord<M::Event>>>,
     iteration: usize,
     run_offset: usize,
     cumulative_usage: TokenUsage,
@@ -414,23 +459,25 @@ pub struct TurnMachine {
     synced_iteration: Option<usize>,
 }
 
-impl TurnMachine {
+impl<M: ModeProtocol> TurnMachine<M> {
     /// Create a new machine in `PrepareIteration` state.
-    pub fn new(config: TurnMachineConfig, messages: Vec<Message>, run_offset: usize) -> Self {
+    pub fn new(config: TurnMachineConfig<M>, messages: Vec<Message>, run_offset: usize) -> Self {
         Self::new_shared(config, MessageSequence::from_owned(messages), run_offset)
     }
 
     pub fn new_shared(
-        config: TurnMachineConfig,
+        config: TurnMachineConfig<M>,
         messages: MessageSequence,
         run_offset: usize,
     ) -> Self {
+        let events = Arc::clone(&config.initial_events);
         Self {
             config,
             state: MachineState::PreparingMode,
             pending_effects: VecDeque::new(),
             next_effect_id: 1,
             messages,
+            events,
             iteration: run_offset,
             run_offset,
             cumulative_usage: TokenUsage::default(),
@@ -448,6 +495,10 @@ impl TurnMachine {
         self.messages.shared()
     }
 
+    pub fn events(&self) -> Arc<Vec<SessionEventRecord<M::Event>>> {
+        Arc::clone(&self.events)
+    }
+
     pub fn message_sequence(&self) -> MessageSequence {
         self.messages.clone()
     }
@@ -456,10 +507,11 @@ impl TurnMachine {
         self.iteration
     }
 
-    fn driver_context(&self) -> DriverContextView<'_> {
+    fn driver_context(&self) -> DriverContextView<'_, M> {
         DriverContextView {
             config: &self.config,
             messages: &self.messages,
+            events: self.events.as_slice(),
             iteration: self.iteration,
             run_offset: self.run_offset,
             termination: &self.termination,
@@ -479,6 +531,7 @@ impl TurnMachine {
     fn emit_progress(&mut self) {
         self.pending_effects.push_back(Effect::Progress {
             messages: self.messages.clone(),
+            events: Arc::clone(&self.events),
             iteration: self.iteration,
         });
     }
@@ -491,17 +544,19 @@ impl TurnMachine {
     fn finish(&mut self) {
         self.emit(SessionEvent::Done);
         let msgs = std::mem::take(&mut self.messages);
+        let events = Arc::clone(&self.events);
         let iteration = self.iteration;
         self.state = MachineState::Finished;
         self.pending_effects.push_back(Effect::Done {
             messages: msgs,
+            events,
             iteration,
         });
     }
 
     /// Drain the next pending effect. Returns `None` when the host must call
     /// `handle_response()` before more effects become available.
-    pub fn poll_effect(&mut self) -> Option<Effect> {
+    pub fn poll_effect(&mut self) -> Option<Effect<M>> {
         if let Some(effect) = self.pending_effects.pop_front() {
             return Some(effect);
         }
@@ -606,14 +661,37 @@ impl TurnMachine {
         });
     }
 
-    pub fn apply_actions(&mut self, actions: Vec<DriverAction>) {
+    fn append_event(&mut self, event: SessionEventRecord<M::Event>) {
+        match event {
+            SessionEventRecord::Conversation(record) => {
+                Arc::make_mut(&mut self.events)
+                    .push(SessionEventRecord::Conversation(record.clone()));
+                self.messages.push(record.to_message());
+            }
+            SessionEventRecord::Tool(ToolEvent::Invocation { stable_key, record }) => {
+                Arc::make_mut(&mut self.events).push(SessionEventRecord::Tool(
+                    ToolEvent::Invocation { stable_key, record },
+                ));
+            }
+            SessionEventRecord::Mode(mode_event) => {
+                Arc::make_mut(&mut self.events).push(SessionEventRecord::Mode(mode_event));
+            }
+            SessionEventRecord::StateSnapshot(snapshot) => {
+                Arc::make_mut(&mut self.events).push(SessionEventRecord::StateSnapshot(snapshot));
+            }
+        }
+    }
+
+    pub fn apply_actions(&mut self, actions: Vec<DriverAction<M>>) {
         let mut progress_dirty = false;
         for action in actions {
             match action {
                 DriverAction::Emit(event) => self.emit(event),
-                DriverAction::AppendMessages(messages) => {
-                    if !messages.is_empty() {
-                        self.messages.extend(messages);
+                DriverAction::AppendEvents(events) => {
+                    if !events.is_empty() {
+                        for event in events {
+                            self.append_event(event);
+                        }
                         progress_dirty = true;
                     }
                 }

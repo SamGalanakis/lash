@@ -604,7 +604,7 @@ mod tests {
             has_plugin_visible_output: true,
             done_reason: DoneReason::ModelStop,
             execution: ExecutionSummary {
-                mode: ExecutionMode::Standard,
+                mode: ExecutionMode::standard(),
                 had_tool_calls: false,
                 had_code_execution: false,
             },

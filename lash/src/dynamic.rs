@@ -656,13 +656,13 @@ mod tests {
         assert_eq!(
             snapshot.tools["enabled_tool"]
                 .definition
-                .effective_availability(crate::ExecutionMode::Standard),
+                .effective_availability(&crate::ExecutionMode::standard()),
             crate::ToolAvailability::Callable
         );
         assert_eq!(
             snapshot.tools["disabled_tool"]
                 .definition
-                .effective_availability(crate::ExecutionMode::Standard),
+                .effective_availability(&crate::ExecutionMode::standard()),
             crate::ToolAvailability::Hidden
         );
     }
@@ -739,7 +739,7 @@ mod tests {
         assert_eq!(
             snapshot.tools["mcp__demo__disabled"]
                 .definition
-                .effective_availability(crate::ExecutionMode::Standard),
+                .effective_availability(&crate::ExecutionMode::standard()),
             crate::ToolAvailability::Hidden
         );
     }

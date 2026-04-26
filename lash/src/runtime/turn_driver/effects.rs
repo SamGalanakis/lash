@@ -147,7 +147,10 @@ impl RuntimeTurnDriver {
             }
         });
         let manager = Arc::clone(&self.session_manager);
-        let accept_finish = matches!(self.rlm_termination, crate::RlmTermination::Finish { .. });
+        let accept_finish = matches!(
+            self.mode_turn_options.rlm_termination(),
+            lash_rlm_types::RlmTermination::Finish { .. }
+        );
         let result = self
             .session
             .run_code(

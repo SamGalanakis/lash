@@ -194,7 +194,7 @@ impl EmbeddedRuntimeBuilderExt for lash::EmbeddedRuntimeBuilder {
         if options.bundles.is_empty()
             && let Some(policy) = self.policy()
         {
-            options.execution_mode = policy.execution_mode;
+            options.execution_mode = policy.execution_mode.clone();
             options.context_approach = policy.context_approach.clone();
         }
         self.with_plugin_host(plugin_host_with_bundles(options).with_dynamic_tools())

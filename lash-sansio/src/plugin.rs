@@ -49,6 +49,16 @@ impl PluginMessage {
     pub fn user_input_provenance(&self) -> Option<&UserInputProvenance> {
         self.user_input.as_ref()
     }
+
+    pub fn first_text(&self) -> Option<&str> {
+        if !self.content.is_empty() {
+            return Some(self.content.as_str());
+        }
+        self.parts.iter().find_map(|part| {
+            matches!(part.kind, crate::PartKind::Text | crate::PartKind::Prose)
+                .then_some(part.content.as_str())
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

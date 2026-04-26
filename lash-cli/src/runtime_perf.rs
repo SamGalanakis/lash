@@ -16,6 +16,7 @@ use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
 use lash_provider_openai::OpenAiGenericProvider;
+use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -76,9 +77,9 @@ impl RuntimePerfScenario {
     fn execution_mode(self) -> ExecutionMode {
         match self {
             Self::Standard | Self::ObservationalMemory | Self::OpenAiCompatStream => {
-                ExecutionMode::Standard
+                ExecutionMode::standard()
             }
-            Self::Rlm | Self::RlmGlobals => ExecutionMode::Rlm,
+            Self::Rlm | Self::RlmGlobals => ExecutionMode::new("rlm"),
         }
     }
 
@@ -713,7 +714,7 @@ async fn run_once(
                     image_blobs: Default::default(),
                     user_input: None,
                     mode: Some(RunMode::Normal),
-                    rlm_termination_override: None,
+                    mode_turn_options: None,
                 },
                 CancellationToken::new(),
             )
@@ -795,7 +796,7 @@ async fn run_once(
         export_state_ms,
         total_ms: elapsed_ms(total_started),
         session_nodes: state.session_graph.nodes.len(),
-        active_path_messages: state.projected_messages().len(),
+        active_path_messages: state.projected_conversation_messages().len(),
         memory: RuntimePerfMemoryRunResult {
             rss_before_kb: before_memory.rss_kb,
             rss_after_build_kb: after_build_memory.rss_kb,
@@ -848,7 +849,7 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         model: "mock-model".to_string(),
         provider,
         max_context_tokens: Some(200_000),
-        execution_mode,
+        execution_mode: execution_mode.clone(),
         context_approach: context_approach.clone(),
         ..SessionPolicy::default()
     };
@@ -867,6 +868,9 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
     ));
     factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
+    ));
+    factories.push(Arc::new(
+        lash_mode_rlmpure::BuiltinRlmpureModePluginFactory::default(),
     ));
     let plugin_host = PluginHost::new(factories).with_dynamic_tools();
     let builder = LashRuntime::builder()
@@ -927,13 +931,14 @@ async fn seed_runtime_state(
         );
         runtime
             .append_session_nodes(AppendSessionNodesRequest {
-                nodes: vec![SessionAppendNode::plugin(
-                    INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
-                    serde_json::to_value(RlmGlobalsPatchPluginBody {
-                        set,
-                        unset: Vec::new(),
-                    })?,
-                )],
+                nodes: vec![SessionAppendNode::event(SessionEventRecord::Mode(
+                    lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(
+                        RlmGlobalsPatchPluginBody {
+                            set,
+                            unset: Vec::new(),
+                        },
+                    )),
+                ))],
                 requires_ancestor_node_id: None,
             })
             .await
@@ -943,7 +948,7 @@ async fn seed_runtime_state(
     if matches!(scenario, RuntimePerfScenario::ObservationalMemory) {
         let observed_through_message_id = runtime
             .export_state()
-            .projected_messages()
+            .projected_conversation_messages()
             .last()
             .map(|message| message.id.clone())
             .ok_or_else(|| anyhow::anyhow!("OM scenario expected seeded messages"))?;
@@ -1000,13 +1005,12 @@ async fn prepare_turn(
 
     runtime
         .append_session_nodes(AppendSessionNodesRequest {
-            nodes: vec![SessionAppendNode::plugin(
-                INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
-                serde_json::to_value(RlmGlobalsPatchPluginBody {
+            nodes: vec![SessionAppendNode::event(SessionEventRecord::Mode(
+                lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
                     set,
                     unset: Vec::new(),
-                })?,
-            )],
+                })),
+            ))],
             requires_ancestor_node_id: None,
         })
         .await
@@ -1075,6 +1079,13 @@ fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> BenchmarkStreamPro
             BenchmarkStreamProfile {
                 full_text: deltas.concat(),
                 deltas,
+            }
+        }
+        RuntimePerfScenario::Rlm | RuntimePerfScenario::RlmGlobals => {
+            let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
+            BenchmarkStreamProfile {
+                full_text: text.clone(),
+                deltas: vec![text],
             }
         }
         _ => {
