@@ -15,13 +15,13 @@ pub struct SansIoTurnInput<M: ModeProtocol = UnitModeProtocol> {
     pub messages: MessageSequence,
     pub events: Arc<Vec<crate::SessionEventRecord<M::Event>>>,
     pub run_offset: usize,
-    pub tool_surface: ToolSurface,
+    pub tool_surface: Arc<ToolSurface>,
     pub mode_preamble: Arc<ModePreamble<M>>,
     pub prompt_template: PromptTemplate,
     pub prompt_contributions: Vec<PromptContribution>,
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
-    pub emit_llm_debug_log: bool,
+    pub emit_llm_trace: bool,
     pub termination: M::Termination,
     pub retry_policy: RetryPolicy,
     /// Optional cache that lets repeat turns skip re-rendering the
@@ -66,12 +66,12 @@ pub fn build_turn<M: ModeProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
             tool_specs: input.mode_preamble.tool_specs.clone(),
             system_prompt: Arc::clone(&prepared_prompt.system_prompt),
             session_id: input.session_id,
-            emit_llm_debug_log: input.emit_llm_debug_log,
+            emit_llm_trace: input.emit_llm_trace,
             termination: input.termination,
             retry_policy: input.retry_policy,
-            initial_events: input.events,
         },
         input.messages,
+        input.events,
         input.run_offset,
     );
 
@@ -153,8 +153,10 @@ mod tests {
 
     #[test]
     fn build_turn_creates_machine_with_rendered_system_prompt() {
-        let tool_surface =
-            crate::ToolSurface::from_tools(vec![tool("read_file")], ExecutionMode::standard());
+        let tool_surface = Arc::new(crate::ToolSurface::from_tools(
+            vec![tool("read_file")],
+            ExecutionMode::standard(),
+        ));
         let mode_preamble = Arc::new(ModePreamble {
             config: ModeConfig::chat(Arc::new(NoopDriver), false),
             tool_specs: Arc::new(tool_surface.model_tool_specs()),
@@ -172,13 +174,13 @@ mod tests {
             messages: crate::MessageSequence::default(),
             events: Arc::new(Vec::new()),
             run_offset: 2,
-            tool_surface: tool_surface.clone(),
+            tool_surface: Arc::clone(&tool_surface),
             mode_preamble,
             prompt_template: default_prompt_template(),
             prompt_contributions: vec![PromptContribution::guidance("Guide", "Be precise.")],
             max_turns: Some(3),
             model_variant: Some("mini".to_string()),
-            emit_llm_debug_log: true,
+            emit_llm_trace: true,
             termination: (),
             retry_policy: RetryPolicy::default(),
             prompt_cache: None,

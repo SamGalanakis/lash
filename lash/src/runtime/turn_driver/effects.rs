@@ -127,23 +127,46 @@ impl RuntimeTurnDriver {
         let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
-        let event_tx_clone = event_tx.clone();
-        let drain_handle = tokio::spawn(async move {
-            while let Some(sandbox_msg) = msg_rx.recv().await {
-                if sandbox_msg.kind != "final" && !event_tx_clone.is_closed() {
-                    let _ = event_tx_clone
-                        .send(RuntimeStreamEvent::Session(SessionEvent::Message {
-                            text: sandbox_msg.text,
-                            kind: sandbox_msg.kind,
-                        }))
-                        .await;
+        let relay_tx = event_tx.clone();
+        let relay_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    maybe_sandbox = msg_rx.recv() => {
+                        let Some(sandbox_msg) = maybe_sandbox else {
+                            // Sandbox channel closed; drain remaining session events.
+                            while let Some(event) = session_event_rx.recv().await {
+                                send_session_event(&relay_tx, event).await;
+                            }
+                            break;
+                        };
+                        if sandbox_msg.kind != "final" && !relay_tx.is_closed() {
+                            let _ = relay_tx
+                                .send(RuntimeStreamEvent::Session(SessionEvent::Message {
+                                    text: sandbox_msg.text,
+                                    kind: sandbox_msg.kind,
+                                }))
+                                .await;
+                        }
+                    }
+                    maybe_event = session_event_rx.recv() => {
+                        let Some(event) = maybe_event else {
+                            // Session channel closed; drain remaining sandbox messages.
+                            while let Some(sandbox_msg) = msg_rx.recv().await {
+                                if sandbox_msg.kind != "final" && !relay_tx.is_closed() {
+                                    let _ = relay_tx
+                                        .send(RuntimeStreamEvent::Session(SessionEvent::Message {
+                                            text: sandbox_msg.text,
+                                            kind: sandbox_msg.kind,
+                                        }))
+                                        .await;
+                                }
+                            }
+                            break;
+                        };
+                        send_session_event(&relay_tx, event).await;
+                    }
                 }
-            }
-        });
-        let forward_tx = event_tx.clone();
-        let forward_handle = tokio::spawn(async move {
-            while let Some(event) = session_event_rx.recv().await {
-                send_session_event(&forward_tx, event).await;
             }
         });
         let manager = Arc::clone(&self.session_manager);
@@ -164,8 +187,7 @@ impl RuntimeTurnDriver {
             .map_err(|e| e.to_string());
         drop(session_event_tx);
         self.session.clear_message_sender();
-        let _ = forward_handle.await;
-        let _ = drain_handle.await;
+        let _ = relay_handle.await;
         result
     }
 }

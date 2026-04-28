@@ -17,7 +17,7 @@ use crate::sansio::{
     ChatContextProjector, ContextProjector, ModeProtocol, ProtocolDriverHandle, UnitModeProtocol,
 };
 use crate::session_model::message::ReasoningMeta;
-use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState};
+use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState, shared_parts};
 use crate::{ExecutionMode, PromptContribution, ToolSurface};
 
 #[derive(Clone)]
@@ -50,7 +50,7 @@ pub struct ModePreamble<M: ModeProtocol = UnitModeProtocol> {
 #[derive(Clone, Debug)]
 pub struct ModeBuildInput {
     pub mode: ExecutionMode,
-    pub tool_surface: ToolSurface,
+    pub tool_surface: std::sync::Arc<ToolSurface>,
     pub extra_prompt_contributions: Vec<PromptContribution>,
 }
 
@@ -117,7 +117,7 @@ pub fn turn_limit_exhausted_message(max_turns: usize) -> Message {
     Message {
         id: id.clone(),
         role: MessageRole::System,
-        parts: vec![Part {
+        parts: shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Error,
             content: format!("Turn limit reached ({max_turns}) before a final assistant response."),
@@ -128,7 +128,7 @@ pub fn turn_limit_exhausted_message(max_turns: usize) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: None,
     }

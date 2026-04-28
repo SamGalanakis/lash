@@ -347,10 +347,10 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         lash_config.set_model_default(active_provider.kind(), model.clone(), model_variant.clone());
         lash_config.save(&crate::paths::config_file())?;
     }
-    let llm_log_path = if crate::detailed_debug_logging_enabled(args.debug) {
+    let trace_path = if crate::detailed_debug_logging_enabled(args.debug) {
         let dir = crate::paths::lash_home().join("sessions");
         Some(dir.join(format!(
-            "{}.llm.jsonl",
+            "{}.trace.jsonl",
             chrono::Local::now().format("%Y%m%d_%H%M%S")
         )))
     } else {
@@ -362,7 +362,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     tracing::debug!(
         session_file = session_bootstrap.filename(),
         resumed = args.resume.is_some(),
-        llm_log_path = ?llm_log_path,
+        trace_path = ?trace_path,
         debug_logging = crate::detailed_debug_logging_enabled(args.debug),
         "prepared session bootstrap"
     );
@@ -424,9 +424,11 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     )
     .map_err(anyhow::Error::msg)?;
     let rlm_globals_patch = resolve_rlm_globals_patch(&args).map_err(anyhow::Error::msg)?;
-    if rlm_globals_patch.is_some() && execution_mode != ExecutionMode::new("rlm") {
+    let rlm_globals_supported = execution_mode == ExecutionMode::new("rlm")
+        || execution_mode == ExecutionMode::new("rlmpure");
+    if rlm_globals_patch.is_some() && !rlm_globals_supported {
         return Err(anyhow::anyhow!(
-            "`--rlm-var`, `--rlm-vars-file`, and `--rlm-unset` require `--execution-mode rlm`."
+            "`--rlm-var`, `--rlm-vars-file`, and `--rlm-unset` require `--execution-mode rlm` or `--execution-mode rlmpure`."
         ));
     }
 
@@ -448,7 +450,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     };
     let host_core = RuntimeCoreConfig::default()
         .with_prompt_template(prompt_template)
-        .with_llm_log_path(llm_log_path)
+        .with_trace_jsonl_path(trace_path)
         .with_credential_store_path(Some(crate::paths::config_file()));
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();

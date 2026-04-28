@@ -34,21 +34,24 @@ pub(crate) enum RuntimePerfScenario {
     Standard,
     Rlm,
     RlmGlobals,
+    Rlmpure,
     ObservationalMemory,
     OpenAiCompatStream,
 }
 
 impl RuntimePerfScenario {
-    const DEFAULTS: [Self; 4] = [
+    const DEFAULTS: [Self; 5] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmGlobals,
+        Self::Rlmpure,
         Self::ObservationalMemory,
     ];
-    const KNOWN: [Self; 5] = [
+    const KNOWN: [Self; 6] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmGlobals,
+        Self::Rlmpure,
         Self::ObservationalMemory,
         Self::OpenAiCompatStream,
     ];
@@ -58,6 +61,7 @@ impl RuntimePerfScenario {
             "standard" => Some(Self::Standard),
             "rlm" => Some(Self::Rlm),
             "rlm_globals" => Some(Self::RlmGlobals),
+            "rlmpure" => Some(Self::Rlmpure),
             "observational_memory" => Some(Self::ObservationalMemory),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
             _ => None,
@@ -69,6 +73,7 @@ impl RuntimePerfScenario {
             Self::Standard => "standard",
             Self::Rlm => "rlm",
             Self::RlmGlobals => "rlm_globals",
+            Self::Rlmpure => "rlmpure",
             Self::ObservationalMemory => "observational_memory",
             Self::OpenAiCompatStream => "openai_compat_stream",
         }
@@ -80,6 +85,7 @@ impl RuntimePerfScenario {
                 ExecutionMode::standard()
             }
             Self::Rlm | Self::RlmGlobals => ExecutionMode::new("rlm"),
+            Self::Rlmpure => ExecutionMode::new("rlmpure"),
         }
     }
 
@@ -1044,6 +1050,14 @@ fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize) -> String 
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
+        RuntimePerfScenario::Rlmpure => format!(
+            "Turn {} in rlmpure mode. Continue the trajectory benchmark and reply with exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
         RuntimePerfScenario::ObservationalMemory => format!(
             "Turn {} in observational memory mode. Continue the same longer benchmark conversation and reply with exactly: {}",
             turn_index + 1,
@@ -1081,7 +1095,9 @@ fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> BenchmarkStreamPro
                 deltas,
             }
         }
-        RuntimePerfScenario::Rlm | RuntimePerfScenario::RlmGlobals => {
+        RuntimePerfScenario::Rlm
+        | RuntimePerfScenario::RlmGlobals
+        | RuntimePerfScenario::Rlmpure => {
             let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
             BenchmarkStreamProfile {
                 full_text: text.clone(),

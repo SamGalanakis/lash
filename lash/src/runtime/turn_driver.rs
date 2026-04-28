@@ -26,11 +26,21 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) prompt_bridge: HostPromptBridge,
     pub(super) mode_turn_options: crate::ModeTurnOptions,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
+    /// Count of sansio events already mirrored into `progress_graph`.
+    /// Tracked separately because `progress_graph` also receives
+    /// `Tool::Invocation` records appended directly by the runtime
+    /// (`Effect::ExecCode`), which sansio doesn't know about — using
+    /// `progress_graph.len()` as the diff offset would skip
+    /// driver-emitted events whenever a tool ran first in the same
+    /// turn (e.g. RLM's lashlang exec → trajectory entry). Initialized
+    /// to the base events count and advanced after each successful
+    /// `persist_progress_boundary`.
+    pub(super) sansio_events_synced: usize,
 }
 
 struct PreparedExecutionSurface {
     execution_mode: ExecutionMode,
-    tool_surface: ToolSurface,
+    tool_surface: Arc<ToolSurface>,
     mode_preamble: Arc<ModePreamble>,
     prompt_contributions: Vec<PromptContribution>,
 }
@@ -76,10 +86,19 @@ impl RuntimeTurnDriver {
 
         self.progress_state.policy = self.policy.clone();
         self.progress_state.iteration = iteration;
-        let existing_events = self.progress_graph.active_events_arc().len();
-        if events.len() > existing_events {
+        // Sansio's events array and `progress_graph.active_events` are
+        // separate streams: the runtime appends `Tool::Invocation`
+        // records directly into `progress_graph` from `Effect::ExecCode`,
+        // while the driver appends mode/conversation events into sansio
+        // via `AppendEvents`. Diffing by `progress_graph` length skips
+        // driver-emitted events whose index in sansio happens to fall
+        // before any same-turn `Tool::Invocation` records. Track sansio's
+        // own committed offset instead so each new sansio event is
+        // appended exactly once.
+        if events.len() > self.sansio_events_synced {
             self.progress_graph
-                .append_events(events[existing_events..].iter().cloned());
+                .append_events(events[self.sansio_events_synced..].iter().cloned());
+            self.sansio_events_synced = events.len();
         }
         if let Some(appended_messages) = self
             .progress_graph
@@ -94,7 +113,9 @@ impl RuntimeTurnDriver {
                 .replace_projection(projected_messages.as_slice(), tool_calls.as_slice());
         }
 
-        if let Ok(snapshot) = self.session.snapshot_execution_state().await {
+        if self.session.execution_state_dirty()
+            && let Ok(snapshot) = self.session.snapshot_execution_state().await
+        {
             self.progress_state.set_execution_state_snapshot(snapshot);
         }
         let plugins = self.session.plugins();
@@ -240,6 +261,25 @@ impl RuntimeTurnDriver {
                     }
                     Effect::ToolCalls { id, calls } => {
                         let results = self.run_tool_calls(calls, &event_tx, &cancel).await;
+                        if self.host.core.trace_sink.is_some() {
+                            for outcome in &results {
+                                crate::trace::emit_trace(
+                                    &self.host.core.trace_sink,
+                                    &self.host.core.trace_context,
+                                    lash_trace::TraceContext::default()
+                                        .for_session(self.session_id.clone())
+                                        .for_iteration(machine.iteration()),
+                                    lash_trace::TraceEvent::ToolCallCompleted {
+                                        call_id: Some(outcome.call_id.clone()),
+                                        name: outcome.tool_name.clone(),
+                                        args: outcome.args.clone(),
+                                        result: outcome.state_result.result.clone(),
+                                        success: outcome.state_result.success,
+                                        duration_ms: outcome.duration_ms,
+                                    },
+                                );
+                            }
+                        }
                         self.progress_graph
                             .record_tool_calls(results.iter().map(|outcome| ToolCallRecord {
                                 call_id: Some(outcome.call_id.clone()),
@@ -344,11 +384,33 @@ impl RuntimeTurnDriver {
             prompt_contributions: execution_surface.prompt_contributions,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model_variant.clone(),
-            emit_llm_debug_log: self.host.core.llm_logger.is_some(),
+            emit_llm_trace: false,
             termination: self.mode_turn_options.clone(),
             retry_policy: self.host.core.retry_policy.clone(),
             prompt_cache: Some(self.session.prompt_cache()),
         });
+        if self.host.core.trace_sink.is_some() {
+            let prompt_hash =
+                lash_trace::sha256_hex(prepared.prepared_prompt.system_prompt.as_bytes());
+            let prompt_chars = prepared.prepared_prompt.system_prompt.chars().count();
+            crate::trace::emit_trace(
+                &self.host.core.trace_sink,
+                &self.host.core.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(self.session_id.clone())
+                    .for_iteration(run_offset),
+                lash_trace::TraceEvent::PromptBuilt {
+                    prompt_hash: prompt_hash.clone(),
+                    prompt_chars,
+                    components: vec![lash_trace::TracePromptComponent {
+                        id: "system_prompt".to_string(),
+                        kind: "rendered_prompt".to_string(),
+                        hash: prompt_hash,
+                        chars: Some(prompt_chars),
+                    }],
+                },
+            );
+        }
         self.policy = session_policy;
         self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
         Ok(prepared.machine)

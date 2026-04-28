@@ -66,11 +66,13 @@ bench/terminalbench2/run.sh --sample --tasks regex-log,fix-code-vulnerability --
 
 - **Harbor jobs**: `jobs/<job-name>/` — raw harbor session logs, pulled container filesystems.
 - **Structured results**: `.benchmarks/terminalbench2/<job-name>/` — gathered trial JSONs + a markdown summary.
+- **Lash traces**: exported under each trial's `artifacts/sessions/*.trace.jsonl` when the lash agent runs; dashboard LLM-call counts come from typed `llm_call_completed` trace records.
 
 ## Implementation notes
 
 - Entry point: `bench/terminalbench2/run.sh` → `scripts/run-terminalbench.sh` → `harbor run …`.
 - Lash driver: `scripts/harbor_lash_agent.py` — `BaseInstalledAgent` that rsyncs the host's lash binary + `~/.lash/config.json` into the container, then runs `lash --print "<task>"` with the right flags.
+- Tracing: `scripts/run-terminalbench.sh` sets `LASH_LOG=debug` for lash runs so the CLI writes typed per-session traces. `scripts/terminalbench_results.py` reads those traces for model, token, turn, and completed-call metadata.
 - **Credentials**: your host's `~/.lash/config.json` (with Codex OAuth tokens, OpenRouter key, etc.) is copied into the container. The container's lash picks up the active provider from that config. Bypass with `--allow-no-config` if you're testing non-lash agents (opencode / codex).
 - The benchmark-harness guidance ("you're being graded by exact verifier checks, don't ask questions…") is folded directly into the user prompt by the Python agent. The old `--prompt-replace` / `--prompt-append` / `--prompt-disable` CLI flags were removed from lash; the harness no longer relies on them.
 - Agent build: default is `docker-bookworm`, which produces `target-bookworm/release/lash` on the host. Use `--no-build` to reuse a prior build.

@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use lash_trace::{TraceContext, TraceError, TraceEvent};
+
 use super::*;
 
 /// Result of running stream hooks over a visible chunk. Carries both
@@ -110,7 +114,25 @@ impl RuntimeTurnDriver {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
-        let debug_request = self.host.core.llm_logger.as_ref().map(|_| request.clone());
+        let trace_enabled = self.host.core.trace_sink.is_some();
+        let llm_call_id = if trace_enabled {
+            Some(format!("{}:{iteration}", self.session_id))
+        } else {
+            None
+        };
+        if let Some(llm_call_id) = llm_call_id.as_ref() {
+            crate::trace::emit_trace(
+                &self.host.core.trace_sink,
+                &self.host.core.trace_context,
+                TraceContext::default()
+                    .for_session(self.session_id.clone())
+                    .for_iteration(iteration)
+                    .for_llm_call(llm_call_id.clone()),
+                TraceEvent::LlmCallStarted {
+                    request: crate::trace::trace_llm_request(&request),
+                },
+            );
+        }
         let (llm_stream_tx, mut llm_stream_rx) =
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
         let llm_request = LlmRequest {
@@ -149,7 +171,7 @@ impl RuntimeTurnDriver {
                         retryable: false,
                         raw: None,
                         code: Some("cancelled".to_string()),
-                        request_body: debug_request.as_ref().map(debug_request_body),
+                        request_body: None,
                     });
                 }
                 Some(stream_event) = llm_stream_rx.recv() => {
@@ -162,22 +184,24 @@ impl RuntimeTurnDriver {
                     if *stream_state.abort_requested {
                         // A plugin stream hook asked us to end the LLM
                         // call now (e.g. RLM mask saw a closed fence).
-                        // Drain the channel cheaply for events already
-                        // sitting in the buffer, then hand the in-flight
-                        // HTTP task + channel to a background "trailing
-                        // usage catcher" so the next iteration can start
-                        // without waiting on the provider's final
-                        // `response.completed` SSE event (which is where
-                        // Codex puts the `usage` block). The catcher
-                        // appends a late-usage JSONL entry and emits a
-                        // `SessionEvent::TokenUsage` delta so persistent
-                        // accounting stays accurate without blocking.
+                        // Drain events already sitting in the buffer, then
+                        // wait briefly for the provider's final
+                        // `response.completed` SSE event. Codex attaches
+                        // usage there, and the next prompt's budget
+                        // contribution depends on the driver seeing that
+                        // accounting before the next iteration starts.
                         if let Err(err) = self
                             .drain_standard_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
                             .await
                         {
                             break Err(err);
                         }
+                        streamed_usage = collect_trailing_usage_before_abort(
+                            &mut llm_task,
+                            &mut llm_stream_rx,
+                            streamed_usage.clone(),
+                        )
+                        .await;
 
                         let mut resp = LlmResponse {
                             deltas: Vec::new(),
@@ -185,7 +209,7 @@ impl RuntimeTurnDriver {
                             parts: Vec::new(),
                             usage: streamed_usage.clone(),
                             provider_usage: None,
-                            request_body: debug_request.as_ref().map(debug_request_body),
+                            request_body: None,
                             http_summary: None,
                         };
                         streamed_output.apply_to_response(&mut resp);
@@ -193,16 +217,6 @@ impl RuntimeTurnDriver {
                             Ok(resp) => resp,
                             Err(err) => break Err(err),
                         };
-
-                        spawn_trailing_usage_catcher(TrailingUsageCatcher {
-                            llm_task,
-                            llm_stream_rx,
-                            event_tx: event_tx.clone(),
-                            llm_logger: self.host.core.llm_logger.clone(),
-                            session_id: self.session_id.clone(),
-                            iteration,
-                            initial_usage: streamed_usage.clone(),
-                        });
 
                         break Ok(resp);
                     }
@@ -215,7 +229,7 @@ impl RuntimeTurnDriver {
                             retryable: false,
                             raw: None,
                             code: Some("task_join_failed".to_string()),
-                            request_body: debug_request.as_ref().map(debug_request_body),
+                            request_body: None,
                         }),
                     };
                     self.policy.provider = provider_after;
@@ -231,11 +245,6 @@ impl RuntimeTurnDriver {
                                 resp.usage = streamed_usage.clone();
                             }
                             streamed_output.apply_to_response(&mut resp);
-                            if resp.request_body.is_none() {
-                                resp.request_body = debug_request
-                                    .as_ref()
-                                    .map(debug_request_body);
-                            }
                             let resp = match self.transform_assistant_response(event_tx, resp).await {
                                 Ok(resp) => resp,
                                 Err(err) => break Err(err),
@@ -247,9 +256,7 @@ impl RuntimeTurnDriver {
                             retryable: e.retryable,
                             raw: e.raw,
                             code: e.code,
-                            request_body: e
-                                .request_body
-                                .or_else(|| debug_request.as_ref().map(debug_request_body)),
+                            request_body: e.request_body,
                         }),
                     }
                 }
@@ -268,12 +275,58 @@ impl RuntimeTurnDriver {
                 "llm call failed"
             );
         }
-        self.llm_stream_summaries.insert(iteration, debug.summary);
+        if let Some(llm_call_id) = llm_call_id {
+            let stream_summary = debug.summary.to_json();
+            match &result {
+                Ok(response) => {
+                    crate::trace::emit_trace(
+                        &self.host.core.trace_sink,
+                        &self.host.core.trace_context,
+                        TraceContext::default()
+                            .for_session(self.session_id.clone())
+                            .for_iteration(iteration)
+                            .for_llm_call(llm_call_id),
+                        TraceEvent::LlmCallCompleted {
+                            response: crate::trace::trace_llm_response(
+                                response.full_text.clone(),
+                                debug.elapsed_ms(),
+                                crate::trace::trace_output_parts(&response.parts),
+                            ),
+                            usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),
+                            provider_usage: response.provider_usage.clone(),
+                            stream_summary: Some(stream_summary.clone()),
+                        },
+                    );
+                }
+                Err(error) => {
+                    crate::trace::emit_trace(
+                        &self.host.core.trace_sink,
+                        &self.host.core.trace_context,
+                        TraceContext::default()
+                            .for_session(self.session_id.clone())
+                            .for_iteration(iteration)
+                            .for_llm_call(llm_call_id),
+                        TraceEvent::LlmCallFailed {
+                            error: TraceError {
+                                message: error.message.clone(),
+                                retryable: error.retryable,
+                                code: error.code.clone(),
+                                raw: error.raw.clone(),
+                            },
+                            stream_summary: Some(stream_summary.clone()),
+                        },
+                    );
+                }
+            }
+        }
+        if trace_enabled {
+            self.llm_stream_summaries.insert(iteration, debug.summary);
+        }
         (result, text_streamed)
     }
 
     pub(super) fn handle_log_event(&mut self, event: crate::sansio::LogEvent) {
-        if self.host.core.llm_logger.is_none() {
+        if self.host.core.trace_sink.is_none() {
             return;
         }
 
@@ -283,86 +336,63 @@ impl RuntimeTurnDriver {
                 iteration,
                 usage,
                 provider_usage,
-                request_body,
                 response_text,
                 response_parts,
+                ..
             } => {
                 let stream_summary = self.llm_stream_summaries.remove(&iteration);
-                let mut entry = serde_json::json!({
-                    "turn": iteration,
-                    "ts": chrono::Utc::now().to_rfc3339(),
-                    "session_id": session_id,
-                    "request": request_body,
-                    "response": response_text,
-                    "usage": {
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                        "cached_input_tokens": usage.cached_input_tokens,
-                        "reasoning_tokens": usage.reasoning_tokens,
-                    }
-                });
-                if let Some(provider_usage) = provider_usage
-                    && let Some(object) = entry.as_object_mut()
-                {
-                    object.insert("provider_usage".to_string(), provider_usage);
-                }
-                if let Some(parts) = response_parts
-                    && let Some(object) = entry.as_object_mut()
-                {
-                    object.insert("response_parts".to_string(), parts);
-                }
-                if let Some(summary) = stream_summary
-                    && let Some(object) = entry.as_object_mut()
-                {
-                    object.insert("stream_summary".to_string(), summary.to_json());
-                }
-                self.append_llm_debug_entry(entry);
+                crate::trace::emit_trace(
+                    &self.host.core.trace_sink,
+                    &self.host.core.trace_context,
+                    TraceContext::default()
+                        .for_session(session_id)
+                        .for_iteration(iteration)
+                        .for_llm_call(format!("{}:{iteration}", self.session_id)),
+                    TraceEvent::LlmCallCompleted {
+                        response: crate::trace::trace_llm_response(
+                            response_text,
+                            0,
+                            response_parts,
+                        ),
+                        usage: Some(crate::trace::trace_usage_from_session(&usage)),
+                        provider_usage,
+                        stream_summary: stream_summary.map(|summary| summary.to_json()),
+                    },
+                );
             }
             crate::sansio::LogEvent::LlmError {
                 session_id,
                 iteration,
-                request_body,
                 message,
                 retryable,
                 raw,
                 code,
+                ..
             } => {
                 let stream_summary = self.llm_stream_summaries.remove(&iteration);
-                let mut entry = serde_json::json!({
-                    "kind": "llm_error",
-                    "turn": iteration,
-                    "ts": chrono::Utc::now().to_rfc3339(),
-                    "session_id": session_id,
-                    "request": request_body,
-                    "error": {
-                        "message": message,
-                        "retryable": retryable,
-                        "code": code,
-                    }
-                });
-                if let Some(raw) = raw
-                    && let Some(object) = entry.as_object_mut()
-                {
-                    object.insert("raw".to_string(), serde_json::Value::String(raw));
-                }
-                if let Some(summary) = stream_summary
-                    && let Some(object) = entry.as_object_mut()
-                {
-                    object.insert("stream_summary".to_string(), summary.to_json());
-                }
-                self.append_llm_debug_entry(entry);
+                crate::trace::emit_trace(
+                    &self.host.core.trace_sink,
+                    &self.host.core.trace_context,
+                    TraceContext::default()
+                        .for_session(session_id)
+                        .for_iteration(iteration)
+                        .for_llm_call(format!("{}:{iteration}", self.session_id)),
+                    TraceEvent::LlmCallFailed {
+                        error: TraceError {
+                            message,
+                            retryable,
+                            code,
+                            raw,
+                        },
+                        stream_summary: stream_summary.map(|summary| summary.to_json()),
+                    },
+                );
             }
         }
     }
 
-    fn append_llm_debug_entry(&self, entry: serde_json::Value) {
-        if let Some(logger) = &self.host.core.llm_logger {
-            logger.append(&entry);
-        }
-    }
-
     fn log_llm_stream_event(&self, debug: &mut LlmStreamDebugState, log: LlmStreamEventLog<'_>) {
-        if self.host.core.llm_logger.is_none() {
+        if self.host.core.trace_sink.is_none() {
             return;
         }
 
@@ -431,7 +461,18 @@ impl RuntimeTurnDriver {
             }
         }
 
-        self.append_llm_debug_entry(entry);
+        crate::trace::emit_trace(
+            &self.host.core.trace_sink,
+            &self.host.core.trace_context,
+            TraceContext::default()
+                .for_session(self.session_id.clone())
+                .for_iteration(log.iteration)
+                .for_llm_call(format!("{}:{}", self.session_id, log.iteration)),
+            TraceEvent::Custom {
+                name: "runtime.stream_event".to_string(),
+                payload: entry,
+            },
+        );
     }
 
     async fn forward_standard_stream_event(
@@ -444,7 +485,7 @@ impl RuntimeTurnDriver {
             LlmStreamEvent::Delta(delta) => {
                 if !delta.is_empty() {
                     *state.text_streamed = true;
-                    let raw_delta = self.host.core.llm_logger.as_ref().map(|_| delta.clone());
+                    let raw_delta = self.host.core.trace_sink.as_ref().map(|_| delta.clone());
                     let outcome = self
                         .transform_assistant_stream_chunk(event_tx, delta)
                         .await?;
@@ -523,7 +564,7 @@ impl RuntimeTurnDriver {
             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
                 if !text.is_empty() {
                     *state.text_streamed = true;
-                    let raw_text = self.host.core.llm_logger.as_ref().map(|_| text.clone());
+                    let raw_text = self.host.core.trace_sink.as_ref().map(|_| text.clone());
                     let outcome = self
                         .transform_assistant_stream_chunk(event_tx, text)
                         .await?;
@@ -694,157 +735,27 @@ pub(in crate::runtime) fn llm_response_has_content(response: &LlmResponse) -> bo
     })
 }
 
-fn debug_request_body(req: &LlmRequest) -> String {
-    let messages = req
-        .messages
-        .iter()
-        .map(|message| {
-            serde_json::json!({
-                "role": format!("{:?}", message.role).to_ascii_lowercase(),
-                "blocks": message.blocks.len(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let tools = req
-        .tools
-        .iter()
-        .map(|tool| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-                "output_schema": tool.output_schema,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::json!({
-        "model": req.model,
-        "messages": messages,
-        "attachments": req.attachments.len(),
-        "tools": tools,
-        "tool_choice": format!("{:?}", req.tool_choice).to_ascii_lowercase(),
-        "model_variant": req.model_variant,
-        "session_id": req.session_id,
-        "output_spec": match &req.output_spec {
-            None => serde_json::Value::Null,
-            Some(crate::llm::types::LlmOutputSpec::JsonObject) => {
-                serde_json::json!({ "type": "json_object" })
-            }
-            Some(crate::llm::types::LlmOutputSpec::JsonSchema(schema)) => {
-                serde_json::json!({
-                    "type": "json_schema",
-                    "name": schema.name,
-                    "schema": schema.schema,
-                    "strict": schema.strict,
-                })
-            }
-        },
-        "stream": req.stream_events.is_some(),
-    })
-    .to_string()
-}
-
-/// Parameters for the background task that catches trailing
-/// `LlmStreamEvent::Usage` events after an RLM stream-mask abort.
-/// Owning the channel + task lets the turn driver return the LLM
-/// response immediately while the provider's `response.completed`
-/// SSE event is still in flight.
-struct TrailingUsageCatcher {
-    llm_task: tokio::task::JoinHandle<(
-        Result<LlmResponse, crate::llm::transport::LlmTransportError>,
-        crate::ProviderHandle,
-    )>,
-    llm_stream_rx: tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
-    event_tx: mpsc::Sender<RuntimeStreamEvent>,
-    llm_logger: Option<Arc<dyn crate::runtime::host::LlmCallLogger>>,
-    session_id: String,
-    iteration: usize,
+/// Wait up to 2s for a late `Usage` event from the provider after an
+/// RLM stream-mask abort. The usage is returned on the response itself so
+/// sansio records it synchronously, which makes prompt-budget guidance
+/// available to the next iteration.
+async fn collect_trailing_usage_before_abort<T>(
+    llm_task: &mut tokio::task::JoinHandle<T>,
+    llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
     initial_usage: LlmUsage,
-}
-
-/// Wait up to 2s for a late `Usage` event from the provider. If it
-/// arrives, emit a `SessionEvent::TokenUsage` delta so cumulative
-/// accounting stays accurate, and (when an LLM debug log is configured)
-/// append a `token_usage_patch` JSONL entry so the benchmark exporter
-/// — which sums `usage` blocks across trace lines — picks the delta up.
-/// Always aborts the in-flight `llm_task` when done so the HTTP socket
-/// closes promptly.
-fn spawn_trailing_usage_catcher(args: TrailingUsageCatcher) {
-    let TrailingUsageCatcher {
-        llm_task,
-        mut llm_stream_rx,
-        event_tx,
-        llm_logger,
-        session_id,
-        iteration,
-        initial_usage,
-    } = args;
-    tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2_000);
-        let mut latest = initial_usage.clone();
-        let mut saw_usage = false;
-        loop {
-            match tokio::time::timeout_at(deadline, llm_stream_rx.recv()).await {
-                Err(_) | Ok(None) => break,
-                Ok(Some(LlmStreamEvent::Usage(usage))) => {
-                    latest = usage;
-                    saw_usage = true;
-                    break;
-                }
-                Ok(Some(_)) => continue,
+) -> LlmUsage {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2_000);
+    let mut latest = initial_usage;
+    loop {
+        match tokio::time::timeout_at(deadline, llm_stream_rx.recv()).await {
+            Err(_) | Ok(None) => break,
+            Ok(Some(LlmStreamEvent::Usage(usage))) => {
+                latest = usage;
+                break;
             }
+            Ok(Some(_)) => continue,
         }
-        llm_task.abort();
-        if !saw_usage || latest == initial_usage {
-            return;
-        }
-        let delta = LlmUsage {
-            input_tokens: (latest.input_tokens - initial_usage.input_tokens).max(0),
-            output_tokens: (latest.output_tokens - initial_usage.output_tokens).max(0),
-            cached_input_tokens: (latest.cached_input_tokens - initial_usage.cached_input_tokens)
-                .max(0),
-            reasoning_tokens: (latest.reasoning_tokens - initial_usage.reasoning_tokens).max(0),
-        };
-        if delta == LlmUsage::default() {
-            return;
-        }
-        // Session-level token ledger update. sansio's cumulative tracker
-        // adds `usage` into the running total on every TokenUsage event,
-        // so a delta-shaped second event correctly bumps totals without
-        // resetting them.
-        let token_delta = TokenUsage {
-            input_tokens: delta.input_tokens,
-            output_tokens: delta.output_tokens,
-            cached_input_tokens: delta.cached_input_tokens,
-            reasoning_tokens: delta.reasoning_tokens,
-        };
-        let _ = event_tx
-            .send(RuntimeStreamEvent::Session(SessionEvent::TokenUsage {
-                iteration,
-                usage: token_delta.clone(),
-                cumulative: token_delta.clone(),
-            }))
-            .await;
-        // Benchmark exporter reads usage from the LLM call log. Append
-        // a patch entry there so `usage` sums across trace lines stay
-        // correct even when the initial request line landed with zeros.
-        if let Some(logger) = llm_logger {
-            let entry = serde_json::json!({
-                "kind": "token_usage_patch",
-                "turn": iteration,
-                "ts": chrono::Utc::now().to_rfc3339(),
-                "session_id": session_id,
-                "usage": {
-                    "input_tokens": delta.input_tokens,
-                    "output_tokens": delta.output_tokens,
-                    "cached_input_tokens": delta.cached_input_tokens,
-                    "reasoning_tokens": delta.reasoning_tokens,
-                }
-            });
-            let _ = tokio::task::spawn_blocking(move || {
-                logger.append(&entry);
-            })
-            .await;
-        }
-    });
+    }
+    llm_task.abort();
+    latest
 }

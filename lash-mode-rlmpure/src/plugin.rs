@@ -12,8 +12,9 @@ use lash::{
 };
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmpureCreateExtras};
 
+use lash_mode_rlm::{BoundVariablesCache, budget_prompt_contributions};
+
 use crate::driver::{RlmpureProjectorConfig, build_rlmpure_preamble};
-use crate::rlm_support::{bound_variables_prompt_contributions, budget_prompt_contributions};
 use crate::stream_mask;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -97,8 +98,10 @@ impl SessionPlugin for RlmpureModePlugin {
         reg.tools()
             .provider(Arc::clone(&self.provider) as Arc<dyn lash::ToolProvider>)?;
 
+        let bound_vars_cache = Arc::new(BoundVariablesCache::new());
         let bound_vars_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
-            Box::pin(async move { Ok(bound_variables_prompt_contributions(&ctx)) })
+            let cache = Arc::clone(&bound_vars_cache);
+            Box::pin(async move { Ok(cache.contributions(&ctx)) })
         });
         reg.prompt().contribute(bound_vars_hook);
 
@@ -462,7 +465,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         })
@@ -475,7 +479,7 @@ mod tests {
             lash::SessionEventRecord::Conversation(lash::ConversationRecord {
                 id: "a1".to_string(),
                 role: lash::MessageRole::Assistant,
-                parts: Vec::new(),
+                parts: Arc::new(Vec::new()),
                 user_input: None,
                 origin: None,
             }),
@@ -524,12 +528,12 @@ mod tests {
                 max_context_tokens: Some(1_050_000),
                 ..Default::default()
             },
-            token_usage: lash::TokenUsage {
+            last_prompt_usage: Some(lash::PromptUsage {
+                prompt_context_tokens: 40_000,
                 input_tokens: 40_000,
-                output_tokens: 7_000,
-                reasoning_tokens: 213,
-                ..Default::default()
-            },
+                cached_input_tokens: 0,
+                context_budget_tokens: 47_213,
+            }),
             ..Default::default()
         };
         let ctx = lash::plugin::PromptHookContext {

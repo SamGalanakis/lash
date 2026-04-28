@@ -1870,6 +1870,7 @@ dependencies = [
  "ignore",
  "lash-rlm-types",
  "lash-sansio",
+ "lash-trace",
  "lashlang",
  "libc",
  "pdf-extract",
@@ -1976,6 +1977,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-gepa"
+version = "0.2.71"
+dependencies = [
+ "lash-sansio",
+ "lash-trace",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "lash-mode-rlm"
 version = "0.2.71"
 dependencies = [
@@ -1991,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "lash-mode-rlmpure"
-version = "0.2.70"
+version = "0.2.71"
 dependencies = [
  "async-trait",
  "lash",
@@ -2138,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "lash-rlm-types"
-version = "0.2.70"
+version = "0.2.71"
 dependencies = [
  "lash-sansio",
  "serde",
@@ -2167,6 +2180,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lash-trace"
+version = "0.2.71"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
  "uuid",
 ]
 

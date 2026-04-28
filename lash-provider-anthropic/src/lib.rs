@@ -107,10 +107,10 @@ impl AnthropicProvider {
         }))
     }
 
-    fn text_block_value(text: impl Into<String>) -> Value {
+    fn text_block_value(text: &str) -> Value {
         json!({
             "type": "text",
-            "text": sanitize_surrogates(&text.into()),
+            "text": sanitize_surrogates(text),
         })
     }
 
@@ -123,7 +123,7 @@ impl AnthropicProvider {
                 if text.trim().is_empty() {
                     return None;
                 }
-                Some(Self::text_block_value(text.clone()))
+                Some(Self::text_block_value(text))
             }
             LlmContentBlock::Image { attachment_idx } => Some(
                 Self::image_block_value(req, *attachment_idx)
@@ -165,7 +165,7 @@ impl AnthropicProvider {
                     if text.trim().is_empty() {
                         return None;
                     }
-                    return Some(Self::text_block_value(text.clone()));
+                    return Some(Self::text_block_value(text));
                 };
                 if *redacted {
                     return Some(json!({

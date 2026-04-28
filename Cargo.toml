@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lash-sansio",
+    "lash-trace",
     "lash-rlm-types",
     "lash",
     "lash-default-tools",
@@ -21,6 +22,7 @@ members = [
     "lash-ui",
     "lash-tui",
     "lash-autoresearch",
+    "lash-gepa",
     "lash-cli",
     "lash-export",
     "lashlang",

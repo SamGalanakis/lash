@@ -39,7 +39,7 @@ pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
     vec![
         PromptContribution::guidance(
             "Command Execution",
-            "Use `exec_command` for one-shot commands and to start long-lived processes. Use `write_stdin` only when the prior `exec_command` is still alive (it returned a `session_id`) — e.g. feeding a REPL or responding to a prompt; otherwise start a fresh `exec_command`. For services or background daemons, prefer startup patterns that survive after the tool call returns, then verify readiness from a fresh command before concluding.",
+            "Use `exec_command` for one-shot commands; it returns only after the process exits and successful results include `status: \"completed\"`, `done: true`, and `exit_code`. Use `start_command` only for interactive or intentionally long-lived processes; it may return `status: \"running\"`, `done: false`, and `session_id`, which means the output is partial and must not be treated as completion. Continue running sessions with `write_stdin`. For builds, installs, tests, migrations, service setup, and verification commands, use `exec_command` and wait for completion before concluding.",
         ),
         PromptContribution::guidance(
             "Git Safety",
@@ -65,8 +65,8 @@ struct ShellOutputSpill {
 
 const MAX_OUTPUT: usize = 512_000;
 const SPILL_OUTPUT_THRESHOLD: usize = 50 * 1024;
-const DEFAULT_EXEC_YIELD_MS: u64 = 10_000;
-const DEFAULT_WRITE_STDIN_YIELD_MS: u64 = 250;
+const DEFAULT_START_COMMAND_POLL_MS: u64 = 250;
+const DEFAULT_WRITE_STDIN_POLL_MS: u64 = 250;
 const OUTPUT_QUIET_PERIOD_MS: u64 = 75;
 const DEFAULT_PTY_SIZE: PtySize = PtySize {
     rows: 24,
@@ -81,7 +81,19 @@ struct ExecCommandParams {
     workdir: PathBuf,
     shell_path: String,
     login: bool,
-    yield_time_ms: u64,
+    allow_failure: bool,
+    timeout_ms: Option<u64>,
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct StartCommandParams {
+    cmd: String,
+    workdir: PathBuf,
+    shell_path: String,
+    login: bool,
+    allow_failure: bool,
+    poll_ms: u64,
     max_output_tokens: Option<usize>,
 }
 
@@ -587,10 +599,14 @@ impl StandardShell {
             .get("login")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let yield_time_ms = args
-            .get("yield_time_ms")
+        let allow_failure = args
+            .get("allow_failure")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let timeout_ms = args
+            .get("timeout_ms")
             .and_then(|value| value.as_u64())
-            .unwrap_or(DEFAULT_EXEC_YIELD_MS);
+            .filter(|value| *value > 0);
         let max_output_tokens = args
             .get("max_output_tokens")
             .and_then(|value| value.as_u64())
@@ -601,7 +617,52 @@ impl StandardShell {
             workdir,
             shell_path,
             login,
-            yield_time_ms,
+            allow_failure,
+            timeout_ms,
+            max_output_tokens,
+        })
+    }
+
+    fn parse_start_command_params(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<StartCommandParams, ToolResult> {
+        let cmd = require_str(args, "cmd")?.to_string();
+        let workdir = self.runtime.resolve_workdir(
+            args.get("workdir")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty()),
+        );
+        let shell_path = args
+            .get("shell")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&self.runtime.shell_path)
+            .to_string();
+        let login = args
+            .get("login")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let allow_failure = args
+            .get("allow_failure")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let poll_ms = args
+            .get("poll_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(DEFAULT_START_COMMAND_POLL_MS);
+        let max_output_tokens = args
+            .get("max_output_tokens")
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize);
+
+        Ok(StartCommandParams {
+            cmd,
+            workdir,
+            shell_path,
+            login,
+            allow_failure,
+            poll_ms,
             max_output_tokens,
         })
     }
@@ -629,7 +690,97 @@ impl StandardShell {
             .runtime
             .wait_until_exit_or_timeout(
                 &handle_id,
-                Some(Duration::from_millis(params.yield_time_ms)),
+                params.timeout_ms.map(Duration::from_millis),
+                progress,
+                params.max_output_tokens,
+                WaitBehavior { baseline_len: 0 },
+                cancel,
+            )
+            .await
+        {
+            Ok(PollOutcome::Running {
+                output,
+                original_token_count,
+                full_output_path,
+                ..
+            }) => {
+                let mut output = output;
+                let mut original_token_count = original_token_count;
+                let mut full_output_path = full_output_path;
+                if let Ok(state) = self.runtime.process_state(&handle_id) {
+                    kill_child(&state);
+                    wait_for_child_exit(&state, Duration::from_millis(500)).await;
+                    if let Ok((tail, tail_token_count, tail_full_output_path)) = self
+                        .runtime
+                        .take_incremental_output(&handle_id, params.max_output_tokens)
+                    {
+                        append_shell_output(&mut output, tail);
+                        original_token_count = original_token_count.or(tail_token_count);
+                        full_output_path = full_output_path.or(tail_full_output_path);
+                    }
+                }
+                self.runtime.remove_process(&handle_id);
+                timed_out_shell_io_result(
+                    &handle_id,
+                    output,
+                    original_token_count,
+                    full_output_path.as_deref(),
+                    started.elapsed().as_secs_f64(),
+                    params.timeout_ms.unwrap_or_default(),
+                )
+            }
+            Ok(PollOutcome::Exited {
+                output,
+                original_token_count,
+                exit_code,
+                full_output_path,
+            }) => {
+                self.runtime.remove_process(&handle_id);
+                shell_io_result(
+                    &handle_id,
+                    output,
+                    Some(exit_code),
+                    original_token_count,
+                    full_output_path.as_deref(),
+                    started.elapsed().as_secs_f64(),
+                    params.allow_failure,
+                )
+            }
+            Ok(PollOutcome::Cancelled) => {
+                self.runtime.remove_process(&handle_id);
+                ToolResult::err_fmt("tool call cancelled")
+            }
+            Err(err) => {
+                self.runtime.remove_process(&handle_id);
+                ToolResult::err(json!(err))
+            }
+        }
+    }
+
+    async fn start_command(
+        &self,
+        params: &StartCommandParams,
+        progress: Option<&ProgressSender>,
+        cancel: Option<CancellationToken>,
+    ) -> ToolResult {
+        let started = Instant::now();
+        let handle_id = self.runtime.allocate_handle_id();
+
+        if let Err(err) = self.runtime.spawn_process(
+            handle_id.clone(),
+            &params.cmd,
+            &params.workdir,
+            params.login,
+            &params.shell_path,
+        ) {
+            return ToolResult::err(json!(err));
+        }
+
+        match self
+            .runtime
+            .wait_until_exit_or_timeout(
+                &handle_id,
+                Some(Duration::from_millis(params.poll_ms)),
                 progress,
                 params.max_output_tokens,
                 WaitBehavior { baseline_len: 0 },
@@ -657,14 +808,15 @@ impl StandardShell {
                 full_output_path,
             }) => {
                 self.runtime.remove_process(&handle_id);
-                ToolResult::ok(standard_shell_io_record(
+                shell_io_result(
                     &handle_id,
                     output,
                     Some(exit_code),
                     original_token_count,
                     full_output_path.as_deref(),
                     started.elapsed().as_secs_f64(),
-                ))
+                    params.allow_failure,
+                )
             }
             Ok(PollOutcome::Cancelled) => {
                 self.runtime.remove_process(&handle_id);
@@ -691,12 +843,16 @@ impl StandardShell {
             .get("chars")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let yield_time_ms = args
-            .get("yield_time_ms")
+        let poll_ms = args
+            .get("poll_ms")
             .and_then(|value| value.as_u64())
-            .unwrap_or(DEFAULT_WRITE_STDIN_YIELD_MS);
+            .unwrap_or(DEFAULT_WRITE_STDIN_POLL_MS);
         let close_stdin = args
             .get("close_stdin")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let allow_failure = args
+            .get("allow_failure")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         let max_output_tokens = args
@@ -720,7 +876,7 @@ impl StandardShell {
             .runtime
             .wait_until_exit_or_timeout(
                 &id,
-                Some(Duration::from_millis(yield_time_ms)),
+                Some(Duration::from_millis(poll_ms)),
                 progress,
                 max_output_tokens,
                 WaitBehavior { baseline_len },
@@ -748,14 +904,15 @@ impl StandardShell {
                 full_output_path,
             }) => {
                 self.runtime.remove_process(&id);
-                ToolResult::ok(standard_shell_io_record(
+                shell_io_result(
                     &id,
                     output,
                     Some(exit_code),
                     original_token_count,
                     full_output_path.as_deref(),
                     started.elapsed().as_secs_f64(),
-                ))
+                    allow_failure,
+                )
             }
             Ok(PollOutcome::Cancelled) => {
                 self.runtime.remove_process(&id);
@@ -778,7 +935,7 @@ impl ToolProvider for StandardShell {
         vec![
             ToolDefinition {
                 name: "exec_command".into(),
-                description: "Run a command in a PTY. Completed commands return cleaned `output` and `exit_code`; longer-running commands return `session_id` so you can continue the same process with `write_stdin`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.".into(),
+                description: "Run a one-shot command in a PTY and wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Use `timeout_ms` as a hard timeout; timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.".into(),
                 params: vec![
                     ToolParam {
                         name: "cmd".into(),
@@ -810,9 +967,16 @@ impl ToolProvider for StandardShell {
                         required: false,
                     },
                     ToolParam {
-                        name: "yield_time_ms".into(),
+                        name: "allow_failure".into(),
+                        r#type: "bool".into(),
+                        description: "When true, nonzero exit codes are returned as successful tool results instead of failed tool calls. Defaults to false.".into(),
+                        default_value: Some(serde_json::json!(false)),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "timeout_ms".into(),
                         r#type: "int".into(),
-                        description: "How long to wait (in milliseconds) for output before yielding.".into(),
+                        description: "Hard timeout in milliseconds. If reached before the command exits, the process is killed and the tool call fails with `status: \"timed_out\"`. Omit for no tool-level timeout.".into(),
                         default_value: None,
                         required: false,
                     },
@@ -837,8 +1001,74 @@ impl ToolProvider for StandardShell {
                 execution_mode: ToolExecutionMode::Serial,
             },
             ToolDefinition {
+                name: "start_command".into(),
+                description: "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. Continue the session with `write_stdin`. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.".into(),
+                params: vec![
+                    ToolParam {
+                        name: "cmd".into(),
+                        r#type: "str".into(),
+                        description: "Shell command to start.".into(),
+                        default_value: None,
+                        required: true,
+                    },
+                    ToolParam {
+                        name: "workdir".into(),
+                        r#type: "str".into(),
+                        description:
+                            "Optional working directory to run the command in; defaults to the turn cwd.".into(),
+                        default_value: None,
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "shell".into(),
+                        r#type: "str".into(),
+                        description: "Shell binary to launch. Defaults to the user's default shell.".into(),
+                        default_value: None,
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "login".into(),
+                        r#type: "bool".into(),
+                        description: "Whether to run the shell with -l semantics. Defaults to false to avoid startup prompts and shell init noise.".into(),
+                        default_value: Some(serde_json::json!(false)),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "allow_failure".into(),
+                        r#type: "bool".into(),
+                        description: "When true, nonzero process exit codes are returned as successful completed results instead of failed tool calls. Defaults to false.".into(),
+                        default_value: Some(serde_json::json!(false)),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "poll_ms".into(),
+                        r#type: "int".into(),
+                        description: "Initial poll window in milliseconds before returning a running `session_id` if the process has not exited. Defaults to 250.".into(),
+                        default_value: Some(serde_json::json!(DEFAULT_START_COMMAND_POLL_MS)),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "max_output_tokens".into(),
+                        r#type: "int".into(),
+                        description: "Maximum number of tokens to return. Excess output will be truncated.".into(),
+                        default_value: None,
+                        required: false,
+                    },
+                ],
+                returns: "dict".into(),
+                examples: vec![],
+                availability: crate::ToolAvailabilityConfig::documented(),
+                activation: crate::ToolActivation::Always,
+                availability_override: None,
+                input_schema_override: None,
+                output_schema_override: None,
+                // start_command creates a stateful shell handle; serialize it
+                // with the other shell tools.
+                execution_mode: ToolExecutionMode::Serial,
+            },
+            ToolDefinition {
                 name: "write_stdin".into(),
-                description: "Write bytes to a running command handle and wait briefly for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.".into(),
+                description: "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.".into(),
                 params: vec![
                     ToolParam {
                         name: "session_id".into(),
@@ -855,16 +1085,23 @@ impl ToolProvider for StandardShell {
                         required: false,
                     },
                     ToolParam {
-                        name: "yield_time_ms".into(),
+                        name: "poll_ms".into(),
                         r#type: "int".into(),
-                        description: "How long to wait (in milliseconds) for output before yielding.".into(),
-                        default_value: None,
+                        description: "Poll window in milliseconds before returning another running result if the process has not exited. Defaults to 250.".into(),
+                        default_value: Some(serde_json::json!(DEFAULT_WRITE_STDIN_POLL_MS)),
                         required: false,
                     },
                     ToolParam {
                         name: "close_stdin".into(),
                         r#type: "bool".into(),
                         description: "Close stdin after writing to send EOF to the process.".into(),
+                        default_value: Some(serde_json::json!(false)),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "allow_failure".into(),
+                        r#type: "bool".into(),
+                        description: "When true, nonzero process exit codes are returned as successful tool results instead of failed tool calls. Defaults to false.".into(),
                         default_value: Some(serde_json::json!(false)),
                         required: false,
                     },
@@ -930,6 +1167,13 @@ impl StandardShell {
                     Err(err) => return err,
                 };
                 self.exec_command(&params, progress, cancel).await
+            }
+            "start_command" => {
+                let params = match self.parse_start_command_params(args) {
+                    Ok(params) => params,
+                    Err(err) => return err,
+                };
+                self.start_command(&params, progress, cancel).await
             }
             "write_stdin" => self.write_stdin_call(args, progress, cancel).await,
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
@@ -1124,12 +1368,17 @@ fn standard_shell_io_record(
     full_output_path: Option<&Path>,
     wall_time_seconds: f64,
 ) -> serde_json::Value {
+    let running = exit_code.is_none();
+    let status = if running { "running" } else { "completed" };
     let session_id = exit_code
         .is_none()
         .then(|| id.parse::<i64>().ok())
         .flatten();
     let mut record = serde_json::Map::new();
     record.insert("output".into(), json!(output));
+    record.insert("status".into(), json!(status));
+    record.insert("done".into(), json!(!running));
+    record.insert("running".into(), json!(running));
     record.insert("wall_time_seconds".into(), json!(wall_time_seconds));
     if let Some(exit_code) = exit_code {
         record.insert("exit_code".into(), json!(exit_code));
@@ -1147,6 +1396,78 @@ fn standard_shell_io_record(
         );
     }
     serde_json::Value::Object(record)
+}
+
+fn append_shell_output(output: &mut String, tail: String) {
+    if tail.is_empty() {
+        return;
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&tail);
+}
+
+fn shell_io_result(
+    id: &str,
+    output: String,
+    exit_code: Option<i32>,
+    original_token_count: Option<usize>,
+    full_output_path: Option<&Path>,
+    wall_time_seconds: f64,
+    allow_failure: bool,
+) -> ToolResult {
+    let mut record = standard_shell_io_record(
+        id,
+        output,
+        exit_code,
+        original_token_count,
+        full_output_path,
+        wall_time_seconds,
+    );
+    if let Some(code) = exit_code
+        && code != 0
+        && !allow_failure
+    {
+        if let Some(object) = record.as_object_mut() {
+            object.insert(
+                "error".into(),
+                json!(format!("Command exited with code {code}")),
+            );
+        }
+        return ToolResult::err(record);
+    }
+    ToolResult::ok(record)
+}
+
+fn timed_out_shell_io_result(
+    id: &str,
+    output: String,
+    original_token_count: Option<usize>,
+    full_output_path: Option<&Path>,
+    wall_time_seconds: f64,
+    timeout_ms: u64,
+) -> ToolResult {
+    let mut record = standard_shell_io_record(
+        id,
+        output,
+        None,
+        original_token_count,
+        full_output_path,
+        wall_time_seconds,
+    );
+    if let Some(object) = record.as_object_mut() {
+        object.insert("status".into(), json!("timed_out"));
+        object.insert("done".into(), json!(true));
+        object.insert("running".into(), json!(false));
+        object.remove("session_id");
+        object.insert("timed_out".into(), json!(true));
+        object.insert(
+            "error".into(),
+            json!(format!("Command timed out after {timeout_ms} ms")),
+        );
+    }
+    ToolResult::err(record)
 }
 
 fn parse_standard_session_id(args: &serde_json::Value) -> Result<String, ToolResult> {
@@ -1179,22 +1500,64 @@ mod tests {
             .await;
         assert!(result.success);
         assert!(result.result.get("session_id").is_none());
+        assert_eq!(result.result["status"], "completed");
+        assert_eq!(result.result["done"], true);
+        assert_eq!(result.result["running"], false);
         assert_eq!(result.result["exit_code"], 0);
         assert!(result.result["wall_time_seconds"].as_f64().is_some());
         assert!(result.result["output"].as_str().unwrap().contains("hello"));
     }
 
     #[tokio::test]
-    async fn exec_command_returns_handle_id_for_running_process() {
+    async fn exec_command_waits_for_process_exit() {
+        let shell = StandardShell::new().with_cwd("/");
+        let result = shell
+            .execute("exec_command", &json!({"cmd": "sleep 0.05; echo done"}))
+            .await;
+        assert!(result.success, "{}", result.result);
+        assert!(result.result.get("session_id").is_none());
+        assert_eq!(result.result["status"], "completed");
+        assert_eq!(result.result["done"], true);
+        assert_eq!(result.result["exit_code"], 0);
+        assert!(result.result["output"].as_str().unwrap().contains("done"));
+    }
+
+    #[tokio::test]
+    async fn exec_command_timeout_kills_and_fails_running_process() {
         let shell = StandardShell::new().with_cwd("/");
         let result = shell
             .execute(
                 "exec_command",
-                &json!({"cmd": "sleep 1; echo done", "yield_time_ms": 10}),
+                &json!({"cmd": "printf started; sleep 5", "timeout_ms": 50}),
+            )
+            .await;
+        assert!(!result.success, "{}", result.result);
+        assert_eq!(result.result["status"], "timed_out");
+        assert_eq!(result.result["done"], true);
+        assert_eq!(result.result["running"], false);
+        assert!(result.result.get("session_id").is_none());
+        assert!(
+            result.result["output"]
+                .as_str()
+                .unwrap_or("")
+                .contains("started")
+        );
+    }
+
+    #[tokio::test]
+    async fn start_command_returns_handle_id_for_running_process() {
+        let shell = StandardShell::new().with_cwd("/");
+        let result = shell
+            .execute(
+                "start_command",
+                &json!({"cmd": "sleep 1; echo done", "poll_ms": 10}),
             )
             .await;
         assert!(result.success);
         assert!(result.result["session_id"].as_i64().is_some());
+        assert_eq!(result.result["status"], "running");
+        assert_eq!(result.result["done"], false);
+        assert_eq!(result.result["running"], true);
         assert!(result.result["exit_code"].is_null());
     }
 
@@ -1204,8 +1567,8 @@ mod tests {
         let cmd = "python3 -u -c 'import sys; line = sys.stdin.readline(); print(\"got:\" + line.strip())'";
         let open = shell
             .execute(
-                "exec_command",
-                &json!({"cmd": cmd, "yield_time_ms": 10, "login": false}),
+                "start_command",
+                &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
             )
             .await;
         assert!(open.success, "{}", open.result);
@@ -1214,11 +1577,12 @@ mod tests {
         let result = shell
             .execute(
                 "write_stdin",
-                &json!({"session_id": session_id, "chars": "hello\n", "yield_time_ms": 1000}),
+                &json!({"session_id": session_id, "chars": "hello\n", "poll_ms": 1000}),
             )
             .await;
         assert!(result.success);
         assert!(result.result.get("session_id").is_none());
+        assert_eq!(result.result["status"], "completed");
         assert_eq!(result.result["exit_code"], 0);
         assert!(
             result.result["output"]
@@ -1235,8 +1599,8 @@ mod tests {
         for _ in 0..16 {
             let open = shell
                 .execute(
-                    "exec_command",
-                    &json!({"cmd": cmd, "yield_time_ms": 10, "login": false}),
+                    "start_command",
+                    &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
                 )
                 .await;
             assert!(open.success);
@@ -1245,7 +1609,7 @@ mod tests {
             let result = shell
                 .execute(
                     "write_stdin",
-                    &json!({"session_id": session_id, "chars": "hello\n", "yield_time_ms": 1000}),
+                    &json!({"session_id": session_id, "chars": "hello\n", "poll_ms": 1000}),
                 )
                 .await;
             assert!(result.success);
@@ -1269,8 +1633,8 @@ mod tests {
         let shell = StandardShell::default();
         let open = shell
             .execute(
-                "exec_command",
-                &json!({"cmd": "cat", "yield_time_ms": 10, "login": false}),
+                "start_command",
+                &json!({"cmd": "cat", "poll_ms": 10, "login": false}),
             )
             .await;
         assert!(open.success);
@@ -1279,7 +1643,7 @@ mod tests {
         let result = shell
             .execute(
                 "write_stdin",
-                &json!({"session_id": session_id, "chars": "hello", "close_stdin": true, "yield_time_ms": 1000}),
+                &json!({"session_id": session_id, "chars": "hello", "close_stdin": true, "poll_ms": 1000}),
             )
             .await;
         assert!(result.success, "{}", result.result);
@@ -1308,8 +1672,59 @@ mod tests {
         let result = shell
             .execute("exec_command", &json!({"cmd": "false | cat"}))
             .await;
-        assert!(result.success);
+        assert!(!result.success);
         assert_ne!(result.result["exit_code"], 0);
+        assert_eq!(
+            result.result["error"].as_str(),
+            Some("Command exited with code 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_command_allow_failure_returns_nonzero_as_success() {
+        let shell = StandardShell::default();
+        let result = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": "echo expected failure; exit 7", "allow_failure": true}),
+            )
+            .await;
+        assert!(result.success, "{}", result.result);
+        assert_eq!(result.result["exit_code"], 7);
+        assert!(result.result["error"].is_null());
+        assert!(
+            result.result["output"]
+                .as_str()
+                .unwrap()
+                .contains("expected failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn write_stdin_nonzero_exit_fails_by_default() {
+        let shell = StandardShell::default();
+        let cmd = "python3 -u -c 'import sys; sys.stdin.readline(); sys.exit(7)'";
+        let open = shell
+            .execute(
+                "start_command",
+                &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
+            )
+            .await;
+        assert!(open.success, "{}", open.result);
+        let session_id = open.result["session_id"].as_i64().unwrap();
+
+        let result = shell
+            .execute(
+                "write_stdin",
+                &json!({"session_id": session_id, "chars": "go\n", "poll_ms": 1000}),
+            )
+            .await;
+        assert!(!result.success, "{}", result.result);
+        assert_eq!(result.result["exit_code"], 7);
+        assert_eq!(
+            result.result["error"].as_str(),
+            Some("Command exited with code 7")
+        );
     }
 
     #[tokio::test]
@@ -1368,8 +1783,8 @@ mod tests {
         let cmd = "python3 -u -c 'import sys; data = sys.stdin.read(); sys.stdout.write(data)'";
         let open = shell
             .execute(
-                "exec_command",
-                &json!({"cmd": cmd, "yield_time_ms": 10, "login": false}),
+                "start_command",
+                &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
             )
             .await;
         assert!(open.success, "{}", open.result);
@@ -1379,7 +1794,7 @@ mod tests {
         let result = shell
             .execute(
                 "write_stdin",
-                &json!({"session_id": session_id, "chars": payload, "close_stdin": true, "yield_time_ms": 1000, "max_output_tokens": 24}),
+                &json!({"session_id": session_id, "chars": payload, "close_stdin": true, "poll_ms": 1000, "max_output_tokens": 24}),
             )
             .await;
         assert!(result.success, "{}", result.result);
@@ -1394,7 +1809,7 @@ mod tests {
     fn shell_definitions_are_compact_and_non_empty() {
         let shell = StandardShell::default();
         let defs = shell.definitions();
-        assert_eq!(defs.len(), 2);
+        assert_eq!(defs.len(), 3);
         assert!(defs.iter().all(|def| !def.description.is_empty()));
     }
 
@@ -1435,7 +1850,6 @@ mod tests {
         // the PTY child must be killed rather than left to run.
         let args = json!({
             "cmd": "sleep 5",
-            "yield_time_ms": 30_000,
             "login": false,
         });
 
@@ -1489,10 +1903,10 @@ mod tests {
         // exactly the process the ChildKiller targets.
         let args = json!({
             "cmd": "echo $$; exec sleep 5",
-            "yield_time_ms": 500,
+            "poll_ms": 500,
             "login": false,
         });
-        let open = shell.execute("exec_command", &args).await;
+        let open = shell.execute("start_command", &args).await;
         assert!(open.success, "{}", open.result);
         let session_id = open.result["session_id"]
             .as_i64()
@@ -1514,7 +1928,7 @@ mod tests {
         let result = shell
             .execute_streaming_with_context(
                 "write_stdin",
-                &json!({"session_id": session_id, "chars": "", "yield_time_ms": 30_000}),
+                &json!({"session_id": session_id, "chars": "", "poll_ms": 30_000}),
                 &ctx,
                 None,
             )

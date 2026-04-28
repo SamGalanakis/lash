@@ -32,12 +32,12 @@ pub use session::{
 };
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
-    CORE_GUIDANCE_SECTION, ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO, Message,
-    MessageRole, MessageSequence, Part, PartKind, PromptBuiltin, PromptPanel, PromptRequest,
-    PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, PruneState, RenderedPrompt, RetryPolicy, SessionEvent,
-    SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent, default_prompt_template,
-    messages_are_prompt_resume_safe,
+    BaseRenderCache, CORE_GUIDANCE_SECTION, ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO,
+    Message, MessageRole, MessageSequence, Part, PartKind, PromptBuiltin, PromptPanel,
+    PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, RetryPolicy,
+    SessionEvent, SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent,
+    default_prompt_template, messages_are_prompt_resume_safe, shared_parts,
 };
 pub use tool_surface::{
     ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceEntry,

@@ -1312,7 +1312,8 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
                 deltas: Vec::new(),
                 parts: vec![lash::llm::types::LlmOutputPart::Text {
                     text: "Keep this text exactly.".into(),
-                }],
+                }]
+                .into(),
                 usage: lash::llm::types::LlmUsage::default(),
                 provider_usage: None,
                 request_body: None,

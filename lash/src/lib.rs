@@ -25,6 +25,7 @@ pub mod testing;
 pub mod tool_dispatch;
 mod tool_provider;
 pub mod tools;
+mod trace;
 
 pub use lash_sansio::sansio;
 
@@ -47,18 +48,18 @@ pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 pub use lash_sansio::{
-    CheckpointKind, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError, Message,
-    MessageOrigin, MessageRole, MessageSequence, ModeBuildInput, Part, PartKind, PluginMessage,
-    PluginSurfaceEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin, PromptContext,
-    PromptContribution, PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode,
-    PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState,
-    RenderedPrompt, Response, SessionEvent, TokenUsage, ToolActivation, ToolAvailability,
-    ToolAvailabilityConfig, ToolCallRecord, ToolDefinition, ToolExecutionMode, ToolImage,
-    ToolParam, ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
+    BaseRenderCache, CheckpointKind, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode,
+    LlmCallError, Message, MessageOrigin, MessageRole, MessageSequence, ModeBuildInput, Part,
+    PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin,
+    PromptContext, PromptContribution, PromptPanel, PromptRequest, PromptResponse,
+    PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
+    PruneState, RenderedPrompt, Response, SessionEvent, TokenUsage, ToolActivation,
+    ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition, ToolExecutionMode,
+    ToolImage, ToolParam, ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
     UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
     build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
     execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
+    normalized_response_parts, reasoning_part, shared_parts, turn_limit_exhausted_message,
 };
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", content = "options", rename_all = "snake_case")]
@@ -99,6 +100,11 @@ pub type PreparedTurnMachine = lash_sansio::PreparedTurnMachine<HostModeProtocol
 pub type SansIoTurnInput = lash_sansio::SansIoTurnInput<HostModeProtocol>;
 pub type TurnMachine = lash_sansio::TurnMachine<HostModeProtocol>;
 pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostModeProtocol>;
+pub use lash_trace::{
+    JsonlTraceSink, TraceAttachment, TraceContentBlock, TraceContext, TraceError, TraceEvent,
+    TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent, TraceRecord,
+    TraceSink, TraceTokenUsage, TraceToolSpec,
+};
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
     CachedModelCatalog, FileModelCatalogStore, MemoryModelCatalogStore, ModelCatalog,
@@ -137,13 +143,13 @@ pub use provider::{
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
     DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
-    FileLlmCallLogger, InputItem, LashRuntime, LlmCallLogger, ManagedRunState, ManagedTaskCancel,
-    ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, NoopEventSink, OutputState, ParkedSession,
-    PathResolver, PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig,
-    RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy,
-    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor,
-    SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput,
-    TurnIssue, TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
+    InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
+    ManagedTaskStatus, NoopEventSink, OutputState, ParkedSession, PathResolver,
+    PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig, RuntimeEnvironment,
+    RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy, SessionStateEnvelope,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, SessionUsageReport,
+    TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
+    TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use session::{
     InjectedTurnInput, Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,

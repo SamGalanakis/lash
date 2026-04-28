@@ -190,7 +190,7 @@ pub enum Response {
 
 #[derive(Clone)]
 pub struct ExecutionSurfaceSync {
-    pub system_prompt: Arc<String>,
+    pub system_prompt: Arc<str>,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
 }
 
@@ -341,7 +341,7 @@ impl<M: ModeProtocol> ContextProjector<M> for ChatContextProjector {
                 0,
                 crate::llm::types::LlmMessage::text(
                     crate::llm::types::LlmRole::System,
-                    ctx.config.system_prompt.as_str().to_owned(),
+                    Arc::clone(&ctx.config.system_prompt),
                 ),
             );
         }
@@ -401,12 +401,11 @@ pub struct TurnMachineConfig<M: ModeProtocol = UnitModeProtocol> {
     pub run_session_id: Option<String>,
     pub autonomous: bool,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
-    pub system_prompt: Arc<String>,
+    pub system_prompt: Arc<str>,
     pub session_id: String,
-    pub emit_llm_debug_log: bool,
+    pub emit_llm_trace: bool,
     pub termination: M::Termination,
     pub retry_policy: RetryPolicy,
-    pub initial_events: Arc<Vec<SessionEventRecord<M::Event>>>,
 }
 
 // ─── Internal state ───
@@ -461,16 +460,26 @@ pub struct TurnMachine<M: ModeProtocol = UnitModeProtocol> {
 
 impl<M: ModeProtocol> TurnMachine<M> {
     /// Create a new machine in `PrepareIteration` state.
-    pub fn new(config: TurnMachineConfig<M>, messages: Vec<Message>, run_offset: usize) -> Self {
-        Self::new_shared(config, MessageSequence::from_owned(messages), run_offset)
+    pub fn new(
+        config: TurnMachineConfig<M>,
+        messages: Vec<Message>,
+        events: Arc<Vec<SessionEventRecord<M::Event>>>,
+        run_offset: usize,
+    ) -> Self {
+        Self::new_shared(
+            config,
+            MessageSequence::from_owned(messages),
+            events,
+            run_offset,
+        )
     }
 
     pub fn new_shared(
         config: TurnMachineConfig<M>,
         messages: MessageSequence,
+        events: Arc<Vec<SessionEventRecord<M::Event>>>,
         run_offset: usize,
     ) -> Self {
-        let events = Arc::clone(&config.initial_events);
         Self {
             config,
             state: MachineState::PreparingMode,
@@ -855,7 +864,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 Message {
                     id: message_id.clone(),
                     role: message.role,
-                    parts,
+                    parts: Arc::new(parts),
                     user_input: message.user_input.clone(),
                     origin: Some(MessageOrigin::Plugin {
                         plugin_id: "plugin".to_string(),
@@ -1070,7 +1079,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             usage: usage.clone(),
             cumulative: self.cumulative_usage.clone(),
         });
-        if self.config.emit_llm_debug_log {
+        if self.config.emit_llm_trace {
             let response_parts = self.llm_response_debug_parts(llm_response);
             self.pending_effects.push_back(Effect::Log {
                 event: LogEvent::LlmDebug {
@@ -1087,7 +1096,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
     }
 
     fn record_llm_error(&mut self, error: &LlmCallError) {
-        if self.config.emit_llm_debug_log {
+        if self.config.emit_llm_trace {
             self.pending_effects.push_back(Effect::Log {
                 event: LogEvent::LlmError {
                     session_id: self.config.session_id.clone(),

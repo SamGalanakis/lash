@@ -267,6 +267,20 @@ impl SessionManager for RuntimeSessionManager {
         })
     }
 
+    async fn emit_trace_event(
+        &self,
+        context: lash_trace::TraceContext,
+        event: lash_trace::TraceEvent,
+    ) -> Result<(), crate::PluginError> {
+        crate::trace::emit_trace(
+            &self.current_host.core.trace_sink,
+            &self.current_host.core.trace_context,
+            context.for_session(self.current_session_id.clone()),
+            event,
+        );
+        Ok(())
+    }
+
     async fn close_session(&self, session_id: &str) -> Result<(), crate::PluginError> {
         if session_id == self.current_session_id {
             return Err(crate::PluginError::Session(
@@ -820,10 +834,65 @@ impl SessionManager for RuntimeSessionManager {
             .await
             .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
         let llm_request = crate::direct::build_llm_request(&provider, request, model.clone());
-        let response = provider
-            .complete(llm_request)
-            .await
-            .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
+        let llm_call_id = if self.current_host.core.trace_sink.is_some() {
+            let id = uuid::Uuid::new_v4().to_string();
+            crate::trace::emit_trace(
+                &self.current_host.core.trace_sink,
+                &self.current_host.core.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(self.current_session_id.clone())
+                    .for_llm_call(id.clone()),
+                lash_trace::TraceEvent::LlmCallStarted {
+                    request: crate::trace::trace_llm_request(&llm_request),
+                },
+            );
+            Some(id)
+        } else {
+            None
+        };
+        let response = match provider.complete(llm_request).await {
+            Ok(response) => response,
+            Err(err) => {
+                if let Some(llm_call_id) = llm_call_id {
+                    crate::trace::emit_trace(
+                        &self.current_host.core.trace_sink,
+                        &self.current_host.core.trace_context,
+                        lash_trace::TraceContext::default()
+                            .for_session(self.current_session_id.clone())
+                            .for_llm_call(llm_call_id),
+                        lash_trace::TraceEvent::LlmCallFailed {
+                            error: lash_trace::TraceError {
+                                message: err.message.clone(),
+                                retryable: err.retryable,
+                                code: err.code.clone(),
+                                raw: err.raw.clone(),
+                            },
+                            stream_summary: None,
+                        },
+                    );
+                }
+                return Err(crate::PluginError::Session(err.message.clone()));
+            }
+        };
+        if let Some(llm_call_id) = llm_call_id {
+            crate::trace::emit_trace(
+                &self.current_host.core.trace_sink,
+                &self.current_host.core.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(self.current_session_id.clone())
+                    .for_llm_call(llm_call_id),
+                lash_trace::TraceEvent::LlmCallCompleted {
+                    response: crate::trace::trace_llm_response(
+                        response.full_text.clone(),
+                        0,
+                        crate::trace::trace_output_parts(&response.parts),
+                    ),
+                    usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),
+                    provider_usage: response.provider_usage.clone(),
+                    stream_summary: None,
+                },
+            );
+        }
         let usage = TokenUsage {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,

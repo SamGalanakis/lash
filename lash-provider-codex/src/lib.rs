@@ -643,7 +643,7 @@ impl CodexProvider {
                     if let LlmContentBlock::Text(text) = block
                         && !text.is_empty()
                     {
-                        instructions.push(text.clone());
+                        instructions.push(text.to_string());
                     }
                 }
                 continue;

@@ -5,7 +5,6 @@
 
 mod driver;
 mod plugin;
-mod rlm_support;
 mod stream_mask;
 
 pub use driver::{RlmpureProjectorConfig, build_rlmpure_preamble, rlmpure_execution_section};

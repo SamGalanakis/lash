@@ -107,7 +107,7 @@ fn render_message(
         return;
     }
 
-    for part in &message.parts {
+    for part in message.parts.iter() {
         render_part(out, message.role, part, tool_index);
     }
 

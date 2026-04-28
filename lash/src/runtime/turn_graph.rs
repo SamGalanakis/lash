@@ -47,10 +47,6 @@ impl TurnGraphOverlay {
         self.projected_messages.clone()
     }
 
-    pub(super) fn active_events_arc(&self) -> Arc<Vec<SessionEventRecord>> {
-        Arc::clone(&self.active_events)
-    }
-
     pub(super) fn tool_calls_arc(&self) -> Arc<Vec<ToolCallRecord>> {
         Arc::clone(&self.read_tool_calls)
     }
@@ -258,8 +254,18 @@ impl TurnGraphOverlay {
         }
         match Arc::try_unwrap(self.base_graph) {
             Ok(mut graph) => {
-                graph.extend_node_records(self.appended_nodes);
-                graph.set_leaf_node_id(leaf_node_id);
+                let last_appended_id = self.appended_nodes.last().map(|node| node.node_id.clone());
+                // Use the fast incremental cache path so the projected
+                // messages / tool calls / rlm globals carry over instead
+                // of forcing a full `SessionGraphCache::rebuild_projection`
+                // on the next access.
+                graph.extend_active_path(self.appended_nodes);
+                // `extend_active_path` advances leaf to the last
+                // appended node. Only re-set when the requested leaf
+                // diverges (rare: branch-cut / fork shapes).
+                if leaf_node_id != last_appended_id {
+                    graph.set_leaf_node_id(leaf_node_id);
+                }
                 graph
             }
             Err(base_graph) => {
@@ -340,7 +346,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         }

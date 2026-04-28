@@ -7,7 +7,8 @@ use sha2::Digest;
 
 use crate::session_model::{ConversationRecord, SessionEventRecord, ToolEvent};
 use crate::{
-    ContextApproach, ExecutionMode, Message, MessageRole, PromptUsage, TokenUsage, ToolCallRecord,
+    BaseRenderCache, ContextApproach, ExecutionMode, Message, MessageRole, PromptUsage, TokenUsage,
+    ToolCallRecord,
 };
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -264,6 +265,16 @@ struct SessionGraphCache {
     /// count).
     projected_message_ids: HashMap<String, usize>,
     projected_tool_calls: Arc<Vec<ToolCallRecord>>,
+    /// RLM globals projection. Maintained incrementally on append so the
+    /// per-iteration `bound_variables` prompt contribution doesn't replay
+    /// every patch event in the active path.
+    projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    /// Memoized render of `projected_messages`. Shared with every
+    /// `MessageSequence` built off this projection so the chat projector's
+    /// per-iteration `render_prompt` walk only happens once per turn.
+    /// Replaced (not invalidated in-place) whenever `projected_messages`
+    /// changes — the `Arc` identity tracks the cache's validity.
+    projected_messages_render_cache: Arc<BaseRenderCache>,
 }
 
 impl SessionGraphCache {
@@ -295,6 +306,8 @@ impl SessionGraphCache {
             projected_messages: Arc::new(Vec::new()),
             projected_message_ids: HashMap::new(),
             projected_tool_calls: Arc::new(Vec::new()),
+            projected_rlm_globals: Arc::new(serde_json::Map::new()),
+            projected_messages_render_cache: Arc::new(BaseRenderCache::new()),
         };
         cache.rebuild_projection(graph);
         cache
@@ -306,9 +319,16 @@ impl SessionGraphCache {
             HashMap::with_capacity(self.active_path_indices.len());
         let mut projected_tool_calls = Vec::with_capacity(self.active_path_indices.len());
         let mut active_events = Vec::with_capacity(self.active_path_indices.len());
+        let mut projected_rlm_globals = serde_json::Map::new();
         for idx in &self.active_path_indices {
             let node = &graph.nodes[*idx];
             if let Some(event) = node.event() {
+                if let SessionEventRecord::Mode(mode_event) = event
+                    && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
+                        mode_event.rlm_event()
+                {
+                    lash_rlm_types::apply_globals_patch(&mut projected_rlm_globals, &patch);
+                }
                 active_events.push(event.clone());
             }
             if let Some(message) = node.message() {
@@ -329,6 +349,8 @@ impl SessionGraphCache {
         self.projected_message_ids = projected_message_ids;
         self.active_events = Arc::new(active_events);
         self.projected_tool_calls = Arc::new(projected_tool_calls);
+        self.projected_rlm_globals = Arc::new(projected_rlm_globals);
+        self.projected_messages_render_cache = Arc::new(BaseRenderCache::new());
     }
 
     fn append_node(
@@ -344,6 +366,15 @@ impl SessionGraphCache {
         }
         self.active_path_indices.push(node_index);
         if let Some(event) = node.event() {
+            if let SessionEventRecord::Mode(mode_event) = event
+                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
+                    mode_event.rlm_event()
+            {
+                lash_rlm_types::apply_globals_patch(
+                    Arc::make_mut(&mut self.projected_rlm_globals),
+                    &patch,
+                );
+            }
             Arc::make_mut(&mut self.active_events).push(event.clone());
         }
         if let Some(message) = node.message() {
@@ -352,6 +383,7 @@ impl SessionGraphCache {
                 self.projected_message_ids
                     .insert(message.id.clone(), messages.len());
                 messages.push(message);
+                self.projected_messages_render_cache = Arc::new(BaseRenderCache::new());
             }
             return;
         }
@@ -711,6 +743,18 @@ impl SessionGraph {
         Arc::clone(&self.cache().projected_tool_calls)
     }
 
+    pub fn shared_projected_rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
+        Arc::clone(&self.cache().projected_rlm_globals)
+    }
+
+    /// Returns a render cache shared with the current projected messages.
+    /// Pass to `MessageSequence::with_base_render_cache` so the per-iteration
+    /// chat projector reuses the same `RenderedPrompt` for the base portion
+    /// of the conversation across LLM iterations within a turn.
+    pub fn shared_projected_messages_render_cache(&self) -> Arc<BaseRenderCache> {
+        Arc::clone(&self.cache().projected_messages_render_cache)
+    }
+
     pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
         let messages = Arc::clone(&self.cache().projected_messages);
         self.merge_active_projection(messages.as_slice(), tool_calls);
@@ -797,6 +841,17 @@ impl SessionGraph {
         I: IntoIterator<Item = SessionNodeRecord>,
     {
         self.data_mut().nodes.extend(nodes);
+    }
+
+    /// Append nodes that extend the current active path, advancing the
+    /// leaf to the last node and updating the cache incrementally
+    /// instead of invalidating it. Use this when the appended nodes are
+    /// genuinely new descendants of the current leaf — e.g. the
+    /// turn-driver merging `TurnGraphOverlay` deltas into the base graph.
+    /// Use `extend_node_records` + `set_leaf_node_id` for store-side
+    /// replay paths that don't follow the active-path append shape.
+    pub fn extend_active_path(&mut self, nodes: Vec<SessionNodeRecord>) {
+        self.append_prebuilt_nodes(nodes);
     }
 
     pub fn active_path_contains(&self, node_id: &str) -> bool {
@@ -1019,7 +1074,7 @@ fn build_projection_items<'a>(
         .filter(|message| !message.is_transient())
         .collect::<Vec<_>>();
     for (idx, message) in projected_messages.iter().enumerate() {
-        for part in &message.parts {
+        for part in message.parts.iter() {
             if let Some(call_id) = &part.tool_call_id {
                 first_message_for_call.entry(call_id.clone()).or_insert(idx);
             }
@@ -1165,7 +1220,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         }

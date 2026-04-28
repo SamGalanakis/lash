@@ -274,7 +274,7 @@ impl GoogleOAuthProvider {
                 if let LlmContentBlock::Text(text) = block
                     && !text.is_empty()
                 {
-                    parts.push(text.clone());
+                    parts.push(text.to_string());
                 }
             }
         }

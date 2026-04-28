@@ -2,6 +2,7 @@ pub mod context;
 pub use lash_sansio::session_model::message;
 pub use lash_sansio::session_model::prompt;
 
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::llm::types::{LlmEventSender, LlmStreamEvent};
@@ -15,7 +16,7 @@ pub use lash_sansio::session_model::{
     PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState, SessionEvent,
     StateSnapshotEvent, TokenUsage, ToolEvent, TurnTerminationPolicyState, default_prompt_template,
     format_tool_result_content, fresh_message_id, make_error_envelope, make_error_event,
-    reassign_part_ids, render_prompt, render_transcript_prompt,
+    reassign_part_ids, render_prompt, render_transcript_prompt, shared_parts,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -152,7 +153,7 @@ pub(crate) fn plugin_message_to_message(
     Message {
         id: message_id,
         role: plugin_message.role,
-        parts,
+        parts: Arc::new(parts),
         user_input,
         origin: Some(crate::MessageOrigin::Plugin {
             plugin_id: "plugin".to_string(),

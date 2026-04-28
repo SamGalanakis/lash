@@ -55,7 +55,7 @@ Common files and directories:
 
 - `config.json`: provider and runtime configuration.
 - `skills/`: user-global skills.
-- `sessions/`: resumable session databases and detailed LLM logs when debug logging is enabled.
+- `sessions/`: resumable session databases and detailed LLM traces when debug logging is enabled.
 - `plans/`: persisted plan artifacts.
 - `lash.log`: CLI log output when file logging is enabled.
 - `cache/`: cache directory when `LASH_HOME` is set. Without `LASH_HOME`, cache usually lives under the platform cache directory.
@@ -83,7 +83,7 @@ Start with:
 
 1. Run `lash --info`.
 2. Check the configured Lash home from `LASH_HOME` or the default `~/.lash`.
-3. Inspect `$LASH_HOME/sessions` for the active session database and any `.llm.jsonl` debug logs.
+3. Inspect `$LASH_HOME/sessions` for the active session database and any `.trace.jsonl` debug logs.
 4. Check `$LASH_HOME/config.json` for provider configuration.
 
 If a task asks Lash to modify its own installed behavior, first identify whether the behavior belongs to the CLI host, core runtime, sans-io state machine, provider crate, mode plugin, or user-home data. Do not paper over a core/runtime problem in the CLI unless the behavior is genuinely host-specific.

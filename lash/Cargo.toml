@@ -24,6 +24,7 @@ full = ["sqlite-store", "tool-impls"]
 
 [dependencies]
 lash-sansio = { path = "../lash-sansio" }
+lash-trace = { path = "../lash-trace" }
 lash-rlm-types = { path = "../lash-rlm-types" }
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 serde = { version = "1", features = ["derive", "rc"] }

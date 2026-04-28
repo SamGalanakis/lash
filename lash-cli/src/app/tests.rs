@@ -9,7 +9,7 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
     Message {
         id: id.to_string(),
         role,
-        parts: vec![part(&format!("{id}.p0"), PartKind::Text, content)],
+        parts: vec![part(&format!("{id}.p0"), PartKind::Text, content)].into(),
         user_input: None,
         origin: None,
     }
@@ -541,7 +541,8 @@ fn finish_turn_from_projection_uses_authoritative_reasoning_and_text() {
                 "Crafting a cool poem\n\nI see the user wants a cool poem.",
             ),
             part("a1.t", PartKind::Text, "Neon rain on midnight street."),
-        ],
+        ]
+        .into(),
         user_input: None,
         origin: None,
     };
@@ -583,7 +584,8 @@ fn projected_assistant_message_places_reasoning_before_text() {
         parts: vec![
             part("a1.t", PartKind::Text, "Visible answer."),
             part("a1.r", PartKind::Reasoning, "Late summary."),
-        ],
+        ]
+        .into(),
         user_input: None,
         origin: None,
     };
@@ -1385,7 +1387,8 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]
+        .into(),
         user_input: None,
         origin: None,
     };

@@ -7,15 +7,29 @@ use std::sync::{Arc, OnceLock};
 // ─── Structured message types for context-aware pruning ───
 
 /// A structured message with typed parts for context management.
+///
+/// `parts` is `Arc`-shared so cloning a `Message` is one Arc bump per
+/// message field rather than a deep-clone of every `Part`. Construct with
+/// `parts: shared_parts(vec![...])` or `parts: Arc::new(...)`. Mutate via
+/// `Arc::make_mut(&mut message.parts)` when truly needed; most plugin
+/// pipelines should produce a fresh `Vec<Part>` and assign it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub id: String,
     pub role: MessageRole,
-    pub parts: Vec<Part>,
+    pub parts: Arc<Vec<Part>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input: Option<UserInputProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<MessageOrigin>,
+}
+
+/// Wrap a `Vec<Part>` for the `Message::parts` field. Use this in struct
+/// literals and tests (`parts: shared_parts(vec![Part { ... }])`) so the
+/// call sites stay short and uniform.
+#[inline]
+pub fn shared_parts(parts: Vec<Part>) -> Arc<Vec<Part>> {
+    Arc::new(parts)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -272,7 +286,7 @@ fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachm
         return display_text.to_string();
     }
     let mut out = Vec::new();
-    for part in &msg.parts {
+    for part in msg.parts.iter() {
         // Reasoning items are display-only from the transcript's point of
         // view — they are never replayed as flat text. The Codex adapter has
         // its own wire channel that re-emits the raw reasoning item on the
@@ -299,12 +313,20 @@ pub struct RenderedPrompt {
     pub attachments: Vec<LlmAttachment>,
 }
 
+/// Memoized render of a `MessageSequence`'s `base`. Shared across the
+/// per-iteration `MessageSequence` instances that wrap the same base
+/// (typically the `SessionGraphCache`'s projected messages) so the
+/// chat projector's `render_prompt` walk happens once per turn instead
+/// of once per LLM iteration.
+pub type BaseRenderCache = OnceLock<RenderedPrompt>;
+
 #[derive(Debug)]
 pub struct MessageSequence {
     base: Arc<Vec<Message>>,
     delta: Vec<Message>,
     owned: Option<Vec<Message>>,
     materialized: OnceLock<Arc<Vec<Message>>>,
+    base_rendered: Option<Arc<BaseRenderCache>>,
 }
 
 impl Clone for MessageSequence {
@@ -314,6 +336,7 @@ impl Clone for MessageSequence {
             delta: self.delta.clone(),
             owned: self.owned.clone(),
             materialized: OnceLock::new(),
+            base_rendered: self.base_rendered.as_ref().map(Arc::clone),
         }
     }
 }
@@ -345,6 +368,7 @@ impl MessageSequence {
             delta: Vec::new(),
             owned: Some(messages),
             materialized: OnceLock::new(),
+            base_rendered: None,
         }
     }
 
@@ -354,6 +378,7 @@ impl MessageSequence {
             delta: Vec::new(),
             owned: None,
             materialized: OnceLock::new(),
+            base_rendered: None,
         }
     }
 
@@ -363,7 +388,17 @@ impl MessageSequence {
             delta,
             owned: None,
             materialized: OnceLock::new(),
+            base_rendered: None,
         }
+    }
+
+    /// Attach a shared render cache for the `base` portion. Subsequent
+    /// `render_prompt` calls will reuse the memoized `RenderedPrompt` for
+    /// the base instead of rewalking it. The delta is always re-rendered
+    /// because it changes per LLM iteration. Returns `self` for chaining.
+    pub fn with_base_render_cache(mut self, cache: Arc<BaseRenderCache>) -> Self {
+        self.base_rendered = Some(cache);
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -487,7 +522,12 @@ impl MessageSequence {
         if self.base.is_empty() {
             return render_prompt(self.delta.as_slice());
         }
-        let mut rendered = render_prompt(self.base.as_slice());
+        let mut rendered = match &self.base_rendered {
+            Some(cache) => cache
+                .get_or_init(|| render_prompt(self.base.as_slice()))
+                .clone(),
+            None => render_prompt(self.base.as_slice()),
+        };
         if !self.delta.is_empty() {
             append_rendered_prompt(&mut rendered, self.delta.as_slice());
         }
@@ -530,7 +570,7 @@ pub fn messages_are_prompt_resume_safe<'a>(
     let mut completed_tool_calls = HashSet::new();
 
     for message in messages {
-        for part in &message.parts {
+        for part in message.parts.iter() {
             // Reasoning parts don't participate in tool pairing and are
             // always safe to resume through.
             if matches!(part.kind, PartKind::Reasoning) {
@@ -663,7 +703,7 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
 fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
     for msg in msgs {
         let mut blocks: Vec<LlmContentBlock> = Vec::new();
-        for part in &msg.parts {
+        for part in msg.parts.iter() {
             match part.kind {
                 PartKind::Reasoning => {
                     // Reasoning parts carry two distinct replay payloads:
@@ -743,7 +783,7 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         text = format!("Runtime note:\n{text}");
                     }
 
-                    blocks.push(LlmContentBlock::Text(text));
+                    blocks.push(LlmContentBlock::Text(text.into()));
                 }
             }
         }
@@ -808,21 +848,21 @@ mod tests {
             Message {
                 id: "m0".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "first")],
+                parts: vec![part(PartKind::Text, "first")].into(),
                 user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::Assistant,
-                parts: vec![part(PartKind::Prose, "reply one")],
+                parts: vec![part(PartKind::Prose, "reply one")].into(),
                 user_input: None,
                 origin: None,
             },
             Message {
                 id: "m2".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "second")],
+                parts: vec![part(PartKind::Text, "second")].into(),
                 user_input: None,
                 origin: None,
             },
@@ -844,7 +884,8 @@ mod tests {
             parts: vec![part(
                 PartKind::Text,
                 "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>",
-            )],
+            )]
+            .into(),
             user_input: Some(UserInputProvenance {
                 display_text: "Use /wholehog".to_string(),
                 effective_text: "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>"
@@ -868,7 +909,7 @@ mod tests {
 
     fn block_text(msg: &LlmMessage, idx: usize) -> &str {
         match msg.blocks.get(idx) {
-            Some(LlmContentBlock::Text(text)) => text.as_str(),
+            Some(LlmContentBlock::Text(text)) => text.as_ref(),
             Some(other) => panic!("expected Text block, got {other:?}"),
             None => panic!("missing block at index {idx}"),
         }
@@ -880,7 +921,7 @@ mod tests {
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "first")],
+                parts: vec![part(PartKind::Text, "first")].into(),
                 user_input: None,
                 origin: None,
             },
@@ -890,14 +931,15 @@ mod tests {
                 parts: vec![
                     part(PartKind::Prose, "reply one"),
                     part(PartKind::Code, "x = 1"),
-                ],
+                ]
+                .into(),
                 user_input: None,
                 origin: None,
             },
             Message {
                 id: "m3".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "second")],
+                parts: vec![part(PartKind::Text, "second")].into(),
                 user_input: None,
                 origin: None,
             },
@@ -917,14 +959,14 @@ mod tests {
             Message {
                 id: "m0".to_string(),
                 role: MessageRole::System,
-                parts: vec![part(PartKind::Text, "note")],
+                parts: vec![part(PartKind::Text, "note")].into(),
                 user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "show this"), image_part(&[1, 2, 3])],
+                parts: vec![part(PartKind::Text, "show this"), image_part(&[1, 2, 3])].into(),
                 user_input: None,
                 origin: None,
             },
@@ -942,7 +984,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },
@@ -960,7 +1003,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },
@@ -1008,7 +1052,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },
@@ -1026,7 +1071,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },
@@ -1059,7 +1105,7 @@ mod tests {
         let msgs = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::User,
-            parts: vec![image_part(&[9, 8, 7])],
+            parts: vec![image_part(&[9, 8, 7])].into(),
             user_input: None,
             origin: None,
         }];
@@ -1076,21 +1122,21 @@ mod tests {
             Message {
                 id: "m0".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "first")],
+                parts: vec![part(PartKind::Text, "first")].into(),
                 user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::Assistant,
-                parts: vec![part(PartKind::Prose, "reply one")],
+                parts: vec![part(PartKind::Prose, "reply one")].into(),
                 user_input: None,
                 origin: None,
             },
             Message {
                 id: "m2".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "second")],
+                parts: vec![part(PartKind::Text, "second")].into(),
                 user_input: None,
                 origin: None,
             },
@@ -1109,7 +1155,7 @@ mod tests {
             Message {
                 id: "m0".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "what time is it")],
+                parts: vec![part(PartKind::Text, "what time is it")].into(),
                 user_input: None,
                 origin: None,
             },
@@ -1127,7 +1173,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },
@@ -1144,7 +1191,7 @@ mod tests {
         let msgs = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::User,
-            parts: vec![part(PartKind::Text, "hi")],
+            parts: vec![part(PartKind::Text, "hi")].into(),
             user_input: None,
             origin: None,
         }];
@@ -1171,7 +1218,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },
@@ -1189,7 +1237,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },
@@ -1219,7 +1268,8 @@ mod tests {
             parts: vec![
                 reasoning_part.clone(),
                 part(PartKind::Prose, "Here is the answer."),
-            ],
+            ]
+            .into(),
             user_input: None,
             origin: None,
         }];
@@ -1249,7 +1299,7 @@ mod tests {
         assert_eq!(rendered.messages[0].blocks.len(), 1);
         assert!(matches!(
             &rendered.messages[0].blocks[0],
-            LlmContentBlock::Text(text) if text == "Here is the answer."
+            LlmContentBlock::Text(text) if text.as_ref() == "Here is the answer."
         ));
 
         // When the assistant message consists solely of a display-only
@@ -1258,7 +1308,7 @@ mod tests {
         let reasoning_only = vec![Message {
             id: "m2".to_string(),
             role: MessageRole::Assistant,
-            parts: vec![reasoning_part],
+            parts: vec![reasoning_part].into(),
             user_input: None,
             origin: None,
         }];
@@ -1282,7 +1332,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         }];
@@ -1321,7 +1372,7 @@ mod tests {
         let msgs = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::Assistant,
-            parts: vec![reasoning_part_fixture(Some("CIPHER=="))],
+            parts: vec![reasoning_part_fixture(Some("CIPHER=="))].into(),
             user_input: None,
             origin: None,
         }];
@@ -1361,7 +1412,7 @@ mod tests {
         let display_only = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::Assistant,
-            parts: vec![reasoning_part_fixture(None)],
+            parts: vec![reasoning_part_fixture(None)].into(),
             user_input: None,
             origin: None,
         }];
@@ -1376,7 +1427,7 @@ mod tests {
         let replayable = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::Assistant,
-            parts: vec![reasoning_part_fixture(Some("CIPHER=="))],
+            parts: vec![reasoning_part_fixture(Some("CIPHER=="))].into(),
             user_input: None,
             origin: None,
         }];

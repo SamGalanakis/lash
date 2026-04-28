@@ -302,12 +302,11 @@ def load_provider_metadata(config_path: Path | None) -> dict[str, Any]:
 
 
 def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
-    """Walk lash's `sessions/*.llm.jsonl` traces and surface:
+    """Walk lash's `sessions/*.trace.jsonl` traces and surface:
 
-    * `record_count`   — every line in the trace (stream deltas + summaries)
-    * `call_count`     — number of actual LLM request/response cycles
-                         (kind != "stream_event" rows carry `request`/`response`)
-    * `turn_count`     — distinct `turn` indexes seen
+    * `record_count`   — every line in the typed runtime trace
+    * `call_count`     — number of completed LLM request/response cycles
+    * `turn_count`     — distinct `context.iteration` indexes seen
     * token totals     — summed from the summary rows' `usage` blocks
 
     Prior to this split the dashboard conflated deltas with calls, showing
@@ -340,18 +339,8 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
                 continue
             record_count += 1
             file_record_count += 1
-            # A trace row is a real LLM round-trip only if it carries
-            # `request`/`response` fields — i.e. the summary line
-            # written at the end of each SSE stream. Stream-event rows
-            # and the late-arriving `token_usage_patch` rows (written
-            # by the trailing-usage catcher) both have other `kind`s
-            # and should be excluded from the LLM-CALLS tally.
-            record_kind = record.get("kind")
-            is_summary_call = (
-                record_kind != "stream_event"
-                and record_kind != "token_usage_patch"
-                and "request" in record
-            )
+            record_type = record.get("type")
+            is_summary_call = record_type == "llm_call_completed"
             if is_summary_call:
                 call_count += 1
                 file_call_count += 1
@@ -362,22 +351,20 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
                 token_totals["cache"] += int(usage.get("cached_input_tokens") or 0)
                 token_totals["reasoning"] += int(usage.get("reasoning_tokens") or 0)
                 usage_record_count += 1
-            turn = record.get("turn")
+            context = record.get("context") if isinstance(record.get("context"), dict) else {}
+            turn = context.get("iteration")
             if isinstance(turn, int):
                 turns.add(turn)
                 file_turns.add(turn)
-            raw_request = record.get("request")
-            if not isinstance(raw_request, str):
-                continue
-            try:
-                request = json.loads(raw_request)
-            except json.JSONDecodeError:
-                continue
-            model = request.get("model")
-            if isinstance(model, str) and model not in models:
-                models.append(model)
-            if isinstance(model, str) and model not in file_models:
-                file_models.append(model)
+            if record_type == "llm_call_started":
+                request = record.get("request")
+                if not isinstance(request, dict):
+                    continue
+                model = request.get("model")
+                if isinstance(model, str) and model not in models:
+                    models.append(model)
+                if isinstance(model, str) and model not in file_models:
+                    file_models.append(model)
         files.append(
             {
                 "name": llm_path.name,
@@ -913,8 +900,8 @@ def combine_activity_metadata(
     return {
         "llm_record_count": llm_record_count,
         "llm_turn_count": max(llm_turn_count, session_turn_count, trajectory_turn_count),
-        # `llm_call_count` is actual provider round-trips (kind != stream_event).
-        # `llm_record_count` stays available for raw-delta counts. Fall through
+        # `llm_call_count` is actual provider round-trips completed by Lash.
+        # `llm_record_count` stays available for raw trace-line counts. Fall through
         # to `exec_result_count` / trajectory_call_count for non-lash runs
         # that don't produce a lash LLM trace.
         "llm_call_count": max(llm_call_count, exec_result_count, trajectory_call_count),
@@ -1211,12 +1198,13 @@ def build_trial_record(
 
     sessions_dir = lash_home_dir / "sessions"
     session_artifacts = copy_directory_artifacts(sessions_dir, artifacts_dir / "sessions", run_dir)
-    llm_candidates = sorted(sessions_dir.glob("*.llm.jsonl"))
+    llm_candidates = sorted(sessions_dir.glob("*.trace.jsonl"))
     llm_metadata = (
         load_llm_metadata(llm_candidates)
         if llm_candidates
         else {
             "record_count": 0,
+            "call_count": 0,
             "turn_count": 0,
             "models": [],
             "files": [],
@@ -1303,7 +1291,7 @@ def build_trial_record(
                 provider_metadata, args.requested_model
             ),
         )
-        token_source = "lash_llm_log"
+        token_source = "lash_trace"
     elif raw_agent_tokens["total"] > 0:
         token_source = "agent_result_fallback"
 
@@ -1416,14 +1404,14 @@ def build_trial_record(
             "task_path": ((result.get("task_id") or {}).get("path")),
             "task_git_url": ((result.get("task_id") or {}).get("git_url")),
             "task_git_commit_id": ((result.get("task_id") or {}).get("git_commit_id")),
-            "llm_request_count": activity_metadata["llm_record_count"],
+            "llm_request_count": activity_metadata["llm_call_count"],
             "llm_record_count": activity_metadata["llm_record_count"],
             "llm_turn_count": activity_metadata["llm_turn_count"],
             "llm_call_count": activity_metadata["llm_call_count"],
             "tool_call_count": activity_metadata["tool_call_count"],
             "tool_batch_count": activity_metadata["batch_call_count"],
             "tool_call_breakdown": activity_metadata["tool_call_breakdown"],
-            "llm_debug_files": llm_metadata["files"],
+            "llm_trace_files": llm_metadata["files"],
             "assistant_response_present": bool(assistant_response),
             "token_accounting": {
                 "source": token_source,

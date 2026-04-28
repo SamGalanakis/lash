@@ -316,7 +316,8 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
             tool_signature: None,
             prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]
+        .into(),
         user_input: Some(lash::UserInputProvenance {
             display_text: "Use /wholehog".into(),
             effective_text: "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>"

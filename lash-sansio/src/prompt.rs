@@ -16,7 +16,7 @@ pub struct PromptBuildInput {
 #[derive(Clone, Debug)]
 pub struct PreparedPrompt {
     pub context: PromptContext,
-    pub system_prompt: Arc<String>,
+    pub system_prompt: Arc<str>,
 }
 
 /// Single-slot memo for the rendered system prompt, keyed by a hash of
@@ -27,7 +27,7 @@ pub struct PreparedPrompt {
 /// work in `PromptTemplate::render`.
 #[derive(Default)]
 pub struct PromptCache {
-    inner: Mutex<Option<(u64, Arc<String>)>>,
+    inner: Mutex<Option<(u64, Arc<str>)>>,
 }
 
 impl PromptCache {
@@ -68,7 +68,7 @@ pub fn build_prompt_cached(input: PromptBuildInput, cache: Option<&PromptCache>)
             system_prompt: cached,
         };
     }
-    let system_prompt = Arc::new(input.template.render(&context));
+    let system_prompt: Arc<str> = Arc::from(input.template.render(&context));
     if let (Some(cache), Some(key)) = (cache, key)
         && let Ok(mut guard) = cache.inner.lock()
     {

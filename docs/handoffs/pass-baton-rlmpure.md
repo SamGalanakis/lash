@@ -392,7 +392,7 @@ End-to-end test after implementation:
    - Force enough trajectory to cross 6000 tokens. Verify the next turn's prompt includes the soft-warning injection.
    - Either let the model voluntarily call `pass_baton`, or include "use pass_baton when convenient" in the original task.
    - When `pass_baton` fires:
-     - Parent session log (`~/.lash/sessions/<parent>.llm.jsonl`) shows it terminated as Completed with no submit value.
+     - Parent session trace (`~/.lash/sessions/<parent>.trace.jsonl`) shows it terminated as Completed with no submit value.
      - Successor session exists with `parent_session_id` = parent, no inherited conversation events, only seed values in globals, `task` as `user_input_1`.
      - CLI tree view (`lash sessions tree <chain-root>` or interactive equivalent) shows parent → successor lineage.
    - Successor's `submit` produces the user-facing answer for the chain.

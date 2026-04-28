@@ -313,6 +313,13 @@ pub enum PluginDirective {
     EmitEvents {
         events: Vec<PluginSurfaceEvent>,
     },
+    EmitTrace {
+        name: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+        #[serde(default)]
+        context: Box<lash_trace::TraceContext>,
+    },
 }
 
 impl PluginDirective {
@@ -336,6 +343,14 @@ impl PluginDirective {
 
     pub fn emit_events(events: Vec<PluginSurfaceEvent>) -> Self {
         Self::EmitEvents { events }
+    }
+
+    pub fn emit_trace(name: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self::EmitTrace {
+            name: name.into(),
+            payload,
+            context: Box::new(lash_trace::TraceContext::default()),
+        }
     }
 }
 
@@ -397,6 +412,13 @@ pub trait SessionManager: Send + Sync {
         &self,
         request: SessionCreateRequest,
     ) -> Result<SessionHandle, PluginError>;
+    async fn emit_trace_event(
+        &self,
+        _context: lash_trace::TraceContext,
+        _event: lash_trace::TraceEvent,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
     /// Pop the seed message that was queued for `session_id` via
     /// `SessionCreateRequest::first_turn_input`. Returns `None` if no
     /// seed was queued, or after a previous caller has already taken

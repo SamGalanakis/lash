@@ -36,12 +36,11 @@ fn test_config_with_termination(
         run_session_id: None,
         autonomous: false,
         tool_specs: Vec::new().into(),
-        system_prompt: std::sync::Arc::new(String::new()),
+        system_prompt: std::sync::Arc::from(""),
         session_id: "test".to_string(),
-        emit_llm_debug_log: false,
+        emit_llm_trace: false,
         termination: lash::ModeTurnOptions::rlm(rlm_termination),
         retry_policy: RetryPolicy::default(),
-        initial_events: Arc::new(Vec::new()),
     }
 }
 
@@ -60,7 +59,8 @@ fn user_message(content: &str) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]
+        .into(),
         user_input: None,
         origin: None,
     }
@@ -74,7 +74,7 @@ fn drain_effects(machine: &mut TurnMachine) -> Vec<Effect> {
             machine.handle_response(Response::ExecutionSurfaceSynced {
                 id,
                 result: Ok(Some(sansio::ExecutionSurfaceSync {
-                    system_prompt: std::sync::Arc::new(String::new()),
+                    system_prompt: std::sync::Arc::from(""),
                     tool_specs: Arc::new(Vec::new()),
                 })),
             });
@@ -135,7 +135,7 @@ fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntry> {
 fn standard_prose_only_response_emits_done() {
     let config = test_config(ExecutionMode::standard());
     let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -146,7 +146,8 @@ fn standard_prose_only_response_emits_done() {
             full_text: "Hello there!".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hello there!".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -169,7 +170,7 @@ fn standard_prose_only_response_emits_done() {
 fn standard_tool_calls_produce_effects_and_loop() {
     let config = test_config(ExecutionMode::standard());
     let msgs = vec![user_message("read file")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -188,7 +189,8 @@ fn standard_tool_calls_produce_effects_and_loop() {
                     item_id: None,
                     signature: None,
                 },
-            ],
+            ]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -238,7 +240,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
 fn standard_empty_final_after_tool_result_finishes_without_error() {
     let config = test_config(ExecutionMode::standard());
     let msgs = vec![user_message("update the plan and do nothing else")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -252,7 +254,8 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
                 input_json: r#"{"plan":[{"step":"done","status":"completed"}]}"#.to_string(),
                 item_id: None,
                 signature: None,
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -325,7 +328,7 @@ fn standard_max_turns_stops_iteration() {
     let mut config = test_config(ExecutionMode::standard());
     config.max_turns = Some(1);
     let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -339,7 +342,8 @@ fn standard_max_turns_stops_iteration() {
                 input_json: "{}".to_string(),
                 item_id: None,
                 signature: None,
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -373,7 +377,7 @@ fn standard_max_turns_stops_iteration() {
 fn rlm_prose_only_response_emits_done() {
     let config = test_config(ExecutionMode::new("rlm"));
     let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -406,7 +410,7 @@ fn typed_rlm_prose_only_response_requests_submit() {
         RlmTermination::Finish { schema: None },
     );
     let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -443,7 +447,7 @@ fn typed_rlm_prose_only_response_requests_submit() {
 fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
     let config = test_config(ExecutionMode::new("rlm"));
     let msgs = vec![user_message("run some code")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -457,7 +461,8 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
             full_text: "Quick check.\n\n```lashlang\nprint \"hi\"\n```\n".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Quick check.\n\n```lashlang\nprint \"hi\"\n```\n".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -511,7 +516,7 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
         RlmTermination::Finish { schema: None },
     );
     let msgs = vec![user_message("return typed data")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -522,7 +527,8 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
             full_text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -578,7 +584,7 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
         RlmTermination::Finish { schema: None },
     );
     let msgs = vec![user_message("say hi")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -599,7 +605,8 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
                 LlmOutputPart::Text {
                     text: "```lashlang\nsubmit \"Hi.\"\n```".to_string(),
                 },
-            ],
+            ]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -655,7 +662,7 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
         },
     );
     let msgs = vec![user_message("return typed data")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -666,7 +673,8 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
             full_text: "```lashlang\nsubmit { missing: true }\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "```lashlang\nsubmit { missing: true }\n```".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });

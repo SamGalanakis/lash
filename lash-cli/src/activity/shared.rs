@@ -214,7 +214,7 @@ pub(super) fn semantic_tool_summary(name: &str, args: &Value) -> String {
             "list {}",
             compact_path_display(tool_arg_str(args, "path").unwrap_or("."))
         ),
-        "exec_command" => tool_arg_str(args, "cmd")
+        "exec_command" | "start_command" => tool_arg_str(args, "cmd")
             .map(inline_text)
             .unwrap_or_else(|| "command".to_string()),
         "write_stdin" => tool_arg_str(args, "chars")

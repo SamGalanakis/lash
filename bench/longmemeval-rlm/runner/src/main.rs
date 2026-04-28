@@ -204,7 +204,7 @@ struct QuestionResult {
     provider_cost: ProviderCostSummary,
     usage: SessionUsageReport,
     tool_calls: usize,
-    llm_log_path: String,
+    trace_path: String,
     session_db_path: String,
 }
 
@@ -576,7 +576,7 @@ async fn run_question(
         .with_context(|| format!("write {}", question_dir.join("prompt.txt").display()))?;
 
     let store_path = question_dir.join("session.db");
-    let llm_log_path = question_dir.join("session.llm.jsonl");
+    let trace_path = question_dir.join("session.trace.jsonl");
     let store = Arc::new(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
@@ -605,7 +605,7 @@ async fn run_question(
     let host = BackgroundRuntimeHost::new(
         EmbeddedRuntimeHost::new(
             RuntimeCoreConfig::default()
-                .with_llm_log_path(Some(llm_log_path.clone()))
+                .with_trace_jsonl_path(Some(trace_path.clone()))
                 .with_prompt_template(prompt_template(args.prompt_profile, args.session_tools)),
         ),
         Arc::new(TokioSessionTaskExecutor::default()),
@@ -689,7 +689,7 @@ async fn run_question(
         })?;
     }
 
-    let trace_metrics = collect_trace_metrics(&llm_log_path).context("collect trace metrics")?;
+    let trace_metrics = collect_trace_metrics(&trace_path).context("collect trace metrics")?;
     let error_records = sink.error_records();
     let failure_reason = if let Some(budget) = token_budget.as_ref() {
         Some(format!(
@@ -730,7 +730,7 @@ async fn run_question(
         provider_cost: trace_metrics.provider_cost,
         usage,
         tool_calls: turn.tool_calls.len(),
-        llm_log_path: llm_log_path.display().to_string(),
+        trace_path: trace_path.display().to_string(),
         session_db_path: store_path.display().to_string(),
     };
     write_json(question_dir.join("result.json"), &result)?;
@@ -1175,14 +1175,16 @@ fn collect_trace_metrics_once(path: &Path) -> anyhow::Result<TraceMetrics> {
     let mut metrics = TraceMetrics::default();
     for line in raw.lines().filter(|line| !line.trim().is_empty()) {
         let value: Value = serde_json::from_str(line)
-            .with_context(|| format!("parse llm log row from {}", path.display()))?;
-        let is_call_summary = value.get("request").is_some()
-            && value.get("response").and_then(Value::as_str).is_some();
-        if !is_call_summary {
+            .with_context(|| format!("parse trace row from {}", path.display()))?;
+        if value.get("type").and_then(Value::as_str) != Some("llm_call_completed") {
             continue;
         }
         metrics.llm_calls += 1;
-        if let Some(turn) = value.get("turn").and_then(Value::as_u64) {
+        if let Some(turn) = value
+            .get("context")
+            .and_then(|context| context.get("iteration"))
+            .and_then(Value::as_u64)
+        {
             turns.insert(turn);
         }
         if let Some(provider_usage) = value.get("provider_usage") {

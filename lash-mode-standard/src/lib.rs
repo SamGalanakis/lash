@@ -38,7 +38,7 @@ use lash::session_model::message::{PartAttachment, ReasoningMeta, data_url_for_b
 use lash::session_model::{
     ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
     SessionEventRecord, format_tool_result_content, fresh_message_id, make_error_event,
-    reassign_part_ids,
+    reassign_part_ids, shared_parts,
 };
 use lash::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
@@ -509,7 +509,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 Message {
                     id: asst_id,
                     role: MessageRole::Assistant,
-                    parts: parts_out,
+                    parts: shared_parts(parts_out),
                     user_input: None,
                     origin: None,
                 },
@@ -583,7 +583,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 Message {
                     id: asst_id,
                     role: MessageRole::Assistant,
-                    parts: assistant_parts,
+                    parts: shared_parts(assistant_parts),
                     user_input: None,
                     origin: None,
                 },
@@ -658,7 +658,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 Message {
                     id: user_id,
                     role: MessageRole::User,
-                    parts: result_parts,
+                    parts: shared_parts(result_parts),
                     user_input: None,
                     origin: None,
                 },

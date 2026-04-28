@@ -16,7 +16,7 @@ use lash::sansio::{
 };
 use lash::session_model::{
     ConversationRecord, Message, MessageRole, ModeEvent, Part, PartKind, PruneState, SessionEvent,
-    SessionEventRecord, fresh_message_id, make_error_event,
+    SessionEventRecord, fresh_message_id, make_error_event, shared_parts,
 };
 use lash::{
     CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart, LlmResponse,
@@ -180,7 +180,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
         if !ctx.config.system_prompt.trim().is_empty() {
             messages.push(lash::llm::types::LlmMessage::text(
                 lash::llm::types::LlmRole::System,
-                ctx.config.system_prompt.as_str().to_owned(),
+                std::sync::Arc::clone(&ctx.config.system_prompt),
             ));
         }
         messages.push(lash::llm::types::LlmMessage::text(
@@ -205,13 +205,13 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
 const MAX_TASK_CONTEXT_USER_MESSAGES: usize = 4;
 const MAX_RLM_TRAJECTORY_STEPS: usize = 12;
 
-fn build_task_context(messages: &[Message]) -> String {
+pub fn build_task_context(messages: &[Message]) -> String {
     let mut user_chunks: Vec<&str> = Vec::new();
     for message in messages {
         if !matches!(message.role, MessageRole::User) {
             continue;
         }
-        for part in &message.parts {
+        for part in message.parts.iter() {
             if matches!(part.kind, PartKind::Text | PartKind::Prose) {
                 let trimmed = part.content.trim();
                 if !trimmed.is_empty() {
@@ -695,7 +695,7 @@ fn assistant_prose_message(content: String) -> Message {
     Message {
         id: id.clone(),
         role: MessageRole::Assistant,
-        parts: vec![Part {
+        parts: shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Prose,
             content,
@@ -706,7 +706,7 @@ fn assistant_prose_message(content: String) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: None,
     }
@@ -717,7 +717,7 @@ fn submit_required_reminder_message() -> Message {
     Message {
         id: id.clone(),
         role: MessageRole::User,
-        parts: vec![Part {
+        parts: shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
             content: "[runtime] An output schema is required for the final answer. Wrap your reply in a fenced ```lashlang block and call `submit <value>` with a value matching the schema. Plain text outside a fence is not delivered.".to_string(),
@@ -728,7 +728,7 @@ fn submit_required_reminder_message() -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: None,
     }
@@ -739,7 +739,7 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
     Message {
         id: id.clone(),
         role: MessageRole::User,
-        parts: vec![Part {
+        parts: shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
             content: format!(
@@ -752,7 +752,7 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: None,
     }

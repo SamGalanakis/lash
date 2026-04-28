@@ -11,7 +11,7 @@ use lash::{
 };
 
 use crate::driver::build_rlm_preamble;
-use crate::rlm_support::bound_variables_prompt_contributions;
+use crate::rlm_support::BoundVariablesCache;
 use crate::stream_mask;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -71,8 +71,10 @@ impl SessionPlugin for RlmModePlugin {
         reg.mode().protocol_driver(Arc::new(RlmProtocolDriver))?;
         reg.tools()
             .provider(Arc::clone(&self.provider) as Arc<dyn lash::ToolProvider>)?;
+        let bound_vars_cache = Arc::new(BoundVariablesCache::new());
         let bound_vars_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
-            Box::pin(async move { Ok(bound_variables_prompt_contributions(&ctx)) })
+            let cache = Arc::clone(&bound_vars_cache);
+            Box::pin(async move { Ok(cache.contributions(&ctx)) })
         });
         reg.prompt().contribute(bound_vars_hook);
         let root_final_response_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {

@@ -71,7 +71,7 @@ pub enum LlmRole {
 /// adapters can emit the right shape without re-coalescing flat messages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LlmContentBlock {
-    Text(String),
+    Text(Arc<str>),
     /// Index into the enclosing `LlmRequest.attachments` vector. User-role
     /// messages may embed images; adapters drop them for providers that
     /// don't accept vision input.
@@ -131,7 +131,7 @@ impl LlmMessage {
     }
 
     /// Convenience constructor for a single-text-block message.
-    pub fn text(role: LlmRole, text: impl Into<String>) -> Self {
+    pub fn text(role: LlmRole, text: impl Into<Arc<str>>) -> Self {
         Self {
             role,
             blocks: Arc::new(vec![LlmContentBlock::Text(text.into())]),

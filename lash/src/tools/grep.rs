@@ -1,7 +1,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::sync::{
+    Arc, Mutex, MutexGuard, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use fff_search::git::format_git_status_opt;
 use fff_search::grep::{GrepMode, GrepSearchOptions, has_regex_metacharacters, is_import_line};
@@ -11,7 +14,9 @@ use fff_search::{
 };
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use crate::{
+    ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolParam, ToolProvider, ToolResult,
+};
 
 use super::require_str;
 
@@ -19,12 +24,15 @@ const DEFAULT_MAX_RESULTS: usize = 20;
 const MAX_CURSORS: usize = 20;
 const MAX_LINE_LEN: usize = 180;
 const MAX_FFF_FUZZY_QUERY_BYTES: usize = (u16::MAX as usize) / (16 * 50);
+const GREP_WALL_TIMEOUT: Duration = Duration::from_secs(5);
+const FFF_SEARCH_BUDGET: Duration = Duration::from_secs(3);
+const DIRECT_FILE_MAX_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Search file contents using an indexed fff-search backend.
 pub struct Grep {
     base_path: Result<PathBuf, String>,
     backend: OnceLock<Result<Arc<GrepBackend>, String>>,
-    cursor_store: Mutex<CursorStore>,
+    cursor_store: Arc<Mutex<CursorStore>>,
 }
 
 impl Grep {
@@ -41,7 +49,7 @@ impl Grep {
         Self {
             base_path: Err(message),
             backend: OnceLock::new(),
-            cursor_store: Mutex::new(CursorStore::new()),
+            cursor_store: Arc::new(Mutex::new(CursorStore::new())),
         }
     }
 
@@ -49,20 +57,23 @@ impl Grep {
         Self {
             base_path: Ok(base_path),
             backend: OnceLock::new(),
-            cursor_store: Mutex::new(CursorStore::new()),
+            cursor_store: Arc::new(Mutex::new(CursorStore::new())),
         }
     }
 
-    fn ensure_ready(&self) -> Result<Arc<GrepBackend>, ToolResult> {
+    fn ensure_ready_for_query(&self, query: &str) -> Result<Arc<GrepBackend>, ToolResult> {
         let backend = self
             .backend
             .get_or_init(|| self.shared_backend())
             .as_ref()
             .map_err(|err| ToolResult::err_fmt(format_args!("{err}")))?;
-        if !backend.picker.wait_for_scan(Duration::from_secs(30)) {
-            return Err(ToolResult::err_fmt(format_args!(
-                "fff-search initial scan timed out"
-            )));
+        if !backend.picker.wait_for_scan(GREP_WALL_TIMEOUT) {
+            return Err(timeout_grep_result(
+                query,
+                "index_scan",
+                GREP_WALL_TIMEOUT,
+                "fff-search initial scan timed out",
+            ));
         }
         Ok(Arc::clone(backend))
     }
@@ -72,25 +83,29 @@ impl Grep {
         backend_for_base(base_path)
     }
 
-    fn lock_cursors(&self) -> Result<MutexGuard<'_, CursorStore>, ToolResult> {
-        self.cursor_store
+    fn lock_cursors(
+        cursor_store: &Mutex<CursorStore>,
+    ) -> Result<MutexGuard<'_, CursorStore>, ToolResult> {
+        cursor_store
             .lock()
             .map_err(|_| ToolResult::err_fmt(format_args!("Failed to acquire cursor store lock")))
     }
 
     fn perform_grep(
-        &self,
         backend: &GrepBackend,
+        cursor_store: &Mutex<CursorStore>,
         query: &str,
         mode: GrepMode,
         max_results: usize,
         cursor_id: Option<&str>,
+        control: &GrepRunControl,
     ) -> Result<serde_json::Value, ToolResult> {
+        control.check(query)?;
         let file_offset = cursor_id
-            .and_then(|id| self.cursor_store.lock().ok()?.get(id))
+            .and_then(|id| cursor_store.lock().ok()?.get(id))
             .unwrap_or(0);
 
-        let (options, auto_expand) = make_grep_options(mode, file_offset);
+        let (options, auto_expand) = make_grep_options(mode, file_offset, control);
 
         let guard = backend.picker.read().map_err(|err| {
             ToolResult::err_fmt(format_args!("Failed to acquire picker lock: {err}"))
@@ -101,9 +116,11 @@ impl Grep {
 
         let parser = QueryParser::new(AiGrepConfig);
         let parsed = parser.parse(query);
+        control.check(query)?;
         let result = picker.grep(&parsed, &options);
 
         if result.matches.is_empty() && file_offset == 0 {
+            control.check(query)?;
             let parts = query.split_whitespace().collect::<Vec<_>>();
             if parts.len() >= 2 {
                 let first_word = parts[0];
@@ -120,11 +137,13 @@ impl Grep {
                     } else {
                         mode
                     };
-                    let (retry_options, retry_auto_expand) = make_grep_options(retry_mode, 0);
+                    let (retry_options, retry_auto_expand) =
+                        make_grep_options(retry_mode, 0, control);
+                    control.check(query)?;
                     let retry_result = picker.grep(&rest_parsed, &retry_options);
 
                     if !retry_result.matches.is_empty() && retry_result.matches.len() <= 10 {
-                        let mut cursors = self.lock_cursors()?;
+                        let mut cursors = Self::lock_cursors(cursor_store)?;
                         return Ok(structured_grep_result(
                             StructuredGrepInput {
                                 query,
@@ -148,11 +167,12 @@ impl Grep {
             }
 
             let fuzzy_query = cleanup_fuzzy_query(query);
-            let (fuzzy_options, fuzzy_auto_expand) = make_grep_options(GrepMode::Fuzzy, 0);
+            let (fuzzy_options, fuzzy_auto_expand) = make_grep_options(GrepMode::Fuzzy, 0, control);
             let fuzzy_parsed = parser.parse(&fuzzy_query);
+            control.check(query)?;
             let fuzzy_result = picker.grep(&fuzzy_parsed, &fuzzy_options);
             if !fuzzy_result.matches.is_empty() {
-                let mut cursors = self.lock_cursors()?;
+                let mut cursors = Self::lock_cursors(cursor_store)?;
                 return Ok(structured_grep_result(
                     StructuredGrepInput {
                         query,
@@ -175,6 +195,7 @@ impl Grep {
 
             if query.contains('/') {
                 let file_query = QueryParser::default().parse(query);
+                control.check(query)?;
                 let file_result = picker.fuzzy_search(
                     &file_query,
                     None,
@@ -201,11 +222,17 @@ impl Grep {
                             "matches": [],
                             "files": [],
                             "count": 0,
+                            "shown": 0,
                             "files_with_matches": 0,
                             "truncated": false,
                             "cursor": null,
                             "suggested_path": top.relative_path(picker),
                             "approximate": false,
+                            "broadened_from": null,
+                            "regex_fallback_error": null,
+                            "timed_out": false,
+                            "cancelled": false,
+                            "error": null,
                         }));
                     }
                 }
@@ -218,7 +245,7 @@ impl Grep {
             return Ok(empty_grep_result(query));
         }
 
-        let mut cursors = self.lock_cursors()?;
+        let mut cursors = Self::lock_cursors(cursor_store)?;
         Ok(structured_grep_result(
             StructuredGrepInput {
                 query,
@@ -296,6 +323,27 @@ impl ToolProvider for Grep {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
+        self.execute_inner(args, None).await
+    }
+
+    async fn execute_streaming_with_context(
+        &self,
+        _name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+        _progress: Option<&crate::ProgressSender>,
+    ) -> ToolResult {
+        self.execute_inner(args, context.cancellation_token.clone())
+            .await
+    }
+}
+
+impl Grep {
+    async fn execute_inner(
+        &self,
+        args: &serde_json::Value,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> ToolResult {
         let raw_query = match require_str(args, "query") {
             Ok(query) => query,
             Err(err) => return err,
@@ -328,26 +376,37 @@ impl ToolProvider for Grep {
 
         let (backend, query) = match path_arg {
             Some(path) => match resolve_path_scope(default_base.as_deref(), path) {
-                Ok(scope) => {
-                    let backend = match backend_for_base(&scope.base_path) {
+                Ok(PathScope::File(file_path)) => {
+                    return direct_file_grep(
+                        raw_query,
+                        &file_path,
+                        default_base.as_deref(),
+                        max_results,
+                        cancellation_token,
+                    )
+                    .await;
+                }
+                Ok(PathScope::Directory(base_path)) => {
+                    let backend = match backend_for_base(&base_path) {
                         Ok(backend) => backend,
                         Err(err) => return ToolResult::err_fmt(format_args!("{err}")),
                     };
-                    let query = match scope.file_constraint {
-                        Some(filename) => format!("{filename} {raw_query}"),
-                        None => raw_query.to_string(),
-                    };
-                    if !backend.picker.wait_for_scan(Duration::from_secs(30)) {
-                        return ToolResult::err_fmt(format_args!(
-                            "fff-search initial scan timed out for {}",
-                            scope.base_path.display()
-                        ));
+                    if !backend.picker.wait_for_scan(GREP_WALL_TIMEOUT) {
+                        return timeout_grep_result(
+                            raw_query,
+                            "index_scan",
+                            GREP_WALL_TIMEOUT,
+                            &format!(
+                                "fff-search initial scan timed out for {}",
+                                base_path.display()
+                            ),
+                        );
                     }
-                    (backend, query)
+                    (backend, raw_query.to_string())
                 }
                 Err(err) => return err,
             },
-            None => match self.ensure_ready() {
+            None => match self.ensure_ready_for_query(raw_query) {
                 Ok(backend) => (backend, raw_query.to_string()),
                 Err(err) => return err,
             },
@@ -360,23 +419,204 @@ impl ToolProvider for Grep {
             GrepMode::PlainText
         };
 
-        match self.perform_grep(&backend, &query, mode, max_results, cursor) {
-            Ok(value) => ToolResult::ok(value),
-            Err(err) => err,
-        }
+        bounded_indexed_grep(
+            Arc::clone(&backend),
+            Arc::clone(&self.cursor_store),
+            query,
+            mode,
+            max_results,
+            cursor.map(str::to_string),
+            cancellation_token,
+        )
+        .await
     }
 }
 
-struct PathScope {
-    base_path: PathBuf,
-    file_constraint: Option<String>,
+enum PathScope {
+    Directory(PathBuf),
+    File(PathBuf),
 }
 
-/// Resolve a user-supplied `path` into a search root and optional
-/// single-file filter. A directory becomes the search root directly; a
-/// file becomes its parent directory plus a `<filename>` constraint.
-/// Relative paths resolve against the workspace root when available
-/// and fall back to the current directory otherwise.
+#[derive(Clone)]
+struct GrepRunControl {
+    abort_signal: Arc<AtomicBool>,
+    deadline: Instant,
+    budget: Duration,
+}
+
+impl GrepRunControl {
+    fn new(abort_signal: Arc<AtomicBool>, budget: Duration) -> Self {
+        Self {
+            abort_signal,
+            deadline: Instant::now() + budget,
+            budget,
+        }
+    }
+
+    fn check(&self, query: &str) -> Result<(), ToolResult> {
+        if self.abort_signal.load(Ordering::Relaxed) {
+            return Err(cancelled_grep_result(query));
+        }
+        if Instant::now() >= self.deadline {
+            self.abort_signal.store(true, Ordering::Relaxed);
+            return Err(timeout_grep_result(
+                query,
+                "fff_search",
+                self.budget,
+                "grep search timed out",
+            ));
+        }
+        Ok(())
+    }
+
+    fn remaining_budget_ms(&self) -> u64 {
+        self.deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .max(1) as u64
+    }
+}
+
+async fn bounded_indexed_grep(
+    backend: Arc<GrepBackend>,
+    cursor_store: Arc<Mutex<CursorStore>>,
+    query: String,
+    mode: GrepMode,
+    max_results: usize,
+    cursor: Option<String>,
+    cancellation_token: Option<tokio_util::sync::CancellationToken>,
+) -> ToolResult {
+    let abort_signal = Arc::new(AtomicBool::new(false));
+    let cancellation_watcher = cancellation_token.map(|token| {
+        let abort_signal = Arc::clone(&abort_signal);
+        tokio::spawn(async move {
+            token.cancelled().await;
+            abort_signal.store(true, Ordering::Relaxed);
+        })
+    });
+    let control = GrepRunControl::new(Arc::clone(&abort_signal), FFF_SEARCH_BUDGET);
+    let timeout_query = query.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        Grep::perform_grep(
+            &backend,
+            &cursor_store,
+            &query,
+            mode,
+            max_results,
+            cursor.as_deref(),
+            &control,
+        )
+    });
+
+    let result = match tokio::time::timeout(GREP_WALL_TIMEOUT, handle).await {
+        Ok(Ok(Ok(value))) => ToolResult::ok(value),
+        Ok(Ok(Err(err))) => err,
+        Ok(Err(err)) => ToolResult::err(serde_json::json!({
+            "query": timeout_query,
+            "query_used": timeout_query,
+            "matches": [],
+            "files": [],
+            "count": 0,
+            "shown": 0,
+            "files_with_matches": 0,
+            "truncated": false,
+            "cursor": null,
+            "suggested_path": null,
+            "approximate": false,
+            "timed_out": false,
+            "cancelled": false,
+            "error": {
+                "kind": "panic",
+                "message": format!("grep worker failed: {err}"),
+                "stage": "fff_search",
+            },
+        })),
+        Err(_) => {
+            abort_signal.store(true, Ordering::Relaxed);
+            timeout_grep_result(
+                &timeout_query,
+                "fff_search",
+                GREP_WALL_TIMEOUT,
+                "grep search timed out",
+            )
+        }
+    };
+    if let Some(watcher) = cancellation_watcher {
+        watcher.abort();
+    }
+    result
+}
+
+async fn direct_file_grep(
+    query: &str,
+    file_path: &Path,
+    default_base: Option<&Path>,
+    max_results: usize,
+    cancellation_token: Option<tokio_util::sync::CancellationToken>,
+) -> ToolResult {
+    let query = query.to_string();
+    let file_path = file_path.to_path_buf();
+    let default_base = default_base.map(Path::to_path_buf);
+    let abort_signal = Arc::new(AtomicBool::new(false));
+    let cancellation_watcher = cancellation_token.map(|token| {
+        let abort_signal = Arc::clone(&abort_signal);
+        tokio::spawn(async move {
+            token.cancelled().await;
+            abort_signal.store(true, Ordering::Relaxed);
+        })
+    });
+    let worker_abort = Arc::clone(&abort_signal);
+    let timeout_query = query.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        direct_file_grep_sync(
+            &query,
+            &file_path,
+            default_base.as_deref(),
+            max_results,
+            &worker_abort,
+        )
+    });
+    let result = match tokio::time::timeout(GREP_WALL_TIMEOUT, handle).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => ToolResult::err(serde_json::json!({
+            "query": timeout_query,
+            "query_used": timeout_query,
+            "matches": [],
+            "files": [],
+            "count": 0,
+            "shown": 0,
+            "files_with_matches": 0,
+            "truncated": false,
+            "cursor": null,
+            "suggested_path": null,
+            "approximate": false,
+            "timed_out": false,
+            "cancelled": false,
+            "error": {
+                "kind": "panic",
+                "message": format!("direct grep worker failed: {err}"),
+                "stage": "direct_file",
+            },
+        })),
+        Err(_) => {
+            abort_signal.store(true, Ordering::Relaxed);
+            timeout_grep_result(
+                &timeout_query,
+                "direct_file",
+                GREP_WALL_TIMEOUT,
+                "direct file grep timed out",
+            )
+        }
+    };
+    if let Some(watcher) = cancellation_watcher {
+        watcher.abort();
+    }
+    result
+}
+
+/// Resolve a user-supplied `path` into either an indexed directory search root
+/// or a direct single-file scan. Relative paths resolve against the workspace
+/// root when available and fall back to the current directory otherwise.
 fn resolve_path_scope(
     default_base: Option<&Path>,
     requested: &str,
@@ -399,24 +639,9 @@ fn resolve_path_scope(
         ))
     })?;
     if canonical.is_dir() {
-        Ok(PathScope {
-            base_path: canonical,
-            file_constraint: None,
-        })
+        Ok(PathScope::Directory(canonical))
     } else {
-        let filename = canonical
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .ok_or_else(|| {
-                ToolResult::err_fmt(format_args!("`path` {requested} has no filename component"))
-            })?;
-        let parent = canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
-            ToolResult::err_fmt(format_args!("`path` {requested} has no parent directory"))
-        })?;
-        Ok(PathScope {
-            base_path: parent,
-            file_constraint: Some(filename),
-        })
+        Ok(PathScope::File(canonical))
     }
 }
 
@@ -515,10 +740,325 @@ fn grep_content_cache_budget() -> ContentCacheBudget {
     ContentCacheBudget {
         max_files: 0,
         max_bytes: 0,
-        max_file_size: 10 * 1024 * 1024,
+        max_file_size: DIRECT_FILE_MAX_SIZE,
         cached_count: Default::default(),
         cached_bytes: Default::default(),
     }
+}
+
+fn direct_file_grep_sync(
+    query: &str,
+    file_path: &Path,
+    default_base: Option<&Path>,
+    max_results: usize,
+    abort_signal: &AtomicBool,
+) -> ToolResult {
+    if abort_signal.load(Ordering::Relaxed) {
+        return cancelled_grep_result(query);
+    }
+    let metadata = match std::fs::metadata(file_path) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            return ToolResult::err(serde_json::json!({
+                "query": query,
+                "query_used": query,
+                "matches": [],
+                "files": [],
+                "count": 0,
+                "shown": 0,
+                "files_with_matches": 0,
+                "truncated": false,
+                "cursor": null,
+                "suggested_path": null,
+                "approximate": false,
+                "timed_out": false,
+                "cancelled": false,
+                "error": {
+                    "kind": "io",
+                    "message": format!("failed to stat file: {err}"),
+                    "stage": "direct_file",
+                },
+            }));
+        }
+    };
+    if !metadata.is_file() {
+        return ToolResult::err(serde_json::json!({
+            "query": query,
+            "query_used": query,
+            "matches": [],
+            "files": [],
+            "count": 0,
+            "shown": 0,
+            "files_with_matches": 0,
+            "truncated": false,
+            "cursor": null,
+            "suggested_path": null,
+            "approximate": false,
+            "timed_out": false,
+            "cancelled": false,
+            "error": {
+                "kind": "not_a_file",
+                "message": "path is not a regular file",
+                "stage": "direct_file",
+            },
+        }));
+    }
+    if metadata.len() > DIRECT_FILE_MAX_SIZE {
+        return ToolResult::err(serde_json::json!({
+            "query": query,
+            "query_used": query,
+            "matches": [],
+            "files": [],
+            "count": 0,
+            "shown": 0,
+            "files_with_matches": 0,
+            "truncated": false,
+            "cursor": null,
+            "suggested_path": null,
+            "approximate": false,
+            "timed_out": false,
+            "cancelled": false,
+            "error": {
+                "kind": "file_too_large",
+                "message": format!("file exceeds grep limit of {DIRECT_FILE_MAX_SIZE} bytes"),
+                "stage": "direct_file",
+                "size_bytes": metadata.len(),
+                "max_size_bytes": DIRECT_FILE_MAX_SIZE,
+            },
+        }));
+    }
+
+    let parsed = QueryParser::new(AiGrepConfig).parse(query);
+    let grep_text = parsed.grep_text();
+    if grep_text.is_empty() {
+        return ToolResult::ok(empty_grep_result(query));
+    }
+
+    let bytes = match std::fs::read(file_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return ToolResult::err(serde_json::json!({
+                "query": query,
+                "query_used": grep_text,
+                "matches": [],
+                "files": [],
+                "count": 0,
+                "shown": 0,
+                "files_with_matches": 0,
+                "truncated": false,
+                "cursor": null,
+                "suggested_path": null,
+                "approximate": false,
+                "timed_out": false,
+                "cancelled": false,
+                "error": {
+                    "kind": "io",
+                    "message": format!("failed to read file: {err}"),
+                    "stage": "direct_file",
+                },
+            }));
+        }
+    };
+    if abort_signal.load(Ordering::Relaxed) {
+        return cancelled_grep_result(query);
+    }
+
+    let display_path = display_path_for_direct_file(file_path, default_base);
+    let matcher = match DirectMatcher::new(&grep_text) {
+        Ok(matcher) => matcher,
+        Err(regex_error) => DirectMatcher::literal_with_error(&grep_text, regex_error),
+    };
+
+    let text = String::from_utf8_lossy(&bytes);
+    let mut matches = Vec::new();
+    let mut total_matches = 0usize;
+    for (line_index, segment) in text.split_inclusive('\n').enumerate() {
+        if abort_signal.load(Ordering::Relaxed) {
+            return cancelled_grep_result(query);
+        }
+        let line = segment.trim_end_matches(['\r', '\n']);
+        let ranges = matcher.ranges(line);
+        if !ranges.is_empty() {
+            total_matches += 1;
+            if matches.len() < max_results {
+                let first = ranges[0];
+                let json_ranges = ranges
+                    .iter()
+                    .map(|(start, end)| {
+                        json!({
+                            "start": start,
+                            "end": end,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let match_text =
+                    direct_match_text(line, first.0 as usize, first.1 as usize).to_string();
+                matches.push(json!({
+                    "path": display_path.clone(),
+                    "line": (line_index + 1) as u64,
+                    "column": first.0.saturating_add(1),
+                    "byte_column": first.0,
+                    "excerpt": truncate_line_for_ai(line, Some(ranges.as_slice()), MAX_LINE_LEN),
+                    "match": match_text,
+                    "ranges": json_ranges,
+                    "is_definition": looks_like_definition_line(line),
+                }));
+            }
+        }
+    }
+
+    let shown = matches.len();
+    let files = if total_matches > 0 {
+        vec![json!({
+            "path": display_path.clone(),
+            "count": total_matches,
+            "size_bytes": metadata.len(),
+            "is_binary": bytes.contains(&0),
+            "git_status": null,
+        })]
+    } else {
+        Vec::new()
+    };
+
+    ToolResult::ok(json!({
+        "query": query,
+        "query_used": grep_text,
+        "broadened_from": null,
+        "regex_fallback_error": matcher.regex_error(),
+        "matches": matches,
+        "files": files,
+        "count": total_matches,
+        "shown": shown,
+        "files_with_matches": if total_matches > 0 { 1 } else { 0 },
+        "truncated": total_matches > shown,
+        "cursor": null,
+        "suggested_path": if total_matches > 0 { Some(display_path) } else { None },
+        "approximate": false,
+        "timed_out": false,
+        "cancelled": false,
+        "error": null,
+    }))
+}
+
+enum DirectMatcher {
+    Literal {
+        needle: String,
+        case_insensitive: bool,
+        regex_error: Option<String>,
+    },
+    Regex(regex::Regex),
+}
+
+impl DirectMatcher {
+    fn new(pattern: &str) -> Result<Self, regex::Error> {
+        if has_regex_metacharacters(pattern) {
+            let case_insensitive = !pattern.chars().any(|ch| ch.is_uppercase());
+            let regex = regex::RegexBuilder::new(pattern)
+                .case_insensitive(case_insensitive)
+                .build()?;
+            Ok(Self::Regex(regex))
+        } else {
+            Ok(Self::Literal {
+                needle: pattern.to_string(),
+                case_insensitive: !pattern.chars().any(|ch| ch.is_uppercase()),
+                regex_error: None,
+            })
+        }
+    }
+
+    fn literal_with_error(pattern: &str, error: regex::Error) -> Self {
+        Self::Literal {
+            needle: pattern.to_string(),
+            case_insensitive: !pattern.chars().any(|ch| ch.is_uppercase()),
+            regex_error: Some(error.to_string()),
+        }
+    }
+
+    fn regex_error(&self) -> Option<&str> {
+        match self {
+            Self::Literal { regex_error, .. } => regex_error.as_deref(),
+            Self::Regex(_) => None,
+        }
+    }
+
+    fn ranges(&self, line: &str) -> Vec<(u32, u32)> {
+        match self {
+            Self::Literal {
+                needle,
+                case_insensitive,
+                ..
+            } => literal_ranges(line, needle, *case_insensitive),
+            Self::Regex(regex) => regex
+                .find_iter(line)
+                .take(16)
+                .map(|matched| (matched.start() as u32, matched.end() as u32))
+                .collect(),
+        }
+    }
+}
+
+fn literal_ranges(line: &str, needle: &str, case_insensitive: bool) -> Vec<(u32, u32)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let haystack = if case_insensitive {
+        line.to_ascii_lowercase()
+    } else {
+        line.to_string()
+    };
+    let needle = if case_insensitive {
+        needle.to_ascii_lowercase()
+    } else {
+        needle.to_string()
+    };
+    let mut ranges = Vec::new();
+    let mut offset = 0usize;
+    while let Some(found) = haystack[offset..].find(&needle) {
+        let start = offset + found;
+        let end = start + needle.len();
+        ranges.push((start as u32, end as u32));
+        if ranges.len() >= 16 {
+            break;
+        }
+        offset = end.max(start + 1);
+    }
+    ranges
+}
+
+fn display_path_for_direct_file(file_path: &Path, default_base: Option<&Path>) -> String {
+    if let Some(base) = default_base
+        && let Ok(relative) = file_path.strip_prefix(base)
+    {
+        return relative.to_string_lossy().to_string();
+    }
+    file_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_path.display().to_string())
+}
+
+fn direct_match_text(line: &str, start: usize, end: usize) -> &str {
+    let start = floor_char_boundary(line, start);
+    let end = ceil_char_boundary(line, end);
+    &line[start..end]
+}
+
+fn looks_like_definition_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    [
+        "fn ",
+        "pub fn ",
+        "async fn ",
+        "def ",
+        "class ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "impl ",
+        "function ",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn parse_max_results(args: &serde_json::Value) -> Result<usize, ToolResult> {
@@ -559,7 +1099,11 @@ fn cleanup_fuzzy_query(input: &str) -> String {
     output
 }
 
-fn make_grep_options(mode: GrepMode, file_offset: usize) -> (GrepSearchOptions, bool) {
+fn make_grep_options(
+    mode: GrepMode,
+    file_offset: usize,
+    control: &GrepRunControl,
+) -> (GrepSearchOptions, bool) {
     let max_matches_per_file = 10;
     let before_context = 0;
     let auto_expand_defs = before_context == 0;
@@ -573,15 +1117,66 @@ fn make_grep_options(mode: GrepMode, file_offset: usize) -> (GrepSearchOptions, 
             file_offset,
             page_limit: 50,
             mode,
-            time_budget_ms: 0,
+            time_budget_ms: control.remaining_budget_ms(),
             before_context,
             after_context,
             classify_definitions: true,
             trim_whitespace: false,
-            abort_signal: None,
+            abort_signal: Some(Arc::clone(&control.abort_signal)),
         },
         auto_expand_defs,
     )
+}
+
+fn timeout_grep_result(query: &str, stage: &str, budget: Duration, message: &str) -> ToolResult {
+    ToolResult::err(json!({
+        "query": query,
+        "query_used": query,
+        "broadened_from": null,
+        "regex_fallback_error": null,
+        "matches": [],
+        "files": [],
+        "count": 0,
+        "shown": 0,
+        "files_with_matches": 0,
+        "truncated": false,
+        "cursor": null,
+        "suggested_path": null,
+        "approximate": false,
+        "timed_out": true,
+        "cancelled": false,
+        "error": {
+            "kind": "timeout",
+            "message": message,
+            "stage": stage,
+            "budget_ms": budget.as_millis() as u64,
+        },
+    }))
+}
+
+fn cancelled_grep_result(query: &str) -> ToolResult {
+    ToolResult::err(json!({
+        "query": query,
+        "query_used": query,
+        "broadened_from": null,
+        "regex_fallback_error": null,
+        "matches": [],
+        "files": [],
+        "count": 0,
+        "shown": 0,
+        "files_with_matches": 0,
+        "truncated": false,
+        "cursor": null,
+        "suggested_path": null,
+        "approximate": false,
+        "timed_out": false,
+        "cancelled": true,
+        "error": {
+            "kind": "cancelled",
+            "message": "grep cancelled",
+            "stage": "grep",
+        },
+    }))
 }
 
 #[derive(Default)]
@@ -782,6 +1377,9 @@ fn structured_grep_result(
         "cursor": cursor,
         "suggested_path": suggested_path,
         "regex_fallback_error": input.regex_fallback_error,
+        "timed_out": false,
+        "cancelled": false,
+        "error": null,
     })
 }
 
@@ -800,6 +1398,9 @@ fn empty_grep_result(query: &str) -> serde_json::Value {
         "cursor": null,
         "suggested_path": null,
         "approximate": false,
+        "timed_out": false,
+        "cancelled": false,
+        "error": null,
     })
 }
 
@@ -972,6 +1573,54 @@ mod tests {
                 .any(|item| item["path"] == "other.txt"),
             "file path should exclude other.txt"
         );
+        assert!(
+            tool.backend.get().is_none(),
+            "single-file grep should bypass the indexed backend"
+        );
+        assert_eq!(result.result["timed_out"], false);
+        assert_eq!(result.result["error"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn test_grep_file_path_uses_direct_scan_for_multiword_query() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("bottle.py"),
+            "header cookie static_file abort redirect request response\nunrelated\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("other.py"),
+            "header cookie static_file abort redirect request response\n",
+        )
+        .unwrap();
+
+        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let result = tool
+            .execute(
+                "grep",
+                &json!({
+                    "query": "header cookie static_file abort redirect request response",
+                    "path": "bottle.py",
+                    "maxResults": 80,
+                }),
+            )
+            .await;
+
+        assert!(result.success, "direct grep failed: {:?}", result.result);
+        assert_eq!(result.result["count"], 1);
+        assert_eq!(result.result["shown"], 1);
+        assert_eq!(result.result["matches"][0]["path"], "bottle.py");
+        assert_eq!(
+            result.result["matches"][0]["match"],
+            "header cookie static_file abort redirect request response"
+        );
+        assert!(
+            tool.backend.get().is_none(),
+            "single-file grep should not initialize fff"
+        );
+        assert_eq!(result.result["timed_out"], false);
+        assert_eq!(result.result["error"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -1032,6 +1681,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_grep_infers_obvious_file_prefix_without_indexing() {
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let file = outside.path().join("external.txt");
+        std::fs::write(&file, "banana split\n").unwrap();
+
+        let tool = Grep::with_base_path(workspace.path().to_path_buf());
+        let result = tool
+            .execute(
+                "grep",
+                &json!({"query": format!("{} banana", file.display())}),
+            )
+            .await;
+        assert!(result.success);
+        assert_eq!(result.result["matches"][0]["path"], "external.txt");
+        assert!(
+            tool.backend.get().is_none(),
+            "inferred single-file grep should bypass fff"
+        );
+    }
+
+    #[test]
+    fn test_direct_file_grep_observes_pre_cancelled_abort_signal() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "banana\n").unwrap();
+        let abort = AtomicBool::new(true);
+
+        let result = direct_file_grep_sync("banana", &file, Some(dir.path()), 20, &abort);
+
+        assert!(!result.success);
+        assert_eq!(result.result["cancelled"], true);
+        assert_eq!(result.result["error"]["kind"], "cancelled");
+    }
+
+    #[tokio::test]
     async fn test_grep_path_missing_returns_clear_error() {
         let workspace = TempDir::new().unwrap();
         let tool = Grep::with_base_path(workspace.path().to_path_buf());
@@ -1057,8 +1742,8 @@ mod tests {
         let left = Grep::with_base_path(dir.path().to_path_buf());
         let right = Grep::with_base_path(dir.path().to_path_buf());
 
-        let left_backend = left.ensure_ready().expect("left backend");
-        let right_backend = right.ensure_ready().expect("right backend");
+        let left_backend = left.ensure_ready_for_query("ctx").expect("left backend");
+        let right_backend = right.ensure_ready_for_query("ctx").expect("right backend");
 
         assert!(Arc::ptr_eq(&left_backend, &right_backend));
     }

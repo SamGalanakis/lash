@@ -593,7 +593,7 @@ mod tests {
     fn write_stdin_summary_uses_input_preview() {
         let mut state = ActivityState::default();
         state.blocks_for_tool_call(
-            "exec_command",
+            "start_command",
             json!({"cmd":"python3 -q"}),
             json!({
                 "session_id": 7,
@@ -605,7 +605,7 @@ mod tests {
 
         let wrote = state.blocks_for_tool_call(
             "write_stdin",
-            json!({"session_id":7,"chars":"print(2 + 2)\n","yield_time_ms":1000}),
+            json!({"session_id":7,"chars":"print(2 + 2)\n","poll_ms":1000}),
             json!({
                 "exit_code": null,
                 "session_id": 7,
@@ -622,7 +622,7 @@ mod tests {
     fn write_stdin_empty_poll_without_output_is_suppressed() {
         let mut state = ActivityState::default();
         state.blocks_for_tool_call(
-            "exec_command",
+            "start_command",
             json!({"cmd":"python3 -q"}),
             json!({
                 "session_id": 7,
@@ -634,7 +634,7 @@ mod tests {
 
         let polled = state.blocks_for_tool_call(
             "write_stdin",
-            json!({"session_id":7,"chars":"","yield_time_ms":1000}),
+            json!({"session_id":7,"chars":"","poll_ms":1000}),
             json!({
                 "session_id": 7,
                 "output": "",
@@ -651,7 +651,7 @@ mod tests {
     fn write_stdin_empty_poll_with_output_is_kept() {
         let mut state = ActivityState::default();
         state.blocks_for_tool_call(
-            "exec_command",
+            "start_command",
             json!({"cmd":"python3 -q"}),
             json!({
                 "session_id": 7,
@@ -663,7 +663,7 @@ mod tests {
 
         let polled = state.blocks_for_tool_call(
             "write_stdin",
-            json!({"session_id":7,"chars":"","yield_time_ms":1000}),
+            json!({"session_id":7,"chars":"","poll_ms":1000}),
             json!({
                 "session_id": 7,
                 "output": ">>> ",

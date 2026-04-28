@@ -461,8 +461,15 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         messages.extend(build_memory_context_messages(&active));
         messages.extend_from_slice(&input_messages[tail_start..]);
 
+        // Wrap as base + fresh render cache so the per-iteration chat
+        // projector reuses one rendered prompt across LLM iterations
+        // within this turn (OM only runs once per turn). Push-driven
+        // additions during the turn land in the delta and re-render
+        // each iteration as before.
+        let base = std::sync::Arc::new(messages);
+        let cache = std::sync::Arc::new(lash::BaseRenderCache::new());
         Ok(PreparedContext {
-            messages: lash::MessageSequence::from_owned(messages),
+            messages: lash::MessageSequence::from_base(base).with_base_render_cache(cache),
             ..input
         })
     }
@@ -1085,7 +1092,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
     Message {
         id: id.to_string(),
         role,
-        parts: vec![Part {
+        parts: lash::shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Prose,
             content,
@@ -1096,7 +1103,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
             tool_signature: None,
             prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
             plugin_id: OBSERVATIONAL_MEMORY_PLUGIN_ID.to_string(),
@@ -1359,11 +1366,11 @@ async fn run_worker_turn(
                 messages: vec![
                     DirectMessage {
                         role: DirectRole::System,
-                        parts: vec![DirectPart::Text(system_prompt.to_string())],
+                        parts: vec![DirectPart::Text(system_prompt.to_string())].into(),
                     },
                     DirectMessage {
                         role: DirectRole::User,
-                        parts: vec![DirectPart::Text(prompt.to_string())],
+                        parts: vec![DirectPart::Text(prompt.to_string())].into(),
                     },
                 ],
                 attachments: Vec::new(),
@@ -1519,7 +1526,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: lash::PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use lash_trace::{JsonlTraceSink, TraceContext, TraceSink};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -78,69 +79,6 @@ pub struct ManagedTaskStatus {
 /// has no tokio handle.
 pub type ManagedTaskCancel =
     Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
-
-/// Destination for LLM request/response/stream debug entries. Lash
-/// emits structured JSON entries at several turn-loop checkpoints; the
-/// host decides where they go.
-///
-/// Default: none (lash emits nothing). lash-cli wires a
-/// [`FileLlmCallLogger`] pointing at a rotating file. Webserver
-/// embedders typically provide their own impl that routes entries to
-/// an observability pipeline (OTel, Datadog, in-memory ring buffer).
-pub trait LlmCallLogger: Send + Sync {
-    /// Append a structured entry. Implementations should not block the
-    /// caller for long; buffer + flush asynchronously if needed.
-    fn append(&self, entry: &serde_json::Value);
-}
-
-/// File-backed [`LlmCallLogger`] that writes one JSON line per entry.
-/// Uses an internal mutex so concurrent turn drivers don't interleave
-/// lines. Failures log at warn-level and are otherwise silent.
-pub struct FileLlmCallLogger {
-    path: PathBuf,
-    lock: StdMutex<()>,
-}
-
-impl FileLlmCallLogger {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            lock: StdMutex::new(()),
-        }
-    }
-}
-
-impl LlmCallLogger for FileLlmCallLogger {
-    fn append(&self, entry: &serde_json::Value) {
-        use std::io::Write;
-        let Ok(line) = serde_json::to_string(entry) else {
-            return;
-        };
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path);
-        match file {
-            Ok(mut file) => {
-                let _guard = self.lock.lock().ok();
-                if let Err(err) = writeln!(file, "{}", line) {
-                    tracing::warn!(
-                        error = %err,
-                        path = %self.path.display(),
-                        "failed to append llm debug log"
-                    );
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    path = %self.path.display(),
-                    "failed to open llm debug log"
-                );
-            }
-        }
-    }
-}
 
 /// Default resolver for file and directory references.
 #[derive(Default)]
@@ -461,7 +399,8 @@ pub struct RuntimeCoreConfig {
     pub base_dir: PathBuf,
     pub path_resolver: Arc<dyn PathResolver>,
     pub prompt_template: crate::PromptTemplate,
-    pub llm_logger: Option<Arc<dyn LlmCallLogger>>,
+    pub trace_sink: Option<Arc<dyn TraceSink>>,
+    pub trace_context: TraceContext,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
     pub retry_policy: lash_sansio::RetryPolicy,
@@ -479,7 +418,8 @@ impl Default for RuntimeCoreConfig {
             base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path_resolver: Arc::new(DefaultPathResolver),
             prompt_template: crate::default_prompt_template(),
-            llm_logger: None,
+            trace_sink: None,
+            trace_context: TraceContext::default(),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
             retry_policy: lash_sansio::RetryPolicy::default(),
@@ -504,14 +444,19 @@ impl RuntimeCoreConfig {
         self
     }
 
-    pub fn with_llm_log_path(mut self, llm_log_path: Option<PathBuf>) -> Self {
-        self.llm_logger = llm_log_path
-            .map(|path| Arc::new(FileLlmCallLogger::new(path)) as Arc<dyn LlmCallLogger>);
+    pub fn with_trace_jsonl_path(mut self, trace_path: Option<PathBuf>) -> Self {
+        self.trace_sink =
+            trace_path.map(|path| Arc::new(JsonlTraceSink::new(path)) as Arc<dyn TraceSink>);
         self
     }
 
-    pub fn with_llm_logger(mut self, logger: Option<Arc<dyn LlmCallLogger>>) -> Self {
-        self.llm_logger = logger;
+    pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
+        self.trace_sink = sink;
+        self
+    }
+
+    pub fn with_trace_context(mut self, context: TraceContext) -> Self {
+        self.trace_context = context;
         self
     }
 

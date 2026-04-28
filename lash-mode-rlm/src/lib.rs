@@ -18,10 +18,14 @@
 
 mod driver;
 mod plugin;
-mod rlm_support;
+pub mod rlm_support;
 mod stream_mask;
 
 pub use driver::{
-    LASHLANG_LANGUAGE_REFERENCE, RlmDriver, contains_closed_lashlang_fence, rlm_execution_section,
+    LASHLANG_LANGUAGE_REFERENCE, RlmDriver, build_task_context, contains_closed_lashlang_fence,
+    rlm_execution_section,
 };
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
+pub use rlm_support::{
+    BoundVariablesCache, bound_variables_prompt_contributions, budget_prompt_contributions,
+};

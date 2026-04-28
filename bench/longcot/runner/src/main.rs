@@ -595,7 +595,7 @@ async fn run_question(
         .with_context(|| format!("write {}", question_dir.join("prompt.txt").display()))?;
 
     let store_path = question_dir.join("session.db");
-    let llm_log_path = question_dir.join("session.llm.jsonl");
+    let trace_path = question_dir.join("session.trace.jsonl");
     let store = Arc::new(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
@@ -622,7 +622,7 @@ async fn run_question(
     let host = BackgroundRuntimeHost::new(
         EmbeddedRuntimeHost::new(
             RuntimeCoreConfig::default()
-                .with_llm_log_path(Some(llm_log_path.clone()))
+                .with_trace_jsonl_path(Some(trace_path.clone()))
                 .with_prompt_template(longcot_prompt_template()),
         ),
         Arc::new(TokioSessionTaskExecutor::default()),
@@ -738,12 +738,12 @@ async fn run_question(
 
     // Emit a self-contained HTML trace alongside the session db. Failures
     // here should not take down the benchmark — traces are a debugging aid.
-    let trace_path = question_dir.join("trace.html");
+    let html_trace_path = question_dir.join("trace.html");
     if let Err(err) = export(
         SessionSelector::Path(&store_path),
         std::path::Path::new(""),
         ExportFormat::Html,
-        Some(&trace_path),
+        Some(&html_trace_path),
     ) {
         eprintln!(
             "warn: failed to render HTML trace for {}: {err:#}",
@@ -751,11 +751,11 @@ async fn run_question(
         );
     }
 
-    // Project the actual outgoing system prompt out of the LLM log so you can
+    // Project the actual outgoing system prompt out of the typed trace so you can
     // see exactly what the model was told. `lash-export` doesn't include the
     // on-the-fly rendered system prompt in the trace because it isn't stored
     // in the session graph.
-    if let Err(err) = write_system_prompt_snapshot(&llm_log_path, &question_dir) {
+    if let Err(err) = write_system_prompt_snapshot(&trace_path, &question_dir) {
         eprintln!(
             "warn: failed to snapshot system prompt for {}: {err:#}",
             question.question_id
@@ -765,16 +765,19 @@ async fn run_question(
     Ok(result)
 }
 
-fn write_system_prompt_snapshot(llm_log_path: &Path, question_dir: &Path) -> anyhow::Result<()> {
-    if !llm_log_path.exists() {
+fn write_system_prompt_snapshot(trace_path: &Path, question_dir: &Path) -> anyhow::Result<()> {
+    if !trace_path.exists() {
         return Ok(());
     }
-    let raw = fs::read_to_string(llm_log_path)
-        .with_context(|| format!("read {}", llm_log_path.display()))?;
+    let raw =
+        fs::read_to_string(trace_path).with_context(|| format!("read {}", trace_path.display()))?;
     for line in raw.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if record.get("type").and_then(Value::as_str) != Some("llm_call_started") {
+            continue;
+        }
         let Some(request) = record.get("request") else {
             continue;
         };
@@ -789,7 +792,7 @@ fn write_system_prompt_snapshot(llm_log_path: &Path, question_dir: &Path) -> any
             .iter()
             .find(|m| m.get("role").and_then(Value::as_str) == Some("system"));
         if let Some(system) = system {
-            let text = extract_text(system.get("content"));
+            let text = extract_text(system.get("blocks").or_else(|| system.get("content")));
             fs::write(question_dir.join("system_prompt.txt"), text).with_context(|| {
                 format!("write {}", question_dir.join("system_prompt.txt").display())
             })?;

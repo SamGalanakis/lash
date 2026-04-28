@@ -1,6 +1,6 @@
-//! Shell projector: `exec_command` and `write_stdin`.
+//! Shell projector: `exec_command`, `start_command`, and `write_stdin`.
 //!
-//! Both mutate the `shell_handles` map on the ctx — `exec_command`
+//! Stateful calls mutate the `shell_handles` map on the ctx — `start_command`
 //! registers a running shell session, `write_stdin` clears it on exit
 //! or keeps it alive while the session is still running. Stateful
 //! tools like these are exactly why `ProjectCtx` exposes the handle
@@ -17,12 +17,12 @@ pub(crate) struct ShellProjector;
 
 impl ToolProjector for ShellProjector {
     fn tool_names(&self) -> &'static [&'static str] {
-        &["exec_command", "write_stdin"]
+        &["exec_command", "start_command", "write_stdin"]
     }
 
     fn project(&self, ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
         match ctx.name {
-            "exec_command" => project_exec_command(ctx),
+            "exec_command" | "start_command" => project_exec_command(ctx),
             "write_stdin" => project_write_stdin(ctx),
             _ => Vec::new(),
         }
@@ -298,15 +298,18 @@ mod tests {
     }
 
     #[test]
-    fn exec_command_running_uses_session_id_handle() {
+    fn start_command_running_uses_session_id_handle() {
         let mut state = ActivityState::new();
         let blocks = state.blocks_for_tool_call(
-            "exec_command",
+            "start_command",
             json!({
                 "cmd": "python3 -q",
             }),
             json!({
                 "output": ">>> ",
+                "status": "running",
+                "done": false,
+                "running": true,
                 "session_id": 7,
                 "wall_time_seconds": 0.01
             }),

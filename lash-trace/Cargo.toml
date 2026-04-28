@@ -1,11 +1,12 @@
 [package]
-name = "lash-sansio"
+name = "lash-trace"
 version.workspace = true
 edition = "2024"
 license.workspace = true
 
 [dependencies]
-base64 = "0.22"
-serde = { version = "1", features = ["derive", "rc"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }

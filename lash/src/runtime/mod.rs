@@ -32,7 +32,7 @@ use crate::plugin::{
 use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, SessionEvent, SessionPolicy, TokenUsage,
-    fresh_message_id, make_error_event, reassign_part_ids, transport_stream_events,
+    fresh_message_id, make_error_event, reassign_part_ids, shared_parts, transport_stream_events,
 };
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call_with_execution_context};
 use crate::{
@@ -61,9 +61,9 @@ use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
-    BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost, FileLlmCallLogger,
-    LlmCallLogger, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
-    ManagedTaskStatus, RuntimeCoreConfig, SessionTaskExecutor, TokioSessionTaskExecutor,
+    BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost, ManagedRunState,
+    ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, RuntimeCoreConfig,
+    SessionTaskExecutor, TokioSessionTaskExecutor,
 };
 use io::{normalize_input_items, projection_message_delta_if_base_preserved};
 pub use state::{PersistedSessionState, SessionStateEnvelope};

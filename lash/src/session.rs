@@ -221,6 +221,14 @@ pub struct Session {
     /// `lash_sansio::PromptTemplate::render`.
     prompt_cache: Arc<lash_sansio::PromptCache>,
     async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
+    /// Tracks whether the lashlang VM (and the scratch dir it owns) has
+    /// changed since the last successful `snapshot_execution_state` call.
+    /// Bumped to `true` whenever a `LashlangRequest` that can mutate state
+    /// is sent (Exec, Reset, PatchGlobals, Reconfigure, Init, Restore).
+    /// Callers gate the per-iteration snapshot on
+    /// [`Session::execution_state_dirty`] so iterations that don't run any
+    /// lashlang code skip the round-trip + JSON serialization.
+    lashlang_state_dirty: bool,
 }
 
 impl Session {
@@ -249,6 +257,7 @@ impl Session {
             tool_surface_cache: std::sync::Mutex::new(Vec::new()),
             prompt_cache: Arc::new(lash_sansio::PromptCache::new()),
             async_tool_handles: Arc::new(StdMutex::new(HashMap::new())),
+            lashlang_state_dirty: true,
         };
 
         let mode_session = Arc::clone(session.plugins().mode_session());
@@ -380,20 +389,21 @@ impl Session {
             tools.extend(self.plugins().mode_native_tools().definitions());
         }
         let fallback_tools = tools.clone();
-        let surface = self
-            .plugins()
-            .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
-                session_id: session_id.to_string(),
-                mode: mode.clone(),
-                tools,
-            })
-            .unwrap_or_else(|err| {
-                tracing::warn!("failed to resolve tool surface: {err}");
-                crate::ToolSurface::from_tools(fallback_tools, mode.clone())
-            });
+        let surface = Arc::new(
+            self.plugins()
+                .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
+                    session_id: session_id.to_string(),
+                    mode: mode.clone(),
+                    tools,
+                })
+                .unwrap_or_else(|err| {
+                    tracing::warn!("failed to resolve tool surface: {err}");
+                    crate::ToolSurface::from_tools(fallback_tools, mode.clone())
+                }),
+        );
         let input = crate::ModeBuildInput {
             mode: mode.clone(),
-            tool_surface: surface.clone(),
+            tool_surface: Arc::clone(&surface),
             extra_prompt_contributions: self.mode_extra_prompt_contributions(&mode),
         };
         let driver = self.plugins().mode_protocol_driver().unwrap_or_else(|| {
@@ -413,7 +423,6 @@ impl Session {
             mode.plugin_id(),
         );
         let preamble = driver.build_preamble(input);
-        let surface = Arc::new(surface);
         ToolSurfaceHandle(Arc::new(ToolSurfaceArtifact {
             surface,
             preamble: Arc::new(preamble),
@@ -439,11 +448,12 @@ impl Session {
         entry
     }
 
-    pub fn tool_surface(&self, session_id: &str, mode: crate::ExecutionMode) -> crate::ToolSurface {
-        self.tool_surface_cache_entry(session_id, mode)
-            .surface()
-            .as_ref()
-            .clone()
+    pub fn tool_surface(
+        &self,
+        session_id: &str,
+        mode: crate::ExecutionMode,
+    ) -> Arc<crate::ToolSurface> {
+        self.tool_surface_cache_entry(session_id, mode).surface()
     }
 
     pub(crate) fn mode_preamble(
@@ -819,6 +829,7 @@ impl Session {
             code: clean_code,
             accept_finish,
         })?;
+        self.lashlang_state_dirty = true;
 
         // Read messages until we get exec_result.
         // Tool calls are spawned as concurrent tokio tasks so RLM parallel branches
@@ -1076,6 +1087,7 @@ impl Session {
         let id = uuid::Uuid::new_v4().to_string();
         self.runtime()?
             .send(LashlangRequest::Reset { id: id.clone() })?;
+        self.lashlang_state_dirty = true;
 
         loop {
             match self.runtime()?.recv()? {
@@ -1107,6 +1119,7 @@ impl Session {
             set: patch.set.clone(),
             unset: patch.unset.clone(),
         })?;
+        self.lashlang_state_dirty = true;
 
         loop {
             match self.runtime()?.recv()? {
@@ -1154,6 +1167,7 @@ impl Session {
             generation,
             observe_projection: self.rlm_observe_projection_config.clone(),
         })?;
+        self.lashlang_state_dirty = true;
 
         loop {
             match self.runtime()?.recv()? {
@@ -1191,6 +1205,7 @@ impl Session {
             session_id: session_id.to_string(),
             observe_projection: self.rlm_observe_projection_config.clone(),
         })?;
+        self.lashlang_state_dirty = true;
 
         match self.runtime()?.recv()? {
             LashlangResponse::Ready => {
@@ -1204,9 +1219,18 @@ impl Session {
         }
     }
 
+    /// Returns `true` if the lashlang VM (or its scratch dir) has been
+    /// mutated since the last successful `snapshot_execution_state` call.
+    /// Callers in the per-iteration progress-boundary path should gate
+    /// the snapshot on this so chat-only iterations skip the round-trip.
+    pub fn execution_state_dirty(&self) -> bool {
+        self.lashlang_state_dirty
+    }
+
     /// Snapshot execution-mode-local state, if any.
     pub async fn snapshot_execution_state(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
         if !self.supports_repl() {
+            self.lashlang_state_dirty = false;
             return Ok(None);
         }
         let id = uuid::Uuid::new_v4().to_string();
@@ -1229,6 +1253,7 @@ impl Session {
             "vars": data,
             "files": files,
         });
+        self.lashlang_state_dirty = false;
         Ok(Some(serde_json::to_vec(&combined).unwrap()))
     }
 
@@ -1265,6 +1290,7 @@ impl Session {
         let id = uuid::Uuid::new_v4().to_string();
         self.runtime()?
             .send(LashlangRequest::Restore { id, data: vars_str })?;
+        self.lashlang_state_dirty = true;
 
         // Wait for acknowledgment (exec_result with optional restore error)
         loop {

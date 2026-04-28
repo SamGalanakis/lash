@@ -93,7 +93,7 @@ bench/longcot/run.sh --variant xhigh
     answer.txt            # the model's final answer
     events.jsonl          # streamed session events
     session.db            # full session graph
-    session.llm.jsonl     # raw LLM request/response log
+    session.trace.jsonl   # structured runtime trace
     system_prompt.txt     # exact system prompt sent for this question
     trace.html            # self-contained session trace (from lash-export)
     result.json           # per-question structured result

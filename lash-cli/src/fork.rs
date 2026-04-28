@@ -750,7 +750,8 @@ mod fork_tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         }];

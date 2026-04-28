@@ -65,6 +65,10 @@ struct SessionReadState {
     active_events: Arc<Vec<crate::SessionEventRecord>>,
     messages: SessionReadMessages,
     tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    /// RLM globals projection memoized at construction time so per-iteration
+    /// callers (e.g. the `bound_variables` prompt contribution) don't replay
+    /// every patch event in the active path.
+    projected_rlm_globals: OnceLock<Arc<serde_json::Map<String, serde_json::Value>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -152,6 +156,7 @@ impl SessionReadView {
             active_events,
             messages: SessionReadMessages::Shared(messages),
             tool_calls,
+            projected_rlm_globals: OnceLock::new(),
         }))
     }
 
@@ -172,6 +177,7 @@ impl SessionReadView {
             active_events: Arc::new(Vec::new()),
             messages: SessionReadMessages::Shared(messages),
             tool_calls,
+            projected_rlm_globals: OnceLock::new(),
         }))
     }
 
@@ -200,6 +206,7 @@ impl SessionReadView {
             active_events,
             messages: SessionReadMessages::Shared(messages),
             tool_calls,
+            projected_rlm_globals: OnceLock::new(),
         }))
     }
 
@@ -222,6 +229,7 @@ impl SessionReadView {
                 cache: OnceLock::new(),
             },
             tool_calls,
+            projected_rlm_globals: OnceLock::new(),
         }))
     }
 
@@ -234,6 +242,7 @@ impl SessionReadView {
                 state.session_graph.shared_projected_conversation_messages(),
             ),
             tool_calls: state.session_graph.shared_projected_tool_calls(),
+            projected_rlm_globals: OnceLock::new(),
         }))
     }
 
@@ -287,12 +296,21 @@ impl SessionReadView {
     }
 
     pub fn projected_rlm_globals(&self) -> serde_json::Map<String, serde_json::Value> {
-        lash_rlm_types::project_globals(self.active_events().iter().filter_map(
-            |event| match event {
-                crate::SessionEventRecord::Mode(event) => event.rlm_event(),
-                _ => None,
-            },
-        ))
+        self.shared_projected_rlm_globals().as_ref().clone()
+    }
+
+    /// Borrow the memoized RLM globals projection for this view. Hot callers
+    /// (per-iteration prompt contributions like `bound_variables`) should use
+    /// this instead of [`projected_rlm_globals`] to avoid a deep map clone.
+    pub fn shared_projected_rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
+        Arc::clone(self.0.projected_rlm_globals.get_or_init(|| {
+            Arc::new(lash_rlm_types::project_globals(
+                self.active_events().iter().filter_map(|event| match event {
+                    crate::SessionEventRecord::Mode(event) => event.rlm_event(),
+                    _ => None,
+                }),
+            ))
+        }))
     }
 
     pub fn iteration(&self) -> usize {

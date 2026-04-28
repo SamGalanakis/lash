@@ -210,8 +210,8 @@ fn test_host_config() -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(RuntimeCoreConfig::default())
 }
 
-fn test_host_config_with_llm_log_path(path: PathBuf) -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_llm_log_path(Some(path)))
+fn test_host_config_with_trace_path(path: PathBuf) -> EmbeddedRuntimeHost {
+    EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_trace_jsonl_path(Some(path)))
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -556,6 +556,7 @@ async fn active_tool_catalog_uses_runtime_execution_mode() {
         .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
         .collect();
     assert!(names.contains(&"exec_command"));
+    assert!(names.contains(&"start_command"));
     assert!(names.contains(&"write_stdin"));
     assert!(!names.contains(&"shell_wait"));
     assert!(!names.contains(&"shell_read"));
@@ -920,7 +921,8 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
             full_text: "Done".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Done".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     }]);
@@ -1050,7 +1052,8 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
                 full_text: "First answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "First answer.".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1060,7 +1063,8 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
                 full_text: "Second answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "Second answer.".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1146,7 +1150,8 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     prune_state: crate::PruneState::Intact,
                     reasoning_meta: None,
                 },
-            ],
+            ]
+            .into(),
             images: Vec::new(),
             user_input: None,
         }])
@@ -1158,7 +1163,8 @@ async fn bridge_checkpoint_injection_preserves_images() {
                 full_text: "First answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "First answer.".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1168,7 +1174,8 @@ async fn bridge_checkpoint_injection_preserves_images() {
                 full_text: "Second answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "Second answer.".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1236,7 +1243,8 @@ async fn checkpoint_hook_can_inject_messages() {
                 full_text: "First answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "First answer.".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1246,7 +1254,8 @@ async fn checkpoint_hook_can_inject_messages() {
                 full_text: "Second answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "Second answer.".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1308,7 +1317,8 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
             full_text: "answer".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "answer".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     }]);
@@ -1449,7 +1459,8 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         },
@@ -1495,7 +1506,8 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
             full_text: "child session".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "child session".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     }]);
@@ -1582,7 +1594,8 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         },
@@ -1850,7 +1863,8 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 full_text: "child session".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "child session".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1860,7 +1874,8 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 full_text: "done".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "done".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1951,7 +1966,8 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 full_text: "cached child".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "cached child".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -1961,7 +1977,8 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 full_text: "done".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "done".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -2056,7 +2073,8 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         },
@@ -2096,7 +2114,8 @@ fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         },
@@ -2117,7 +2136,8 @@ fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: Some(crate::UserInputProvenance {
                 display_text: "new prompt".to_string(),
                 effective_text: "new prompt".to_string(),
@@ -2159,7 +2179,8 @@ fn assembler_prefers_state_output_when_streamed_text_is_a_truncated_prefix() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         },
@@ -2229,7 +2250,8 @@ fn assembler_state_output_excludes_tool_call_payload() {
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                 },
-            ],
+            ]
+            .into(),
             user_input: None,
             origin: None,
         },
@@ -2314,7 +2336,8 @@ fn assembler_detects_max_turn_message() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         },
@@ -2431,7 +2454,8 @@ async fn standard_runtime_assembles_stream_only_text_response() {
             full_text: "What time is it?".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "What time is it?".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     }]);
@@ -2551,7 +2575,8 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                 full_text: "stopped".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "stopped".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -2627,7 +2652,8 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                 full_text: "done".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "done".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -2678,7 +2704,8 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
                 LlmOutputPart::Text {
                     text: "## Heading".to_string(),
                 },
-            ],
+            ]
+            .into(),
             ..LlmResponse::default()
         }),
     }]);
@@ -2781,7 +2808,8 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
             full_text: "Hi".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hi".to_string(),
-            }],
+            }]
+            .into(),
             usage: LlmUsage::default(),
             ..LlmResponse::default()
         }),
@@ -2825,7 +2853,8 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
             full_text: "Hi".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hi".to_string(),
-            }],
+            }]
+            .into(),
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
@@ -2859,7 +2888,7 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
 }
 
 #[tokio::test]
-async fn standard_runtime_debug_log_records_stream_event_entries() {
+async fn standard_runtime_trace_records_stream_event_entries() {
     let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("Hello ".to_string()),
@@ -2877,12 +2906,13 @@ async fn standard_runtime_debug_log_records_stream_event_entries() {
             full_text: "Hello world".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hello world".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     }]);
-    let log_path = std::env::temp_dir().join(format!(
-        "lash-standard-debug-log-{}-{}.jsonl",
+    let trace_path = std::env::temp_dir().join(format!(
+        "lash-standard-trace-{}-{}.jsonl",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2891,7 +2921,7 @@ async fn standard_runtime_debug_log_records_stream_event_entries() {
     ));
     let mut runtime = standard_runtime_with_transport_and_host(
         transport,
-        test_host_config_with_llm_log_path(log_path.clone()),
+        test_host_config_with_trace_path(trace_path.clone()),
     )
     .await;
 
@@ -2913,40 +2943,56 @@ async fn standard_runtime_debug_log_records_stream_event_entries() {
 
     assert_eq!(turn.status, TurnStatus::Completed);
 
-    let logged = std::fs::read_to_string(&log_path).expect("read log");
+    let logged = std::fs::read_to_string(&trace_path).expect("read trace");
     let entries = logged
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json log entry"))
         .collect::<Vec<_>>();
 
     assert!(
-        entries
-            .iter()
-            .any(
-                |entry| entry.get("kind").and_then(|v| v.as_str()) == Some("stream_event")
-                    && entry.get("event").and_then(|v| v.as_str()) == Some("delta")
-                    && entry.get("raw_text").and_then(|v| v.as_str()) == Some("Hello ")
-            ),
-        "expected delta stream event in log: {entries:?}"
+        entries.iter().any(
+            |entry| entry.get("type").and_then(|v| v.as_str()) == Some("custom")
+                && entry.get("name").and_then(|v| v.as_str()) == Some("runtime.stream_event")
+                && entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("event"))
+                    .and_then(|v| v.as_str())
+                    == Some("delta")
+                && entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("raw_text"))
+                    .and_then(|v| v.as_str())
+                    == Some("Hello ")
+        ),
+        "expected delta stream event in trace: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(
+            |entry| entry.get("type").and_then(|v| v.as_str()) == Some("custom")
+                && entry.get("name").and_then(|v| v.as_str()) == Some("runtime.stream_event")
+                && entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("event"))
+                    .and_then(|v| v.as_str())
+                    == Some("text_part")
+                && entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("raw_text"))
+                    .and_then(|v| v.as_str())
+                    == Some("world")
+        ),
+        "expected text_part stream event in trace: {entries:?}"
     );
     assert!(
         entries
             .iter()
-            .any(
-                |entry| entry.get("kind").and_then(|v| v.as_str()) == Some("stream_event")
-                    && entry.get("event").and_then(|v| v.as_str()) == Some("text_part")
-                    && entry.get("raw_text").and_then(|v| v.as_str()) == Some("world")
-            ),
-        "expected text_part stream event in log: {entries:?}"
-    );
-    assert!(
-        entries.iter().any(|entry| entry.get("response").is_some()),
-        "expected final debug log entry in log: {entries:?}"
+            .any(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("llm_call_completed")),
+        "expected final llm trace entry in trace: {entries:?}"
     );
     let response_entry = entries
         .iter()
-        .find(|entry| entry.get("response").is_some())
-        .expect("final response entry");
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("llm_call_completed"))
+        .expect("completed llm call entry");
     let stream_summary = response_entry
         .get("stream_summary")
         .and_then(|value| value.as_object())
@@ -2985,11 +3031,11 @@ async fn standard_runtime_debug_log_records_stream_event_entries() {
             .is_some_and(|value| !value.is_null())
     );
 
-    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&trace_path);
 }
 
 #[tokio::test]
-async fn standard_runtime_debug_log_records_failed_llm_calls() {
+async fn standard_runtime_trace_records_failed_llm_calls() {
     let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
         response: Err(crate::llm::transport::LlmTransportError::new(
@@ -2999,8 +3045,8 @@ async fn standard_runtime_debug_log_records_failed_llm_calls() {
         .with_raw("transport raw body")
         .with_request_body("{\"model\":\"mock-model\"}")),
     }]);
-    let log_path = std::env::temp_dir().join(format!(
-        "lash-standard-debug-log-error-{}-{}.jsonl",
+    let trace_path = std::env::temp_dir().join(format!(
+        "lash-standard-trace-error-{}-{}.jsonl",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3009,7 +3055,7 @@ async fn standard_runtime_debug_log_records_failed_llm_calls() {
     ));
     let mut runtime = standard_runtime_with_transport_and_host(
         transport,
-        test_host_config_with_llm_log_path(log_path.clone()),
+        test_host_config_with_trace_path(trace_path.clone()),
     )
     .await;
 
@@ -3033,24 +3079,31 @@ async fn standard_runtime_debug_log_records_failed_llm_calls() {
     assert_eq!(turn.errors.len(), 1);
     assert_eq!(turn.errors[0].raw.as_deref(), Some("transport raw body"));
 
-    let logged = std::fs::read_to_string(&log_path).expect("read log");
+    let logged = std::fs::read_to_string(&trace_path).expect("read trace");
     let entries = logged
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json log entry"))
         .collect::<Vec<_>>();
     let error_entry = entries
         .iter()
-        .find(|entry| entry.get("kind").and_then(|v| v.as_str()) == Some("llm_error"))
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("llm_call_failed"))
         .expect("llm error entry");
     assert_eq!(
         error_entry["error"]["message"].as_str(),
         Some("HTTP request failed: builder error")
     );
     assert_eq!(error_entry["error"]["code"].as_str(), Some("builder"));
-    assert_eq!(error_entry["raw"].as_str(), Some("transport raw body"));
     assert_eq!(
-        error_entry["request"].as_str(),
-        Some("{\"model\":\"mock-model\"}")
+        error_entry["error"]["raw"].as_str(),
+        Some("transport raw body")
+    );
+    let request_entry = entries
+        .iter()
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("llm_call_started"))
+        .expect("llm request entry");
+    assert_eq!(
+        request_entry["request"]["model"].as_str(),
+        Some("mock-model")
     );
 }
 
@@ -3148,7 +3201,8 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                         item_id: None,
                         signature: None,
                     },
-                ],
+                ]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -3158,7 +3212,8 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                 full_text: "done".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "done".to_string(),
-                }],
+                }]
+                .into(),
                 ..LlmResponse::default()
             }),
         },
@@ -3225,7 +3280,8 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
             full_text: "Stored answer".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Stored answer".to_string(),
-            }],
+            }]
+            .into(),
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
@@ -3298,7 +3354,8 @@ async fn completed_turns_are_persisted_in_session_graph() {
             full_text: "Stored answer".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Stored answer".to_string(),
-            }],
+            }]
+            .into(),
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
@@ -3394,7 +3451,8 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 full_text: "stored".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "stored".to_string(),
-                }],
+                }]
+                .into(),
                 usage: first_usage.clone(),
                 ..LlmResponse::default()
             }),
@@ -3408,7 +3466,8 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 full_text: "stored again".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "stored again".to_string(),
-                }],
+                }]
+                .into(),
                 usage: second_usage.clone(),
                 ..LlmResponse::default()
             }),

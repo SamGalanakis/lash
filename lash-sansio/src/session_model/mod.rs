@@ -2,9 +2,9 @@ pub mod message;
 pub mod prompt;
 
 pub use message::{
-    Message, MessageRole, MessageSequence, Part, PartKind, PruneState, ReasoningMeta,
-    RenderedPrompt, append_rendered_prompt, messages_are_prompt_resume_safe, render_prompt,
-    render_transcript_prompt,
+    BaseRenderCache, Message, MessageRole, MessageSequence, Part, PartKind, PruneState,
+    ReasoningMeta, RenderedPrompt, append_rendered_prompt, messages_are_prompt_resume_safe,
+    render_prompt, render_transcript_prompt, shared_parts,
 };
 pub use prompt::{
     CORE_GUIDANCE_SECTION, MAIN_AGENT_INTRO, PromptBuiltin, PromptSlot, PromptTemplate,
@@ -12,6 +12,7 @@ pub use prompt::{
 };
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
@@ -30,7 +31,7 @@ pub enum SessionEventRecord<ME = ()> {
 pub struct ConversationRecord {
     pub id: String,
     pub role: MessageRole,
-    pub parts: Vec<Part>,
+    pub parts: Arc<Vec<Part>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input: Option<UserInputProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,7 +53,7 @@ impl ConversationRecord {
         Message {
             id: self.id.clone(),
             role: self.role,
-            parts: self.parts.clone(),
+            parts: Arc::clone(&self.parts),
             user_input: self.user_input.clone(),
             origin: self.origin.clone(),
         }
@@ -416,7 +417,7 @@ impl TurnTerminationPolicyState {
         msgs.push(Message {
             id: sys_id.clone(),
             role: MessageRole::System,
-            parts: vec![Part {
+            parts: Arc::new(vec![Part {
                 id: format!("{}.p0", sys_id),
                 kind: PartKind::Text,
                 content: format!(
@@ -433,7 +434,7 @@ impl TurnTerminationPolicyState {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]),
             user_input: None,
             origin: None,
         });

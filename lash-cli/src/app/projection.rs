@@ -554,7 +554,7 @@ fn append_transcript_items(
             if message.parts.iter().any(|part| {
                 part_is_rlm_exec_result(part) || matches!(part.kind, PartKind::ToolResult)
             }) {
-                for part in &message.parts {
+                for part in message.parts.iter() {
                     append_tool_result_items(timeline, part, tool_calls, activity_state);
                 }
             } else {
@@ -570,7 +570,7 @@ fn append_transcript_items(
             }
         }
         MessageRole::Assistant => {
-            for part in &message.parts {
+            for part in message.parts.iter() {
                 if !matches!(part.kind, PartKind::Reasoning) {
                     continue;
                 }
@@ -581,7 +581,7 @@ fn append_transcript_items(
             }
 
             let mut prose = Vec::new();
-            for part in &message.parts {
+            for part in message.parts.iter() {
                 if matches!(part.kind, PartKind::Reasoning) {
                     continue;
                 }

@@ -592,7 +592,7 @@ async fn run_instance(
     .with_context(|| format!("write {}", instance_dir.join("instance.json").display()))?;
 
     let store_path = instance_dir.join("session.db");
-    let llm_log_path = instance_dir.join("session.llm.jsonl");
+    let trace_path = instance_dir.join("session.trace.jsonl");
     let events_path = instance_dir.join("events.jsonl");
     let store = Arc::new(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
@@ -620,7 +620,7 @@ async fn run_instance(
         EmbeddedRuntimeHost::new(
             RuntimeCoreConfig::default()
                 .with_base_dir(&repo_dir)
-                .with_llm_log_path(Some(llm_log_path.clone())),
+                .with_trace_jsonl_path(Some(trace_path.clone())),
         ),
         Arc::new(TokioSessionTaskExecutor::default()),
     );

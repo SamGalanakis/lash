@@ -15,7 +15,7 @@ fn push_history_system_message(history: &mut Vec<Message>, content: String) {
     history.push(Message {
         id: sys_id.clone(),
         role: MessageRole::System,
-        parts: vec![Part {
+        parts: lash::shared_parts(vec![Part {
             id: format!("{}.p0", sys_id),
             kind: PartKind::Text,
             content,
@@ -26,7 +26,7 @@ fn push_history_system_message(history: &mut Vec<Message>, content: String) {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: None,
     });

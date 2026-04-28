@@ -19,12 +19,11 @@ fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineCon
         run_session_id: None,
         autonomous: false,
         tool_specs: Vec::new().into(),
-        system_prompt: Arc::new(String::new()),
+        system_prompt: Arc::from(""),
         session_id: "test".to_string(),
-        emit_llm_debug_log: false,
+        emit_llm_trace: false,
         termination: (),
         retry_policy: RetryPolicy::default(),
-        initial_events: Arc::new(Vec::new()),
     }
 }
 
@@ -43,7 +42,8 @@ fn user_message(content: &str) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]
+        .into(),
         user_input: None,
         origin: None,
     }
@@ -69,7 +69,8 @@ fn text_message(role: MessageRole, content: impl Into<String>) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]
+        .into(),
         user_input: None,
         origin: None,
     }
@@ -371,11 +372,12 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
             },
-        ],
+        ]
+        .into(),
         user_input: None,
         origin: None,
     }];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let (_, request) = find_llm_call(&effects).expect("llm call");
@@ -399,7 +401,7 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
 fn driver_can_finish_via_checkpoint() {
     let config = test_config(Arc::new(ProseDriver));
     let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call").0;
@@ -410,7 +412,8 @@ fn driver_can_finish_via_checkpoint() {
             full_text: "Hello".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hello".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -433,7 +436,7 @@ fn driver_can_finish_via_checkpoint() {
 fn retryable_error_preserves_driver_state_across_retry() {
     let config = test_config(Arc::new(RetryStateDriver));
     let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call").0;
@@ -462,7 +465,8 @@ fn retryable_error_preserves_driver_state_across_retry() {
             full_text: "ok".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "ok".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -488,7 +492,7 @@ fn retryable_error_preserves_driver_state_across_retry() {
 fn checkpoint_messages_resume_prepare_iteration() {
     let config = test_config(Arc::new(ProseDriver));
     let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let llm_id = *find_llm_call(&effects).expect("llm call").0;
@@ -499,7 +503,8 @@ fn checkpoint_messages_resume_prepare_iteration() {
             full_text: "Hello".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hello".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -547,7 +552,7 @@ fn checkpoint_messages_resume_prepare_iteration() {
 fn exec_driver_state_round_trip() {
     let config = test_config(Arc::new(ExecDriver));
     let msgs = vec![user_message("run code")];
-    let mut machine = TurnMachine::new(config, msgs, 0);
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let (exec_id, code) = find_exec_call(&effects).expect("exec call");
@@ -588,7 +593,8 @@ fn exec_driver_state_round_trip() {
 fn initial_execution_surface_sync_is_host_only() {
     let mut config = test_config(Arc::new(ProseDriver));
     config.sync_execution_surface = true;
-    let mut machine = TurnMachine::new(config, vec![user_message("hello")], 0);
+    let mut machine =
+        TurnMachine::new(config, vec![user_message("hello")], Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let (sync_id, update_machine_config) =
@@ -608,8 +614,9 @@ fn initial_execution_surface_sync_is_host_only() {
 fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
     let mut config = test_config(Arc::new(SyncThenAdvanceDriver));
     config.sync_execution_surface = true;
-    config.system_prompt = Arc::new("initial prompt".to_string());
-    let mut machine = TurnMachine::new(config, vec![user_message("hello")], 0);
+    config.system_prompt = Arc::from("initial prompt");
+    let mut machine =
+        TurnMachine::new(config, vec![user_message("hello")], Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
     let (initial_sync_id, update_machine_config) =
@@ -629,7 +636,8 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
             full_text: "advance".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "advance".to_string(),
-            }],
+            }]
+            .into(),
             ..LlmResponse::default()
         }),
     });
@@ -650,7 +658,7 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
     machine.handle_response(Response::ExecutionSurfaceSynced {
         id: sync_id,
         result: Ok(Some(ExecutionSurfaceSync {
-            system_prompt: Arc::new("updated prompt".to_string()),
+            system_prompt: Arc::from("updated prompt"),
             tool_specs: Arc::new(vec![crate::llm::types::LlmToolSpec {
                 name: "new_tool".to_string(),
                 description: "desc".to_string(),
@@ -670,7 +678,7 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
                 matches!(
                     block,
                     crate::llm::types::LlmContentBlock::Text(text)
-                        if text == "updated prompt"
+                        if text.as_ref() == "updated prompt"
                 )
             })
     }));

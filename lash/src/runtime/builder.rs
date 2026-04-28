@@ -117,8 +117,18 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_llm_log_path(mut self, llm_log_path: Option<PathBuf>) -> Self {
-        self.core = self.core.with_llm_log_path(llm_log_path);
+    pub fn with_trace_jsonl_path(mut self, trace_path: Option<PathBuf>) -> Self {
+        self.core = self.core.with_trace_jsonl_path(trace_path);
+        self
+    }
+
+    pub fn with_trace_sink(mut self, sink: Option<Arc<dyn lash_trace::TraceSink>>) -> Self {
+        self.core = self.core.with_trace_sink(sink);
+        self
+    }
+
+    pub fn with_trace_context(mut self, context: lash_trace::TraceContext) -> Self {
+        self.core = self.core.with_trace_context(context);
         self
     }
 

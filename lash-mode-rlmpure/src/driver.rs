@@ -1,43 +1,16 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use lash::llm::types::{LlmMessage, LlmRole, LlmToolChoice};
 use lash::sansio::ContextProjector;
-use lash::session_model::{ConversationRecord, MessageRole, PartKind, SessionEventRecord};
 use lash::{
     LlmRequest, ModeBuildInput, ModeConfig, ModePreamble, ProjectorContext, PromptContribution,
     head_tail_truncate,
+    session_model::{ConversationRecord, Message, MessageRole, PartKind, SessionEventRecord},
 };
 use lash_rlm_types::{RlmModeEvent, RlmTrajectoryEntry};
 
-/// Trajectory-shaped RLM prompt. The protocol driver is the existing RLM
-/// lashlang executor; this mode differs by presenting history as a
-/// compact REPL trajectory rather than as chat-shaped context.
-pub const RLMPURE_EXECUTION_SECTION: &str = r#"You have access to a persistent lashlang REPL. Write a small amount of reasoning plus exactly one fenced `lashlang` block when you need to act. The block is executed immediately; its `print` output becomes the next observation, and variables persist across later blocks in this turn.
-
-Available inside lashlang:
-- `print <expr>` — inspect a value; output appears as the next observation.
-- `submit <expr>` — final answer; ends the run.
-- `call tool_name { ... }` — call any tool under Available Tools. Use `(call tool_name { ... })?` for fail-fast unwrapping.
-- Persistent variables — values assigned in one block are available in later blocks.
-
-Execution discipline:
-1. EXPLORE FIRST when the answer depends on data you haven't seen: inspect file snippets, tool outputs, types, and assumptions before finalizing. For trivial questions or known-shape passthroughs, skip straight to `submit`.
-2. ITERATE on non-trivial work: small focused blocks; observe; decide the next step. Don't try to solve everything in one block.
-3. INSPECT BEFORE SUBMITTING WHEN THE OUTPUT IS UNCERTAIN: if a tool result could be empty, malformed, or need transformation, `print` it in one block and `submit` on a later block. Combining `call` + `submit` in one block is fine when the result is direct passthrough or you're returning a fixed answer.
-4. VERIFY ON SURPRISES: if a result looks empty, off, or error-shaped, investigate before `submit`.
-5. MINIMIZE RETYPING: keep exact long values in variables and compute from them instead of copying.
-6. KEEP OUTPUTS TARGETED: large `print` output is capped; print slices or selected fields.
-
-Only the first ` ```lashlang ` fenced block is executed. Trailing prose or later fences are ignored after that block closes.
-"#;
-
-const RLMPURE_FINALIZATION_SECTION: &str = r#"When the task is complete, call `submit <value>` from lashlang. Strings are rendered as prose; records/lists are rendered as JSON unless a required schema is active."#;
-
 pub fn rlmpure_execution_section() -> String {
-    format!(
-        "{RLMPURE_EXECUTION_SECTION}\n\n{}\n\n{RLMPURE_FINALIZATION_SECTION}",
-        lash_mode_rlm::LASHLANG_LANGUAGE_REFERENCE
-    )
+    lash_mode_rlm::rlm_execution_section()
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +50,7 @@ pub fn build_rlmpure_preamble(
             protocol: Arc::new(lash_mode_rlm::RlmDriver),
             projector: Arc::new(RlmpureContextProjector {
                 max_output_chars: config.max_output_chars,
+                cache: Mutex::new(None),
             }),
             sync_execution_surface: true,
         },
@@ -90,13 +64,29 @@ pub fn build_rlmpure_preamble(
 
 struct RlmpureContextProjector {
     max_output_chars: usize,
+    /// Memoizes the rendered REPL-history string across LLM iterations
+    /// within a single turn. Events are append-only within a turn (only
+    /// `apply_actions` mutates `TurnMachine.events`), so we can extend
+    /// the cached prefix instead of re-walking every event each
+    /// iteration. The projector is rebuilt per turn via
+    /// `build_rlmpure_preamble`, so the cache scope matches turn scope
+    /// without explicit invalidation.
+    cache: Mutex<Option<TrajectoryCache>>,
+}
+
+#[derive(Default)]
+struct TrajectoryCache {
+    rendered: String,
+    processed_events: usize,
+    step_index: usize,
 }
 
 impl ContextProjector<lash::HostModeProtocol> for RlmpureContextProjector {
     fn project(&self, ctx: ProjectorContext<'_>) -> LlmRequest {
-        let repl_history = format_repl_history(ctx.events, self.max_output_chars);
+        let task_context = self.format_task_context(ctx.events, ctx.messages.as_slice());
+        let repl_history = self.format_repl_history(ctx.events);
         let user_prompt = format!(
-            "REPL history\n{repl_history}\n\nIteration\n{}\n\nNext prediction\nProduce reasoning plus one fenced `lashlang` block. Use `print` for observations or `submit` when the final output is ready.",
+            "Task\n{task_context}\n\nREPL history\n{repl_history}\n\nIteration\n{}\n\nFinalization\nCall `submit <value>` from lashlang when the task is complete. Do not answer in prose without a lashlang block.",
             ctx.iteration + 1
         );
 
@@ -104,7 +94,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmpureContextProjector {
         if !ctx.config.system_prompt.trim().is_empty() {
             messages.push(LlmMessage::text(
                 LlmRole::System,
-                ctx.config.system_prompt.as_str().to_owned(),
+                std::sync::Arc::clone(&ctx.config.system_prompt),
             ));
         }
         messages.push(LlmMessage::text(LlmRole::User, user_prompt));
@@ -123,38 +113,71 @@ impl ContextProjector<lash::HostModeProtocol> for RlmpureContextProjector {
     }
 }
 
-fn format_repl_history(events: &[SessionEventRecord], max_output_chars: usize) -> String {
-    let mut out = String::new();
-    let mut user_message_index = 0usize;
-    let mut step_index = 0usize;
-    for event in events {
-        match event {
-            SessionEventRecord::Conversation(record) if record.role == MessageRole::User => {
-                let Some(text) = conversation_text(record) else {
-                    continue;
-                };
-                user_message_index += 1;
-                if !out.is_empty() {
-                    out.push_str("\n\n");
-                }
-                append_user_message(&mut out, user_message_index, &text, max_output_chars);
+impl RlmpureContextProjector {
+    fn format_task_context(&self, events: &[SessionEventRecord], messages: &[Message]) -> String {
+        let mut rendered = String::new();
+        let mut user_message_index = 0usize;
+        for event in events {
+            let SessionEventRecord::Conversation(record) = event else {
+                continue;
+            };
+            if record.role != MessageRole::User
+                || matches!(record.origin, Some(lash::MessageOrigin::Plugin { .. }))
+            {
+                continue;
             }
-            SessionEventRecord::Mode(event) => {
-                if let Some(RlmModeEvent::RlmTrajectoryEntry(entry)) = event.rlm_event() {
-                    step_index += 1;
-                    if !out.is_empty() {
-                        out.push_str("\n\n");
-                    }
-                    append_repl_step(&mut out, step_index, &entry, max_output_chars);
-                }
+            let Some(text) = conversation_text(record) else {
+                continue;
+            };
+            user_message_index += 1;
+            if !rendered.is_empty() {
+                rendered.push_str("\n\n");
             }
-            _ => {}
+            append_user_message(
+                &mut rendered,
+                user_message_index,
+                &text,
+                self.max_output_chars,
+            );
+        }
+        if rendered.is_empty() {
+            lash_mode_rlm::build_task_context(messages)
+        } else {
+            rendered
         }
     }
-    if out.is_empty() {
-        "No user messages or REPL interactions yet.".to_string()
-    } else {
-        out
+
+    fn format_repl_history(&self, events: &[SessionEventRecord]) -> String {
+        let mut guard = self.cache.lock().expect("rlmpure trajectory cache lock");
+        let cache = guard.get_or_insert_with(TrajectoryCache::default);
+        // Events grow append-only within a turn. If the slice shrunk
+        // (shouldn't happen during a turn, but be safe), reset and
+        // rebuild from scratch.
+        if events.len() < cache.processed_events {
+            *cache = TrajectoryCache::default();
+        }
+        for event in &events[cache.processed_events..] {
+            if let SessionEventRecord::Mode(event) = event
+                && let Some(RlmModeEvent::RlmTrajectoryEntry(entry)) = event.rlm_event()
+            {
+                cache.step_index += 1;
+                if !cache.rendered.is_empty() {
+                    cache.rendered.push_str("\n\n");
+                }
+                append_repl_step(
+                    &mut cache.rendered,
+                    cache.step_index,
+                    &entry,
+                    self.max_output_chars,
+                );
+            }
+        }
+        cache.processed_events = events.len();
+        if cache.rendered.is_empty() {
+            "You have not interacted with the lashlang REPL yet.".to_string()
+        } else {
+            cache.rendered.clone()
+        }
     }
 }
 
@@ -269,7 +292,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         })
@@ -292,34 +316,61 @@ mod tests {
         )))
     }
 
-    #[test]
-    fn repl_history_interleaves_user_messages_and_steps() {
-        let history = format_repl_history(
-            &[
-                user_event("u1", "first"),
-                step_event(0, "print 1", "1"),
-                user_event("u2", "second"),
-                step_event(1, "print 2", "2"),
-            ],
-            100,
-        );
+    fn projector(max_output_chars: usize) -> RlmpureContextProjector {
+        RlmpureContextProjector {
+            max_output_chars,
+            cache: Mutex::new(None),
+        }
+    }
 
-        assert!(history.contains("=== Message 1 ===\nUser (5 chars):\nfirst"));
+    #[test]
+    fn task_context_renders_user_messages_separately_from_repl_history() {
+        let projector = projector(100);
+        let events = [
+            user_event("u1", "first"),
+            step_event(0, "print 1", "1"),
+            user_event("u2", "second"),
+            step_event(1, "print 2", "2"),
+        ];
+        let task_context = projector.format_task_context(&events, &[]);
+        let history = projector.format_repl_history(&events);
+
+        assert!(task_context.contains("=== Message 1 ===\nUser (5 chars):\nfirst"));
+        assert!(task_context.contains("=== Message 2 ===\nUser (6 chars):\nsecond"));
         assert!(history.contains("=== Step 1 ==="));
-        assert!(history.contains("=== Message 2 ===\nUser (6 chars):\nsecond"));
         assert!(history.contains("=== Step 2 ==="));
-        assert!(history.find("=== Message 1 ===") < history.find("=== Step 1 ==="));
-        assert!(history.find("=== Step 1 ===") < history.find("=== Message 2 ==="));
-        assert!(history.find("=== Message 2 ===") < history.find("=== Step 2 ==="));
+        assert!(!history.contains("=== Message 1 ==="));
+        assert!(!history.contains("=== Message 2 ==="));
         assert!(!history.contains("Inputs"));
         assert!(!history.contains("omitted]"));
     }
 
     #[test]
     fn long_user_message_gets_binding_hint() {
-        let history = format_repl_history(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")], 10);
+        let projector = projector(10);
+        let task_context =
+            projector.format_task_context(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")], &[]);
 
-        assert!(history.contains("available as `user_input_1`"));
-        assert!(history.contains("... (16 characters omitted) ..."));
+        assert!(task_context.contains("available as `user_input_1`"));
+        assert!(task_context.contains("... (16 characters omitted) ..."));
+    }
+
+    #[test]
+    fn incremental_render_extends_cached_prefix_on_subsequent_calls() {
+        let projector = projector(100);
+        let initial = projector
+            .format_repl_history(&[user_event("u1", "first"), step_event(0, "print 1", "1")]);
+        assert!(!initial.contains("=== Message 1 ==="));
+        assert!(initial.contains("=== Step 1 ==="));
+
+        let extended = projector.format_repl_history(&[
+            user_event("u1", "first"),
+            step_event(0, "print 1", "1"),
+            user_event("u2", "second"),
+            step_event(1, "print 2", "2"),
+        ]);
+        assert!(extended.starts_with(&initial));
+        assert!(!extended.contains("=== Message 2 ==="));
+        assert!(extended.contains("=== Step 2 ==="));
     }
 }

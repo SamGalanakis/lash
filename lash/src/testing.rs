@@ -913,7 +913,7 @@ mod test_mode_fakes {
                     SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
                         id: asst_id,
                         role: MessageRole::Assistant,
-                        parts: parts_out,
+                        parts: lash_sansio::shared_parts(parts_out),
                         user_input: None,
                         origin: None,
                     })),
@@ -969,7 +969,7 @@ mod test_mode_fakes {
                     SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
                         id: asst_id,
                         role: MessageRole::Assistant,
-                        parts: assistant_parts,
+                        parts: lash_sansio::shared_parts(assistant_parts),
                         user_input: None,
                         origin: None,
                     })),
@@ -1017,7 +1017,7 @@ mod test_mode_fakes {
                     SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
                         id: user_id,
                         role: MessageRole::User,
-                        parts: result_parts,
+                        parts: lash_sansio::shared_parts(result_parts),
                         user_input: None,
                         origin: None,
                     })),
