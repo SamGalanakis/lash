@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::LlmUsage;
 use crate::plugin::StaticPluginFactory;
-use crate::store::RuntimeStore;
 use crate::testing::TestProvider;
 use tokio_util::sync::CancellationToken;
 
@@ -31,27 +30,18 @@ fn stream_fallback_merges_adjacent_display_reasoning_chunks() {
 }
 
 trait ProjectionState {
-    fn projected_conversation_messages(&self) -> &[Message];
-    fn projected_tool_calls(&self) -> &[ToolCallRecord];
+    fn shared_projection(&self) -> crate::SessionProjection;
 }
 
 impl ProjectionState for SessionStateEnvelope {
-    fn projected_conversation_messages(&self) -> &[Message] {
-        self.projected_conversation_messages()
-    }
-
-    fn projected_tool_calls(&self) -> &[ToolCallRecord] {
-        self.projected_tool_calls()
+    fn shared_projection(&self) -> crate::SessionProjection {
+        self.shared_projection()
     }
 }
 
 impl ProjectionState for PersistedSessionState {
-    fn projected_conversation_messages(&self) -> &[Message] {
-        self.projected_conversation_messages()
-    }
-
-    fn projected_tool_calls(&self) -> &[ToolCallRecord] {
-        self.projected_tool_calls()
+    fn shared_projection(&self) -> crate::SessionProjection {
+        self.shared_projection()
     }
 }
 
@@ -71,12 +61,12 @@ impl ProjectionStateMut for PersistedSessionState {
     }
 }
 
-fn projected_conversation_messages(state: &impl ProjectionState) -> &[Message] {
-    state.projected_conversation_messages()
+fn projected_conversation_messages(state: &impl ProjectionState) -> Vec<Message> {
+    state.shared_projection().messages.as_ref().clone()
 }
 
-fn projected_tool_calls(state: &impl ProjectionState) -> &[ToolCallRecord] {
-    state.projected_tool_calls()
+fn projected_tool_calls(state: &impl ProjectionState) -> Vec<ToolCallRecord> {
+    state.shared_projection().tool_calls.as_ref().clone()
 }
 
 fn append_message(state: &mut impl ProjectionStateMut, message: Message) {
@@ -110,7 +100,7 @@ struct RecordingStore {
 }
 
 #[async_trait::async_trait]
-impl crate::store::RuntimeStore for RecordingStore {
+impl crate::store::BlobStore for RecordingStore {
     async fn put_blob(&self, content: &[u8]) -> crate::BlobRef {
         let hash = format!("{:x}", sha2::Sha256::digest(content));
         self.blobs
@@ -127,7 +117,10 @@ impl crate::store::RuntimeStore for RecordingStore {
             .get(blob_ref.as_str())
             .cloned()
     }
+}
 
+#[async_trait::async_trait]
+impl crate::store::UsageLedgerStore for RecordingStore {
     async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
         self.usage_deltas
             .lock()
@@ -138,7 +131,10 @@ impl crate::store::RuntimeStore for RecordingStore {
     async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry> {
         self.usage_deltas.lock().expect("lock usage deltas").clone()
     }
+}
 
+#[async_trait::async_trait]
+impl crate::store::SessionHeadStore for RecordingStore {
     async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
         *self.session_head_meta.lock().expect("lock store") = Some(meta);
     }
@@ -147,6 +143,15 @@ impl crate::store::RuntimeStore for RecordingStore {
         self.session_head_meta.lock().expect("lock store").clone()
     }
 
+    async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
+
+    async fn load_session_meta(&self) -> Option<crate::store::SessionMeta> {
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::store::SessionGraphStore for RecordingStore {
     async fn replace_session_graph(&self, graph: &crate::SessionGraph) {
         *self.session_graph.lock().expect("lock graph") = graph.clone();
     }
@@ -161,13 +166,10 @@ impl crate::store::RuntimeStore for RecordingStore {
     async fn load_session_graph(&self) -> crate::SessionGraph {
         self.session_graph.lock().expect("lock graph").clone()
     }
-
-    async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
-
-    async fn load_session_meta(&self) -> Option<crate::store::SessionMeta> {
-        None
-    }
 }
+
+#[async_trait::async_trait]
+impl crate::store::RetentionStore for RecordingStore {}
 
 #[derive(Debug)]
 struct MockCall {
@@ -232,7 +234,7 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
     fn create_store(
         &self,
         request: &SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn crate::store::RuntimeStore>, String> {
+    ) -> Result<Arc<dyn crate::store::RuntimePersistence>, String> {
         let store = Arc::new(crate::store::Store::memory().map_err(|err| err.to_string())?);
         store.save_session_meta(crate::SessionMeta {
             session_id: request.session_id.clone(),
@@ -246,7 +248,7 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
             .lock()
             .expect("store factory")
             .push(Arc::clone(&store));
-        Ok(store as Arc<dyn crate::store::RuntimeStore>)
+        Ok(store as Arc<dyn crate::store::RuntimePersistence>)
     }
 }
 
@@ -503,7 +505,7 @@ async fn rlm_runtime_with_transport(transport: TestProvider) -> LashRuntime {
 #[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
 async fn rlm_runtime_with_transport_and_store(
     transport: TestProvider,
-    store: Arc<dyn crate::store::RuntimeStore>,
+    store: Arc<dyn crate::store::RuntimePersistence>,
 ) -> LashRuntime {
     let plugins = default_tool_session("root", ExecutionMode::new("rlm"), true);
     let mut runtime = LashRuntime::from_persistent_embedded_state(
@@ -951,9 +953,9 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
         .await
         .expect("turn");
 
-    let user_message = turn
-        .state
-        .projected_conversation_messages()
+    let projection = turn.state.shared_projection();
+    let user_message = projection
+        .messages
         .iter()
         .find(|message| message.role == MessageRole::User)
         .expect("user message");
@@ -1426,7 +1428,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                         match snapshot {
                                             Ok(snapshot) => crate::ToolResult::ok(json!({
                                                 "session_id": handle.session_id,
-                                                "message_count": snapshot.projected_conversation_messages().len(),
+                                                "message_count": snapshot.shared_projection().messages.len(),
                                             })),
                                             Err(err) => err,
                                         }
@@ -1627,7 +1629,8 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     assert_eq!(meta.parent_session_id.as_deref(), Some("root"));
     let head = stores[0].load_session_head().expect("session head");
     let graph = head.graph;
-    let messages = graph.project_conversation_messages();
+    let projection = graph.shared_projection();
+    let messages = projection.messages.as_slice();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].parts[0].content, "parent hello");
     let checkpoint = head
@@ -3228,7 +3231,8 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                                     .map(|call| call.result.clone())
                                     .unwrap_or(serde_json::Value::Null),
                                 turn.state
-                                    .projected_tool_calls()
+                                    .shared_projection()
+                                    .tool_calls
                                     .first()
                                     .map(|call| call.result.clone())
                                     .unwrap_or(serde_json::Value::Null),
@@ -3355,7 +3359,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
         test_host_config(),
         crate::PersistentRuntimeServices::new(
             Arc::clone(&plugins),
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            store.clone() as Arc<dyn crate::store::RuntimePersistence>,
         ),
         PersistedSessionState::default(),
     )
@@ -3379,12 +3383,12 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
         .await
         .expect("turn");
 
-    let messages = store
-        .load_session_head()
+    let projection = crate::store::load_session_head(store.as_ref())
         .await
         .expect("session head")
         .graph
-        .project_conversation_messages();
+        .shared_projection();
+    let messages = projection.messages.as_slice();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, MessageRole::User);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
@@ -3436,7 +3440,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
         test_host_config(),
         crate::PersistentRuntimeServices::new(
             Arc::clone(&plugins),
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            store.clone() as Arc<dyn crate::store::RuntimePersistence>,
         ),
         PersistedSessionState::default(),
     )
@@ -3462,7 +3466,8 @@ async fn completed_turns_are_persisted_in_session_graph() {
 
     let head = store.load_session_head().expect("session head");
     let graph = head.graph;
-    let messages = graph.project_conversation_messages();
+    let projection = graph.shared_projection();
+    let messages = projection.messages.as_slice();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
     assert_eq!(messages[1].parts[0].content, "Stored answer");
@@ -3530,7 +3535,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
     ]);
 
     let store = Arc::new(crate::store::Store::memory().expect("store"));
-    let store_trait = store.clone() as Arc<dyn crate::store::RuntimeStore>;
+    let store_trait = store.clone() as Arc<dyn crate::store::RuntimePersistence>;
 
     let mut runtime = rlm_runtime_with_transport_and_store(transport.clone(), store_trait).await;
     let first_turn = runtime
@@ -3566,7 +3571,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
             default_tool_session("root", ExecutionMode::new("rlm"), true),
             crate::TurnInjectionBridge::new(),
             crate::TurnInputInjectionBridge::new(),
-            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            store.clone() as Arc<dyn crate::store::RuntimePersistence>,
         ),
         PersistedSessionState {
             policy: SessionPolicy {
@@ -3801,7 +3806,7 @@ async fn environment_park_resume_preserves_active_path() {
         .build();
 
     // In-memory SQLite store — shared across park/resume.
-    let store: Arc<dyn crate::store::RuntimeStore> =
+    let store: Arc<dyn crate::store::RuntimePersistence> =
         Arc::new(crate::store::Store::memory().expect("in-memory store"));
 
     // Initial state: one user message. Force the active leaf to this

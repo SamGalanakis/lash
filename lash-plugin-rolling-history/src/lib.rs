@@ -544,9 +544,11 @@ async fn summarize_compaction_prefix(
     snapshot.last_prompt_usage = None;
     let previous_summary = extract_previous_summary(&messages);
     let referenced = referenced_tool_call_ids(&messages);
-    let tool_calls = state
-        .project_tool_calls()
-        .into_iter()
+    let projection = state.shared_projection();
+    let tool_calls = projection
+        .tool_calls
+        .iter()
+        .cloned()
         .filter(|record| {
             record
                 .call_id

@@ -55,7 +55,7 @@ pub(super) struct RuntimeSessionManager {
     current_plugins: Arc<crate::PluginSession>,
     current_tool_catalog: Arc<Vec<serde_json::Value>>,
     current_prompt_bridge: Option<HostPromptBridge>,
-    current_store: Option<Arc<dyn crate::store::RuntimeStore>>,
+    current_store: Option<Arc<dyn crate::store::RuntimePersistence>>,
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     /// Session-scoped token cost ledger shared with the parent
@@ -122,13 +122,11 @@ impl RuntimeSessionManager {
             current_snapshot: if persist_usage_to_store {
                 CurrentSnapshot::Owned(runtime.export_graph_first_state())
             } else {
+                let projection = runtime.state.shared_projection();
                 CurrentSnapshot::Projection {
                     meta: Self::current_snapshot_meta_without_graph(runtime),
-                    messages: runtime
-                        .state
-                        .session_graph
-                        .shared_projected_conversation_messages(),
-                    tool_calls: runtime.state.session_graph.shared_projected_tool_calls(),
+                    messages: projection.messages,
+                    tool_calls: projection.tool_calls,
                 }
             },
             current_policy: runtime.policy.clone(),
@@ -158,15 +156,12 @@ impl RuntimeSessionManager {
         std::mem::take(&mut *ledger)
     }
 
-    fn merge_drained_token_ledger(&self, state: &mut SessionSnapshot) -> bool {
+    fn merge_drained_token_ledger(&self, state: &mut SessionSnapshot) -> Vec<TokenLedgerEntry> {
         let drained = self.drain_token_ledger();
-        if drained.is_empty() {
-            return false;
-        }
-        for entry in drained {
+        for entry in drained.iter().cloned() {
             merge_ledger_entry(&mut state.token_ledger, entry);
         }
-        true
+        drained
     }
 
     fn background_scope_key(&self, session_id: &str) -> String {
@@ -175,13 +170,8 @@ impl RuntimeSessionManager {
 
     async fn current_snapshot_for_store_write(&self) -> SessionSnapshot {
         let mut state = self.current_snapshot.to_snapshot();
-        if let Some(store) = &self.current_store
-            && let Some(head) = store.load_session_head().await
-        {
-            super::apply_session_head(&mut state, &head);
-            let checkpoint =
-                super::load_session_checkpoint(store.as_ref(), head.checkpoint_ref.as_ref()).await;
-            super::apply_session_checkpoint(&mut state, checkpoint);
+        if let Some(store) = &self.current_store {
+            crate::store::refresh_persisted_session_state(store.as_ref(), &mut state).await;
         }
         super::normalize_session_graph(&mut state);
         state
@@ -202,8 +192,9 @@ impl RuntimeSessionManager {
         for entry in drained.iter().cloned() {
             merge_ledger_entry(&mut state.token_ledger, entry);
         }
-        crate::store::append_usage_deltas(store.as_ref(), &drained).await;
-        super::persist_session_graph_and_head(store.as_ref(), &mut state).await;
+        if let Err(err) = super::commit_runtime_state(store.as_ref(), &mut state, &drained).await {
+            tracing::warn!("failed to persist current usage ledger: {err}");
+        }
         Ok(())
     }
 

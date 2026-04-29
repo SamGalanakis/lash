@@ -159,13 +159,11 @@ mod tests {
             token_ledger: Vec::new(),
             ..lash::PersistedSessionState::default()
         };
-        store
-            .refresh_persisted_session_state(&mut persistence_state)
-            .await;
+        lash::refresh_persisted_session_state(&store, &mut persistence_state).await;
         let stale_state = persistence_state;
 
         assert_eq!(stale_state.iteration, 2);
-        assert_eq!(stale_state.projected_conversation_messages().len(), 1);
+        assert_eq!(stale_state.shared_projection().messages.len(), 1);
         assert_eq!(stale_state.token_ledger.len(), 1);
         assert_eq!(stale_state.token_ledger[0].source, "turn");
         assert_eq!(stale_state.token_ledger[0].model, "gpt-5.4-mini");

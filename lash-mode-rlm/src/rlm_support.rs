@@ -2,7 +2,152 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use lash::PromptContribution;
-use lash::plugin::PromptHookContext;
+use lash::plugin::{ModeSessionContext, PromptHookContext};
+use lash::{SessionAppendNode, SessionError, SessionEventRecord};
+use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
+
+pub async fn restore_execution_state_and_globals(
+    ctx: &mut ModeSessionContext<'_>,
+    state: &lash::runtime::PersistedSessionState,
+) -> Result<(), SessionError> {
+    if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
+        ctx.restore_execution_state(&snapshot).await?;
+    }
+    let projection = state.shared_projection();
+    apply_globals_patch_events(ctx, projection.active_events.iter()).await
+}
+
+pub async fn apply_globals_patch_nodes(
+    ctx: &mut ModeSessionContext<'_>,
+    nodes: &[SessionAppendNode],
+) -> Result<(), SessionError> {
+    for node in nodes {
+        if let SessionAppendNode::Event {
+            event: SessionEventRecord::Mode(event),
+        } = node
+            && let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = event.rlm_event()
+        {
+            ctx.apply_mode_globals_patch(&patch).await?;
+        }
+    }
+    Ok(())
+}
+
+pub fn user_input_patch_from_nodes(
+    nodes: &[lash::SessionAppendNode],
+    start_index: usize,
+) -> (RlmGlobalsPatchPluginBody, usize) {
+    let mut next_index = start_index;
+    let mut patch = RlmGlobalsPatchPluginBody::default();
+    for node in nodes {
+        let text = match node {
+            lash::SessionAppendNode::Event {
+                event: lash::SessionEventRecord::Conversation(record),
+            } if should_bind_conversation_user_input(record) => conversation_text(record),
+            lash::SessionAppendNode::Message { message }
+                if should_bind_plugin_message_user_input(message) =>
+            {
+                plugin_message_text(message)
+            }
+            _ => None,
+        };
+        let Some(text) = text else {
+            continue;
+        };
+        next_index += 1;
+        patch.set.insert(
+            format!("user_input_{next_index}"),
+            serde_json::Value::String(text),
+        );
+    }
+    (patch, next_index)
+}
+
+pub fn user_input_patch_from_events<'a>(
+    events: impl IntoIterator<Item = &'a lash::SessionEventRecord>,
+    start_index: usize,
+) -> (RlmGlobalsPatchPluginBody, usize) {
+    let mut next_index = start_index;
+    let mut patch = RlmGlobalsPatchPluginBody::default();
+    for event in events {
+        let lash::SessionEventRecord::Conversation(record) = event else {
+            continue;
+        };
+        if !should_bind_conversation_user_input(record) {
+            continue;
+        }
+        let Some(text) = conversation_text(record) else {
+            continue;
+        };
+        next_index += 1;
+        patch.set.insert(
+            format!("user_input_{next_index}"),
+            serde_json::Value::String(text),
+        );
+    }
+    (patch, next_index)
+}
+
+fn should_bind_conversation_user_input(record: &lash::ConversationRecord) -> bool {
+    record.role == lash::MessageRole::User
+        && !matches!(
+            record.origin.as_ref(),
+            Some(lash::MessageOrigin::Plugin { .. })
+        )
+}
+
+fn should_bind_plugin_message_user_input(_message: &lash::PluginMessage) -> bool {
+    false
+}
+
+fn conversation_text(record: &lash::ConversationRecord) -> Option<String> {
+    if let Some(user_input) = &record.user_input
+        && !user_input.effective_text.trim().is_empty()
+    {
+        return Some(user_input.effective_text.clone());
+    }
+    let chunks = record
+        .parts
+        .iter()
+        .filter(|part| matches!(part.kind, lash::PartKind::Text | lash::PartKind::Prose))
+        .map(|part| part.content.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (!chunks.is_empty()).then(|| chunks.join("\n\n"))
+}
+
+fn plugin_message_text(message: &lash::PluginMessage) -> Option<String> {
+    if let Some(user_input) = &message.user_input
+        && !user_input.effective_text.trim().is_empty()
+    {
+        return Some(user_input.effective_text.clone());
+    }
+    if !message.content.trim().is_empty() {
+        return Some(message.content.clone());
+    }
+    let chunks = message
+        .parts
+        .iter()
+        .filter(|part| matches!(part.kind, lash::PartKind::Text | lash::PartKind::Prose))
+        .map(|part| part.content.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (!chunks.is_empty()).then(|| chunks.join("\n\n"))
+}
+
+async fn apply_globals_patch_events<'a>(
+    ctx: &mut ModeSessionContext<'_>,
+    events: impl IntoIterator<Item = &'a SessionEventRecord>,
+) -> Result<(), SessionError> {
+    for event in events {
+        if let SessionEventRecord::Mode(event) = event
+            && let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = event.rlm_event()
+        {
+            ctx.apply_mode_globals_patch(&patch).await?;
+        }
+    }
+    Ok(())
+}
 
 /// Render the "Context Budget" prompt section. Returns an empty vec when
 /// no budget is configured or the most recent prompt has no usable token

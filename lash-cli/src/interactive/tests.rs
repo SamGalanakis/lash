@@ -50,9 +50,57 @@ fn promote_pending_steers_to_queue_preserves_order() {
 }
 
 #[test]
+fn enter_on_command_suggestion_resolves_selected_slash_command() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.set_input("/in".into());
+    app.update_suggestions();
+
+    let (text, parsed) =
+        super::input_handling::selected_slash_command_suggestion(&app, app.ui_extensions())
+            .expect("selected slash command");
+
+    assert_eq!(text, "/info");
+    assert!(matches!(
+        parsed,
+        super::commands::ParsedSlashCommand::Builtin(crate::command::Command::Info)
+    ));
+}
+
+#[test]
+fn enter_on_skill_suggestion_stays_text_completion() {
+    let root =
+        std::env::temp_dir().join(format!("lash-interactive-skill-{}", uuid::Uuid::new_v4()));
+    let skill_dir = root.join("localref");
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: localref\ndescription: Clone a local reference\n---\n\nbody\n",
+    )
+    .expect("skill file");
+
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.skills = lash::SkillCatalog::from_dirs(std::slice::from_ref(&root));
+    app.set_input("/loc".into());
+    app.update_suggestions();
+
+    assert!(
+        app.suggestions()
+            .iter()
+            .any(|suggestion| suggestion.name == "/localref")
+    );
+    assert!(
+        super::input_handling::selected_slash_command_suggestion(&app, app.ui_extensions())
+            .is_none()
+    );
+
+    app.complete_suggestion();
+    assert_eq!(app.input(), "/localref ");
+}
+
+#[test]
 fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.push(DisplayBlock::UserInput(
+    app.blocks.push(UiTimelineItem::UserInput(
         "(I want future migrations to work though!)".into(),
     ));
     app.queue_pending_steer(PreparedTurn::new("next queued thing".into(), Vec::new()));
@@ -64,7 +112,7 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
     assert!(app.has_queued_messages());
     assert!(matches!(
         app.blocks.last(),
-        Some(DisplayBlock::UserInput(text)) if text == "(I want future migrations to work though!)"
+        Some(UiTimelineItem::UserInput(text)) if text == "(I want future migrations to work though!)"
     ));
 }
 

@@ -12,7 +12,8 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{App, DisplayBlock, PreparedTurn};
+use crate::app::{App, PreparedTurn, UiTimelineItem};
+use crate::editor::SuggestionKind;
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
 use crate::render;
@@ -81,6 +82,26 @@ pub(super) fn current_ui_action_context(app: &App, terminal: &Terminal) -> UiAct
     }
 }
 
+pub(super) fn selected_slash_command_suggestion(
+    app: &App,
+    ui_extensions: &UiExtensions,
+) -> Option<(String, super::commands::ParsedSlashCommand)> {
+    if app.suggestion_kind() != SuggestionKind::Command {
+        return None;
+    }
+    let command_text = app
+        .suggestions()
+        .get(app.suggestion_idx())
+        .map(|suggestion| suggestion.name.clone())?;
+    parse_slash_command(
+        &command_text,
+        &app.skills,
+        ui_extensions,
+        &app.plugin_commands,
+    )
+    .map(|command| (command_text, command))
+}
+
 pub(super) fn apply_terminal_action(
     app: &mut App,
     terminal: &Terminal,
@@ -141,7 +162,7 @@ pub(super) async fn activate_foreground_session_handoff(
     *current_execution_mode = state.policy.execution_mode.clone();
     *current_model_variant = state.policy.model_variant.clone();
     app.set_model_variant(current_model_variant.clone());
-    *history = state.project_conversation_messages();
+    *history = state.shared_projection().messages.as_ref().clone();
     *turn_counter = state.iteration;
 
     match rt.session_manager() {
@@ -825,7 +846,7 @@ pub(super) async fn handle_key_event(
                             );
                         }
                         Err(err) => {
-                            app.blocks.push(DisplayBlock::SystemMessage(err));
+                            app.blocks.push(UiTimelineItem::SystemMessage(err));
                             app.invalidate_height_cache();
                             app.scroll_to_bottom();
                         }
@@ -1128,6 +1149,90 @@ pub(super) async fn handle_key_event(
                     .modifiers
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
         {
+            if let Some((command_text, cmd)) = selected_slash_command_suggestion(app, ui_extensions)
+            {
+                if let Some(recorder) = ui_trace.as_mut() {
+                    recorder.record_suggestion_complete();
+                    recorder.record_slash_command(command_text.clone());
+                }
+                app.set_input(String::new());
+                app.update_suggestions();
+                if app.running {
+                    if slash_command_runs_out_of_band_while_running(&cmd, &app.plugin_commands) {
+                        if handle_parsed_slash_command(
+                            cmd,
+                            terminal,
+                            app,
+                            logger,
+                            args,
+                            paused,
+                            plugin_host,
+                            ui_extensions,
+                            dynamic_tools,
+                            runtime,
+                            history,
+                            turn_counter,
+                            last_turn,
+                            runtime_return_rx,
+                            cancel_token,
+                            active_stream_id,
+                            provider,
+                            current_model_variant,
+                            current_execution_mode,
+                            session_manager,
+                            desired_dynamic,
+                            pending_reconfigure,
+                            model_catalog,
+                            toolset_hash,
+                            app_tx,
+                            pending_clear_after_return,
+                        )
+                        .await?
+                        {
+                            return Ok(true);
+                        }
+                        return Ok(false);
+                    }
+                    let queued =
+                        PreparedTurn::prepare(command_text.clone(), Vec::new(), &app.skills);
+                    record_queue_turn(ui_trace, &queued);
+                    app.queue_turn(queued);
+                    return Ok(false);
+                }
+                if handle_parsed_slash_command(
+                    cmd,
+                    terminal,
+                    app,
+                    logger,
+                    args,
+                    paused,
+                    plugin_host,
+                    ui_extensions,
+                    dynamic_tools,
+                    runtime,
+                    history,
+                    turn_counter,
+                    last_turn,
+                    runtime_return_rx,
+                    cancel_token,
+                    active_stream_id,
+                    provider,
+                    current_model_variant,
+                    current_execution_mode,
+                    session_manager,
+                    desired_dynamic,
+                    pending_reconfigure,
+                    model_catalog,
+                    toolset_hash,
+                    app_tx,
+                    pending_clear_after_return,
+                )
+                .await?
+                {
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_suggestion_complete();
             }
@@ -1279,20 +1384,20 @@ pub(super) async fn handle_key_event(
                             } else {
                                 None
                             };
-                            app.blocks.push(DisplayBlock::ShellOutput {
+                            app.blocks.push(UiTimelineItem::ShellOutput {
                                 command: cmd_str.to_string(),
                                 output: stdout.trim_end().to_string(),
                                 error: error.map(|e| e.trim_end().to_string()),
                             });
                         }
                         Ok(Err(e)) => {
-                            app.blocks.push(DisplayBlock::Error(format!(
+                            app.blocks.push(UiTimelineItem::Error(format!(
                                 "Failed to run '{}': {}",
                                 cmd_str, e
                             )));
                         }
                         Err(_) => {
-                            app.blocks.push(DisplayBlock::Error(format!(
+                            app.blocks.push(UiTimelineItem::Error(format!(
                                 "Command '{}' timed out after 30s. Try a narrower command or run it in smaller steps.",
                                 cmd_str
                             )));

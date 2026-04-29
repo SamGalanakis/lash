@@ -17,7 +17,6 @@ path = "src/main.rs"
 lash = { path = "../lash", default-features = false, features = ["full", "testing"] }
 lash-default-tools = { path = "../lash-default-tools" }
 lash-mode-rlm = { path = "../lash-mode-rlm", features = ["sqlite-store"] }
-lash-mode-rlmpure = { path = "../lash-mode-rlmpure", features = ["sqlite-store"] }
 lash-mode-standard = { path = "../lash-mode-standard" }
 lash-rlm-types = { path = "../lash-rlm-types" }
 lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode" }

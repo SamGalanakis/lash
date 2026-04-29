@@ -60,22 +60,24 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
     assert!(store.get_blob(&orphan).is_none());
 }
 
-#[test]
-fn runtime_commit_rejects_different_session_id_on_single_session_store() {
+#[tokio::test]
+async fn runtime_commit_rejects_different_session_id_on_single_session_store() {
     let store = Store::memory().expect("store");
     let alpha = PersistedSessionState {
         session_id: "alpha".to_string(),
         ..PersistedSessionState::default()
     };
-    let first = store.apply_runtime_commit(PersistedStateCommit::persisted_state(&alpha, &[]));
+    let first =
+        lash::apply_runtime_commit(&store, PersistedStateCommit::persisted_state(&alpha, &[]))
+            .await;
     assert!(first.is_ok());
 
     let beta = PersistedSessionState {
         session_id: "beta".to_string(),
         ..PersistedSessionState::default()
     };
-    let err = store
-        .apply_runtime_commit(PersistedStateCommit::persisted_state(&beta, &[]))
+    let err = lash::apply_runtime_commit(&store, PersistedStateCommit::persisted_state(&beta, &[]))
+        .await
         .expect_err("mismatched session commit should fail");
     assert!(err.to_string().contains("bound to session `alpha`"));
 }

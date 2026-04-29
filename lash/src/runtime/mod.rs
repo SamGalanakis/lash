@@ -69,8 +69,9 @@ use io::{normalize_input_items, projection_message_delta_if_base_preserved};
 pub use state::{PersistedSessionState, SessionStateEnvelope};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
-    apply_session_head, clear_persisted_runtime_caches, load_session_checkpoint,
-    normalize_session_graph, persist_session_graph_and_head,
+    apply_session_head, clear_persisted_runtime_caches, commit_runtime_state,
+    commit_runtime_state_with_graph_commit, load_session_checkpoint, normalize_session_graph,
+    persist_runtime_state,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,
@@ -301,7 +302,7 @@ pub trait SessionStoreFactory: Send + Sync {
     fn create_store(
         &self,
         request: &SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn crate::store::RuntimeStore>, String>;
+    ) -> Result<Arc<dyn crate::store::RuntimePersistence>, String>;
 }
 
 fn debug_rss_kb() -> Option<u64> {

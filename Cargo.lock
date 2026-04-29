@@ -230,7 +230,6 @@ dependencies = [
  "lash",
  "lash-export",
  "lash-mode-rlm",
- "lash-mode-rlmpure",
  "lash-mode-standard",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
@@ -280,7 +279,6 @@ dependencies = [
  "lash",
  "lash-default-tools",
  "lash-mode-rlm",
- "lash-mode-rlmpure",
  "lash-mode-standard",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
@@ -1926,7 +1924,6 @@ dependencies = [
  "lash-export",
  "lash-file-index",
  "lash-mode-rlm",
- "lash-mode-rlmpure",
  "lash-mode-standard",
  "lash-plugin-plan-mode",
  "lash-plugin-prompt-context",
@@ -2014,6 +2011,7 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "lash-mode-rlmpure"
 version = "0.2.75"
 dependencies = [
@@ -2026,6 +2024,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> dca461c (checkpoint before responses cutover)
 name = "lash-mode-standard"
 version = "0.2.75"
 dependencies = [

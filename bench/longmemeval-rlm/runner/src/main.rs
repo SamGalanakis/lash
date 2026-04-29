@@ -18,8 +18,8 @@ use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
     PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig, RuntimeStore,
-    SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
+    PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
+    RuntimePersistence, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
@@ -600,7 +600,7 @@ async fn run_question(
         root_plugins,
         TurnInjectionBridge::new(),
         TurnInputInjectionBridge::new(),
-        store.clone() as Arc<dyn RuntimeStore>,
+        store.clone() as Arc<dyn RuntimePersistence>,
     );
     let host = BackgroundRuntimeHost::new(
         EmbeddedRuntimeHost::new(
@@ -974,7 +974,6 @@ fn read_env_var(name: &str) -> Option<String> {
 fn parse_execution_mode(raw: &str) -> anyhow::Result<ExecutionMode> {
     match raw {
         "rlm" => Ok(ExecutionMode::new("rlm")),
-        "rlmpure" | "rlm-pure" | "rlm_pure" => Ok(ExecutionMode::new("rlmpure")),
         "standard" => Ok(ExecutionMode::standard()),
         _ => bail!("unsupported execution mode `{raw}`"),
     }

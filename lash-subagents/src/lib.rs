@@ -23,9 +23,7 @@ use lash::{
     SessionStartPoint, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
     ToolSurfaceContribution, TurnInput,
 };
-use lash_rlm_types::{
-    RlmCreateExtras, RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination, RlmpureCreateExtras,
-};
+use lash_rlm_types::{RlmCreateExtras, RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination};
 use serde_json::{Value, json};
 
 pub use host::{
@@ -52,6 +50,41 @@ struct SubagentToolsProvider {
 }
 
 impl SubagentToolsProvider {
+    fn fresh_child_request(
+        parent_session_id: String,
+        start: SessionStartPoint,
+        policy: SessionPolicy,
+        mode_extras: ModeExtras,
+        usage_source: impl Into<String>,
+    ) -> SessionCreateRequest {
+        SessionCreateRequest {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            parent_session_id: Some(parent_session_id),
+            start,
+            policy: Some(policy),
+            plugin_mode: SessionPluginMode::Fresh,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            context_surface: lash::SessionContextSurface::default(),
+            mode_extras,
+            usage_source: Some(usage_source.into()),
+        }
+    }
+
+    fn finish_mode_extras(
+        mode: &lash::ExecutionMode,
+        termination: RlmTermination,
+    ) -> Result<ModeExtras, String> {
+        match mode.plugin_id() {
+            "rlm" => ModeExtras::typed(
+                lash::ExecutionMode::new("rlm"),
+                RlmCreateExtras { termination },
+            )
+            .map_err(|err| format!("failed to encode rlm mode extras: {err}")),
+            other => Err(format!("unsupported RLM finish mode extras for {other}")),
+        }
+    }
+
     fn build_session_policy(
         &self,
         current_policy: &SessionPolicy,
@@ -108,21 +141,8 @@ impl SubagentToolsProvider {
             let termination = RlmTermination::Finish {
                 schema: Some(schema),
             };
-            if current_snapshot.policy.execution_mode == lash::ExecutionMode::new("rlmpure") {
-                policy.execution_mode = lash::ExecutionMode::new("rlmpure");
-                mode_extras = ModeExtras::typed(
-                    lash::ExecutionMode::new("rlmpure"),
-                    RlmpureCreateExtras { termination },
-                )
-                .map_err(|err| format!("failed to encode rlmpure mode extras: {err}"))?;
-            } else {
-                policy.execution_mode = lash::ExecutionMode::new("rlm");
-                mode_extras = ModeExtras::typed(
-                    lash::ExecutionMode::new("rlm"),
-                    RlmCreateExtras { termination },
-                )
-                .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
-            }
+            policy.execution_mode = lash::ExecutionMode::new("rlm");
+            mode_extras = Self::finish_mode_extras(&policy.execution_mode, termination)?;
         }
         let start = match fork_turns {
             ForkTurns::None => SessionStartPoint::Empty,
@@ -134,18 +154,13 @@ impl SubagentToolsProvider {
             },
         };
 
-        Ok(SessionCreateRequest {
-            session_id: Some(uuid::Uuid::new_v4().to_string()),
-            parent_session_id: Some(context.session_id.clone()),
+        Ok(Self::fresh_child_request(
+            context.session_id.clone(),
             start,
-            policy: Some(policy),
-            plugin_mode: SessionPluginMode::Fresh,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            context_surface: lash::SessionContextSurface::default(),
+            policy,
             mode_extras,
-            usage_source: Some("subagent".to_string()),
-        })
+            "subagent",
+        ))
     }
 
     async fn spawn_agent(
@@ -199,8 +214,8 @@ impl SubagentToolsProvider {
         args: &Value,
         context: &ToolExecutionContext,
     ) -> Result<Value, String> {
-        if self.execution_mode != lash::ExecutionMode::new("rlmpure") {
-            return Err("pass_baton is only available in rlmpure mode".to_string());
+        if self.execution_mode != lash::ExecutionMode::new("rlm") {
+            return Err("pass_baton is only available in rlm mode".to_string());
         }
 
         let task = required_string(args, "task")?;
@@ -217,9 +232,8 @@ impl SubagentToolsProvider {
             .map_err(|err| format!("failed to snapshot current session: {err}"))?;
         let termination = current_snapshot.mode_turn_options.rlm_termination();
         let mut policy = current_snapshot.policy.clone();
-        policy.execution_mode = lash::ExecutionMode::new("rlmpure");
+        policy.execution_mode = lash::ExecutionMode::new("rlm");
 
-        let successor_session_id = uuid::Uuid::new_v4().to_string();
         let mut initial_nodes = Vec::new();
         if !seed.is_empty() {
             initial_nodes.push(SessionAppendNode::event(SessionEventRecord::Mode(
@@ -230,23 +244,20 @@ impl SubagentToolsProvider {
             )));
         }
 
-        let mode_extras = ModeExtras::typed(
-            lash::ExecutionMode::new("rlmpure"),
-            RlmpureCreateExtras { termination },
-        )
-        .map_err(|err| format!("failed to encode rlmpure mode extras: {err}"))?;
-        let request = SessionCreateRequest {
-            session_id: Some(successor_session_id.clone()),
-            parent_session_id: Some(context.session_id.clone()),
-            start: SessionStartPoint::Empty,
-            policy: Some(policy),
-            plugin_mode: SessionPluginMode::Fresh,
-            initial_nodes,
-            first_turn_input: Some(PluginMessage::text(MessageRole::User, task.clone())),
-            context_surface: lash::SessionContextSurface::default(),
+        let mode_extras = Self::finish_mode_extras(&policy.execution_mode, termination)?;
+        let mut request = Self::fresh_child_request(
+            context.session_id.clone(),
+            SessionStartPoint::Empty,
+            policy,
             mode_extras,
-            usage_source: Some("baton".to_string()),
-        };
+            "baton",
+        );
+        let successor_session_id = request
+            .session_id
+            .clone()
+            .expect("fresh child request sets session id");
+        request.initial_nodes = initial_nodes;
+        request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task.clone()));
         context
             .host
             .create_session(request)
@@ -1013,7 +1024,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pass_baton_creates_empty_rlmpure_successor_with_seed_and_task() {
+    async fn pass_baton_creates_empty_rlm_successor_with_seed_and_task() {
         #[derive(Default)]
         struct BatonManager {
             snapshot: PersistedSessionState,
@@ -1076,7 +1087,7 @@ mod tests {
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {
                 policy: SessionPolicy {
-                    execution_mode: lash::ExecutionMode::new("rlmpure"),
+                    execution_mode: lash::ExecutionMode::new("rlm"),
                     model: "model".to_string(),
                     max_context_tokens: Some(200_000),
                     ..SessionPolicy::default()
@@ -1094,10 +1105,10 @@ mod tests {
         });
         let registry = Arc::new(default_registry(
             &std::collections::BTreeMap::new(),
-            lash::ExecutionMode::new("rlmpure"),
+            lash::ExecutionMode::new("rlm"),
         ));
         let provider = SubagentToolsProvider {
-            execution_mode: lash::ExecutionMode::new("rlmpure"),
+            execution_mode: lash::ExecutionMode::new("rlm"),
             registry,
             host: Arc::new(LocalSubagentHost::default()),
         };
@@ -1153,9 +1164,9 @@ mod tests {
         assert_eq!(seed.set["query"], json!("original"));
         let extras = request
             .mode_extras
-            .decode::<RlmpureCreateExtras>(&lash::ExecutionMode::new("rlmpure"))
+            .decode::<RlmCreateExtras>(&lash::ExecutionMode::new("rlm"))
             .expect("decode extras")
-            .expect("rlmpure extras");
+            .expect("rlm extras");
         assert!(matches!(
             extras.termination,
             RlmTermination::Finish { schema: Some(_) }

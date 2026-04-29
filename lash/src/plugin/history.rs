@@ -47,9 +47,10 @@ pub struct HistoryState {
 
 impl HistoryState {
     pub fn from_state(state: &SessionStateEnvelope) -> Self {
+        let projection = state.shared_projection();
         Self {
-            messages: state.project_conversation_messages(),
-            tool_calls: state.project_tool_calls(),
+            messages: projection.messages.as_ref().clone(),
+            tool_calls: projection.tool_calls.as_ref().clone(),
             metadata: HistoryRewriteMetadata::default(),
         }
     }
@@ -147,15 +148,13 @@ impl SessionReadView {
     pub fn new(state: SessionStateEnvelope) -> Self {
         let mut state = state;
         let graph = Arc::new(std::mem::take(&mut state.session_graph));
-        let active_events = graph.shared_active_events();
-        let messages = graph.shared_projected_conversation_messages();
-        let tool_calls = graph.shared_projected_tool_calls();
+        let projection = graph.shared_projection();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_owned(state),
             graph: SessionReadGraph::Owned(Arc::clone(&graph)),
-            active_events,
-            messages: SessionReadMessages::Shared(messages),
-            tool_calls,
+            active_events: projection.active_events,
+            messages: SessionReadMessages::Shared(projection.messages),
+            tool_calls: projection.tool_calls,
             projected_rlm_globals: OnceLock::new(),
         }))
     }
@@ -196,7 +195,7 @@ impl SessionReadView {
         messages: Arc<Vec<crate::Message>>,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     ) -> Self {
-        let active_events = base_graph.shared_active_events();
+        let active_events = base_graph.shared_projection().active_events;
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Derived {
@@ -216,7 +215,7 @@ impl SessionReadView {
         messages: crate::MessageSequence,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     ) -> Self {
-        let active_events = base_graph.shared_active_events();
+        let active_events = base_graph.shared_projection().active_events;
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Derived {
@@ -234,14 +233,13 @@ impl SessionReadView {
     }
 
     pub fn from_state(state: &SessionStateEnvelope) -> Self {
+        let projection = state.session_graph.shared_projection();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Owned(Arc::new(state.session_graph.clone())),
-            active_events: state.session_graph.shared_active_events(),
-            messages: SessionReadMessages::Shared(
-                state.session_graph.shared_projected_conversation_messages(),
-            ),
-            tool_calls: state.session_graph.shared_projected_tool_calls(),
+            active_events: projection.active_events,
+            messages: SessionReadMessages::Shared(projection.messages),
+            tool_calls: projection.tool_calls,
             projected_rlm_globals: OnceLock::new(),
         }))
     }

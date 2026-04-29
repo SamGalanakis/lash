@@ -6,8 +6,6 @@
 //! modules (`mod.rs`, `session_manager.rs`) can reach them via
 //! `super::*`.
 
-use std::sync::Arc;
-
 use lash_sansio::PromptUsage;
 
 use crate::session_model::{
@@ -36,28 +34,8 @@ pub struct SessionStateEnvelope {
 }
 
 impl SessionStateEnvelope {
-    pub fn active_events(&self) -> Vec<SessionEventRecord> {
-        self.session_graph.active_events()
-    }
-
-    pub fn shared_active_events(&self) -> Arc<Vec<SessionEventRecord>> {
-        self.session_graph.shared_active_events()
-    }
-
-    pub fn projected_conversation_messages(&self) -> &[Message] {
-        self.session_graph.projected_conversation_messages()
-    }
-
-    pub fn project_conversation_messages(&self) -> Vec<Message> {
-        self.session_graph.project_conversation_messages()
-    }
-
-    pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
-        self.session_graph.projected_tool_calls()
-    }
-
-    pub fn project_tool_calls(&self) -> Vec<ToolCallRecord> {
-        self.session_graph.project_tool_calls()
+    pub fn shared_projection(&self) -> crate::SessionProjection {
+        self.session_graph.shared_projection()
     }
 
     pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
@@ -212,28 +190,8 @@ impl PersistedSessionState {
         super::usage::SessionUsageReport::from_entries(&self.token_ledger)
     }
 
-    pub fn projected_conversation_messages(&self) -> &[Message] {
-        self.session_graph.projected_conversation_messages()
-    }
-
-    pub fn active_events(&self) -> Vec<SessionEventRecord> {
-        self.session_graph.active_events()
-    }
-
-    pub fn shared_active_events(&self) -> Arc<Vec<SessionEventRecord>> {
-        self.session_graph.shared_active_events()
-    }
-
-    pub fn project_conversation_messages(&self) -> Vec<Message> {
-        self.session_graph.project_conversation_messages()
-    }
-
-    pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
-        self.session_graph.projected_tool_calls()
-    }
-
-    pub fn project_tool_calls(&self) -> Vec<ToolCallRecord> {
-        self.session_graph.project_tool_calls()
+    pub fn shared_projection(&self) -> crate::SessionProjection {
+        self.session_graph.shared_projection()
     }
 
     pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
@@ -359,17 +317,6 @@ impl Default for PersistedSessionState {
     }
 }
 
-pub(super) fn persisted_session_config(policy: &SessionPolicy) -> crate::PersistedSessionConfig {
-    crate::PersistedSessionConfig {
-        provider_id: policy.provider.kind().to_string(),
-        configured_model: policy.model.clone(),
-        context_window: policy.max_context_tokens.unwrap_or_default() as u64,
-        execution_mode: policy.execution_mode.clone(),
-        context_approach: policy.context_approach.clone(),
-        model_variant: policy.model_variant.clone(),
-    }
-}
-
 pub(super) fn apply_persisted_session_config(
     policy: &mut SessionPolicy,
     config: &crate::PersistedSessionConfig,
@@ -437,49 +384,45 @@ pub(super) fn apply_session_head(
     apply_persisted_session_config(&mut state.policy, &head.config);
 }
 
-pub(super) fn session_head_meta_from_state(
-    state: &PersistedSessionState,
-) -> crate::store::SessionHeadMeta {
-    crate::store::SessionHeadMeta {
-        session_id: state.session_id.clone(),
-        config: persisted_session_config(&state.policy),
-        checkpoint_ref: state.checkpoint_ref.clone(),
-        leaf_node_id: state.session_graph.leaf_node_id.clone(),
-        graph_node_count: state.session_graph.nodes.len(),
-        token_ledger: Vec::new(),
+pub(super) async fn persist_runtime_state(
+    store: &(dyn crate::store::RuntimePersistence + '_),
+    state: &mut PersistedSessionState,
+) {
+    match commit_runtime_state(store, state, &[]).await {
+        Ok(()) => {}
+        Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
     }
 }
 
-pub(super) async fn persist_session_graph_and_head(
-    store: &(dyn crate::store::RuntimeStore + '_),
+pub(super) async fn commit_runtime_state(
+    store: &(dyn crate::store::RuntimePersistence + '_),
     state: &mut PersistedSessionState,
-) {
-    let nodes_len = state.session_graph.nodes.len();
-    debug_assert!(
-        state.persisted_graph_node_count <= nodes_len || state.graph_replace_required,
-        "persisted_graph_node_count ({}) exceeds resident ({}) without graph_replace_required — \
-         residency trim or heal path forgot to reset the count",
-        state.persisted_graph_node_count,
-        nodes_len
+    usage_deltas: &[crate::TokenLedgerEntry],
+) -> Result<(), crate::store::StoreError> {
+    let commit = crate::store::PersistedStateCommit::persisted_state(state, usage_deltas);
+    let result = crate::store::apply_runtime_commit(store, commit).await?;
+    state.apply_persisted_commit_result(result);
+    Ok(())
+}
+
+pub(super) async fn commit_runtime_state_with_graph_commit(
+    store: &(dyn crate::store::RuntimePersistence + '_),
+    state: &mut PersistedSessionState,
+    graph: crate::store::SessionGraphCommit,
+    usage_deltas: &[crate::TokenLedgerEntry],
+) -> Result<(), crate::store::StoreError> {
+    let commit = crate::store::PersistedStateCommit::persisted_state_with_graph_commit(
+        state,
+        graph,
+        usage_deltas,
     );
-    if state.graph_replace_required || state.persisted_graph_node_count > nodes_len {
-        store.replace_session_graph(&state.session_graph).await;
-    } else if state.persisted_graph_node_count < nodes_len {
-        store
-            .append_session_graph_nodes(
-                &state.session_graph.nodes[state.persisted_graph_node_count..],
-            )
-            .await;
-    }
-    store
-        .save_session_head_meta(session_head_meta_from_state(state))
-        .await;
-    state.persisted_graph_node_count = nodes_len;
-    state.graph_replace_required = false;
+    let result = crate::store::apply_runtime_commit(store, commit).await?;
+    state.apply_persisted_commit_result(result);
+    Ok(())
 }
 
 pub(super) async fn load_session_checkpoint(
-    store: &(dyn crate::store::RuntimeStore + '_),
+    store: &(dyn crate::store::RuntimePersistence + '_),
     checkpoint_ref: Option<&crate::store::BlobRef>,
 ) -> Option<crate::store::HydratedSessionCheckpoint> {
     let checkpoint_ref = checkpoint_ref?;

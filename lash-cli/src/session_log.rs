@@ -12,7 +12,7 @@ use lash::session_model::Message;
 use lash::session_model::{MessageRole, PartKind};
 use lash::{Store, TokenUsage};
 
-use crate::app::{DisplayBlock, LiveToolOutput, projected_blocks_from_state};
+use crate::app::{LiveToolOutput, UiTimelineItem, projected_timeline_items_from_projection};
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -31,7 +31,7 @@ pub struct SessionStart {
 
 pub struct LoadedSession {
     pub messages: Vec<Message>,
-    pub blocks: Vec<DisplayBlock>,
+    pub blocks: Vec<UiTimelineItem>,
     pub last_token_usage: TokenUsage,
     pub plugin_mode_indicators: BTreeMap<String, String>,
     pub live_tool_output: LiveToolOutput,
@@ -68,7 +68,7 @@ impl lash::SessionStoreFactory for DbSessionStoreFactory {
     fn create_store(
         &self,
         request: &lash::SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn lash::RuntimeStore>, String> {
+    ) -> Result<Arc<dyn lash::RuntimePersistence>, String> {
         let path = self.next_path()?;
         let store = Arc::new(Store::open(&path).map_err(|err| err.to_string())?);
         store.save_session_meta(lash::SessionMeta {
@@ -81,7 +81,7 @@ impl lash::SessionStoreFactory for DbSessionStoreFactory {
                 .and_then(|path| path.to_str().map(str::to_string)),
             parent_session_id: request.parent_session_id.clone(),
         });
-        Ok(store as Arc<dyn lash::RuntimeStore>)
+        Ok(store as Arc<dyn lash::RuntimePersistence>)
     }
 }
 
@@ -301,9 +301,8 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
     let head = store.load_session_head().unwrap_or_default();
     let graph = head.graph;
-    let events = graph.active_events();
-    let messages = graph.project_conversation_messages();
-    let tool_calls = graph.project_tool_calls();
+    let projection = graph.shared_projection();
+    let messages = projection.messages.as_ref().clone();
     let ui_state = crate::app::UiProjectionState::default();
     let checkpoint = head
         .checkpoint_ref
@@ -311,11 +310,11 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         .and_then(|blob_ref| store.get_checkpoint(blob_ref));
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
-    let blocks = projected_blocks_from_state(&events, &messages, &tool_calls, &ui_state);
+    let blocks = projected_timeline_items_from_projection(&projection, &ui_state);
     tracing::debug!(
         session_file = filename,
-        messages = messages.len(),
-        tool_calls = tool_calls.len(),
+        messages = projection.messages.len(),
+        tool_calls = projection.tool_calls.len(),
         blocks = blocks.len(),
         plugin_mode_indicators = plugin_mode_indicators.len(),
         graph_nodes = graph.nodes.len(),
@@ -469,15 +468,15 @@ mod tests {
             // the first user input.
             assert!(matches!(
                 loaded.blocks.first(),
-                Some(DisplayBlock::TurnStart(_))
+                Some(UiTimelineItem::TurnStart(_))
             ));
             assert!(matches!(
                 loaded.blocks.get(1),
-                Some(DisplayBlock::UserInput(text)) if text == "Hi"
+                Some(UiTimelineItem::UserInput(text)) if text == "Hi"
             ));
             assert!(matches!(
                 loaded.blocks.get(2),
-                Some(DisplayBlock::AssistantText(text)) if text == "Hello world"
+                Some(UiTimelineItem::AssistantText(text)) if text == "Hello world"
             ));
             assert_eq!(loaded.last_token_usage.input_tokens, 12);
             assert!(loaded.plugin_mode_indicators.is_empty());
@@ -524,16 +523,16 @@ mod tests {
             // blocks[0] = TurnStart, [1] = UserInput, [2] = Activity, [3] = AssistantText
             assert!(matches!(
                 loaded.blocks.first(),
-                Some(DisplayBlock::TurnStart(_))
+                Some(UiTimelineItem::TurnStart(_))
             ));
             assert!(matches!(
                 loaded.blocks.get(2),
-                Some(DisplayBlock::Activity(activity))
+                Some(UiTimelineItem::Activity(activity))
                     if activity.call.summary == "git status --short"
             ));
             assert!(matches!(
                 loaded.blocks.get(3),
-                Some(DisplayBlock::AssistantText(text)) if text == "Done"
+                Some(UiTimelineItem::AssistantText(text)) if text == "Done"
             ));
         });
     }
@@ -563,7 +562,7 @@ mod tests {
             // blocks[0] = TurnStart, [1] = UserInput, [2] = AssistantText
             assert!(matches!(
                 loaded.blocks.get(2),
-                Some(DisplayBlock::AssistantText(text)) if text == assistant.trim()
+                Some(UiTimelineItem::AssistantText(text)) if text == assistant.trim()
             ));
         });
     }

@@ -12,7 +12,6 @@ path = "src/main.rs"
 lash = { path = "../../../lash", default-features = false, features = ["full"] }
 lash-export = { path = "../../../lash-export" }
 lash-mode-rlm = { path = "../../../lash-mode-rlm" }
-lash-mode-rlmpure = { path = "../../../lash-mode-rlmpure" }
 lash-mode-standard = { path = "../../../lash-mode-standard" }
 lash-rlm-types = { path = "../../../lash-rlm-types" }
 lash-plugin-observational-memory = { path = "../../../lash-plugin-observational-memory" }

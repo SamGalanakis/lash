@@ -21,7 +21,7 @@ use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, ExplorationOp,
     ExplorationOpKind, SnippetPreviewArtifact, SnippetRenderMode,
 };
-use crate::app::{App, DisplayBlock, FollowOutputMode, PreparedTurn, TextSelection};
+use crate::app::{App, FollowOutputMode, PreparedTurn, TextSelection, UiTimelineItem};
 use crate::cli_support::apply_ui_host_effects;
 use crate::render;
 use crate::ui_trace::render_screen_snapshot_with_perf;
@@ -641,27 +641,27 @@ fn build_benchmark_app() -> App {
         );
         app.push_prepared_user_input(&turn);
         app.blocks
-            .push(DisplayBlock::AssistantText(long_assistant_text(
+            .push(UiTimelineItem::AssistantText(long_assistant_text(
                 turn.preview().as_str(),
             )));
         if turn.draft_id.is_empty() {
             unreachable!("prepared turns should always have a draft id");
         }
         app.blocks
-            .push(DisplayBlock::Activity(Box::new(exploration_activity(
+            .push(UiTimelineItem::Activity(Box::new(exploration_activity(
                 turn.preview().as_str(),
                 turn.display_text.as_str(),
             ))));
         if turn.display_text.len().is_multiple_of(3) {
             app.blocks
-                .push(DisplayBlock::Activity(Box::new(snippet_activity(
+                .push(UiTimelineItem::Activity(Box::new(snippet_activity(
                     &turn_label,
                     false,
                 ))));
         }
         if turn.display_text.len().is_multiple_of(5) {
             app.blocks
-                .push(DisplayBlock::Activity(Box::new(snippet_activity(
+                .push(UiTimelineItem::Activity(Box::new(snippet_activity(
                     &turn_label,
                     true,
                 ))));

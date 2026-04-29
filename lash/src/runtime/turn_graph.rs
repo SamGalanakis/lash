@@ -313,10 +313,10 @@ impl TurnGraphOverlay {
         let Some(graph) = self.materialized.as_ref() else {
             return;
         };
-        self.projected_messages =
-            MessageSequence::from_owned(graph.project_conversation_messages());
-        self.active_events = Arc::new(graph.active_events());
-        self.graph_tool_calls = graph.project_tool_calls();
+        let projection = graph.shared_projection();
+        self.projected_messages = MessageSequence::from_owned(projection.messages.as_ref().clone());
+        self.active_events = projection.active_events;
+        self.graph_tool_calls = projection.tool_calls.as_ref().clone();
         self.read_tool_calls = Arc::new(self.graph_tool_calls.clone());
         self.append_builder = graph.append_builder();
     }
@@ -355,11 +355,12 @@ mod tests {
 
     fn overlay_from_graph(graph: SessionGraph) -> TurnGraphOverlay {
         let base_graph = Arc::new(graph);
+        let projection = base_graph.shared_projection();
         TurnGraphOverlay::new(
             Arc::clone(&base_graph),
-            base_graph.shared_active_events(),
-            base_graph.shared_projected_conversation_messages(),
-            base_graph.shared_projected_tool_calls(),
+            projection.active_events,
+            projection.messages,
+            projection.tool_calls,
         )
     }
 
@@ -409,7 +410,8 @@ mod tests {
         let graph = overlay.into_session_graph();
         assert_eq!(
             graph
-                .project_conversation_messages()
+                .shared_projection()
+                .messages
                 .iter()
                 .map(|message| message.id.as_str())
                 .collect::<Vec<_>>(),

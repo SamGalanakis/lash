@@ -287,6 +287,15 @@ pub(crate) enum TracePluginSurfaceEvent {
     PanelClear {
         key: String,
     },
+    Status {
+        key: String,
+        label: String,
+        detail: Option<String>,
+    },
+    Custom {
+        name: String,
+        payload: serde_json::Value,
+    },
 }
 
 impl TracePluginSurfaceEvent {
@@ -313,9 +322,16 @@ impl TracePluginSurfaceEvent {
                 content: content.clone(),
             },
             PluginSurfaceEvent::PanelClear { key } => Self::PanelClear { key: key.clone() },
-            PluginSurfaceEvent::Custom { name, payload } => Self::PanelAppend {
-                key: format!("custom:{name}"),
-                content: payload.to_string(),
+            PluginSurfaceEvent::Status {
+                key, label, detail, ..
+            } => Self::Status {
+                key: key.clone(),
+                label: label.clone(),
+                detail: detail.clone(),
+            },
+            PluginSurfaceEvent::Custom { name, payload } => Self::Custom {
+                name: name.clone(),
+                payload: payload.clone(),
             },
         }
     }

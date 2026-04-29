@@ -7,7 +7,7 @@ use lash::{
     Store, TokenUsage,
 };
 
-use crate::app::{App, DisplayBlock};
+use crate::app::{App, UiTimelineItem};
 use crate::session_log;
 
 fn push_history_system_message(history: &mut Vec<Message>, content: String) {
@@ -48,7 +48,7 @@ async fn restore_execution_state_if_present<'a>(
     match snapshot {
         Some(snapshot) => match rt.restore_execution_state(snapshot).await {
             Ok(()) => {
-                app.blocks.push(DisplayBlock::SystemMessage(
+                app.blocks.push(UiTimelineItem::SystemMessage(
                     "Execution state restored from snapshot.".to_string(),
                 ));
             }
@@ -158,8 +158,9 @@ async fn apply_graph_resume_state(
     if graph.heal_orphaned_leaf() {
         tracing::warn!("session graph leaf was orphaned on resume; healed to most recent message");
     }
-    let messages = graph.project_conversation_messages();
-    let tool_calls = graph.project_tool_calls();
+    let projection = graph.shared_projection();
+    let messages = projection.messages.as_ref().clone();
+    let tool_calls = projection.tool_calls.as_ref().clone();
     *history = messages.clone();
 
     if let Some(dynamic_state) = checkpoint
@@ -204,7 +205,7 @@ async fn apply_graph_resume_state(
     if let Some(requested_execution_mode) = requested_execution_mode.as_ref()
         && !lash::execution_mode_supported(&restored_execution_mode)
     {
-        app.blocks.push(DisplayBlock::SystemMessage(format!(
+        app.blocks.push(UiTimelineItem::SystemMessage(format!(
             "This build does not support `{}` mode; resuming in `standard`.",
             crate::execution_mode_label(requested_execution_mode)
         )));
@@ -296,7 +297,7 @@ pub async fn load_resumed_session(
     app.last_response_usage = loaded.last_token_usage;
     app.last_prompt_usage = None;
     app.plugin_mode_indicators = loaded.plugin_mode_indicators;
-    app.blocks.push(DisplayBlock::SystemMessage(format!(
+    app.blocks.push(UiTimelineItem::SystemMessage(format!(
         "Resumed: {}",
         filename
     )));
@@ -345,7 +346,7 @@ pub async fn restore_session_state(
     let resume_store = match Store::open(&db_path) {
         Ok(s) => s,
         Err(err) => {
-            app.blocks.push(DisplayBlock::SystemMessage(format!(
+            app.blocks.push(UiTimelineItem::SystemMessage(format!(
                 "Could not open session database: {err}"
             )));
             return Ok(());

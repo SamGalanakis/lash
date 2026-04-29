@@ -2,7 +2,7 @@ use super::artifact::render_snippet_preview;
 use super::prompt::prompt_content_lines_snapshot;
 use super::*;
 use crate::activity::ActivityState;
-use crate::app::projected_blocks_from_state;
+use crate::app::projected_timeline_items_from_parts;
 use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use async_trait::async_trait;
@@ -67,7 +67,7 @@ fn exploration_multi_op_shows_explored_header_with_ops_below() {
         0,
     )
     .with_detail_lines(vec!["Read README.md".into(), "Read Cargo.toml".into()]);
-    let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
+    let blocks = vec![UiTimelineItem::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 80, 20)
         .into_iter()
         .map(|line| {
@@ -96,7 +96,7 @@ fn single_op_exploration_renders_as_one_line() {
         true,
         0,
     );
-    let display_blocks = vec![DisplayBlock::Activity(Box::new(blocks[0].clone()))];
+    let display_blocks = vec![UiTimelineItem::Activity(Box::new(blocks[0].clone()))];
     let rendered = render_block(&display_blocks, 0, 1, 80, 20)
         .into_iter()
         .map(|line| {
@@ -130,7 +130,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
         true,
         0,
     );
-    let display_blocks = vec![DisplayBlock::Activity(Box::new(blocks[0].clone()))];
+    let display_blocks = vec![UiTimelineItem::Activity(Box::new(blocks[0].clone()))];
     let rendered = render_block(&display_blocks, 0, 1, 56, 20)
         .into_iter()
         .map(|line| {
@@ -168,7 +168,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
 #[test]
 fn extract_history_selection_text_reads_across_scrolled_content_rows() {
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-    app.blocks = vec![DisplayBlock::UserInput("alpha\nbeta\ngamma".into())];
+    app.blocks = vec![UiTimelineItem::UserInput("alpha\nbeta\ngamma".into())];
     app.scroll_offset = 1;
     app.selection.anchor = (2, 1);
     app.selection.end = (4, 2);
@@ -330,7 +330,7 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
         origin: None,
     };
 
-    let blocks = projected_blocks_from_state(
+    let blocks = projected_timeline_items_from_parts(
         &[],
         &[message],
         &[],
@@ -338,13 +338,13 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
     );
 
     // blocks[0] is the TurnStart marker emitted before the user input.
-    assert!(matches!(blocks.first(), Some(DisplayBlock::TurnStart(_))));
+    assert!(matches!(blocks.first(), Some(UiTimelineItem::TurnStart(_))));
     assert!(matches!(
         blocks.get(1),
-        Some(DisplayBlock::UserInput(text)) if text == "Use /wholehog"
+        Some(UiTimelineItem::UserInput(text)) if text == "Use /wholehog"
     ));
     assert!(!blocks.iter().any(|block| match block {
-        DisplayBlock::UserInput(text) => text.contains("<skill>") || text.contains("<name>"),
+        UiTimelineItem::UserInput(text) => text.contains("<skill>") || text.contains("<name>"),
         _ => false,
     }));
 }
@@ -413,7 +413,7 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
         },
     )));
 
-    let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
+    let blocks = vec![UiTimelineItem::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 80, 24)
         .into_iter()
         .map(|line| {
@@ -456,7 +456,7 @@ fn activity_block_indents_show_snippet_to_user_preview_under_summary() {
         },
     )));
 
-    let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
+    let blocks = vec![UiTimelineItem::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 100, 24)
         .into_iter()
         .map(|line| {
@@ -531,7 +531,7 @@ async fn show_snippet_to_user_output_wraps_under_line_number_gutter() {
         .next()
         .expect("activity block");
 
-    let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
+    let blocks = vec![UiTimelineItem::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 54, 24);
 
     assert!(rendered.iter().all(|line| line.width() <= 54));
@@ -559,7 +559,7 @@ async fn show_snippet_to_user_output_wraps_under_line_number_gutter() {
 
 #[test]
 fn user_input_does_not_highlight_non_command_slash_word_in_prose() {
-    let blocks = vec![DisplayBlock::UserInput(
+    let blocks = vec![UiTimelineItem::UserInput(
         "We need to deal with node /relation types.".into(),
     )];
 
@@ -584,7 +584,7 @@ fn user_input_does_not_highlight_non_command_slash_word_in_prose() {
 
 #[test]
 fn user_input_highlights_slash_in_leading_slash_command() {
-    let blocks = vec![DisplayBlock::UserInput("/help with something".into())];
+    let blocks = vec![UiTimelineItem::UserInput("/help with something".into())];
 
     let rendered = render_block(&blocks, 0, 1, 80, 20);
     let line = rendered.first().expect("user input line");
@@ -728,7 +728,7 @@ fn user_input_highlights_every_detected_slash_command() {
         ("yolopush", "ship changes"),
         ("ghmonitor", "monitor"),
     ]);
-    app.blocks = vec![DisplayBlock::UserInput(
+    app.blocks = vec![UiTimelineItem::UserInput(
         "/spring-cleaning /yolopush and then /ghmonitor status".into(),
     )];
 
@@ -746,7 +746,7 @@ fn user_input_highlights_every_detected_slash_command() {
 fn user_input_does_not_highlight_unknown_inline_slash_words() {
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     app.skills = skill_catalog_with(&[("ghmonitor", "monitor")]);
-    app.blocks = vec![DisplayBlock::UserInput(
+    app.blocks = vec![UiTimelineItem::UserInput(
         "Please check /not-a-command and /ghmonitor soon".into(),
     )];
 
@@ -787,7 +787,7 @@ fn queue_preview_highlights_multiple_detected_slash_commands() {
 #[test]
 fn shell_activity_renders_live_output_inline_under_tool() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks = vec![DisplayBlock::Activity(Box::new(
+    app.blocks = vec![UiTimelineItem::Activity(Box::new(
         ActivityBlock::new(
             ActivityKind::ShellCommand,
             "exec_command",
@@ -843,7 +843,7 @@ fn shell_activity_renders_live_output_inline_under_tool() {
 
 #[test]
 fn plugin_panel_renders_as_section_header_without_box() {
-    let blocks = vec![DisplayBlock::PluginPanel(crate::app::PluginPanelBlock {
+    let blocks = vec![UiTimelineItem::PluginPanel(crate::app::PluginPanelBlock {
         plugin_id: "plan_mode".into(),
         key: "panel".into(),
         title: "PLAN".into(),
@@ -1084,7 +1084,7 @@ fn snippet_preview_wraps_long_markdown_bullets_to_viewport_width() {
 
 #[test]
 fn lashlang_code_block_is_hidden_below_full_expand() {
-    let blocks = vec![DisplayBlock::LashlangCode(
+    let blocks = vec![UiTimelineItem::LashlangCode(
         "r = call read_file { path: \"a\" }\nsubmit r.value".to_string(),
     )];
     for level in [0u8, 1] {
@@ -1123,7 +1123,7 @@ fn activity_detail_lines_are_visible_at_l0() {
         true,
         3,
     );
-    let display = vec![DisplayBlock::Activity(Box::new(blocks[0].clone()))];
+    let display = vec![UiTimelineItem::Activity(Box::new(blocks[0].clone()))];
     let rendered = render_block(&display, 0, 0, 80, 10);
     let text: Vec<String> = rendered
         .iter()
@@ -1142,7 +1142,7 @@ fn activity_detail_lines_are_visible_at_l0() {
 
 #[test]
 fn shell_output_is_hidden_at_l0_and_visible_at_l1() {
-    let blocks = vec![DisplayBlock::ShellOutput {
+    let blocks = vec![UiTimelineItem::ShellOutput {
         command: "echo hi".into(),
         output: "hi\nworld".into(),
         error: None,
@@ -1182,9 +1182,9 @@ fn shell_output_is_hidden_at_l0_and_visible_at_l1() {
 #[test]
 fn reasoning_is_compact_below_l2_and_full_at_l2() {
     let blocks = vec![
-        DisplayBlock::UserInput("x".into()),
-        DisplayBlock::AssistantReasoning("**Planning the push**\n\nThinking body line.".into()),
-        DisplayBlock::AssistantText("Answer.".into()),
+        UiTimelineItem::UserInput("x".into()),
+        UiTimelineItem::AssistantReasoning("**Planning the push**\n\nThinking body line.".into()),
+        UiTimelineItem::AssistantText("Answer.".into()),
     ];
 
     let l0 = render_block(&blocks, 1, 0, 60, 10);
@@ -1253,7 +1253,7 @@ fn reasoning_is_compact_below_l2_and_full_at_l2() {
 fn live_reasoning_compacts_after_activity_appends_below_it() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
-    app.blocks = vec![DisplayBlock::AssistantReasoning(
+    app.blocks = vec![UiTimelineItem::AssistantReasoning(
         "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
     )];
 
@@ -1313,7 +1313,7 @@ fn committed_reasoning_compacts_while_live_assistant_streams() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.expand_level = 1;
-    app.blocks = vec![DisplayBlock::AssistantReasoning(
+    app.blocks = vec![UiTimelineItem::AssistantReasoning(
         "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
     )];
 
@@ -1349,7 +1349,7 @@ fn committed_reasoning_compacts_while_live_assistant_streams() {
 fn live_reasoning_compacts_after_turn_stops() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
-    app.blocks = vec![DisplayBlock::AssistantReasoning(
+    app.blocks = vec![UiTimelineItem::AssistantReasoning(
         "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
     )];
 
@@ -1399,7 +1399,7 @@ fn live_reasoning_compacts_after_turn_stops() {
 #[test]
 fn lashlang_code_block_renders_header_and_body_at_full_expand() {
     let code = "r = call read_file { path: \"a\" }\nsubmit r.value";
-    let blocks = vec![DisplayBlock::LashlangCode(code.to_string())];
+    let blocks = vec![UiTimelineItem::LashlangCode(code.to_string())];
     let rendered = render_block(&blocks, 0, 2, 80, 24);
     let text: Vec<String> = rendered
         .iter()

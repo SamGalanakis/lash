@@ -129,6 +129,7 @@ impl AutonomousRenderer {
                 }
                 PluginSurfaceEvent::ModeIndicatorUpsert { .. }
                 | PluginSurfaceEvent::ModeIndicatorClear { .. }
+                | PluginSurfaceEvent::Status { .. }
                 | PluginSurfaceEvent::Custom { .. } => {}
             },
             // Reasoning summaries are a TUI-only affordance; in

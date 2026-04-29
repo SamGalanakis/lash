@@ -437,7 +437,7 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
         crate::render::extract_history_selection_text(app, width, height)
     });
     let last_text = app.blocks.iter().rev().find_map(|b| {
-        if let DisplayBlock::AssistantText(text) = b {
+        if let UiTimelineItem::AssistantText(text) = b {
             Some(text.clone())
         } else {
             None

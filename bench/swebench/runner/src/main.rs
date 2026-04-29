@@ -18,7 +18,7 @@ use lash::provider::LashConfig;
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, ContextApproach,
     EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, ProviderHandle, RuntimeCoreConfig, RuntimeStore,
+    PersistentRuntimeServices, PluginHost, ProviderHandle, RuntimeCoreConfig, RuntimePersistence,
     SessionEvent, SessionPolicy, SessionUsageReport, Store, TokioSessionTaskExecutor,
     TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
@@ -614,7 +614,7 @@ async fn run_instance(
         plugin_session,
         TurnInjectionBridge::new(),
         TurnInputInjectionBridge::new(),
-        store.clone() as Arc<dyn RuntimeStore>,
+        store.clone() as Arc<dyn RuntimePersistence>,
     );
     let host = BackgroundRuntimeHost::new(
         EmbeddedRuntimeHost::new(
@@ -918,9 +918,6 @@ fn build_plugin_session(
     factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
-    factories.push(Arc::new(
-        lash_mode_rlmpure::BuiltinRlmpureModePluginFactory::default(),
-    ));
 
     // Tool bundles only — core/context/mode plugins are registered
     // above, so we ask `tool_plugin_factories` for just the tool
@@ -988,7 +985,6 @@ fn resolve_provider(args: &Args) -> Result<(ProviderHandle, String, String)> {
 fn parse_execution_mode(raw: &str) -> Result<ExecutionMode> {
     match raw {
         "rlm" => Ok(ExecutionMode::new("rlm")),
-        "rlmpure" | "rlm-pure" | "rlm_pure" => Ok(ExecutionMode::new("rlmpure")),
         "standard" => Ok(ExecutionMode::standard()),
         other => bail!("unsupported execution mode `{other}`"),
     }

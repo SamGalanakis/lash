@@ -83,7 +83,7 @@ sequenceDiagram
   participant Tools as ToolProvider
   participant Repl as lashlang runtime
   participant Graph as TurnGraphOverlay
-  participant Store as RuntimeStore
+  participant Store as RuntimePersistence
 
   Host->>Runtime: stream_turn(input)
   Runtime->>Machine: build from ModePreamble + PromptTemplate

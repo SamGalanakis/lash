@@ -175,6 +175,15 @@ enum ProjectionItem<'a> {
     },
 }
 
+#[derive(Clone)]
+pub struct SessionProjection {
+    pub active_events: Arc<Vec<SessionEventRecord>>,
+    pub messages: Arc<Vec<Message>>,
+    pub tool_calls: Arc<Vec<ToolCallRecord>>,
+    pub rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    pub messages_render_cache: Arc<BaseRenderCache>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SessionGraphAppendBuilder {
     existing_ids: HashSet<String>,
@@ -447,8 +456,9 @@ impl SessionNodeRecord {
 impl SessionGraph {
     pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
         let appendable_messages = {
-            let mut seen_message_ids = self
-                .projected_conversation_messages()
+            let projection = self.shared_projection();
+            let mut seen_message_ids = projection
+                .messages
                 .iter()
                 .map(|message| message.id.as_str())
                 .collect::<HashSet<_>>();
@@ -460,8 +470,9 @@ impl SessionGraph {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        let mut seen_tool_call_keys = self
-            .projected_tool_calls()
+        let projection = self.shared_projection();
+        let mut seen_tool_call_keys = projection
+            .tool_calls
             .iter()
             .map(|record| tool_call_projection_key(&stable_tool_call_key(record), record))
             .collect::<HashSet<_>>();
@@ -719,53 +730,20 @@ impl SessionGraph {
             .collect()
     }
 
-    pub fn project_conversation_messages(&self) -> Vec<Message> {
-        self.cache().projected_messages.as_ref().clone()
-    }
-
-    pub fn projected_conversation_messages(&self) -> &[Message] {
-        self.cache().projected_messages.as_slice()
-    }
-
-    pub fn shared_projected_conversation_messages(&self) -> Arc<Vec<Message>> {
-        Arc::clone(&self.cache().projected_messages)
-    }
-
-    pub fn project_tool_calls(&self) -> Vec<ToolCallRecord> {
-        self.cache().projected_tool_calls.as_ref().clone()
-    }
-
-    pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
-        self.cache().projected_tool_calls.as_slice()
-    }
-
-    pub fn shared_projected_tool_calls(&self) -> Arc<Vec<ToolCallRecord>> {
-        Arc::clone(&self.cache().projected_tool_calls)
-    }
-
-    pub fn shared_projected_rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
-        Arc::clone(&self.cache().projected_rlm_globals)
-    }
-
-    /// Returns a render cache shared with the current projected messages.
-    /// Pass to `MessageSequence::with_base_render_cache` so the per-iteration
-    /// chat projector reuses the same `RenderedPrompt` for the base portion
-    /// of the conversation across LLM iterations within a turn.
-    pub fn shared_projected_messages_render_cache(&self) -> Arc<BaseRenderCache> {
-        Arc::clone(&self.cache().projected_messages_render_cache)
+    pub fn shared_projection(&self) -> SessionProjection {
+        let cache = self.cache();
+        SessionProjection {
+            active_events: Arc::clone(&cache.active_events),
+            messages: Arc::clone(&cache.projected_messages),
+            tool_calls: Arc::clone(&cache.projected_tool_calls),
+            rlm_globals: Arc::clone(&cache.projected_rlm_globals),
+            messages_render_cache: Arc::clone(&cache.projected_messages_render_cache),
+        }
     }
 
     pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
         let messages = Arc::clone(&self.cache().projected_messages);
         self.merge_active_projection(messages.as_slice(), tool_calls);
-    }
-
-    pub fn active_events(&self) -> Vec<SessionEventRecord> {
-        self.cache().active_events.as_ref().clone()
-    }
-
-    pub fn shared_active_events(&self) -> Arc<Vec<SessionEventRecord>> {
-        Arc::clone(&self.cache().active_events)
     }
 
     pub fn append_event(&mut self, event: SessionEventRecord) -> String {
@@ -1246,7 +1224,8 @@ mod tests {
 
         graph.merge_active_projection(&[user.clone(), transient, assistant.clone()], &[]);
 
-        let projected = graph.project_conversation_messages();
+        let projection = graph.shared_projection();
+        let projected = projection.messages.as_slice();
         assert_eq!(
             projected.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             vec!["m1", "m2"]
@@ -1275,7 +1254,8 @@ mod tests {
 
         graph.merge_active_projection(&[user, assistant], &[]);
 
-        let projected = graph.project_conversation_messages();
+        let projection = graph.shared_projection();
+        let projected = projection.messages.as_slice();
         assert_eq!(
             projected.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             vec!["m1", "m2"]

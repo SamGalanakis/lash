@@ -600,11 +600,7 @@ impl PluginSession {
                     messages: plugin_messages,
                 } => {
                     let messages = updated_messages.get_or_insert_with(|| {
-                        crate::MessageSequence::from_base(
-                            turn.state
-                                .session_graph
-                                .shared_projected_conversation_messages(),
-                        )
+                        crate::MessageSequence::from_base(turn.state.shared_projection().messages)
                     });
                     append_plugin_messages(messages, &plugin_messages);
                 }
@@ -648,13 +644,13 @@ impl PluginSession {
             }
         }
         if let Some(messages) = updated_messages.as_ref() {
-            let tool_calls = turn.state.projected_tool_calls().to_vec();
+            let tool_calls = turn.state.shared_projection().tool_calls.as_ref().clone();
             turn.state
                 .replace_projection(messages.as_slice(), &tool_calls);
         }
 
         if self.has_runtime_event_hooks() {
-            let mut history_tool_calls = turn.state.project_tool_calls();
+            let mut history_tool_calls = turn.state.shared_projection().tool_calls.as_ref().clone();
             let mut history_changed = false;
             for tool_call in &mut history_tool_calls {
                 let projected = self

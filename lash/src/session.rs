@@ -365,7 +365,7 @@ impl Session {
         &self.context_prompt_contributions
     }
 
-    pub fn history_store(&self) -> Option<Arc<dyn crate::store::RuntimeStore>> {
+    pub fn history_store(&self) -> Option<Arc<dyn crate::store::RuntimePersistence>> {
         self.services.store.clone()
     }
 

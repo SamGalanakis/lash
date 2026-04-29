@@ -3,7 +3,7 @@ use std::sync::Arc;
 use lash::session_model::Message;
 use lash::*;
 
-use crate::app::{App, projected_blocks_from_state};
+use crate::app::{App, projected_timeline_items_from_projection};
 use crate::push_system_message;
 
 use super::super::runtime::sync_runtime_tool_surface;
@@ -32,15 +32,11 @@ pub(super) async fn handle_plugin(
         match rt.rewrite_history(trigger).await {
             Ok(true) => {
                 let state = rt.export_state();
+                let projection = state.shared_projection();
                 history.clear();
-                let projected_events = state.active_events();
-                let projected_messages = state.project_conversation_messages();
-                let projected_tool_calls = state.project_tool_calls();
-                history.extend(projected_messages.clone());
-                app.blocks = projected_blocks_from_state(
-                    &projected_events,
-                    &projected_messages,
-                    &projected_tool_calls,
+                history.extend(projection.messages.iter().cloned());
+                app.blocks = projected_timeline_items_from_projection(
+                    &projection,
                     &app.ui_projection_state(),
                 );
                 app.invalidate_height_cache();

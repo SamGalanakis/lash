@@ -6,7 +6,7 @@ use lash::*;
 use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
 
-use crate::app::{App, DisplayBlock, PreparedTurn};
+use crate::app::{App, PreparedTurn, UiTimelineItem};
 use crate::command;
 
 #[derive(Debug, Clone)]
@@ -233,10 +233,9 @@ pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String>
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Execution mode cannot be empty.".to_string()),
         "rlm" => Ok(ExecutionMode::new("rlm")),
-        "rlmpure" | "rlm-pure" | "rlm_pure" => Ok(ExecutionMode::new("rlmpure")),
         "standard" | "tools" => Ok(ExecutionMode::standard()),
         other => Err(format!(
-            "Unknown execution mode `{other}`. Expected `rlm`, `rlmpure`, or `standard`."
+            "Unknown execution mode `{other}`. Expected `rlm` or `standard`."
         )),
     }
 }
@@ -359,7 +358,7 @@ pub(crate) fn apply_context_approach_overrides(
 
 pub(crate) fn execution_mode_usage() -> &'static str {
     if lash::execution_mode_supported(&ExecutionMode::new("rlm")) {
-        "<rlm|rlmpure|standard>"
+        "<rlm|standard>"
     } else {
         "<standard>"
     }
@@ -373,8 +372,6 @@ pub(crate) fn ensure_supported_execution_mode(
     } else {
         Err(if mode == ExecutionMode::new("rlm") {
             "RLM mode is not available in this build.".to_string()
-        } else if mode == ExecutionMode::new("rlmpure") {
-            "RLM pure mode is not available in this build.".to_string()
         } else {
             "Execution mode is not available.".to_string()
         })
@@ -481,13 +478,13 @@ pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {
     let msg = msg.into();
     let duplicate = matches!(
         app.blocks.last(),
-        Some(DisplayBlock::SystemMessage(existing)) if existing == &msg
+        Some(UiTimelineItem::SystemMessage(existing)) if existing == &msg
     );
     if duplicate {
         return;
     }
     crate::ui_trace::record_system_message_aux(&msg);
-    app.blocks.push(DisplayBlock::SystemMessage(msg));
+    app.blocks.push(UiTimelineItem::SystemMessage(msg));
     app.invalidate_height_cache();
     app.scroll_to_bottom();
 }

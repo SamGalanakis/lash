@@ -368,18 +368,14 @@ impl TurnAssembler {
         if let Some(issue) = force_runtime_error {
             issues.push(issue);
         }
-        let max_turn_reached = state
-            .projected_conversation_messages()
-            .iter()
-            .rev()
-            .take(8)
-            .any(|msg| {
-                msg.role == MessageRole::System
-                    && msg
-                        .parts
-                        .iter()
-                        .any(|part| part.content.contains("Turn limit reached ("))
-            });
+        let projection = state.shared_projection();
+        let max_turn_reached = projection.messages.iter().rev().take(8).any(|msg| {
+            msg.role == MessageRole::System
+                && msg
+                    .parts
+                    .iter()
+                    .any(|part| part.content.contains("Turn limit reached ("))
+        });
 
         let raw_output = if let Some(final_message) = self.final_message {
             final_message
@@ -443,7 +439,8 @@ impl TurnAssembler {
 }
 
 pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope) -> String {
-    let messages = state.projected_conversation_messages();
+    let projection = state.shared_projection();
+    let messages = projection.messages.as_slice();
     let latest_user_input_idx = messages
         .iter()
         .rposition(|message| {

@@ -1355,7 +1355,7 @@ mod tests {
     #[test]
     fn history_selection_highlights_visible_cells() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-        app.blocks = vec![crate::app::DisplayBlock::UserInput(
+        app.blocks = vec![crate::app::UiTimelineItem::UserInput(
             "alpha\nbeta\ngamma".into(),
         )];
         app.selection.anchor = (2, 1);
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn history_selection_tracks_content_rows_while_scrolled() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-        app.blocks = vec![crate::app::DisplayBlock::UserInput(
+        app.blocks = vec![crate::app::UiTimelineItem::UserInput(
             "alpha\nbeta\ngamma\ndelta".into(),
         )];
         app.scroll_offset = 1;
@@ -1508,7 +1508,7 @@ mod tests {
     #[test]
     fn workspace_surface_replaces_history_and_footer_renders_above_input() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-        app.blocks = vec![crate::app::DisplayBlock::UserInput("history line".into())];
+        app.blocks = vec![crate::app::UiTimelineItem::UserInput("history line".into())];
         let ui_extensions = Arc::new(
             UiExtensions::new(vec![Arc::new(SurfaceTestExtension)]).expect("surface extensions"),
         );
