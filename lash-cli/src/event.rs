@@ -17,6 +17,11 @@ pub enum AppEvent {
     },
     /// 100ms tick for spinner animation (only triggers redraw when a session is running).
     Tick,
+    /// The background `@`-completion file index has finished walking the
+    /// project root and is now serving real matches. The interactive loop
+    /// re-runs `update_suggestions` so any in-flight "indexing files…"
+    /// placeholder is replaced with the real result.
+    FileIndexReady,
     /// Graceful shutdown (e.g. SIGTERM).
     Quit,
 }

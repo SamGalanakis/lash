@@ -102,6 +102,25 @@ impl LashRuntime {
         Ok(exported)
     }
 
+    /// Promote a managed child session into the foreground runtime.
+    ///
+    /// Child sessions created through `SessionManager::create_session` are real
+    /// runtimes, not serialized placeholders. Foreground handoff must therefore
+    /// claim that runtime instead of reconstructing a new empty state in the UI.
+    pub async fn activate_managed_session(&mut self, session_id: &str) -> Result<(), SessionError> {
+        let child = {
+            let mut registry = self.managed_sessions.lock().await;
+            registry.remove(session_id).ok_or_else(|| {
+                SessionError::Protocol(format!("unknown managed session `{session_id}`"))
+            })?
+        };
+        let child = Arc::try_unwrap(child).map_err(|_| {
+            SessionError::Protocol(format!("managed session `{session_id}` is still in use"))
+        })?;
+        *self = child.into_inner();
+        Ok(())
+    }
+
     /// Reset the RLM session on the underlying session runtime.
     pub async fn reset_session(&mut self) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {

@@ -6,7 +6,7 @@ use lash::*;
 use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
 
-use crate::app::{App, DisplayBlock, PendingSessionSwitch, PreparedTurn};
+use crate::app::{App, DisplayBlock, PreparedTurn};
 use crate::command;
 
 #[derive(Debug, Clone)]
@@ -703,15 +703,6 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
             }
             UiHostEffect::WakeSession { input } => {
                 app.queue_monitor_wake(input);
-            }
-            UiHostEffect::SwitchToNewSession {
-                session_id,
-                queued_turn,
-            } => {
-                app.queue_session_switch(PendingSessionSwitch::new(
-                    session_id,
-                    queued_turn.map(PreparedTurn::from),
-                ));
             }
             UiHostEffect::MountSurface { .. }
             | UiHostEffect::UpdateSurface { .. }

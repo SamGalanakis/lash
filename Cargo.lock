@@ -1924,6 +1924,7 @@ dependencies = [
  "lash-autoresearch",
  "lash-default-tools",
  "lash-export",
+ "lash-file-index",
  "lash-mode-rlm",
  "lash-mode-rlmpure",
  "lash-mode-standard",
@@ -1974,6 +1975,16 @@ dependencies = [
  "dirs 6.0.0",
  "lash",
  "serde_json",
+]
+
+[[package]]
+name = "lash-file-index"
+version = "0.2.72"
+dependencies = [
+ "ignore",
+ "notify",
+ "nucleo",
+ "tempfile",
 ]
 
 [[package]]
@@ -2212,6 +2223,7 @@ dependencies = [
  "lash",
  "lash-tui",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2524,6 +2536,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nucleo"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5262af4c94921c2646c5ac6ff7900c2af9cbb08dc26a797e18130a7019c039d4"
+dependencies = [
+ "nucleo-matcher",
+ "parking_lot",
+ "rayon",
+]
+
+[[package]]
+name = "nucleo-matcher"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
+dependencies = [
+ "memchr",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -4203,6 +4236,12 @@ checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
 dependencies = [
  "tinyvec",
 ]
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
 
 [[package]]
 name = "unicode-width"

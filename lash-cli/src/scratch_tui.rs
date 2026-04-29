@@ -806,7 +806,7 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
         .suggestions()
         .iter()
         .take(max_visible)
-        .map(|(name, _)| display_width(name))
+        .map(|s| display_width(&s.name))
         .max()
         .unwrap_or(8)
         .max(8);
@@ -826,22 +826,85 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
         fg(theme::border_faint()),
         Some(bg(theme::surface_deep())),
     );
-    for (idx, (name, desc)) in app.suggestions().iter().take(max_visible).enumerate() {
-        let selected = idx == app.suggestion_idx();
-        let style = if selected {
+    let is_indexing = app.suggestion_kind() == SuggestionKind::Indexing;
+    for (idx, suggestion) in app.suggestions().iter().take(max_visible).enumerate() {
+        let selected = !is_indexing && idx == app.suggestion_idx();
+        let base_style = if selected {
             fg(theme::text_primary()).bg(theme::surface_raised())
+        } else if is_indexing {
+            fg(theme::text_subtle())
+                .add_modifier(Modifier::Italic)
+                .add_modifier(Modifier::Dim)
         } else {
             fg(theme::text_subtle())
         };
-        let row = format!(" {:<width$} {}", name, desc, width = name_col);
-        frame.write_text(
+        let line = build_suggestion_line(suggestion, name_col, base_style, selected);
+        frame.write_line_styled(
             popup.x + 1,
             popup.y + 1 + idx as u16,
-            &row,
-            style,
+            &line,
+            base_style,
             popup.width.saturating_sub(2),
         );
     }
+}
+
+fn build_suggestion_line<'a>(
+    suggestion: &'a crate::editor::Suggestion,
+    name_col: usize,
+    base_style: Style,
+    selected: bool,
+) -> Line<'a> {
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    spans.push(Span::raw(" "));
+
+    // Bold the matched chars on top of `base_style`. Selected rows already
+    // read at full strength, so we only add bold; on unselected rows we also
+    // bump the foreground to text_primary so the matched chars actually pop
+    // against the dim base style.
+    let mut highlight = base_style.add_modifier(Modifier::Bold);
+    if !selected {
+        highlight = highlight.fg(theme::text_primary());
+    }
+
+    if suggestion.match_indices.is_empty() {
+        spans.push(Span::raw(suggestion.name.as_str()));
+    } else {
+        let indices: std::collections::HashSet<u32> =
+            suggestion.match_indices.iter().copied().collect();
+        let mut current = String::new();
+        let mut current_is_match: Option<bool> = None;
+        for (char_idx, ch) in suggestion.name.chars().enumerate() {
+            let is_match = indices.contains(&(char_idx as u32));
+            match current_is_match {
+                Some(prev) if prev == is_match => current.push(ch),
+                Some(prev) => {
+                    let style = if prev { highlight } else { base_style };
+                    spans.push(Span::styled(std::mem::take(&mut current), style));
+                    current.push(ch);
+                    current_is_match = Some(is_match);
+                }
+                None => {
+                    current.push(ch);
+                    current_is_match = Some(is_match);
+                }
+            }
+        }
+        if let Some(prev) = current_is_match {
+            let style = if prev { highlight } else { base_style };
+            spans.push(Span::styled(current, style));
+        }
+    }
+
+    let name_width = display_width(&suggestion.name);
+    if name_width < name_col {
+        spans.push(Span::raw(" ".repeat(name_col - name_width)));
+    }
+    if !suggestion.description.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(suggestion.description.as_str()));
+    }
+    Line::from(spans)
 }
 
 /// Dim every cell in `area` so a popup drawn afterwards reads as a modal

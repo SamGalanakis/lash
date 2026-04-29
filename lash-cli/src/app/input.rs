@@ -116,6 +116,7 @@ impl App {
             &self.skills,
             self.ui_extensions.as_ref(),
             &self.plugin_commands,
+            self.file_index.as_ref(),
         );
     }
 
@@ -480,7 +481,7 @@ impl App {
         self.editor.redo()
     }
 
-    pub fn suggestions(&self) -> &[(String, String)] {
+    pub fn suggestions(&self) -> &[crate::editor::Suggestion] {
         &self.editor.suggestions
     }
 

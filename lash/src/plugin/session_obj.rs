@@ -314,6 +314,9 @@ impl PluginSession {
                         .await
                         .map_err(|err| PluginError::Session(err.to_string()))?;
                 }
+                PluginDirective::HandoffSession { .. } => {
+                    return Err(PluginError::Session(invalid_context.to_string()));
+                }
                 PluginDirective::EmitEvents { events: surface } => {
                     events.extend(crate::plugin::plugin_surface_session_events(
                         &emitted.plugin_id,
@@ -392,6 +395,11 @@ impl PluginSession {
                         .create_session(*request)
                         .await
                         .map_err(|err| PluginError::Session(err.to_string()))?;
+                }
+                PluginDirective::HandoffSession { .. } => {
+                    return Err(PluginError::Session(
+                        "checkpoint hooks do not support session handoff".to_string(),
+                    ));
                 }
                 PluginDirective::AbortTurn { code, message } => {
                     abort = Some(PluginAbort { code, message });
@@ -604,6 +612,11 @@ impl PluginSession {
                     host.create_session(*request)
                         .await
                         .map_err(|err| PluginError::Session(err.to_string()))?;
+                }
+                PluginDirective::HandoffSession { .. } => {
+                    return Err(PluginError::Session(
+                        "after_turn hooks do not support session handoff".to_string(),
+                    ));
                 }
                 PluginDirective::EmitEvents { events: surface } => {
                     events.extend(crate::plugin::plugin_surface_session_events(

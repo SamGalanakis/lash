@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use lash::SkillCatalog;
+use lash_file_index::FileIndex;
+use lash_file_index::MatchResult;
 use lash_ui::UiExtensions;
 
 use crate::command;
@@ -25,6 +26,41 @@ pub enum SuggestionKind {
     Command,
     CommandArgument,
     Path,
+    /// File index is still walking. The popup shows a placeholder row but the
+    /// row is non-selectable — Tab/Enter on it should be a no-op.
+    Indexing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggestion {
+    /// Visible label that gets inserted on accept.
+    pub name: String,
+    /// Right-column annotation (e.g. "file", "dir", or a description).
+    pub description: String,
+    /// Character offsets within `name` that were matched by the fuzzy query.
+    /// Empty for non-fuzzy completions (commands, command arguments). Sorted
+    /// ascending. Renderers bold these characters in the popup.
+    pub match_indices: Vec<u32>,
+}
+
+impl Suggestion {
+    pub fn plain(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            match_indices: Vec::new(),
+        }
+    }
+}
+
+impl From<(String, String)> for Suggestion {
+    fn from((name, description): (String, String)) -> Self {
+        Self {
+            name,
+            description,
+            match_indices: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,7 +91,7 @@ pub struct EditorState {
     pub selection: InputSelection,
     pub input_history: Vec<String>,
     pub input_history_idx: Option<usize>,
-    pub suggestions: Vec<(String, String)>,
+    pub suggestions: Vec<Suggestion>,
     pub suggestion_idx: usize,
     pub suggestion_kind: SuggestionKind,
     pub pending_images: Vec<PendingImage>,
@@ -842,18 +878,22 @@ impl EditorState {
         skills: &SkillCatalog,
         ui_extensions: &UiExtensions,
         plugin_commands: &[lash::CommandDef],
+        file_index: Option<&FileIndex>,
     ) {
         if let Some(context) = self.slash_completion_context() {
             match context {
                 SlashCompletionContext::CommandName { prefix, .. } => {
-                    self.suggestions = command::completions(&prefix, skills, plugin_commands);
-                    for completion in ui_extensions.completions(&prefix) {
+                    self.suggestions = command::completions(&prefix, skills, plugin_commands)
+                        .into_iter()
+                        .map(Suggestion::from)
+                        .collect();
+                    for (name, description) in ui_extensions.completions(&prefix) {
                         if !self
                             .suggestions
                             .iter()
-                            .any(|(existing, _)| existing == &completion.0)
+                            .any(|existing| existing.name == name)
                         {
-                            self.suggestions.push(completion);
+                            self.suggestions.push(Suggestion::plain(name, description));
                         }
                     }
                     self.suggestion_kind = SuggestionKind::Command;
@@ -867,7 +907,10 @@ impl EditorState {
                         skills,
                         plugin_commands,
                         ui_extensions,
-                    );
+                    )
+                    .into_iter()
+                    .map(Suggestion::from)
+                    .collect();
                     self.suggestion_kind = SuggestionKind::CommandArgument;
                 }
             }
@@ -879,12 +922,41 @@ impl EditorState {
             return;
         }
         if let Some((_at_pos, partial)) = self.at_token_at_cursor() {
-            self.suggestions = complete_path(&partial);
-            self.suggestion_kind = SuggestionKind::Path;
-            if self.suggestions.is_empty() {
+            // Wholehog: `@`-completion goes through the project-wide fuzzy
+            // index. No fallback to per-directory listing — if no index is
+            // installed, the popup stays closed.
+            let Some(index) = file_index else {
+                self.suggestions.clear();
                 self.suggestion_idx = 0;
-            } else {
-                self.suggestion_idx = self.suggestion_idx.min(self.suggestions.len() - 1);
+                self.suggestion_kind = SuggestionKind::None;
+                return;
+            };
+            match index.matches(&partial, 20) {
+                MatchResult::Indexing => {
+                    self.suggestions = vec![Suggestion::plain("indexing files…", "")];
+                    self.suggestion_idx = 0;
+                    self.suggestion_kind = SuggestionKind::Indexing;
+                }
+                MatchResult::Ready(matches) => {
+                    self.suggestions = matches
+                        .into_iter()
+                        .map(|m| Suggestion {
+                            name: m.path,
+                            description: if m.is_dir {
+                                "dir".into()
+                            } else {
+                                "file".into()
+                            },
+                            match_indices: m.indices,
+                        })
+                        .collect();
+                    self.suggestion_kind = SuggestionKind::Path;
+                    if self.suggestions.is_empty() {
+                        self.suggestion_idx = 0;
+                    } else {
+                        self.suggestion_idx = self.suggestion_idx.min(self.suggestions.len() - 1);
+                    }
+                }
             }
             return;
         }
@@ -970,8 +1042,9 @@ impl EditorState {
             SuggestionKind::Command => {
                 if let Some(SlashCompletionContext::CommandName { slash_pos, .. }) =
                     self.slash_completion_context()
-                    && let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned()
+                    && let Some(suggestion) = self.suggestions.get(self.suggestion_idx).cloned()
                 {
+                    let cmd = suggestion.name;
                     self.record_undo(UndoAction::Bulk);
                     let needs_arg =
                         ui_extensions
@@ -992,8 +1065,9 @@ impl EditorState {
             SuggestionKind::CommandArgument => {
                 if let Some(SlashCompletionContext::CommandArgument { arg_start, .. }) =
                     self.slash_completion_context()
-                    && let Some((value, _)) = self.suggestions.get(self.suggestion_idx).cloned()
+                    && let Some(suggestion) = self.suggestions.get(self.suggestion_idx).cloned()
                 {
+                    let value = suggestion.name;
                     self.record_undo(UndoAction::Bulk);
                     let before = self.input[..arg_start].to_string();
                     let after = self.input[self.cursor_pos..].to_string();
@@ -1006,8 +1080,9 @@ impl EditorState {
             }
             SuggestionKind::Path => {
                 if let Some((at_pos, _partial)) = self.at_token_at_cursor()
-                    && let Some((path, _)) = self.suggestions.get(self.suggestion_idx).cloned()
+                    && let Some(suggestion) = self.suggestions.get(self.suggestion_idx).cloned()
                 {
+                    let path = suggestion.name;
                     self.record_undo(UndoAction::Bulk);
                     let before = self.input[..at_pos].to_string();
                     let after = self.input[self.cursor_pos..].to_string();
@@ -1021,6 +1096,10 @@ impl EditorState {
                 self.suggestions.clear();
                 self.suggestion_idx = 0;
                 self.suggestion_kind = SuggestionKind::None;
+            }
+            SuggestionKind::Indexing => {
+                // Placeholder row — accepting it should be a no-op so the
+                // user can keep typing while the walker finishes.
             }
             SuggestionKind::None => {}
         }
@@ -1080,75 +1159,6 @@ fn sanitize_pasted_text(text: &str) -> String {
     text.chars()
         .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
         .collect()
-}
-
-fn complete_path(partial: &str) -> Vec<(String, String)> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    let (dir, prefix) = if partial.is_empty() {
-        (cwd.clone(), String::new())
-    } else if partial.ends_with('/') {
-        let dir = if partial.starts_with('/') {
-            PathBuf::from(partial)
-        } else {
-            cwd.join(partial)
-        };
-        (dir, String::new())
-    } else {
-        let path = if partial.starts_with('/') {
-            PathBuf::from(partial)
-        } else {
-            cwd.join(partial)
-        };
-        let parent = path.parent().unwrap_or(&cwd).to_path_buf();
-        let prefix = path
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-        (parent, prefix)
-    };
-
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(_) => return Vec::new(),
-    };
-
-    let show_hidden = prefix.starts_with('.');
-    let mut dirs: Vec<(String, String)> = Vec::new();
-    let mut files: Vec<(String, String)> = Vec::new();
-
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !show_hidden && name.starts_with('.') {
-            continue;
-        }
-        if !prefix.is_empty() && !name.starts_with(&prefix) {
-            continue;
-        }
-        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-        let dir_part = if partial.is_empty() {
-            String::new()
-        } else if partial.ends_with('/') {
-            partial.to_string()
-        } else if let Some(slash) = partial.rfind('/') {
-            partial[..=slash].to_string()
-        } else {
-            String::new()
-        };
-
-        if is_dir {
-            dirs.push((format!("{}{}/", dir_part, name), "dir".to_string()));
-        } else {
-            files.push((format!("{}{}", dir_part, name), "file".to_string()));
-        }
-    }
-
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut result = dirs;
-    result.extend(files);
-    result.truncate(20);
-    result
 }
 
 #[cfg(test)]

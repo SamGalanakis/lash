@@ -135,29 +135,13 @@ fn plan_mode_host(plan_factory: PlanModePluginFactory) -> PluginHost {
 }
 
 #[tokio::test]
-async fn plan_mode_plugin_toggle_and_status_round_trip() {
+async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
-
-    let status = session
-        .invoke_external(
-            "plan_mode.status",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
-        .await
-        .expect("status");
-    assert!(status.success);
-    assert_eq!(
-        status.result.get("enabled").and_then(|v| v.as_bool()),
-        Some(false)
-    );
 
     let enabled = session
         .invoke_external(
@@ -187,34 +171,34 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
     let restored = host
         .build_standard_session("restored", Some(&snapshot))
         .expect("restored");
-    let restored_status = restored
-        .invoke_external("plan_mode.status", json!({}), None, true, manager)
+    let restored_toggle = restored
+        .invoke_external("plan_mode.toggle", json!({}), None, true, manager)
         .await
-        .expect("status");
+        .expect("toggle restored");
     assert_eq!(
-        restored_status
+        restored_toggle
             .result
             .get("enabled")
             .and_then(|v| v.as_bool()),
-        Some(true)
+        Some(false)
     );
 
     restored
         .restore(&lash::PluginSessionSnapshot::default())
         .expect("reset restore");
-    let reset_status = restored
+    let reset_toggle = restored
         .invoke_external(
-            "plan_mode.status",
+            "plan_mode.toggle",
             json!({}),
             None,
             true,
             Arc::new(mock_session_manager("run-session")),
         )
         .await
-        .expect("status");
+        .expect("toggle reset");
     assert_eq!(
-        reset_status.result.get("enabled").and_then(|v| v.as_bool()),
-        Some(false)
+        reset_toggle.result.get("enabled").and_then(|v| v.as_bool()),
+        Some(true)
     );
 }
 
@@ -879,17 +863,6 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             })
     );
 
-    let status = session
-        .invoke_external("plan_mode.status", json!({}), None, true, manager_host)
-        .await
-        .expect("status");
-    assert_eq!(
-        status
-            .result
-            .get("enabled")
-            .and_then(|value| value.as_bool()),
-        Some(false)
-    );
     let dynamic = manager
         .dynamic_tool_state("root")
         .await
@@ -1271,6 +1244,11 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
         directives
             .iter()
             .any(|owned| matches!(owned.value, PluginDirective::EmitEvents { .. }))
+    );
+    assert!(
+        directives
+            .iter()
+            .any(|owned| matches!(owned.value, PluginDirective::HandoffSession { .. }))
     );
 }
 

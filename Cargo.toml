@@ -25,6 +25,7 @@ members = [
     "lash-gepa",
     "lash-cli",
     "lash-export",
+    "lash-file-index",
     "lashlang",
     "bench/longcot/runner",
     "bench/longmemeval-rlm/runner",
