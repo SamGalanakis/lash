@@ -33,6 +33,7 @@ lash-ui = { path = "../lash-ui" }
 lash-tui = { path = "../lash-tui" }
 lash-autoresearch = { path = "../lash-autoresearch" }
 lash-export = { path = "../lash-export" }
+lash-file-index = { path = "../lash-file-index" }
 crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }

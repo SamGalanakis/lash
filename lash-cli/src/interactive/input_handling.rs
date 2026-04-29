@@ -7,12 +7,12 @@ use crossterm::event::{
 use lash::session_model::Message;
 use lash::*;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
-use lash_ui::{UiContext, UiExtensions, UiHostEffect, UiInputOutcome, UiSurfaceSlot};
+use lash_ui::{UiContext, UiExtensions, UiInputOutcome, UiSurfaceSlot};
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{App, DisplayBlock, PendingSessionSwitch, PreparedTurn};
+use crate::app::{App, DisplayBlock, PreparedTurn};
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
 use crate::render;
@@ -91,119 +91,62 @@ pub(super) fn apply_terminal_action(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn apply_ui_host_effect(
+pub(super) async fn activate_foreground_session_handoff(
     app: &mut App,
-    effect: UiHostEffect,
+    session_id: String,
     history: &mut Vec<lash::session_model::Message>,
     runtime: &mut Option<LashRuntime>,
     turn_counter: &mut usize,
     current_execution_mode: &mut ExecutionMode,
-    provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    dynamic_tools: &Arc<DynamicToolProvider>,
-    desired_dynamic: &mut DynamicStateSnapshot,
-    model_catalog: &CachedModelCatalog,
-    session_manager: &mut Arc<dyn SessionManager>,
-    ui_extensions: &UiExtensions,
-    plugin_host: &PluginHost,
-) {
-    match effect {
-        UiHostEffect::SwitchToNewSession {
-            session_id,
-            queued_turn,
-        } => {
-            let pending_switch =
-                PendingSessionSwitch::new(session_id, queued_turn.map(PreparedTurn::from));
-            if runtime.is_some() && !app.running {
-                load_session_switch(
-                    app,
-                    pending_switch,
-                    history,
-                    runtime,
-                    turn_counter,
-                    current_execution_mode,
-                    provider,
-                    current_model_variant,
-                    dynamic_tools,
-                    desired_dynamic,
-                    model_catalog,
-                    session_manager,
-                    ui_extensions,
-                    plugin_host,
-                )
-                .await;
-            } else {
-                app.queue_session_switch(pending_switch);
-            }
-        }
-        other => apply_ui_host_effects(app, vec![other]),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn load_session_switch(
-    app: &mut App,
-    pending_switch: PendingSessionSwitch,
-    history: &mut Vec<lash::session_model::Message>,
-    runtime: &mut Option<LashRuntime>,
-    turn_counter: &mut usize,
-    current_execution_mode: &mut ExecutionMode,
-    _provider: &ProviderHandle,
-    current_model_variant: &mut Option<String>,
-    _dynamic_tools: &Arc<DynamicToolProvider>,
-    _desired_dynamic: &mut DynamicStateSnapshot,
-    _model_catalog: &CachedModelCatalog,
     session_manager: &mut Arc<dyn SessionManager>,
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
 ) -> bool {
-    let mut queued_turn = pending_switch.queued_turn;
-    if queued_turn.is_none()
-        && let Ok(Some(seed)) = session_manager
-            .take_first_turn_input(&pending_switch.session_id)
-            .await
-        && !seed.content.trim().is_empty()
-    {
-        queued_turn = Some(PreparedTurn::prepare_with_effective_text(
-            seed.content.clone(),
-            seed.content,
-            Vec::new(),
-        ));
+    let Some(rt) = runtime.as_mut() else {
+        push_system_message(
+            app,
+            format!("Failed to activate session `{session_id}`: runtime is not available"),
+        );
+        return false;
+    };
+    if let Err(err) = rt.activate_managed_session(&session_id).await {
+        push_system_message(
+            app,
+            format!("Failed to activate session `{session_id}`: {err}"),
+        );
+        return false;
     }
-
-    // Brand-new session: reset the foreground runtime and UI in place
-    // instead of going through the resume path. The resume path is
-    // built to recover history, blocks, and checkpoints from disk; for
-    // a fresh session there's nothing to recover, and any branch in it
-    // that bails early leaks parent state (notably the cumulative
-    // `app.token_usage`) into the new session.
-    app.clear();
-    app.set_model_variant(current_model_variant.clone());
-    history.clear();
-    *turn_counter = 0;
-
-    if let Some(rt) = runtime.as_mut() {
-        let _ = rt.reset_session().await;
-        let mut state = SessionStateEnvelope {
-            session_id: pending_switch.session_id.clone(),
-            policy: SessionPolicy {
-                execution_mode: current_execution_mode.clone(),
-                ..rt.export_state().policy
-            },
-            session_graph: lash::SessionGraph::default(),
-            iteration: *turn_counter,
-            token_usage: TokenUsage::default(),
-            last_prompt_usage: None,
-            mode_turn_options: rt.export_state().mode_turn_options,
-        };
-        state.replace_projection(history, &[]);
-        rt.set_persisted_state(lash::PersistedSessionState::from_state(state));
-        match rt.session_manager() {
-            Ok(manager) => *session_manager = manager,
-            Err(err) => {
-                push_system_message(app, format!("Failed to refresh session manager: {}", err))
-            }
+    let queued_turn = match session_manager.take_first_turn_input(&session_id).await {
+        Ok(Some(seed)) if !seed.content.trim().is_empty() => {
+            Some(PreparedTurn::prepare_with_effective_text(
+                seed.content.clone(),
+                seed.content,
+                Vec::new(),
+            ))
         }
+        Ok(_) => None,
+        Err(err) => {
+            push_system_message(
+                app,
+                format!("Failed to read first turn for session `{session_id}`: {err}"),
+            );
+            None
+        }
+    };
+    let state = rt.export_state();
+
+    app.clear();
+    app.session_id = state.session_id.clone();
+    *current_execution_mode = state.policy.execution_mode.clone();
+    *current_model_variant = state.policy.model_variant.clone();
+    app.set_model_variant(current_model_variant.clone());
+    *history = state.project_conversation_messages();
+    *turn_counter = state.iteration;
+
+    match rt.session_manager() {
+        Ok(manager) => *session_manager = manager,
+        Err(err) => push_system_message(app, format!("Failed to refresh session manager: {}", err)),
     }
 
     sync_ui_extensions(app, ui_extensions, plugin_host, Arc::clone(session_manager)).await;

@@ -424,7 +424,7 @@ async fn set_plan_mode_enabled_state(
     Ok(enabled)
 }
 
-fn plan_status_payload(
+fn plan_mode_payload(
     session_id: &str,
     enabled: bool,
     report: Option<&PlanReport>,
@@ -821,6 +821,9 @@ impl SessionPlugin for PlanModePlugin {
                                 usage_source: Some("plan_execution".to_string()),
                             }),
                         });
+                        directives.push(PluginDirective::HandoffSession {
+                            session_id: session_id.clone(),
+                        });
                         directives.push(PluginDirective::short_circuit(ToolResult::ok(json!({
                             "approved": true,
                             "plan_path": plan_path,
@@ -882,74 +885,17 @@ impl SessionPlugin for PlanModePlugin {
             })
         }));
 
-        let status_state = Arc::clone(&self.state);
-        reg.external().op(
-            ExternalOpDef {
-                name: "plan_mode.status".to_string(),
-                description: "Read the current plan-mode state for this session.".to_string(),
-                kind: ExternalOpKind::Query,
-                session_param: SessionParam::Required,
-                input_schema: json!({
-                    "type": "object",
-                    "additionalProperties": false
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "session_id": { "type": "string" },
-                        "enabled": { "type": "boolean" },
-                        "plan_path": { "type": ["string", "null"] },
-                        "panel_title": { "type": ["string", "null"] },
-                        "panel_content": { "type": ["string", "null"] }
-                    },
-                    "required": ["session_id", "enabled", "plan_path", "panel_title", "panel_content"],
-                    "additionalProperties": false
-                }),
-            },
-            Arc::new(move |ctx, _args| {
-                let state = Arc::clone(&status_state);
-                Box::pin(async move {
-                    let Some(session_id) = ctx.session_id else {
-                        return ToolResult::err(json!("plan_mode.status requires session_id"));
-                    };
-                    let enabled = match state.lock() {
-                        Ok(guard) => guard.enabled,
-                        Err(_) => return ToolResult::err(json!("plan mode state poisoned")),
-                    };
-                    let report = match ensure_plan_report(&state, &session_id, &ctx.host, enabled)
-                        .await
-                    {
-                        Ok(report) => report,
-                        Err(err) => return ToolResult::err(json!(err.to_string())),
-                    };
-                    ToolResult::ok(plan_status_payload(&session_id, enabled, Some(&report)))
-                })
-            }),
-        )?;
-
-        for (name, description, kind) in [
-            (
-                "plan_mode.enable",
-                "Enable plan mode for this session.",
-                ExternalOpKind::Command,
-            ),
-            (
-                "plan_mode.disable",
-                "Disable plan mode for this session.",
-                ExternalOpKind::Command,
-            ),
-            (
-                "plan_mode.toggle",
-                "Toggle plan mode for this session.",
-                ExternalOpKind::Command,
-            ),
+        for (name, description) in [
+            ("plan_mode.enable", "Enable plan mode for this session."),
+            ("plan_mode.disable", "Disable plan mode for this session."),
+            ("plan_mode.toggle", "Toggle plan mode for this session."),
         ] {
             let state = Arc::clone(&self.state);
             reg.external().op(
                 ExternalOpDef {
                     name: name.to_string(),
                     description: description.to_string(),
-                    kind,
+                    kind: ExternalOpKind::Command,
                     session_param: SessionParam::Required,
                     input_schema: json!({
                         "type": "object",
@@ -1003,7 +949,7 @@ impl SessionPlugin for PlanModePlugin {
                             Ok(report) => report,
                             Err(err) => return ToolResult::err(json!(err.to_string())),
                         };
-                        ToolResult::ok(plan_status_payload(&session_id, enabled, Some(&report)))
+                        ToolResult::ok(plan_mode_payload(&session_id, enabled, Some(&report)))
                     })
                 }),
             )?;

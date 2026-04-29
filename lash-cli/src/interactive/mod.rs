@@ -49,8 +49,8 @@ use self::runtime::{apply_pending_reconfigure, send_user_message, sync_runtime_t
 pub(crate) use self::runtime::{generate_session_name, notify_desktop};
 
 use self::input_handling::{
-    apply_terminal_action, apply_ui_host_effect, handle_key_event, handle_mouse_event,
-    handle_surface_input, load_session_switch, process_pending_monitor_wakes,
+    activate_foreground_session_handoff, apply_terminal_action, handle_key_event,
+    handle_mouse_event, handle_surface_input, process_pending_monitor_wakes,
 };
 
 // Items used only by tests via `use super::*;` in tests.rs.
@@ -138,6 +138,23 @@ pub(crate) async fn run_app(
     // Unified event channel
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
 
+    // Kick off the background `@`-completion file index. Starting it here
+    // (rather than lazily on the first `@` keystroke) means the walk is
+    // usually finished before the user can type a query, so the popup serves
+    // real matches immediately. Cwd is captured once; lash-cli has no
+    // mid-session cwd-change events and a stale-after-startup index is the
+    // documented v1 behavior.
+    if let Ok(cwd) = std::env::current_dir() {
+        let index_tx = app_tx.clone();
+        let index = lash_file_index::FileIndex::for_root(
+            cwd,
+            Box::new(move || {
+                let _ = index_tx.send(AppEvent::FileIndexReady);
+            }),
+        );
+        app.install_file_index(index);
+    }
+
     // Stop/pause flags for terminal event pumps.
     let stop = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));
@@ -204,6 +221,7 @@ pub(crate) async fn run_app(
     let mut last_turn: Option<TurnReplayPayload> = None;
     let mut active_stream_id: u64 = 0;
     let mut pending_clear_after_return = false;
+    let mut pending_handoff_session_id: Option<String> = None;
     let mut pending_text_deltas = PendingTextDeltaBuffer::default();
     let mut last_ui_sync = tokio::time::Instant::now();
 
@@ -409,31 +427,37 @@ pub(crate) async fn run_app(
                         &mut pending_text_deltas,
                         ui_trace.as_mut(),
                     );
-                    let pending_session_switch = app.take_pending_session_switch();
                     runtime = Some(done.runtime);
-                    if let Some(pending_switch) = pending_session_switch {
+                    if done.stream_id == active_stream_id
+                        && !pending_clear_after_return
+                        && let Some(session_id) = pending_handoff_session_id.take()
+                    {
                         app.stop_turn();
                         app.recycle_unaccepted_monitor_wakes();
                         runtime_return_rx = None;
                         cancel_token = None;
-                        if load_session_switch(
+                        if activate_foreground_session_handoff(
                             &mut app,
-                            pending_switch,
+                            session_id,
                             &mut history,
                             &mut runtime,
                             &mut turn_counter,
                             &mut current_execution_mode,
-                            &provider,
                             &mut current_model_variant,
-                            &dynamic_tools,
-                            &mut desired_dynamic,
-                            model_catalog.as_ref(),
                             &mut session_manager,
                             ui_extensions.as_ref(),
                             &plugin_host,
                         )
                         .await
                         {
+                            if let Err(err) = sync_runtime_tool_surface(&mut runtime).await {
+                                push_system_message(
+                                    &mut app,
+                                    format!(
+                                        "Failed to sync tool surface after session handoff: {err}"
+                                    ),
+                                );
+                            }
                             dispatch_next_queued_turn(
                                 &mut app,
                                 &mut ui_trace,
@@ -473,6 +497,7 @@ pub(crate) async fn run_app(
                         );
                     }
                     if done.stream_id != active_stream_id || pending_clear_after_return {
+                        pending_handoff_session_id = None;
                         app.recycle_unaccepted_monitor_wakes();
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.export_state().policy;
@@ -819,6 +844,15 @@ pub(crate) async fn run_app(
                 app.dirty = true;
                 push_system_message(&mut app, message);
             }
+            AppEvent::FileIndexReady => {
+                // Walker just finished. If the user is currently sitting on
+                // an "indexing files…" placeholder for an `@`-token, refresh
+                // the popup so they see real matches without typing again.
+                if app.suggestion_kind() == crate::editor::SuggestionKind::Indexing {
+                    app.update_suggestions();
+                    app.dirty = true;
+                }
+            }
             AppEvent::Terminal(TermEvent::Key(key)) => {
                 if handle_key_event(
                     key,
@@ -925,10 +959,6 @@ pub(crate) async fn run_app(
                 if stream_id != active_stream_id {
                     continue;
                 }
-                if app.has_pending_session_switch() {
-                    pending_text_deltas.clear();
-                    continue;
-                }
                 if let SessionEvent::TextDelta { content } = event {
                     pending_text_deltas.push(content);
                     continue;
@@ -978,32 +1008,12 @@ pub(crate) async fn run_app(
                     if let SessionEvent::InjectedTurnInputAccepted { messages, .. } = &event {
                         app.acknowledge_monitor_wakes(messages);
                     }
-                    app.handle_session_event(event);
-                    for effect in ui_effects {
-                        apply_ui_host_effect(
-                            &mut app,
-                            effect,
-                            &mut history,
-                            &mut runtime,
-                            &mut turn_counter,
-                            &mut current_execution_mode,
-                            &provider,
-                            &mut current_model_variant,
-                            &dynamic_tools,
-                            &mut desired_dynamic,
-                            model_catalog.as_ref(),
-                            &mut session_manager,
-                            ui_extensions.as_ref(),
-                            &plugin_host,
-                        )
-                        .await;
-                    }
-                    if app.has_pending_session_switch() {
+                    if let SessionEvent::SessionHandoff { session_id } = &event {
+                        pending_handoff_session_id = Some(session_id.clone());
                         pending_text_deltas.clear();
-                        if let Some(token) = cancel_token.as_ref() {
-                            token.cancel();
-                        }
                     }
+                    app.handle_session_event(event);
+                    apply_ui_host_effects(&mut app, ui_effects);
                     if let Some(effect) = plugin_notification {
                         apply_ui_host_effects(&mut app, vec![effect]);
                     }

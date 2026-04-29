@@ -1,0 +1,13 @@
+[package]
+name = "lash-file-index"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+ignore = "0.4"
+notify = "9.0.0-rc.3"
+nucleo = "0.5"
+
+[dev-dependencies]
+tempfile = "3"

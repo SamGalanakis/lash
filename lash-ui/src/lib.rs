@@ -106,12 +106,6 @@ pub struct ShortcutSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UiPreparedTurn {
-    pub display_text: String,
-    pub effective_text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiHostEffect {
     PushSystemMessage(String),
     DesktopNotification {
@@ -145,10 +139,6 @@ pub enum UiHostEffect {
     },
     WakeSession {
         input: String,
-    },
-    SwitchToNewSession {
-        session_id: String,
-        queued_turn: Option<UiPreparedTurn>,
     },
     MountSurface {
         spec: UiSurfaceSpec,
@@ -614,10 +604,7 @@ struct PlanModeStatus {
     panel_content: Option<String>,
 }
 
-fn plan_mode_status_from_result(
-    result: ToolResult,
-    op_name: &str,
-) -> Result<PlanModeStatus, String> {
+fn plan_mode_command_result(result: ToolResult, op_name: &str) -> Result<PlanModeStatus, String> {
     if !result.success {
         return Err(format!("{op_name} failed: {}", result.result));
     }
@@ -640,7 +627,10 @@ fn plan_mode_status_from_result(
     })
 }
 
-async fn plan_mode_status(ctx: UiContext<'_>, op_name: &str) -> Result<PlanModeStatus, String> {
+async fn invoke_plan_mode_action(
+    ctx: UiContext<'_>,
+    op_name: &str,
+) -> Result<PlanModeStatus, String> {
     let result = ctx
         .plugin_host
         .invoke_external_for_session(
@@ -651,7 +641,7 @@ async fn plan_mode_status(ctx: UiContext<'_>, op_name: &str) -> Result<PlanModeS
         )
         .await
         .map_err(|err| err.to_string())?;
-    plan_mode_status_from_result(result, op_name)
+    plan_mode_command_result(result, op_name)
 }
 
 fn plan_mode_effects(status: &PlanModeStatus) -> Vec<UiHostEffect> {
@@ -1149,13 +1139,6 @@ impl UiExtension for PlanModeUiExtension {
         PLAN_MODE_SHORTCUTS
     }
 
-    async fn sync(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
-        let status = plan_mode_status(ctx, "plan_mode.status")
-            .await
-            .map_err(|err| format!("failed to sync plan mode: {err}"))?;
-        Ok(plan_mode_effects(&status))
-    }
-
     async fn invoke_action(
         &self,
         action: &str,
@@ -1164,7 +1147,7 @@ impl UiExtension for PlanModeUiExtension {
     ) -> Result<Vec<UiHostEffect>, String> {
         match action {
             "toggle" => {
-                let status = plan_mode_status(ctx, "plan_mode.toggle")
+                let status = invoke_plan_mode_action(ctx, "plan_mode.toggle")
                     .await
                     .map_err(|err| format!("failed to toggle plan mode: {err}"))?;
                 let mut effects = plan_mode_effects(&status);
@@ -1223,17 +1206,6 @@ impl UiExtension for PlanModeUiExtension {
                 effects.push(UiHostEffect::QueuePreparedTurn {
                     display_text: display_text.to_string(),
                     effective_text: input.to_string(),
-                });
-            }
-            if result
-                .get("execution_mode")
-                .and_then(|value| value.as_str())
-                == Some("fresh_context")
-                && let Some(session_id) = result.get("session_id").and_then(|value| value.as_str())
-            {
-                effects.push(UiHostEffect::SwitchToNewSession {
-                    session_id: session_id.to_string(),
-                    queued_turn: None,
                 });
             }
             effects
@@ -1311,6 +1283,76 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn plan_mode_sync_is_event_driven() {
+        struct UnusedSessionManager;
+
+        #[async_trait]
+        impl SessionManager for UnusedSessionManager {
+            async fn snapshot_current(&self) -> Result<lash::SessionSnapshot, lash::PluginError> {
+                panic!("plan-mode UI sync should not inspect sessions")
+            }
+
+            async fn snapshot_session(
+                &self,
+                _session_id: &str,
+            ) -> Result<lash::SessionSnapshot, lash::PluginError> {
+                panic!("plan-mode UI sync should not inspect sessions")
+            }
+
+            async fn tool_catalog(
+                &self,
+                _session_id: &str,
+            ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
+                panic!("plan-mode UI sync should not inspect tool catalogs")
+            }
+
+            async fn create_session(
+                &self,
+                _request: lash::SessionCreateRequest,
+            ) -> Result<lash::SessionHandle, lash::PluginError> {
+                panic!("plan-mode UI sync should not create sessions")
+            }
+
+            async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
+                panic!("plan-mode UI sync should not close sessions")
+            }
+
+            async fn start_turn_stream(
+                &self,
+                _session_id: &str,
+                _input: lash::TurnInput,
+            ) -> Result<lash::SessionTurnHandle, lash::PluginError> {
+                panic!("plan-mode UI sync should not start turns")
+            }
+
+            async fn await_turn(
+                &self,
+                _turn_id: &str,
+            ) -> Result<lash::AssembledTurn, lash::PluginError> {
+                panic!("plan-mode UI sync should not await turns")
+            }
+
+            async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::PluginError> {
+                panic!("plan-mode UI sync should not cancel turns")
+            }
+        }
+
+        let extensions =
+            UiExtensions::new(vec![Arc::new(PlanModeUiExtension)]).expect("extensions");
+        let host = PluginHost::new(Vec::new());
+        let effects = extensions
+            .sync_all(UiContext {
+                plugin_host: &host,
+                session_id: "fresh-context-child",
+                session_manager: Arc::new(UnusedSessionManager),
+            })
+            .await
+            .expect("sync");
+
+        assert!(effects.is_empty());
+    }
+
     #[test]
     fn duplicate_commands_are_rejected() {
         struct Duplicate;
@@ -1378,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_exit_event_can_switch_to_fresh_context_session() {
+    fn plan_exit_event_clears_ui_for_fresh_context_handoff() {
         let extensions = UiExtensions::builtin().expect("builtin extensions");
 
         let effects = extensions.effects_for_session_event(&SessionEvent::ToolCall {
@@ -1404,10 +1446,6 @@ mod tests {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string()
                 },
-                UiHostEffect::SwitchToNewSession {
-                    session_id: "new-plan-session".to_string(),
-                    queued_turn: None,
-                }
             ]
         );
     }

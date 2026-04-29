@@ -13,7 +13,6 @@ impl App {
         self.clear_live_tool_output();
         self.pending_steers.clear();
         self.queued_turns.clear();
-        self.pending_session_switch = None;
         self.pending_monitor_wakes.clear();
         self.in_flight_monitor_wakes.clear();
         self.overlay = None;

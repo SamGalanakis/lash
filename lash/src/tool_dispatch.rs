@@ -104,6 +104,12 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                     break;
                 }
             }
+            PluginDirective::HandoffSession { .. } => {
+                short_circuit = Some(ToolResult::err_fmt(
+                    "before_tool_call does not support session handoff",
+                ));
+                break;
+            }
             PluginDirective::ReplaceToolArgs { args: replacement } => {
                 args = replacement;
             }
@@ -190,6 +196,13 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                             final_result = ToolResult::err_fmt(err.to_string());
                             break;
                         }
+                    }
+                    PluginDirective::HandoffSession { session_id } => {
+                        crate::session_model::send_event(
+                            &context.event_tx,
+                            SessionEvent::SessionHandoff { session_id },
+                        )
+                        .await;
                     }
                     PluginDirective::ShortCircuitTool { result, success } => {
                         final_result = ToolResult {

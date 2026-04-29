@@ -116,7 +116,7 @@ fn ui_extension_commands_appear_in_editor_suggestions() {
 
     app.update_suggestions();
 
-    assert!(app.suggestions().iter().any(|(name, _)| name == "/plan"));
+    assert!(app.suggestions().iter().any(|s| s.name == "/plan"));
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn ui_extension_argument_suggestions_complete_second_token() {
     app.update_suggestions();
 
     assert_eq!(
-        app.suggestions().first().map(|value| value.0.as_str()),
+        app.suggestions().first().map(|value| value.name.as_str()),
         Some("help")
     );
     app.complete_suggestion();
@@ -1153,7 +1153,7 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
 }
 
 #[test]
-fn plan_exit_fresh_context_tool_does_not_queue_follow_up_turn() {
+fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let ui_extensions = lash_ui::UiExtensions::builtin().expect("builtin ui extensions");
     crate::apply_ui_host_effects(
@@ -1173,13 +1173,11 @@ fn plan_exit_fresh_context_tool_does_not_queue_follow_up_turn() {
     );
 
     assert!(app.take_next_queued_turn().is_none());
-    let pending = app
-        .take_pending_session_switch()
-        .expect("pending session switch");
-    assert_eq!(pending.session_id, "new-plan-session");
     assert!(
-        pending.queued_turn.is_none(),
-        "seed turn is now sourced from SessionManager::take_first_turn_input, not the tool result"
+        app.blocks
+            .iter()
+            .all(|block| !matches!(block, DisplayBlock::UserInput(_))),
+        "fresh-context handoff is a runtime transition, not a UI-queued turn"
     );
 }
 
@@ -2771,5 +2769,103 @@ fn live_batch_tool_call_expands_children_without_parent_batch_block() {
         activities
             .iter()
             .all(|activity| activity.call.tool_name != "batch" && activity.call.summary != "batch")
+    );
+}
+
+#[test]
+fn at_completion_finds_nested_file_via_fuzzy() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("tempdir");
+    fs::create_dir_all(dir.path().join("lash-cli/src/interactive")).unwrap();
+    fs::create_dir_all(dir.path().join("lash-cli/src")).unwrap();
+    fs::create_dir_all(dir.path().join("other/dir")).unwrap();
+    fs::write(
+        dir.path()
+            .join("lash-cli/src/interactive/input_handling.rs"),
+        "",
+    )
+    .unwrap();
+    fs::write(dir.path().join("lash-cli/src/editor.rs"), "").unwrap();
+    fs::write(dir.path().join("other/dir/unrelated.rs"), "").unwrap();
+
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let index = lash_file_index::FileIndex::for_root_blocking(dir.path().to_path_buf());
+    app.install_file_index(index);
+
+    app.set_input("@input_handling".into());
+    app.editor.cursor_pos = app.input().len();
+    app.update_suggestions();
+
+    assert_eq!(
+        app.suggestion_kind(),
+        crate::editor::SuggestionKind::Path,
+        "expected Path suggestion kind, got {:?}",
+        app.suggestion_kind()
+    );
+    let suggestions: Vec<&str> = app.suggestions().iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        suggestions
+            .iter()
+            .any(|s| *s == "lash-cli/src/interactive/input_handling.rs"),
+        "expected fuzzy match to surface input_handling.rs; got {suggestions:?}"
+    );
+}
+
+#[test]
+fn at_completion_with_no_index_disables_popup() {
+    // Wholehog: without an installed FileIndex, `@`-completion is silent.
+    // No fallback to the old prefix-only directory listing.
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.set_input("@anything".into());
+    app.editor.cursor_pos = app.input().len();
+    app.update_suggestions();
+
+    assert!(
+        app.suggestions().is_empty(),
+        "expected no suggestions without installed index, got {:?}",
+        app.suggestions()
+    );
+    assert_eq!(app.suggestion_kind(), crate::editor::SuggestionKind::None);
+}
+
+#[test]
+fn at_completion_threads_match_indices_for_highlighting() {
+    // Match indices from nucleo are plumbed through editor::Suggestion so the
+    // popup can bold matched characters. Without them the highlight-on-match
+    // feature is dead code.
+    use std::fs;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/handler.rs"), "").unwrap();
+
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let index = lash_file_index::FileIndex::for_root_blocking(dir.path().to_path_buf());
+    app.install_file_index(index);
+
+    app.set_input("@handler".into());
+    app.editor.cursor_pos = app.input().len();
+    app.update_suggestions();
+
+    let suggestion = app
+        .suggestions()
+        .iter()
+        .find(|s| s.name == "src/handler.rs")
+        .expect("expected src/handler.rs in suggestions");
+    assert!(
+        !suggestion.match_indices.is_empty(),
+        "expected non-empty match_indices for fuzzy match, got {:?}",
+        suggestion.match_indices
+    );
+    // Indices reference char offsets within `name`, so all must be in range.
+    let name_len = suggestion.name.chars().count() as u32;
+    assert!(
+        suggestion.match_indices.iter().all(|&i| i < name_len),
+        "match_indices out of bounds for {:?}: {:?}",
+        suggestion.name,
+        suggestion.match_indices
     );
 }

@@ -1677,6 +1677,61 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
     assert!(err.to_string().contains("already exists"));
 }
 
+#[tokio::test]
+async fn runtime_can_activate_managed_child_session() {
+    let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
+    let manager = runtime.session_manager().expect("session manager");
+    manager
+        .create_session(crate::SessionCreateRequest {
+            session_id: Some("child".to_string()),
+            parent_session_id: Some(runtime.session_id().to_string()),
+            start: crate::SessionStartPoint::Empty,
+            policy: None,
+            plugin_mode: crate::SessionPluginMode::InheritCurrent,
+            initial_nodes: Vec::new(),
+            first_turn_input: Some(crate::PluginMessage::text(
+                crate::MessageRole::User,
+                "run child",
+            )),
+            context_surface: crate::SessionContextSurface::default(),
+            mode_extras: crate::ModeExtras::default(),
+            usage_source: Some("test".to_string()),
+        })
+        .await
+        .expect("child session");
+
+    runtime
+        .activate_managed_session("child")
+        .await
+        .expect("activate child");
+
+    assert_eq!(runtime.session_id(), "child");
+    let seed = manager
+        .take_first_turn_input("child")
+        .await
+        .expect("seed lookup")
+        .expect("seed");
+    assert_eq!(seed.content, "run child");
+    assert!(
+        manager
+            .start_turn_stream(
+                "child",
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "old manager should not own activated child".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    user_input: None,
+                    mode: None,
+                    mode_turn_options: None,
+                },
+            )
+            .await
+            .is_err(),
+        "activated child runtime should leave the parent manager registry"
+    );
+}
+
 struct MemoryProbeTool;
 
 #[async_trait::async_trait]
