@@ -218,13 +218,13 @@ pub fn truncate_snapshot_to_recent_turns(
     let kept_tool_calls = projection
         .tool_calls
         .iter()
-        .cloned()
         .filter(|tool_call| {
             tool_call
                 .call_id
                 .as_ref()
                 .is_some_and(|call_id| referenced.contains(call_id))
         })
+        .cloned()
         .collect::<Vec<_>>();
     snapshot.replace_projection(&kept_messages, &kept_tool_calls);
     snapshot

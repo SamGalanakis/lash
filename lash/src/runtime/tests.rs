@@ -923,8 +923,8 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
             full_text: "Done".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Done".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     }]);
@@ -1054,8 +1054,8 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
                 full_text: "First answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "First answer.".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -1065,8 +1065,8 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
                 full_text: "Second answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "Second answer.".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -1139,6 +1139,7 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     tool_signature: None,
                     prune_state: crate::PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 },
                 crate::Part {
                     id: String::new(),
@@ -1151,9 +1152,9 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     tool_signature: None,
                     prune_state: crate::PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 },
-            ]
-            .into(),
+            ],
             images: Vec::new(),
             user_input: None,
         }])
@@ -1165,8 +1166,8 @@ async fn bridge_checkpoint_injection_preserves_images() {
                 full_text: "First answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "First answer.".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -1176,8 +1177,8 @@ async fn bridge_checkpoint_injection_preserves_images() {
                 full_text: "Second answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "Second answer.".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -1245,8 +1246,8 @@ async fn checkpoint_hook_can_inject_messages() {
                 full_text: "First answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "First answer.".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -1256,8 +1257,8 @@ async fn checkpoint_hook_can_inject_messages() {
                 full_text: "Second answer.".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "Second answer.".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -1319,8 +1320,8 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
             full_text: "answer".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "answer".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     }]);
@@ -1461,6 +1462,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -1496,6 +1498,7 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
             LlmStreamEvent::Delta("child ".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
                 text: "session".to_string(),
+                response_meta: None,
             }),
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 7,
@@ -1508,8 +1511,8 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
             full_text: "child session".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "child session".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     }]);
@@ -1596,6 +1599,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -1921,8 +1925,8 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 full_text: "child session".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "child session".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -1932,8 +1936,8 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 full_text: "done".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "done".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -2024,8 +2028,8 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 full_text: "cached child".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "cached child".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -2035,8 +2039,8 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 full_text: "done".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "done".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -2131,6 +2135,7 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -2172,6 +2177,7 @@ fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -2194,6 +2200,7 @@ fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: Some(crate::UserInputProvenance {
@@ -2237,6 +2244,7 @@ fn assembler_prefers_state_output_when_streamed_text_is_a_truncated_prefix() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -2293,6 +2301,7 @@ fn assembler_state_output_excludes_tool_call_payload() {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 },
                 Part {
                     id: "m0.p1".to_string(),
@@ -2307,6 +2316,7 @@ fn assembler_state_output_excludes_tool_call_payload() {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 },
             ]
             .into(),
@@ -2394,6 +2404,7 @@ fn assembler_detects_max_turn_message() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -2500,6 +2511,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
             LlmStreamEvent::Delta("What time ".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
                 text: "is it?".to_string(),
+                response_meta: None,
             }),
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 11,
@@ -2512,8 +2524,8 @@ async fn standard_runtime_assembles_stream_only_text_response() {
             full_text: "What time is it?".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "What time is it?".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     }]);
@@ -2561,6 +2573,7 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
             LlmStreamEvent::Delta("I’m continuing with a type-safety cleanup now: ".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
                 text: "replace the remaining raw JSON paths.".to_string(),
+                response_meta: None,
             }),
         ],
         response: Ok(LlmResponse::default()),
@@ -2633,8 +2646,8 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                 full_text: "stopped".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "stopped".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -2710,8 +2723,8 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                 full_text: "done".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "done".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -2758,12 +2771,13 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
             parts: vec![
                 LlmOutputPart::Text {
                     text: "Intro paragraph.".to_string(),
+                    response_meta: None,
                 },
                 LlmOutputPart::Text {
                     text: "## Heading".to_string(),
+                    response_meta: None,
                 },
-            ]
-            .into(),
+            ],
             ..LlmResponse::default()
         }),
     }]);
@@ -2866,8 +2880,8 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
             full_text: "Hi".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hi".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             usage: LlmUsage::default(),
             ..LlmResponse::default()
         }),
@@ -2911,8 +2925,8 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
             full_text: "Hi".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hi".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
@@ -2952,6 +2966,7 @@ async fn standard_runtime_trace_records_stream_event_entries() {
             LlmStreamEvent::Delta("Hello ".to_string()),
             LlmStreamEvent::Part(LlmOutputPart::Text {
                 text: "world".to_string(),
+                response_meta: None,
             }),
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 10,
@@ -2964,8 +2979,8 @@ async fn standard_runtime_trace_records_stream_event_entries() {
             full_text: "Hello world".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hello world".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     }]);
@@ -3252,6 +3267,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                 parts: vec![
                     LlmOutputPart::Text {
                         text: "checking tool".to_string(),
+                        response_meta: None,
                     },
                     LlmOutputPart::ToolCall {
                         call_id: "tool-1".to_string(),
@@ -3260,8 +3276,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                         item_id: None,
                         signature: None,
                     },
-                ]
-                .into(),
+                ],
                 ..LlmResponse::default()
             }),
         },
@@ -3271,8 +3286,8 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                 full_text: "done".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "done".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 ..LlmResponse::default()
             }),
         },
@@ -3339,8 +3354,8 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
             full_text: "Stored answer".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Stored answer".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
@@ -3413,8 +3428,8 @@ async fn completed_turns_are_persisted_in_session_graph() {
             full_text: "Stored answer".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Stored answer".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
@@ -3511,8 +3526,8 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 full_text: "stored".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "stored".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 usage: first_usage.clone(),
                 ..LlmResponse::default()
             }),
@@ -3526,8 +3541,8 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 full_text: "stored again".to_string(),
                 parts: vec![LlmOutputPart::Text {
                     text: "stored again".to_string(),
-                }]
-                .into(),
+                    response_meta: None,
+                }],
                 usage: second_usage.clone(),
                 ..LlmResponse::default()
             }),

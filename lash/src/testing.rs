@@ -855,7 +855,7 @@ mod test_mode_fakes {
 
             for part in parts {
                 match part {
-                    LlmOutputPart::Text { text } => {
+                    LlmOutputPart::Text { text, .. } => {
                         if !text.is_empty() {
                             let previous_len = assistant_text.len();
                             crate::append_assistant_text_part(&mut assistant_text, &text);
@@ -908,6 +908,7 @@ mod test_mode_fakes {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }];
                 actions.push(DriverAction::AppendEvents(vec![
                     SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
@@ -939,6 +940,7 @@ mod test_mode_fakes {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 });
             }
             let mut calls = Vec::new();
@@ -954,6 +956,7 @@ mod test_mode_fakes {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 });
                 let args = serde_json::from_str::<serde_json::Value>(&input_json)
                     .unwrap_or_else(|_| serde_json::json!({}));
@@ -1008,6 +1011,7 @@ mod test_mode_fakes {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 });
             }
             if !result_parts.is_empty() {

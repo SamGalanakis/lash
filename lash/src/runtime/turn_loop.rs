@@ -260,6 +260,7 @@ impl LashRuntime {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]),
                 user_input: None,
                 origin: None,
@@ -285,6 +286,7 @@ impl LashRuntime {
                         tool_signature: None,
                         prune_state: PruneState::Intact,
                         reasoning_meta: None,
+                        response_meta: None,
                     });
                 }
                 NormalizedItem::Image(bytes) => {
@@ -306,6 +308,7 @@ impl LashRuntime {
                         tool_signature: None,
                         prune_state: PruneState::Intact,
                         reasoning_meta: None,
+                        response_meta: None,
                     });
                 }
             }
@@ -322,6 +325,7 @@ impl LashRuntime {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             });
         }
         reassign_part_ids(&user_id, &mut user_parts);

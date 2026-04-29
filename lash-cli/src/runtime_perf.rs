@@ -508,6 +508,7 @@ fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider {
                 deltas: profile.deltas.clone(),
                 parts: vec![LlmOutputPart::Text {
                     text: profile.full_text,
+                    response_meta: None,
                 }],
                 usage,
                 provider_usage: None,

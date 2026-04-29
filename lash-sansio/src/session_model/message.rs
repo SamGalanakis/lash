@@ -1,4 +1,4 @@
-use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole};
+use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, ResponseTextMeta};
 use crate::plugin::UserInputProvenance;
 use base64::Engine;
 use std::collections::HashSet;
@@ -83,6 +83,11 @@ pub struct Part {
     /// predate this field round-trip unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_meta: Option<ReasoningMeta>,
+    /// Responses API message metadata for assistant text parts. Legacy
+    /// snapshots omit it; adapters synthesize deterministic ids when replaying
+    /// older assistant text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_meta: Option<ResponseTextMeta>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -783,7 +788,14 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         text = format!("Runtime note:\n{text}");
                     }
 
-                    blocks.push(LlmContentBlock::Text(text.into()));
+                    blocks.push(LlmContentBlock::Text {
+                        text: text.into(),
+                        response_meta: if matches!(part.kind, PartKind::Text | PartKind::Prose) {
+                            part.response_meta.clone()
+                        } else {
+                            None
+                        },
+                    });
                 }
             }
         }
@@ -820,6 +832,7 @@ mod tests {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }
     }
 
@@ -839,6 +852,7 @@ mod tests {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }
     }
 
@@ -909,7 +923,7 @@ mod tests {
 
     fn block_text(msg: &LlmMessage, idx: usize) -> &str {
         match msg.blocks.get(idx) {
-            Some(LlmContentBlock::Text(text)) => text.as_ref(),
+            Some(LlmContentBlock::Text { text, .. }) => text.as_ref(),
             Some(other) => panic!("expected Text block, got {other:?}"),
             None => panic!("missing block at index {idx}"),
         }
@@ -984,6 +998,7 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]
                 .into(),
                 user_input: None,
@@ -1003,6 +1018,7 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]
                 .into(),
                 user_input: None,
@@ -1018,7 +1034,7 @@ mod tests {
         assert_eq!(rendered.messages[1].role, LlmRole::User);
         assert!(matches!(
             rendered.messages[1].blocks[0],
-            LlmContentBlock::Text(_)
+            LlmContentBlock::Text { .. }
         ));
         assert!(matches!(
             rendered.messages[1].blocks[1],
@@ -1052,6 +1068,7 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]
                 .into(),
                 user_input: None,
@@ -1071,6 +1088,7 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]
                 .into(),
                 user_input: None,
@@ -1173,6 +1191,7 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]
                 .into(),
                 user_input: None,
@@ -1218,6 +1237,7 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]
                 .into(),
                 user_input: None,
@@ -1237,6 +1257,7 @@ mod tests {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]
                 .into(),
                 user_input: None,
@@ -1260,6 +1281,7 @@ mod tests {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         };
 
         let msgs = vec![Message {
@@ -1299,7 +1321,7 @@ mod tests {
         assert_eq!(rendered.messages[0].blocks.len(), 1);
         assert!(matches!(
             &rendered.messages[0].blocks[0],
-            LlmContentBlock::Text(text) if text.as_ref() == "Here is the answer."
+            LlmContentBlock::Text { text, .. } if text.as_ref() == "Here is the answer."
         ));
 
         // When the assistant message consists solely of a display-only
@@ -1332,6 +1354,7 @@ mod tests {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -1364,6 +1387,7 @@ mod tests {
                 summary: vec!["Thinking.".to_string()],
                 encrypted_content: encrypted.map(str::to_string),
             }),
+            response_meta: None,
         }
     }
 

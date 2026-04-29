@@ -1198,6 +1198,7 @@ mod tests {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,

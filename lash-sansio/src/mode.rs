@@ -62,6 +62,7 @@ pub fn normalized_response_parts(llm_response: &LlmResponse) -> Vec<LlmOutputPar
     if llm_response.parts.is_empty() && !llm_response.full_text.is_empty() {
         vec![LlmOutputPart::Text {
             text: llm_response.full_text.clone(),
+            response_meta: None,
         }]
     } else {
         llm_response.parts.clone()
@@ -88,6 +89,7 @@ pub fn reasoning_part(
         tool_signature: None,
         prune_state: PruneState::Intact,
         reasoning_meta: meta,
+        response_meta: None,
     }
 }
 
@@ -128,6 +130,7 @@ pub fn turn_limit_exhausted_message(max_turns: usize) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]),
         user_input: None,
         origin: None,

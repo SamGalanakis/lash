@@ -548,13 +548,13 @@ async fn summarize_compaction_prefix(
     let tool_calls = projection
         .tool_calls
         .iter()
-        .cloned()
         .filter(|record| {
             record
                 .call_id
                 .as_ref()
                 .is_some_and(|call_id| referenced.contains(call_id))
         })
+        .cloned()
         .collect::<Vec<_>>();
     snapshot.replace_projection(&messages, &tool_calls);
 
@@ -633,6 +633,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
             tool_signature: None,
             prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]),
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
@@ -1004,6 +1005,7 @@ mod tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -1030,6 +1032,7 @@ mod tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,
@@ -1149,6 +1152,7 @@ mod tests {
                         tool_signature: None,
                         prune_state: lash::PruneState::Intact,
                         reasoning_meta: None,
+                        response_meta: None,
                     })
                     .collect(),
             ),

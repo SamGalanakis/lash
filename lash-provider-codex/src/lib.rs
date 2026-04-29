@@ -93,17 +93,15 @@ impl CodexStreamState {
             .iter()
             .rev()
             .find_map(|part| match part {
-                LlmOutputPart::Text { text } if !text.is_empty() => Some(true),
+                LlmOutputPart::Text { text, .. } if !text.is_empty() => Some(true),
                 LlmOutputPart::Text { .. } => None,
                 _ => None,
             })
             .unwrap_or(false);
         if prev_has_text {
-            if let Some(idx) = self
-                .parts
-                .iter()
-                .rposition(|part| matches!(part, LlmOutputPart::Text { text } if !text.is_empty()))
-                && let Some(LlmOutputPart::Text { text }) = self.parts.get_mut(idx)
+            if let Some(idx) = self.parts.iter().rposition(
+                |part| matches!(part, LlmOutputPart::Text { text, .. } if !text.is_empty()),
+            ) && let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(idx)
                 && !text.ends_with("\n\n")
             {
                 text.push_str("\n\n");
@@ -114,6 +112,7 @@ impl CodexStreamState {
         let index = self.parts.len();
         self.parts.push(LlmOutputPart::Text {
             text: String::new(),
+            response_meta: None,
         });
         self.current_text_part = Some(index);
     }
@@ -135,7 +134,7 @@ impl CodexStreamState {
 
         let part_index = self.ensure_text_part_index();
 
-        if let Some(LlmOutputPart::Text { text }) = self.parts.get_mut(part_index) {
+        if let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(part_index) {
             text.push_str(piece);
         }
         self.deltas.push(piece.to_string());
@@ -151,7 +150,7 @@ impl CodexStreamState {
             .parts
             .get(part_index)
             .and_then(|part| match part {
-                LlmOutputPart::Text { text } => Some(text.clone()),
+                LlmOutputPart::Text { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .unwrap_or_default();
@@ -198,12 +197,13 @@ impl CodexStreamState {
         let index = self.parts.len();
         self.parts.push(LlmOutputPart::Text {
             text: String::new(),
+            response_meta: None,
         });
         index
     }
 
     fn set_text_part(&mut self, part_index: usize, text: String) {
-        if let Some(LlmOutputPart::Text { text: existing }) = self.parts.get_mut(part_index) {
+        if let Some(LlmOutputPart::Text { text: existing, .. }) = self.parts.get_mut(part_index) {
             *existing = text;
         }
         self.recompute_full_text();
@@ -217,6 +217,7 @@ impl CodexStreamState {
                 LlmOutputPart::Text { .. } if !replaced => {
                     parts.push(LlmOutputPart::Text {
                         text: text.to_string(),
+                        response_meta: None,
                     });
                     replaced = true;
                 }
@@ -227,6 +228,7 @@ impl CodexStreamState {
         if !replaced {
             parts.push(LlmOutputPart::Text {
                 text: text.to_string(),
+                response_meta: None,
             });
         }
         self.parts = parts;
@@ -237,7 +239,7 @@ impl CodexStreamState {
     fn recompute_full_text(&mut self) {
         self.full_text.clear();
         for part in &self.parts {
-            if let LlmOutputPart::Text { text } = part {
+            if let LlmOutputPart::Text { text, .. } = part {
                 self.full_text.push_str(text);
             }
         }
@@ -411,7 +413,7 @@ impl CodexStreamState {
             .parts
             .iter()
             .filter_map(|part| match part {
-                LlmOutputPart::Text { text } if text.is_empty() => None,
+                LlmOutputPart::Text { text, .. } if text.is_empty() => None,
                 LlmOutputPart::Reasoning { text, .. } if text.trim().is_empty() => None,
                 _ => Some(part.clone()),
             })
@@ -427,13 +429,17 @@ impl CodexStreamState {
             }
             let text = CodexProvider::extract_text(final_response);
             if !text.is_empty() {
-                return vec![LlmOutputPart::Text { text }];
+                return vec![LlmOutputPart::Text {
+                    text,
+                    response_meta: None,
+                }];
             }
         }
 
         if !self.full_text.is_empty() {
             return vec![LlmOutputPart::Text {
                 text: self.full_text.clone(),
+                response_meta: None,
             }];
         }
 
@@ -447,7 +453,7 @@ impl CodexStreamState {
         parts
             .iter()
             .filter_map(|part| match part {
-                LlmOutputPart::Text { text } => Some(text.as_str()),
+                LlmOutputPart::Text { text, .. } => Some(text.as_str()),
                 LlmOutputPart::ToolCall { .. } | LlmOutputPart::Reasoning { .. } => None,
             })
             .collect::<String>()
@@ -640,7 +646,7 @@ impl CodexProvider {
             // input array.
             if matches!(msg.role, LlmRole::System) {
                 for block in msg.blocks.iter() {
-                    if let LlmContentBlock::Text(text) = block
+                    if let LlmContentBlock::Text { text, .. } = block
                         && !text.is_empty()
                     {
                         instructions.push(text.to_string());
@@ -669,7 +675,7 @@ impl CodexProvider {
                         LlmContentBlock::Image { .. } => {
                             consumed_after_tool_result.insert(j);
                         }
-                        LlmContentBlock::Text(t) if t.starts_with("[Tool image:") => {
+                        LlmContentBlock::Text { text: t, .. } if t.starts_with("[Tool image:") => {
                             consumed_after_tool_result.insert(j);
                         }
                         _ => break,
@@ -682,7 +688,7 @@ impl CodexProvider {
                     continue;
                 }
                 match block {
-                    LlmContentBlock::Text(text) => {
+                    LlmContentBlock::Text { text, .. } => {
                         if text.is_empty() {
                             continue;
                         }
@@ -809,7 +815,9 @@ impl CodexProvider {
                                         image_parts.push(Self::input_image_part(att));
                                     }
                                 }
-                                LlmContentBlock::Text(t) if t.starts_with("[Tool image:") => {
+                                LlmContentBlock::Text { text: t, .. }
+                                    if t.starts_with("[Tool image:") =>
+                                {
                                     // placeholder — consume silently
                                 }
                                 _ => break,
@@ -1382,6 +1390,7 @@ impl CodexProvider {
                                 {
                                     parts.push(LlmOutputPart::Text {
                                         text: text.to_string(),
+                                        response_meta: None,
                                     });
                                 }
                             }
@@ -1421,6 +1430,7 @@ impl CodexProvider {
         {
             parts.push(LlmOutputPart::Text {
                 text: text.to_string(),
+                response_meta: None,
             });
         }
         parts
@@ -1742,6 +1752,7 @@ impl Provider for CodexProvider {
             if parts.is_empty() && !content.is_empty() {
                 parts.push(LlmOutputPart::Text {
                     text: content.clone(),
+                    response_meta: None,
                 });
             }
             if let Some(tx) = &stream_events {
