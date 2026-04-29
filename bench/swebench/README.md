@@ -27,7 +27,7 @@ For each instance:
 1. **Materialize the repo.** Clones `https://github.com/<repo>.git` as a bare mirror into `.benchmarks/swebench/workspace/<org__repo>.git` (shared across instances), then `git worktree add --detach <base_commit>` into the per-instance directory. Fetches on-demand when the base commit isn't present yet.
 2. **Run lash.** Each instance is spawned as its own subprocess (lash's file tools resolve paths against the process CWD, so we need per-instance isolation to run `batch_size > 1`). The child starts the embedded runtime with the worktree as the project root, RLM execution mode, rolling-history context, and the default tool surface (shell, apply_patch, read_file, ls, grep, glob). No `ask` (autonomous) and no web tools.
 3. **Capture the patch.** `git add -A && git diff HEAD --binary` against the base commit — that's the `model_patch`. Empty patches are recorded but graded as `fail`.
-4. **Record artifacts.** `instances/<id>/` gets `model.patch`, `prompt.txt`, `result.json`, `events.jsonl`, `session.llm.jsonl`, `session.db`. Worktrees are removed after the instance finishes (they can be 100s of MB).
+4. **Record artifacts.** `instances/<id>/` gets `model.patch`, `prompt.txt`, `result.json`, `events.jsonl`, `session.trace.jsonl`, `session.db`. Worktrees are removed after the instance finishes (they can be 100s of MB).
 
 `predictions.jsonl` (top-level, one JSON object per line) is what the evaluator consumes. It follows upstream's schema:
 

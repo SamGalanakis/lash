@@ -90,29 +90,35 @@ class BenchUiHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_DELETE(self) -> None:  # noqa: N802
-        if not self.path.startswith("/api/runs/"):
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
-            return
-        run_id = self.path.removeprefix("/api/runs/").strip("/")
-        if delete_run(self.results_dir, run_id):
-            self._send_json(HTTPStatus.OK, {"deleted": [run_id]})
-        else:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "run not found"})
+        try:
+            if not self.path.startswith("/api/runs/"):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            run_id = self.path.removeprefix("/api/runs/").strip("/")
+            if delete_run(self.results_dir, run_id):
+                self._send_json(HTTPStatus.OK, {"deleted": [run_id]})
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "run not found"})
+        except Exception as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/api/runs/delete":
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
-            return
-        body = self._read_json_body()
-        run_ids = body.get("run_ids") or []
-        if not isinstance(run_ids, list):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "run_ids must be a list"})
-            return
-        deleted = []
-        for run_id in run_ids:
-            if isinstance(run_id, str) and delete_run(self.results_dir, run_id):
-                deleted.append(run_id)
-        self._send_json(HTTPStatus.OK, {"deleted": deleted})
+        try:
+            if self.path != "/api/runs/delete":
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            body = self._read_json_body()
+            run_ids = body.get("run_ids") or []
+            if not isinstance(run_ids, list):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "run_ids must be a list"})
+                return
+            deleted = []
+            for run_id in run_ids:
+                if isinstance(run_id, str) and delete_run(self.results_dir, run_id):
+                    deleted.append(run_id)
+            self._send_json(HTTPStatus.OK, {"deleted": deleted})
+        except Exception as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return

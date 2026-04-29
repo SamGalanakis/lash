@@ -1,14 +1,89 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use lash::PromptContribution;
 use lash::plugin::PromptHookContext;
 
+/// Render the "Context Budget" prompt section. Returns an empty vec when
+/// no budget is configured or the most recent prompt has no usable token
+/// accounting yet.
+pub fn budget_prompt_contributions(
+    ctx: &PromptHookContext,
+    max_budget_tokens: Option<usize>,
+) -> Vec<PromptContribution> {
+    let Some(max) = max_budget_tokens else {
+        return Vec::new();
+    };
+    let Some(usage) = ctx.state.last_prompt_usage() else {
+        return Vec::new();
+    };
+    let used = usage.context_budget_tokens;
+    if used == 0 {
+        return Vec::new();
+    }
+    let pct = (used * 100).checked_div(max).unwrap_or(0);
+    vec![PromptContribution::execution(
+        "Context Budget",
+        format!(
+            "Used: {used} / {max} tokens ({pct}%)\nHand off via `pass_baton` when this becomes inefficient. The next agent starts fresh."
+        ),
+    )]
+}
+
 pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
-    let globals = ctx.state.projected_rlm_globals();
+    let globals = ctx.state.shared_projected_rlm_globals();
     if globals.is_empty() {
         return Vec::new();
     }
+    vec![render_bound_variables(&globals)]
+}
 
+/// Memoizes the rendered "Bound Variables" `PromptContribution`. The
+/// cache hits when the projected-globals `Arc` identity is unchanged
+/// between LLM iterations — common during a single turn since the
+/// `SessionGraphCache` only mints a new globals `Arc` when a
+/// `RlmGlobalsPatch` is applied. Saves the JSON-shape inference + the
+/// `format!()`/`String::push_str` walk per iteration.
+#[derive(Default)]
+pub struct BoundVariablesCache {
+    inner: Mutex<Option<CachedBoundVariables>>,
+}
+
+struct CachedBoundVariables {
+    globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    rendered: PromptContribution,
+}
+
+impl BoundVariablesCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn contributions(&self, ctx: &PromptHookContext) -> Vec<PromptContribution> {
+        let globals = ctx.state.shared_projected_rlm_globals();
+        if globals.is_empty() {
+            return Vec::new();
+        }
+        if let Ok(guard) = self.inner.lock()
+            && let Some(cached) = guard.as_ref()
+            && Arc::ptr_eq(&cached.globals, &globals)
+        {
+            return vec![cached.rendered.clone()];
+        }
+        let rendered = render_bound_variables(&globals);
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = Some(CachedBoundVariables {
+                globals,
+                rendered: rendered.clone(),
+            });
+        }
+        vec![rendered]
+    }
+}
+
+fn render_bound_variables(
+    globals: &Arc<serde_json::Map<String, serde_json::Value>>,
+) -> PromptContribution {
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
         "The type and size hints below are there to help you choose the right strategy before inspecting a value.".to_string(),
@@ -51,10 +126,7 @@ pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<Prom
         lines.push("```".to_string());
     }
 
-    vec![PromptContribution::guidance(
-        "Bound Variables",
-        lines.join("\n"),
-    )]
+    PromptContribution::guidance("Bound Variables", lines.join("\n"))
 }
 
 fn render_value_size_hint(value: &serde_json::Value) -> Option<String> {

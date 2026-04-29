@@ -168,7 +168,7 @@ fn trial_record(r: &InstanceResult) -> Value {
                 "instance_result": format!("instances/{}/result.json", r.instance_id),
                 "instance_patch": format!("instances/{}/model.patch", r.instance_id),
                 "instance_events": format!("instances/{}/events.jsonl", r.instance_id),
-                "instance_llm_log": format!("instances/{}/session.llm.jsonl", r.instance_id),
+                "instance_trace": format!("instances/{}/session.trace.jsonl", r.instance_id),
                 "instance_prompt": format!("instances/{}/prompt.txt", r.instance_id),
             },
             "commands": Vec::<Value>::new(),

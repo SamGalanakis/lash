@@ -1297,7 +1297,7 @@ mod tests {
             state: Arc::new(Mutex::new(RuntimeState::default())),
         };
         assert!(tools.definitions().into_iter().all(|tool| {
-            tool.effective_availability(lash::ExecutionMode::Standard)
+            tool.effective_availability(&lash::ExecutionMode::standard())
                 == lash::ToolAvailability::Hidden
         }));
     }

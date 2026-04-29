@@ -397,13 +397,13 @@ mod tests {
         let factory = UpdatePlanPluginFactory::new();
         let root_ctx = PluginSessionContext {
             session_id: "root".into(),
-            execution_mode: lash::ExecutionMode::Standard,
+            execution_mode: lash::ExecutionMode::standard(),
             context_approach: lash::ContextApproach::default(),
             parent_session_id: None,
         };
         let child_ctx = PluginSessionContext {
             session_id: "child".into(),
-            execution_mode: lash::ExecutionMode::Standard,
+            execution_mode: lash::ExecutionMode::standard(),
             context_approach: lash::ContextApproach::default(),
             parent_session_id: Some("root".into()),
         };
@@ -427,7 +427,7 @@ mod tests {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::new(SessionStateEnvelope::default()),
-                rlm_termination: lash::RlmTermination::default(),
+                mode_turn_options: lash::ModeTurnOptions::default(),
             })
             .await
             .expect("prompt contributions");
@@ -449,7 +449,7 @@ mod tests {
             .build_session_with_parent(
                 "child",
                 Some("root".to_string()),
-                ExecutionMode::Standard,
+                ExecutionMode::standard(),
                 lash::ContextApproach::default(),
                 None,
             )
@@ -460,7 +460,7 @@ mod tests {
                 session_id: "child".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::new(SessionStateEnvelope::default()),
-                rlm_termination: lash::RlmTermination::default(),
+                mode_turn_options: lash::ModeTurnOptions::default(),
             })
             .await
             .expect("prompt contributions");

@@ -45,7 +45,7 @@ impl ToolSurface {
             tools: tools
                 .into_iter()
                 .map(|definition| ToolSurfaceEntry {
-                    availability: definition.effective_availability(mode),
+                    availability: definition.effective_availability(&mode),
                     definition,
                 })
                 .collect(),
@@ -213,7 +213,7 @@ mod tests {
                 tool("grep", ToolAvailability::Callable),
                 tool("privileged_tool", ToolAvailability::Discoverable),
             ],
-            mode: crate::ExecutionMode::Rlm,
+            mode: crate::ExecutionMode::new("test_mode"),
             contributions: Vec::new(),
         });
 
@@ -227,7 +227,7 @@ mod tests {
     fn explicit_contributions_override_availability() {
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: vec![tool("read_file", ToolAvailability::Documented)],
-            mode: crate::ExecutionMode::Rlm,
+            mode: crate::ExecutionMode::new("test_mode"),
             contributions: vec![ToolSurfaceContribution {
                 overrides: vec![ToolSurfaceOverride {
                     tool_name: "read_file".to_string(),
@@ -258,7 +258,7 @@ mod tests {
     fn prompt_gate_requires_matching_tool_availability() {
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: vec![tool("discover_tools", ToolAvailability::Documented)],
-            mode: crate::ExecutionMode::Standard,
+            mode: crate::ExecutionMode::standard(),
             contributions: Vec::new(),
         });
 

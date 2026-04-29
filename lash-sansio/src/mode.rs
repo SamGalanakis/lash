@@ -1,32 +1,45 @@
 //! Mode-agnostic types and helpers used by protocol drivers. The
-//! concrete `StandardDriver` / `RlmDriver` and their prompts live in
-//! the `lash-mode-standard` / `lash-mode-rlm` crates; this module only
+//! concrete mode drivers and their prompts live in
+//! the mode crates crates; this module only
 //! exposes the shared surface:
 //!
 //! - [`ModeConfig`], [`ModePreamble`], [`ModeBuildInput`] — the
 //!   per-turn configuration driver-plugins populate.
 //! - A small helper layer (`normalized_response_parts`, `reasoning_part`,
 //!   `append_assistant_text_part`, `turn_limit_exhausted_message`) that
-//!   both Standard and RLM drivers reuse for building assistant
+//!   mode drivers reuse for building assistant
 //!   messages.
 
 use std::sync::Arc;
 
 use crate::llm::types::{LlmOutputPart, LlmResponse, LlmToolSpec};
-use crate::sansio::ProtocolDriverHandle;
+use crate::sansio::{
+    ChatContextProjector, ContextProjector, ModeProtocol, ProtocolDriverHandle, UnitModeProtocol,
+};
 use crate::session_model::message::ReasoningMeta;
-use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState};
+use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState, shared_parts};
 use crate::{ExecutionMode, PromptContribution, ToolSurface};
 
 #[derive(Clone)]
-pub struct ModeConfig {
-    pub protocol: Arc<dyn ProtocolDriverHandle>,
+pub struct ModeConfig<M: ModeProtocol = UnitModeProtocol> {
+    pub protocol: Arc<dyn ProtocolDriverHandle<M>>,
+    pub projector: Arc<dyn ContextProjector<M>>,
     pub sync_execution_surface: bool,
 }
 
+impl<M: ModeProtocol> ModeConfig<M> {
+    pub fn chat(protocol: Arc<dyn ProtocolDriverHandle<M>>, sync_execution_surface: bool) -> Self {
+        Self {
+            protocol,
+            projector: Arc::new(ChatContextProjector),
+            sync_execution_surface,
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct ModePreamble {
-    pub config: ModeConfig,
+pub struct ModePreamble<M: ModeProtocol = UnitModeProtocol> {
+    pub config: ModeConfig<M>,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
     pub tool_names: Vec<String>,
     pub omitted_tool_count: usize,
@@ -37,7 +50,7 @@ pub struct ModePreamble {
 #[derive(Clone, Debug)]
 pub struct ModeBuildInput {
     pub mode: ExecutionMode,
-    pub tool_surface: ToolSurface,
+    pub tool_surface: std::sync::Arc<ToolSurface>,
     pub extra_prompt_contributions: Vec<PromptContribution>,
 }
 
@@ -104,7 +117,7 @@ pub fn turn_limit_exhausted_message(max_turns: usize) -> Message {
     Message {
         id: id.clone(),
         role: MessageRole::System,
-        parts: vec![Part {
+        parts: shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Error,
             content: format!("Turn limit reached ({max_turns}) before a final assistant response."),
@@ -115,7 +128,7 @@ pub fn turn_limit_exhausted_message(max_turns: usize) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: None,
     }

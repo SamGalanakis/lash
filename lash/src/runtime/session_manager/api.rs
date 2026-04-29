@@ -126,7 +126,7 @@ impl SessionManager for RuntimeSessionManager {
                 .build_session_with_parent(
                     &session_id,
                     request.parent_session_id.clone(),
-                    policy.execution_mode,
+                    policy.execution_mode.clone(),
                     policy.context_approach.clone(),
                     None,
                 )
@@ -135,7 +135,7 @@ impl SessionManager for RuntimeSessionManager {
                 .current_plugins
                 .fork_for_session(
                     &session_id,
-                    policy.execution_mode,
+                    policy.execution_mode.clone(),
                     policy.context_approach.clone(),
                 )
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
@@ -254,11 +254,31 @@ impl SessionManager for RuntimeSessionManager {
                 .expect("child usage sources lock")
                 .insert(session_id.clone(), source.clone());
         }
+        if let Some(seed) = request.first_turn_input.clone() {
+            self.pending_first_turn_inputs
+                .lock()
+                .expect("pending first turn inputs lock")
+                .insert(session_id.clone(), seed);
+        }
         Ok(SessionHandle {
             session_id,
             parent_session_id: request.parent_session_id,
             policy,
         })
+    }
+
+    async fn emit_trace_event(
+        &self,
+        context: lash_trace::TraceContext,
+        event: lash_trace::TraceEvent,
+    ) -> Result<(), crate::PluginError> {
+        crate::trace::emit_trace(
+            &self.current_host.core.trace_sink,
+            &self.current_host.core.trace_context,
+            context.for_session(self.current_session_id.clone()),
+            event,
+        );
+        Ok(())
     }
 
     async fn close_session(&self, session_id: &str) -> Result<(), crate::PluginError> {
@@ -282,6 +302,10 @@ impl SessionManager for RuntimeSessionManager {
         self.child_usage_sources
             .lock()
             .expect("child usage sources lock")
+            .remove(session_id);
+        self.pending_first_turn_inputs
+            .lock()
+            .expect("pending first turn inputs lock")
             .remove(session_id);
         self.current_plugins.host().unregister_session(session_id)?;
         Ok(())
@@ -524,6 +548,38 @@ impl SessionManager for RuntimeSessionManager {
         executor
             .mark_live_state(&self.background_scope_key(session_id), task_id, run_state)
             .await;
+    }
+
+    async fn take_first_turn_input(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::PluginMessage>, crate::PluginError> {
+        Ok(self
+            .pending_first_turn_inputs
+            .lock()
+            .expect("pending first turn inputs lock")
+            .remove(session_id))
+    }
+
+    async fn session_mode_turn_options(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::ModeTurnOptions, crate::PluginError> {
+        if session_id == self.current_session_id {
+            let runtime = {
+                let registry = self.registry.lock().await;
+                registry.get(session_id).cloned()
+            };
+            if let Some(runtime) = runtime {
+                return Ok(runtime.lock().await.mode_turn_options.clone());
+            }
+        }
+        let runtime = {
+            let registry = self.registry.lock().await;
+            registry.get(session_id).cloned()
+        }
+        .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
+        Ok(runtime.lock().await.mode_turn_options.clone())
     }
 
     async fn inject_turn_input(
@@ -778,10 +834,65 @@ impl SessionManager for RuntimeSessionManager {
             .await
             .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
         let llm_request = crate::direct::build_llm_request(&provider, request, model.clone());
-        let response = provider
-            .complete(llm_request)
-            .await
-            .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
+        let llm_call_id = if self.current_host.core.trace_sink.is_some() {
+            let id = uuid::Uuid::new_v4().to_string();
+            crate::trace::emit_trace(
+                &self.current_host.core.trace_sink,
+                &self.current_host.core.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(self.current_session_id.clone())
+                    .for_llm_call(id.clone()),
+                lash_trace::TraceEvent::LlmCallStarted {
+                    request: crate::trace::trace_llm_request(&llm_request),
+                },
+            );
+            Some(id)
+        } else {
+            None
+        };
+        let response = match provider.complete(llm_request).await {
+            Ok(response) => response,
+            Err(err) => {
+                if let Some(llm_call_id) = llm_call_id {
+                    crate::trace::emit_trace(
+                        &self.current_host.core.trace_sink,
+                        &self.current_host.core.trace_context,
+                        lash_trace::TraceContext::default()
+                            .for_session(self.current_session_id.clone())
+                            .for_llm_call(llm_call_id),
+                        lash_trace::TraceEvent::LlmCallFailed {
+                            error: lash_trace::TraceError {
+                                message: err.message.clone(),
+                                retryable: err.retryable,
+                                code: err.code.clone(),
+                                raw: err.raw.clone(),
+                            },
+                            stream_summary: None,
+                        },
+                    );
+                }
+                return Err(crate::PluginError::Session(err.message.clone()));
+            }
+        };
+        if let Some(llm_call_id) = llm_call_id {
+            crate::trace::emit_trace(
+                &self.current_host.core.trace_sink,
+                &self.current_host.core.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(self.current_session_id.clone())
+                    .for_llm_call(llm_call_id),
+                lash_trace::TraceEvent::LlmCallCompleted {
+                    response: crate::trace::trace_llm_response(
+                        response.full_text.clone(),
+                        0,
+                        crate::trace::trace_output_parts(&response.parts),
+                    ),
+                    usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),
+                    provider_usage: response.provider_usage.clone(),
+                    stream_summary: None,
+                },
+            );
+        }
         let usage = TokenUsage {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,

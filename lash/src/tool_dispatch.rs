@@ -17,7 +17,7 @@ use crate::{
 pub struct ToolDispatchContext {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
-    pub surface: ToolSurface,
+    pub surface: Arc<ToolSurface>,
     pub host: Arc<dyn SessionManager>,
     pub session_id: String,
     pub event_tx: mpsc::Sender<SessionEvent>,
@@ -120,6 +120,26 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
             PluginDirective::EmitEvents { events } => {
                 emit_plugin_surface_events(&context.event_tx, &plugin_id, events).await;
             }
+            PluginDirective::EmitTrace {
+                name,
+                payload,
+                context: trace_context,
+            } => {
+                if let Err(err) = context
+                    .host
+                    .emit_trace_event(
+                        *trace_context,
+                        lash_trace::TraceEvent::Custom {
+                            name: format!("plugin.{plugin_id}.{name}"),
+                            payload,
+                        },
+                    )
+                    .await
+                {
+                    short_circuit = Some(ToolResult::err_fmt(err.to_string()));
+                    break;
+                }
+            }
             PluginDirective::EnqueueMessages { .. } => {
                 short_circuit = Some(ToolResult::err_fmt(
                     "before_tool_call does not support message injection",
@@ -183,6 +203,26 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                     }
                     PluginDirective::EmitEvents { events } => {
                         emit_plugin_surface_events(&context.event_tx, &plugin_id, events).await;
+                    }
+                    PluginDirective::EmitTrace {
+                        name,
+                        payload,
+                        context: trace_context,
+                    } => {
+                        if let Err(err) = context
+                            .host
+                            .emit_trace_event(
+                                *trace_context,
+                                lash_trace::TraceEvent::Custom {
+                                    name: format!("plugin.{plugin_id}.{name}"),
+                                    payload,
+                                },
+                            )
+                            .await
+                        {
+                            final_result = ToolResult::err_fmt(err.to_string());
+                            break;
+                        }
                     }
                     PluginDirective::EnqueueMessages { messages } => {
                         if let Err(err) = context.turn_injection_bridge.enqueue(messages) {
@@ -435,7 +475,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(MockTools));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
         ToolDispatchContext {
             plugins,
             tools,
@@ -454,7 +494,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
         ToolDispatchContext {
             plugins,
             tools,
@@ -659,7 +699,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(SerialProbeTools { log }));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
         ToolDispatchContext {
             plugins,
             tools,
@@ -814,7 +854,7 @@ mod tests {
         });
         let plugins = test_plugins(provider);
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::Standard);
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
         let context = Arc::new(ToolDispatchContext {
             plugins,
             tools,

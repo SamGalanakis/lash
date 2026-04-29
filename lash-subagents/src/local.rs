@@ -1735,7 +1735,7 @@ mod tests {
                         image_blobs: HashMap::new(),
                         user_input: None,
                         mode: None,
-                        rlm_termination_override: None,
+                        mode_turn_options: None,
                     },
                     delivery: DeliveryMode::NextTurn,
                 },

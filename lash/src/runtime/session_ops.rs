@@ -27,6 +27,7 @@ impl LashRuntime {
                 Some(session.plugins().snapshot_revision_fingerprint());
         }
         self.policy = state.policy.clone();
+        self.mode_turn_options = state.mode_turn_options.clone();
         self.state = state;
     }
 

@@ -121,7 +121,7 @@ impl RuntimeTurnDriver {
             tools: self.session.tools(),
             surface: self
                 .session
-                .tool_surface(&self.session_id, self.policy.execution_mode),
+                .tool_surface(&self.session_id, self.policy.execution_mode.clone()),
             host: Arc::clone(&manager),
             session_id: self.session_id.clone(),
             event_tx: tool_event_tx,

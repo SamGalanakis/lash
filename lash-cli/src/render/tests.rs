@@ -167,7 +167,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
 
 #[test]
 fn extract_history_selection_text_reads_across_scrolled_content_rows() {
-    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     app.blocks = vec![DisplayBlock::UserInput("alpha\nbeta\ngamma".into())];
     app.scroll_offset = 1;
     app.selection.anchor = (2, 1);
@@ -316,7 +316,8 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
             tool_signature: None,
             prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]
+        .into(),
         user_input: Some(lash::UserInputProvenance {
             display_text: "Use /wholehog".into(),
             effective_text: "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>"
@@ -329,8 +330,12 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
         origin: None,
     };
 
-    let blocks =
-        projected_blocks_from_state(&[message], &[], &crate::app::UiProjectionState::default());
+    let blocks = projected_blocks_from_state(
+        &[],
+        &[message],
+        &[],
+        &crate::app::UiProjectionState::default(),
+    );
 
     // blocks[0] is the TurnStart marker emitted before the user input.
     assert!(matches!(blocks.first(), Some(DisplayBlock::TurnStart(_))));
@@ -599,7 +604,7 @@ fn user_input_highlights_slash_in_leading_slash_command() {
 
 #[test]
 fn input_box_highlights_slash_command_slash() {
-    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     app.set_input("/model gpt-5.4".into());
 
     let snapshot = input_render_snapshot(&app, Rect::new(0, 0, 40, 4));
@@ -614,7 +619,7 @@ fn input_box_highlights_slash_command_slash() {
 
 #[test]
 fn input_box_shows_skill_argument_hint_inline() {
-    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     app.skills =
         skill_catalog_with_hints(&[("impeccable", "design helper", Some("[craft|teach|extract]"))]);
     app.set_input("/impeccable ".into());
@@ -670,7 +675,7 @@ fn input_box_shows_ui_command_argument_hint_inline() {
         }
     }
 
-    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     let ui_extensions = UiExtensions::new(vec![Arc::new(DemoUiExtension)]).expect("ui extensions");
     app.set_ui_extensions(Arc::new(ui_extensions));
     app.set_input("/demo ".into());
@@ -692,7 +697,7 @@ fn input_box_shows_ui_command_argument_hint_inline() {
 
 #[test]
 fn queue_preview_highlights_slash_command_slash() {
-    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::prepare("/retry later".into(), Vec::new(), &app.skills);
     app.queue_turn(turn);
 
@@ -717,7 +722,7 @@ fn queue_preview_highlights_slash_command_slash() {
 
 #[test]
 fn user_input_highlights_every_detected_slash_command() {
-    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     app.skills = skill_catalog_with(&[
         ("spring-cleaning", "cleanup"),
         ("yolopush", "ship changes"),
@@ -739,7 +744,7 @@ fn user_input_highlights_every_detected_slash_command() {
 
 #[test]
 fn user_input_does_not_highlight_unknown_inline_slash_words() {
-    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     app.skills = skill_catalog_with(&[("ghmonitor", "monitor")]);
     app.blocks = vec![DisplayBlock::UserInput(
         "Please check /not-a-command and /ghmonitor soon".into(),
@@ -760,7 +765,7 @@ fn user_input_does_not_highlight_unknown_inline_slash_words() {
 
 #[test]
 fn queue_preview_highlights_multiple_detected_slash_commands() {
-    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     app.skills = skill_catalog_with(&[("ghmonitor", "monitor")]);
     let turn = PreparedTurn::prepare(
         "/retry then /ghmonitor and /bogus".into(),
@@ -781,7 +786,7 @@ fn queue_preview_highlights_multiple_detected_slash_commands() {
 
 #[test]
 fn shell_activity_renders_live_output_inline_under_tool() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks = vec![DisplayBlock::Activity(Box::new(
         ActivityBlock::new(
             ActivityKind::ShellCommand,
@@ -868,7 +873,7 @@ fn plugin_panel_renders_as_section_header_without_box() {
 #[test]
 fn plan_dock_renders_as_checklist_without_header_or_scribe_rule() {
     use crate::app::{App, PlanDockItem, PlanDockItemStatus, PlanDockState};
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.plan_dock = Some(PlanDockState {
         title: "PLAN".into(),
         meta: None,
@@ -922,7 +927,7 @@ fn plan_dock_renders_as_checklist_without_header_or_scribe_rule() {
 #[test]
 fn plan_dock_trailing_height_includes_gutter_plus_items() {
     use crate::app::{App, PlanDockItem, PlanDockItemStatus, PlanDockState};
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     assert_eq!(crate::render::plan_dock_trailing_height(&app), 0);
 
     app.plan_dock = Some(PlanDockState {
@@ -1246,7 +1251,7 @@ fn reasoning_is_compact_below_l2_and_full_at_l2() {
 
 #[test]
 fn live_reasoning_compacts_after_activity_appends_below_it() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.blocks = vec![DisplayBlock::AssistantReasoning(
         "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
@@ -1305,7 +1310,7 @@ fn live_reasoning_compacts_after_activity_appends_below_it() {
 
 #[test]
 fn committed_reasoning_compacts_while_live_assistant_streams() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.expand_level = 1;
     app.blocks = vec![DisplayBlock::AssistantReasoning(
@@ -1342,7 +1347,7 @@ fn committed_reasoning_compacts_while_live_assistant_streams() {
 
 #[test]
 fn live_reasoning_compacts_after_turn_stops() {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.blocks = vec![DisplayBlock::AssistantReasoning(
         "**Inspecting config implementation**\n\nDetailed thinking body.".into(),

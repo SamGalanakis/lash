@@ -25,6 +25,7 @@ pub mod testing;
 pub mod tool_dispatch;
 mod tool_provider;
 pub mod tools;
+mod trace;
 
 pub use lash_sansio::sansio;
 
@@ -45,21 +46,64 @@ pub use dynamic::{
 };
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
-pub use lash_sansio::llm::types::{LlmOutputPart, LlmResponse};
+pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 pub use lash_sansio::{
-    CheckpointKind, Effect, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError,
-    Message, MessageOrigin, MessageRole, MessageSequence, ModeBuildInput, ModeConfig, ModePreamble,
-    Part, PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt, PreparedTurnMachine,
-    PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptPanel, PromptRequest,
-    PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, PruneState, RenderedPrompt, Response, SansIoTurnInput, SessionEvent,
-    TokenUsage, ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolCallRecord,
-    ToolDefinition, ToolExecutionMode, ToolImage, ToolParam, ToolResult, ToolSurface,
-    ToolSurfaceBuildInput, ToolSurfaceEntry, TurnMachine, TurnMachineConfig, UserInputProvenance,
-    UserInputTransform, append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
-    default_execution_mode, default_prompt_template, execution_mode_supported,
-    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part,
-    turn_limit_exhausted_message,
+    BaseRenderCache, CheckpointKind, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode,
+    LlmCallError, Message, MessageOrigin, MessageRole, MessageSequence, ModeBuildInput, Part,
+    PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin,
+    PromptContext, PromptContribution, PromptPanel, PromptRequest, PromptResponse,
+    PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
+    PruneState, RenderedPrompt, Response, SessionEvent, TokenUsage, ToolActivation,
+    ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition, ToolExecutionMode,
+    ToolImage, ToolParam, ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
+    UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
+    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
+    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
+    normalized_response_parts, reasoning_part, shared_parts, turn_limit_exhausted_message,
+};
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", content = "options", rename_all = "snake_case")]
+pub enum ModeTurnOptions {
+    #[default]
+    Unit,
+    Rlm(lash_rlm_types::RlmTermination),
+}
+
+impl ModeTurnOptions {
+    pub fn rlm(termination: lash_rlm_types::RlmTermination) -> Self {
+        Self::Rlm(termination)
+    }
+
+    pub fn rlm_termination(&self) -> lash_rlm_types::RlmTermination {
+        match self {
+            Self::Unit => lash_rlm_types::RlmTermination::default(),
+            Self::Rlm(termination) => termination.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HostModeProtocol;
+
+impl lash_sansio::ModeProtocol for HostModeProtocol {
+    type Event = crate::session_model::ModeEvent;
+    type Termination = ModeTurnOptions;
+}
+
+pub type Effect = lash_sansio::Effect<HostModeProtocol>;
+pub type DriverAction = lash_sansio::DriverAction<HostModeProtocol>;
+pub type DriverContextView<'a> = lash_sansio::DriverContextView<'a, HostModeProtocol>;
+pub type ModeConfig = lash_sansio::ModeConfig<HostModeProtocol>;
+pub type ModePreamble = lash_sansio::ModePreamble<HostModeProtocol>;
+pub type ProjectorContext<'a> = lash_sansio::ProjectorContext<'a, HostModeProtocol>;
+pub type PreparedTurnMachine = lash_sansio::PreparedTurnMachine<HostModeProtocol>;
+pub type SansIoTurnInput = lash_sansio::SansIoTurnInput<HostModeProtocol>;
+pub type TurnMachine = lash_sansio::TurnMachine<HostModeProtocol>;
+pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostModeProtocol>;
+pub use lash_trace::{
+    JsonlTraceSink, TraceAttachment, TraceContentBlock, TraceContext, TraceError, TraceEvent,
+    TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent, TraceRecord,
+    TraceSink, TraceTokenUsage, TraceToolSpec,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
@@ -81,15 +125,15 @@ pub use plugin::{
     PluginHost, PluginOwned, PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook,
     PluginSession, PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact,
     PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
-    PromptRequestHookContext, RewriteContext, RewriteTrigger, RlmCreateExtras, RlmTermination,
-    RuntimeServices, SessionAppendNode, SessionConfigChangedContext, SessionContextSurface,
-    SessionCreateRequest, SessionHandle, SessionManager, SessionParam, SessionPlugin,
-    SessionPluginMode, SessionReadView, SessionSnapshot, SessionStartPoint,
-    SessionStateChangedContext, SessionTurnHandle, SnapshotReader, SnapshotWriter,
-    StandardCreateExtras, ToolResultProjectionContext, ToolResultProjectionHook,
-    ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
-    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
-    TurnResultSummary, TurnTransformContext, plugin_surface_event_renders_visible_output,
+    PromptRequestHookContext, RewriteContext, RewriteTrigger, RuntimeServices, SessionAppendNode,
+    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
+    SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
+    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionTurnHandle,
+    SnapshotReader, SnapshotWriter, StandardCreateExtras, ToolResultProjectionContext,
+    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
+    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary, TurnTransformContext,
+    plugin_surface_event_renders_visible_output,
 };
 pub use provider::{
     AgentModelSelection, LashConfig, Provider, ProviderFactory, ProviderHandle, ProviderOptions,
@@ -99,24 +143,26 @@ pub use provider::{
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
     DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
-    FileLlmCallLogger, InputItem, LashRuntime, LlmCallLogger, ManagedRunState, ManagedTaskCancel,
-    ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, NoopEventSink, OutputState, ParkedSession,
-    PathResolver, PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig,
-    RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy,
-    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor,
-    SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput,
-    TurnIssue, TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
+    InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
+    ManagedTaskStatus, NoopEventSink, OutputState, ParkedSession, PathResolver,
+    PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig, RuntimeEnvironment,
+    RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy, SessionStateEnvelope,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, SessionUsageReport,
+    TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
+    TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use session::{
     InjectedTurnInput, Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 pub use session_graph::{
-    INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE, INTERNAL_TOOL_CALL_PLUGIN_TYPE, PersistedSessionConfig,
-    PersistedTurnState, RlmGlobalsPatchPluginBody, SessionGraph, SessionMessageTreeNode,
-    SessionNodePayload, SessionNodeRecord, ToolCallPluginBody,
+    PersistedSessionConfig, PersistedTurnState, SessionGraph, SessionMessageTreeNode,
+    SessionNodePayload, SessionNodeRecord,
 };
 pub use session_model::SessionPolicy;
 pub use session_model::context::PreparedContext;
+pub use session_model::{
+    ConversationRecord, ModeEvent, SessionEventRecord, StateSnapshotEvent, ToolEvent,
+};
 pub use skill_catalog::{LoadedSkill, SkillCatalog};
 pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,

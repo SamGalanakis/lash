@@ -1,36 +1,271 @@
 use super::*;
-use crate::assistant_text;
+use std::collections::HashSet;
 
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
 const TEXT_PREVIEW_LINE_CHAR_LIMIT: usize = 240;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct UiTimeline {
+    items: Vec<UiTimelineItem>,
+}
+
+impl UiTimeline {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, item: UiTimelineItem) {
+        self.items.push(item);
+    }
+
+    fn extend(&mut self, items: impl IntoIterator<Item = UiTimelineItem>) {
+        self.items.extend(items);
+    }
+
+    fn last(&self) -> Option<&UiTimelineItem> {
+        self.items.last()
+    }
+
+    fn last_mut(&mut self) -> Option<&mut UiTimelineItem> {
+        self.items.last_mut()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn items(&self) -> &[UiTimelineItem] {
+        self.items.as_slice()
+    }
+
+    pub(crate) fn to_display_blocks(&self) -> Vec<DisplayBlock> {
+        self.items.iter().cloned().map(Into::into).collect()
+    }
+
+    fn into_display_blocks(self) -> Vec<DisplayBlock> {
+        self.items.into_iter().map(Into::into).collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UiTimelineItem {
+    TurnStart(Turn),
+    UserInput(String),
+    AssistantReasoning(String),
+    AssistantText(String),
+    Activity(Box<ActivityBlock>),
+    ShellOutput {
+        command: String,
+        output: String,
+        error: Option<String>,
+    },
+    Error(String),
+    SystemMessage(String),
+    PluginPanel(PluginPanelBlock),
+    LashlangCode(String),
+    Splash,
+}
+
+impl From<UiTimelineItem> for DisplayBlock {
+    fn from(item: UiTimelineItem) -> Self {
+        match item {
+            UiTimelineItem::TurnStart(turn) => DisplayBlock::TurnStart(turn),
+            UiTimelineItem::UserInput(text) => DisplayBlock::UserInput(text),
+            UiTimelineItem::AssistantReasoning(text) => DisplayBlock::AssistantReasoning(text),
+            UiTimelineItem::AssistantText(text) => DisplayBlock::AssistantText(text),
+            UiTimelineItem::Activity(activity) => DisplayBlock::Activity(activity),
+            UiTimelineItem::ShellOutput {
+                command,
+                output,
+                error,
+            } => DisplayBlock::ShellOutput {
+                command,
+                output,
+                error,
+            },
+            UiTimelineItem::Error(text) => DisplayBlock::Error(text),
+            UiTimelineItem::SystemMessage(text) => DisplayBlock::SystemMessage(text),
+            UiTimelineItem::PluginPanel(panel) => DisplayBlock::PluginPanel(panel),
+            UiTimelineItem::LashlangCode(code) => DisplayBlock::LashlangCode(code),
+            UiTimelineItem::Splash => DisplayBlock::Splash,
+        }
+    }
+}
+
+impl From<DisplayBlock> for UiTimelineItem {
+    fn from(block: DisplayBlock) -> Self {
+        match block {
+            DisplayBlock::TurnStart(turn) => UiTimelineItem::TurnStart(turn),
+            DisplayBlock::UserInput(text) => UiTimelineItem::UserInput(text),
+            DisplayBlock::AssistantReasoning(text) => UiTimelineItem::AssistantReasoning(text),
+            DisplayBlock::AssistantText(text) => UiTimelineItem::AssistantText(text),
+            DisplayBlock::Activity(activity) => UiTimelineItem::Activity(activity),
+            DisplayBlock::ShellOutput {
+                command,
+                output,
+                error,
+            } => UiTimelineItem::ShellOutput {
+                command,
+                output,
+                error,
+            },
+            DisplayBlock::Error(text) => UiTimelineItem::Error(text),
+            DisplayBlock::SystemMessage(text) => UiTimelineItem::SystemMessage(text),
+            DisplayBlock::PluginPanel(panel) => UiTimelineItem::PluginPanel(panel),
+            DisplayBlock::LashlangCode(code) => UiTimelineItem::LashlangCode(code),
+            DisplayBlock::Splash => UiTimelineItem::Splash,
+        }
+    }
+}
+
 pub(crate) fn projected_blocks_from_state(
+    events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
 ) -> Vec<DisplayBlock> {
-    let mut blocks = blocks_from_transcript(messages, tool_calls);
-    append_live_projection_blocks(&mut blocks, ui_state);
-    blocks.extend(
+    projected_timeline_from_state(events, messages, tool_calls, ui_state).into_display_blocks()
+}
+
+pub(crate) fn projected_timeline_from_state(
+    events: &[lash::SessionEventRecord],
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+    ui_state: &UiProjectionState,
+) -> UiTimeline {
+    let mut timeline = timeline_from_events(events, messages, tool_calls);
+    append_live_projection_items(&mut timeline, ui_state);
+    timeline.extend(
         ui_state
             .plugin_panels
             .iter()
             .cloned()
-            .map(DisplayBlock::PluginPanel),
+            .map(UiTimelineItem::PluginPanel),
     );
-    blocks
+    timeline
 }
 
 pub(crate) fn project_interrupted_blocks(
+    events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
 ) -> Vec<DisplayBlock> {
-    let mut blocks = projected_blocks_from_state(messages, tool_calls, ui_state);
-    push_system_message_block_if_new(&mut blocks, status_message.into());
-    blocks
+    let mut timeline = projected_timeline_from_state(events, messages, tool_calls, ui_state);
+    push_system_message_item_if_new(&mut timeline, status_message.into());
+    timeline.into_display_blocks()
+}
+
+fn timeline_from_events(
+    events: &[lash::SessionEventRecord],
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+) -> UiTimeline {
+    if events.is_empty() {
+        return timeline_from_transcript(messages, tool_calls);
+    }
+
+    let mut timeline = UiTimeline::new();
+    let mut activity_state = ActivityState::default();
+    let tool_call_map = tool_calls
+        .iter()
+        .filter_map(|record| {
+            record
+                .call_id
+                .as_deref()
+                .map(|call_id| (call_id, record.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut seen_messages = HashSet::new();
+
+    for event in events {
+        match event {
+            lash::SessionEventRecord::Conversation(record) => {
+                seen_messages.insert(record.id.clone());
+                let message = record.to_message();
+                append_transcript_items(
+                    &mut timeline,
+                    &message,
+                    &tool_call_map,
+                    &mut activity_state,
+                );
+            }
+            lash::SessionEventRecord::Mode(event) => {
+                if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
+                    event.rlm_event()
+                {
+                    append_rlm_trajectory_items(&mut timeline, &entry, &mut activity_state);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for message in messages
+        .iter()
+        .filter(|message| !seen_messages.contains(&message.id))
+    {
+        append_transcript_items(&mut timeline, message, &tool_call_map, &mut activity_state);
+    }
+
+    timeline
+}
+
+fn append_rlm_trajectory_items(
+    timeline: &mut UiTimeline,
+    entry: &lash_rlm_types::RlmTrajectoryEntry,
+    activity_state: &mut ActivityState,
+) {
+    if let Some(reasoning) = rlm_reasoning_display_text(&entry.reasoning) {
+        let _ = push_assistant_reasoning_item(timeline, &reasoning);
+    }
+    timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
+    for record in &entry.tool_calls {
+        for activity in activity_state.blocks_for_tool_call(
+            &record.tool,
+            record.args.clone(),
+            record.result.clone(),
+            record.success,
+            record.duration_ms,
+        ) {
+            append_activity_item(timeline, activity);
+        }
+    }
+}
+
+fn rlm_reasoning_display_text(text: &str) -> Option<String> {
+    let cleaned = strip_first_lashlang_fence(text).trim().to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn strip_first_lashlang_fence(text: &str) -> String {
+    let Some(open_rel) = text.find("```") else {
+        return text.to_string();
+    };
+    let after_open = open_rel + 3;
+    let rest = &text[after_open..];
+    let Some(lang_end_rel) = rest.find('\n') else {
+        return text[..open_rel].to_string();
+    };
+    let lang = rest[..lang_end_rel].trim();
+    if !matches!(lang, "lashlang" | "rlm" | "lash") {
+        return text.to_string();
+    }
+    let body_start = after_open + lang_end_rel + 1;
+    let close = text[body_start..]
+        .find("```")
+        .map(|rel| body_start + rel)
+        .unwrap_or(text.len());
+    let after_close = (close + 3).min(text.len());
+    let mut out = String::new();
+    out.push_str(text[..open_rel].trim_end());
+    let tail = text[after_close..].trim_start();
+    if !tail.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(tail);
+    }
+    out
 }
 
 pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) -> Option<String> {
@@ -96,14 +331,14 @@ pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) ->
     Some(cleaned)
 }
 
-fn append_live_projection_blocks(blocks: &mut Vec<DisplayBlock>, ui_state: &UiProjectionState) {
+fn append_live_projection_items(timeline: &mut UiTimeline, ui_state: &UiProjectionState) {
     if let Some(text) = ui_state.live_reasoning_text.as_deref() {
-        let _ = assistant_text::push_assistant_reasoning_block(blocks, text);
+        let _ = push_assistant_reasoning_item(timeline, text);
     }
     if let Some(text) = ui_state.live_assistant_text.as_deref()
-        && let Some(tail) = interrupted_assistant_tail(blocks, text)
+        && let Some(tail) = interrupted_assistant_tail(&timeline.to_display_blocks(), text)
     {
-        let _ = push_assistant_text_block(blocks, &tail);
+        let _ = push_assistant_text_item(timeline, &tail);
     }
 }
 
@@ -132,11 +367,8 @@ pub(crate) fn push_user_turn_start(blocks: &mut Vec<DisplayBlock>) {
     blocks.push(DisplayBlock::TurnStart(Turn::user(show_separator)));
 }
 
-pub(crate) fn blocks_from_transcript(
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-) -> Vec<DisplayBlock> {
-    let mut blocks = Vec::new();
+fn timeline_from_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> UiTimeline {
+    let mut timeline = UiTimeline::new();
     let mut activity_state = ActivityState::default();
     let tool_call_map = tool_calls
         .iter()
@@ -148,9 +380,9 @@ pub(crate) fn blocks_from_transcript(
         })
         .collect::<HashMap<_, _>>();
     for message in messages {
-        append_transcript_blocks(&mut blocks, message, &tool_call_map, &mut activity_state);
+        append_transcript_items(&mut timeline, message, &tool_call_map, &mut activity_state);
     }
-    blocks
+    timeline
 }
 
 pub(crate) fn append_activity_block(blocks: &mut Vec<DisplayBlock>, activity: ActivityBlock) {
@@ -173,6 +405,28 @@ pub(crate) fn append_activity_block(blocks: &mut Vec<DisplayBlock>, activity: Ac
         return;
     }
     blocks.push(DisplayBlock::Activity(Box::new(activity)));
+}
+
+fn append_activity_item(timeline: &mut UiTimeline, activity: ActivityBlock) {
+    if let Some(UiTimelineItem::Activity(existing)) = timeline.last_mut()
+        && existing.call.kind == ActivityKind::Exploration
+        && activity.call.kind == ActivityKind::Exploration
+        && existing.result.status == ActivityStatus::Completed
+        && activity.result.status == ActivityStatus::Completed
+        && merge_exploration_activity(existing, activity.clone())
+    {
+        return;
+    }
+    if let Some(UiTimelineItem::Activity(existing)) = timeline.last_mut()
+        && existing.call.kind == ActivityKind::Edit
+        && activity.call.kind == ActivityKind::Edit
+        && existing.result.status == ActivityStatus::Completed
+        && activity.result.status == ActivityStatus::Completed
+        && merge_edit_activity(existing, activity.clone())
+    {
+        return;
+    }
+    timeline.push(UiTimelineItem::Activity(Box::new(activity)));
 }
 
 pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {
@@ -289,8 +543,8 @@ pub(crate) fn strip_ansi_escape_sequences(text: &str) -> String {
     out
 }
 
-fn append_transcript_blocks(
-    blocks: &mut Vec<DisplayBlock>,
+fn append_transcript_items(
+    timeline: &mut UiTimeline,
     message: &Message,
     tool_calls: &HashMap<&str, ToolCallRecord>,
     activity_state: &mut ActivityState,
@@ -300,8 +554,8 @@ fn append_transcript_blocks(
             if message.parts.iter().any(|part| {
                 part_is_rlm_exec_result(part) || matches!(part.kind, PartKind::ToolResult)
             }) {
-                for part in &message.parts {
-                    append_tool_result_blocks(blocks, part, tool_calls, activity_state);
+                for part in message.parts.iter() {
+                    append_tool_result_items(timeline, part, tool_calls, activity_state);
                 }
             } else {
                 let text = message
@@ -310,24 +564,24 @@ fn append_transcript_blocks(
                     .map(|user_input| user_input.display_text.clone())
                     .unwrap_or_else(|| rendered_message_text(message));
                 if !text.is_empty() {
-                    push_user_turn_start(blocks);
-                    blocks.push(DisplayBlock::UserInput(text));
+                    push_user_turn_start_item(timeline);
+                    timeline.push(UiTimelineItem::UserInput(text));
                 }
             }
         }
         MessageRole::Assistant => {
-            for part in &message.parts {
+            for part in message.parts.iter() {
                 if !matches!(part.kind, PartKind::Reasoning) {
                     continue;
                 }
                 let trimmed = part.content.trim();
                 if !trimmed.is_empty() {
-                    let _ = assistant_text::push_assistant_reasoning_block(blocks, trimmed);
+                    let _ = push_assistant_reasoning_item(timeline, trimmed);
                 }
             }
 
             let mut prose = Vec::new();
-            for part in &message.parts {
+            for part in message.parts.iter() {
                 if matches!(part.kind, PartKind::Reasoning) {
                     continue;
                 }
@@ -337,47 +591,47 @@ fn append_transcript_blocks(
                 match part.kind {
                     PartKind::Text | PartKind::Prose | PartKind::Image => prose.push(text),
                     PartKind::ToolCall => {
-                        flush_assistant_prose(blocks, &mut prose);
+                        flush_assistant_prose_items(timeline, &mut prose);
                     }
                     PartKind::Code | PartKind::Output => {}
                     PartKind::Error => {
-                        flush_assistant_prose(blocks, &mut prose);
-                        blocks.push(DisplayBlock::Error(text));
+                        flush_assistant_prose_items(timeline, &mut prose);
+                        timeline.push(UiTimelineItem::Error(text));
                     }
                     PartKind::ToolResult => {}
                     PartKind::Reasoning => {}
                 }
             }
-            flush_assistant_prose(blocks, &mut prose);
+            flush_assistant_prose_items(timeline, &mut prose);
         }
         MessageRole::System => {
             let text = rendered_message_text(message);
             if !text.is_empty() {
-                blocks.push(DisplayBlock::SystemMessage(text));
+                timeline.push(UiTimelineItem::SystemMessage(text));
             }
         }
     }
 }
 
-/// True when a user-message part carries an RLM exec result. The
-/// driver writes these as `PartKind::Text` (not `ToolResult`) so the
-/// wire format is a clean `role=user` observation — see
-/// `rlm_result_message` in `lash-mode-rlm/src/driver.rs`. The part
-/// still keeps `tool_call_id` + `tool_name="execute_lashlang"` for
-/// projection to detect them.
+/// True when a legacy user-message part carries an RLM exec result.
+/// Current RLM history uses trajectory events instead; these old
+/// messages should stay hidden rather than render as fake tool calls.
 fn part_is_rlm_exec_result(part: &lash::Part) -> bool {
     matches!(part.kind, PartKind::Text)
         && part.tool_call_id.is_some()
         && part.tool_name.as_deref() == Some("execute_lashlang")
 }
 
-fn append_tool_result_blocks(
-    blocks: &mut Vec<DisplayBlock>,
+fn append_tool_result_items(
+    timeline: &mut UiTimeline,
     part: &lash::Part,
     tool_calls: &HashMap<&str, ToolCallRecord>,
     activity_state: &mut ActivityState,
 ) {
-    if !matches!(part.kind, PartKind::ToolResult) && !part_is_rlm_exec_result(part) {
+    if part_is_rlm_exec_result(part) {
+        return;
+    }
+    if !matches!(part.kind, PartKind::ToolResult) {
         return;
     }
 
@@ -395,17 +649,58 @@ fn append_tool_result_blocks(
         record.success,
         record.duration_ms,
     ) {
-        append_activity_block(blocks, activity);
+        append_activity_item(timeline, activity);
     }
 }
 
-fn flush_assistant_prose(blocks: &mut Vec<DisplayBlock>, prose: &mut Vec<String>) {
+fn flush_assistant_prose_items(timeline: &mut UiTimeline, prose: &mut Vec<String>) {
     if prose.is_empty() {
         return;
     }
     let text = prose.join("\n\n");
-    let _ = push_assistant_text_block(blocks, &text);
+    let _ = push_assistant_text_item(timeline, &text);
     prose.clear();
+}
+
+fn push_assistant_text_item(timeline: &mut UiTimeline, text: &str) -> bool {
+    let cleaned = normalize_assistant_text(text);
+    if cleaned.is_empty() {
+        return false;
+    }
+    timeline.push(UiTimelineItem::AssistantText(cleaned));
+    true
+}
+
+fn push_assistant_reasoning_item(timeline: &mut UiTimeline, text: &str) -> bool {
+    let cleaned = normalize_assistant_text(text);
+    if cleaned.is_empty() {
+        return false;
+    }
+    if let Some(UiTimelineItem::AssistantReasoning(existing)) = timeline.last_mut() {
+        return merge_assistant_reasoning_text(existing, &cleaned);
+    }
+    timeline.push(UiTimelineItem::AssistantReasoning(cleaned));
+    true
+}
+
+fn push_system_message_item_if_new(timeline: &mut UiTimeline, message: String) {
+    if matches!(
+        timeline.last(),
+        Some(UiTimelineItem::SystemMessage(existing)) if existing == &message
+    ) {
+        return;
+    }
+    timeline.push(UiTimelineItem::SystemMessage(message));
+}
+
+fn push_user_turn_start_item(timeline: &mut UiTimeline) {
+    let show_separator = match timeline.last() {
+        None => false,
+        Some(UiTimelineItem::Splash) => false,
+        Some(UiTimelineItem::TurnStart(_)) => false,
+        Some(_) => true,
+    };
+    timeline.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
 }
 
 pub(crate) fn rendered_message_text(message: &Message) -> String {

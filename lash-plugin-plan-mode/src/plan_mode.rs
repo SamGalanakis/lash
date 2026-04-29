@@ -546,7 +546,6 @@ impl PlanModeTools {
                 "approved": true,
                 "plan_path": report.display_path,
                 "execution_mode": "fresh_context",
-                "fresh_context_input": plan_exit_fresh_context_input(&report.display_path),
             }));
         }
 
@@ -796,17 +795,17 @@ impl SessionPlugin for PlanModePlugin {
                         .and_then(|value| value.as_str())
                         == Some("fresh_context")
                     {
-                        let Some(seed) = ctx
+                        let plan_path = ctx
                             .result
                             .result
-                            .get("fresh_context_input")
+                            .get("plan_path")
                             .and_then(|value| value.as_str())
-                        else {
-                            return Ok(vec![PluginDirective::AbortTurn {
-                                code: "plan_mode_fresh_context_missing_input".to_string(),
-                                message: "Plan exit requested fresh-context execution without a seed prompt.".to_string(),
-                            }]);
-                        };
+                            .unwrap_or_default()
+                            .to_string();
+                        let seed = PluginMessage::text(
+                            lash::MessageRole::User,
+                            plan_exit_fresh_context_input(&plan_path),
+                        );
                         let session_id = fresh_context_session_id();
                         directives.push(PluginDirective::CreateSession {
                             request: Box::new(SessionCreateRequest {
@@ -816,6 +815,7 @@ impl SessionPlugin for PlanModePlugin {
                                 policy: None,
                                 plugin_mode: SessionPluginMode::Fresh,
                                 initial_nodes: Vec::new(),
+                                first_turn_input: Some(seed),
                                 context_surface: SessionContextSurface::default(),
                                 mode_extras: lash::ModeExtras::default(),
                                 usage_source: Some("plan_execution".to_string()),
@@ -823,9 +823,8 @@ impl SessionPlugin for PlanModePlugin {
                         });
                         directives.push(PluginDirective::short_circuit(ToolResult::ok(json!({
                             "approved": true,
-                            "plan_path": ctx.result.result.get("plan_path").cloned().unwrap_or(serde_json::Value::Null),
+                            "plan_path": plan_path,
                             "execution_mode": "fresh_context",
-                            "fresh_context_input": seed,
                             "session_id": session_id,
                         }))));
                     }

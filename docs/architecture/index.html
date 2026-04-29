@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" defer></script>
+<script src="./mermaid.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Current workspace architecture</div>
+          <h1>lash<span class="slash">/</span>system</h1>
+          <p>
+            <strong>lash</strong> is a Rust workspace for an embeddable terminal coding agent. The current shape is a layered runtime: <code>lash-sansio</code> owns deterministic turn protocol and prompt assembly, <code>lash</code> hosts runtime, plugins, stores, providers, and sessions, and <code>lash-cli</code> assembles the default TUI application.
+          </p>
+          <p>
+            This folder is the architecture entrypoint. It replaces the old single-page architecture document with focused pages for modules/runtime, execution modes, lashlang, and file/dependency reference.
+          </p>
+        </div>
+        <div class="hero-meta">
+          <article class="card">
+            <div class="micro-label">Execution modes</div>
+            <strong><code>standard</code>, <code>rlm</code>, <code>rlmpure</code></strong>
+            <span>Standard uses native provider tools. RLM and RLMPure use a persistent lashlang REPL with no native model tool schema.</span>
+          </article>
+          <article class="card">
+            <div class="micro-label">Prompt boundary</div>
+            <strong>Mode preamble + tool surface + prompt template</strong>
+            <span>Mode plugins choose the protocol driver, context projector, native tool specs, and execution instructions for each turn.</span>
+          </article>
+          <article class="card">
+            <div class="micro-label">Updated</div>
+            <strong>2026-04-25</strong>
+            <span>Reflects RLMPure, event-ordered RLM trajectories, current prompt assembly, and the shared lashlang language reference.</span>
+          </article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a class="active" href="./index.html">Overview</a>
+        <a href="./runtime.html">Modules + Runtime</a>
+        <a href="./execution-modes.html">Execution Modes</a>
+        <a href="./lashlang.html">Lashlang</a>
+        <a href="./reference.html">Reference</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>System Shape</h2>
+            <p>Lash is intentionally split between pure turn mechanics, async host runtime, mode-specific protocol drivers, providers, tools, and the CLI/TUI host.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Workspace topology</div>
+            <div class="mermaid">
+flowchart TD
+  subgraph Kernel[Pure protocol and language core]
+    S["lash-sansio<br/>TurnMachine, PromptTemplate,<br/>messages, effects"]
+    LL["lashlang<br/>parser, AST, persistent REPL runtime"]
+  end
+
+  subgraph Runtime[Host runtime]
+    L["lash<br/>runtime, session graph, store,<br/>plugins, providers, tool dispatch"]
+    TD["turn_driver<br/>streaming, tools, effects"]
+    SG["session_graph<br/>events, messages, tool calls,<br/>RLM trajectory"]
+  end
+
+  subgraph Modes[Execution modes]
+    STD["lash-mode-standard<br/>native model tools"]
+    RLM["lash-mode-rlm<br/>chat context + lashlang"]
+    PURE["lash-mode-rlmpure<br/>compact REPL trajectory context"]
+  end
+
+  subgraph Host[Host applications]
+    CLI["lash-cli<br/>TUI, bootstrap, resume/fork"]
+    UI["lash-ui + lash-tui"]
+    BENCH["bench runners + lash-export"]
+  end
+
+  S --> L
+  LL --> L
+  L --> TD
+  L --> SG
+  STD --> L
+  RLM --> L
+  PURE --> L
+  L --> CLI
+  UI --> CLI
+  L --> BENCH
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Read This Way</h2>
+            <p>Each page owns a narrower architecture question so diagrams can stay precise instead of turning into one long scroll.</p>
+          </div>
+          <div class="grid">
+            <a class="nav-card" href="./runtime.html">
+              <small>Page 01</small>
+              <strong>Modules + Runtime</strong>
+              <span>Crate boundaries, runtime lifecycle, session graph, plugin host, turn machine, providers, stores, and session manager.</span>
+            </a>
+            <a class="nav-card" href="./execution-modes.html">
+              <small>Page 02</small>
+              <strong>Execution Modes</strong>
+              <span>Separate sections and context diagrams for Standard, RLM, and RLMPure.</span>
+            </a>
+            <a class="nav-card" href="./lashlang.html">
+              <small>Page 03</small>
+              <strong>Lashlang</strong>
+              <span>Current language surface, persistent REPL behavior, tool-call wrapper model, print/submit distinction, and event ordering.</span>
+            </a>
+            <a class="nav-card" href="./reference.html">
+              <small>Page 04</small>
+              <strong>Reference</strong>
+              <span>Important files, public traits, dependency map, and docs pointers.</span>
+            </a>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Core Truths</h2>
+            <p>The architecture should be read from the repo-owned boundary outward: first the typed session graph and turn protocol, then host UX and provider details.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel">
+              <h3>Prompt construction is mode-aware</h3>
+              <p><code>build_turn</code> combines the active <code>ModePreamble</code>, current <code>ToolSurface</code>, extra prompt contributions, and <code>PromptTemplate</code>. The resulting system prompt belongs to the turn machine config.</p>
+            </article>
+            <article class="panel">
+              <h3>Context projection is separate from protocol handling</h3>
+              <p><code>ContextProjector</code> decides what messages and tool schemas the provider sees. <code>ProtocolDriverHandle</code> decides how model output advances the turn.</p>
+            </article>
+            <article class="panel">
+              <h3>Session graph is the durable timeline</h3>
+              <p>Conversation records, tool invocations, mode events, state snapshots, plugin nodes, and active path metadata are persisted as graph nodes.</p>
+            </article>
+            <article class="panel">
+              <h3>RLM tool effects are now causal</h3>
+              <p>Lashlang tool calls are recorded before the RLM trajectory/final assistant event, so durable order matches execution order: user, tool, trajectory, assistant.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">Architecture docs entrypoint: <code>docs/architecture/index.html</code></footer>
+    </main>
+  </div>
+</body>
+</html>

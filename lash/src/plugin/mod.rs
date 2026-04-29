@@ -6,15 +6,15 @@ use crate::llm::types::LlmResponse;
 use crate::monitor::{MonitorSnapshot, MonitorSpec, MonitorUpdateBatch};
 use crate::runtime::{AssembledTurn, PersistedSessionState};
 use crate::{
-    ExecutionMode, MessageRole, SessionPolicy, ToolAvailability, ToolDefinition, ToolProvider,
-    ToolResult, TurnInput,
+    ExecutionMode, MessageRole, ModeTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
+    ToolProvider, ToolResult, TurnInput,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 pub use lash_sansio::{
-    CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, RlmTermination,
-    ToolSurfaceContribution, ToolSurfaceOverride,
+    CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolSurfaceContribution,
+    ToolSurfaceOverride,
 };
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
@@ -55,7 +55,8 @@ pub type CommandHandler =
 mod mode;
 pub use mode::{
     ModeExtras, ModeNativeToolsPlugin, ModeProtocolDriverPlugin, ModeRuntimeContext,
-    ModeSessionContext, ModeSessionPlugin, RlmCreateExtras, StandardCreateExtras,
+    ModeSessionContext, ModeSessionPlugin, RlmCreateExtras, RlmpureCreateExtras,
+    StandardCreateExtras,
 };
 
 mod history;
@@ -159,6 +160,12 @@ pub struct SessionCreateRequest {
     pub plugin_mode: SessionPluginMode,
     #[serde(default)]
     pub initial_nodes: Vec<SessionAppendNode>,
+    /// Optional seed message dispatched as the new session's first turn
+    /// input. The runtime stashes it during `create_session`; any host
+    /// that drives turns on the new session can claim it via
+    /// `SessionManager::take_first_turn_input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_turn_input: Option<PluginMessage>,
     #[serde(skip)]
     pub context_surface: SessionContextSurface,
     /// Per-execution-mode "extras" that configure mode-specific
@@ -181,6 +188,9 @@ pub enum SessionAppendNode {
     Message {
         message: PluginMessage,
     },
+    Event {
+        event: crate::SessionEventRecord,
+    },
     Plugin {
         plugin_type: String,
         #[serde(default)]
@@ -198,6 +208,10 @@ impl SessionAppendNode {
             plugin_type: plugin_type.into(),
             body,
         }
+    }
+
+    pub fn event(event: crate::SessionEventRecord) -> Self {
+        Self::Event { event }
     }
 }
 
@@ -299,6 +313,13 @@ pub enum PluginDirective {
     EmitEvents {
         events: Vec<PluginSurfaceEvent>,
     },
+    EmitTrace {
+        name: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+        #[serde(default)]
+        context: Box<lash_trace::TraceContext>,
+    },
 }
 
 impl PluginDirective {
@@ -322,6 +343,14 @@ impl PluginDirective {
 
     pub fn emit_events(events: Vec<PluginSurfaceEvent>) -> Self {
         Self::EmitEvents { events }
+    }
+
+    pub fn emit_trace(name: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self::EmitTrace {
+            name: name.into(),
+            payload,
+            context: Box::new(lash_trace::TraceContext::default()),
+        }
     }
 }
 
@@ -383,6 +412,30 @@ pub trait SessionManager: Send + Sync {
         &self,
         request: SessionCreateRequest,
     ) -> Result<SessionHandle, PluginError>;
+    async fn emit_trace_event(
+        &self,
+        _context: lash_trace::TraceContext,
+        _event: lash_trace::TraceEvent,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+    /// Pop the seed message that was queued for `session_id` via
+    /// `SessionCreateRequest::first_turn_input`. Returns `None` if no
+    /// seed was queued, or after a previous caller has already taken
+    /// it. Hosts call this when starting the inaugural turn on a
+    /// freshly created session.
+    async fn take_first_turn_input(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<PluginMessage>, PluginError> {
+        Ok(None)
+    }
+    async fn session_mode_turn_options(
+        &self,
+        _session_id: &str,
+    ) -> Result<ModeTurnOptions, PluginError> {
+        Ok(ModeTurnOptions::default())
+    }
     async fn close_session(&self, session_id: &str) -> Result<(), PluginError>;
     async fn start_turn_stream(
         &self,
@@ -591,7 +644,7 @@ pub struct PromptHookContext {
     pub session_id: String,
     pub host: Arc<dyn SessionManager>,
     pub state: SessionReadView,
-    pub rlm_termination: RlmTermination,
+    pub mode_turn_options: ModeTurnOptions,
 }
 
 #[derive(Clone)]
@@ -768,6 +821,7 @@ pub struct AssistantStreamHookContext {
 #[derive(Clone, Debug, Default)]
 pub struct AssistantStreamTransform {
     pub chunk: String,
+    pub reasoning_deltas: Vec<String>,
     pub events: Vec<PluginSurfaceEvent>,
     /// When `true`, the runtime cancels the in-flight LLM call the
     /// moment this hook returns and finalizes the turn using whatever
@@ -995,7 +1049,7 @@ mod tests {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::new(SessionStateEnvelope::default()),
-                rlm_termination: RlmTermination::default(),
+                mode_turn_options: ModeTurnOptions::default(),
             })
             .await
             .expect("prompt contributions");
@@ -1064,7 +1118,7 @@ mod tests {
         let child = root
             .fork_for_session(
                 "child",
-                ExecutionMode::Standard,
+                ExecutionMode::standard(),
                 crate::ContextApproach::default(),
             )
             .expect("child");

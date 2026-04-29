@@ -25,9 +25,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::host::{
-    DefaultPathResolver, FileLlmCallLogger, LlmCallLogger, RuntimeCoreConfig, SessionTaskExecutor,
-};
+use lash_trace::{JsonlTraceSink, TraceContext, TraceSink};
+
+use super::host::{DefaultPathResolver, RuntimeCoreConfig, SessionTaskExecutor};
 use super::{PathResolver, SanitizerPolicy, TerminationPolicy};
 
 /// Where session nodes live at runtime.
@@ -80,7 +80,8 @@ pub struct RuntimeEnvironment {
     pub base_dir: PathBuf,
     pub path_resolver: Arc<dyn PathResolver>,
     pub prompt_template: crate::PromptTemplate,
-    pub llm_logger: Option<Arc<dyn LlmCallLogger>>,
+    pub trace_sink: Option<Arc<dyn TraceSink>>,
+    pub trace_context: TraceContext,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
 
@@ -105,7 +106,8 @@ impl Default for RuntimeEnvironment {
             base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path_resolver: Arc::new(DefaultPathResolver),
             prompt_template: crate::default_prompt_template(),
-            llm_logger: None,
+            trace_sink: None,
+            trace_context: TraceContext::default(),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
             retry_policy: lash_sansio::RetryPolicy::default(),
@@ -127,7 +129,8 @@ impl RuntimeEnvironment {
             base_dir: self.base_dir.clone(),
             path_resolver: Arc::clone(&self.path_resolver),
             prompt_template: self.prompt_template.clone(),
-            llm_logger: self.llm_logger.clone(),
+            trace_sink: self.trace_sink.clone(),
+            trace_context: self.trace_context.clone(),
             sanitizer: self.sanitizer.clone(),
             termination: self.termination.clone(),
             retry_policy: self.retry_policy.clone(),
@@ -189,14 +192,18 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_llm_log_path(mut self, path: Option<PathBuf>) -> Self {
-        self.env.llm_logger =
-            path.map(|p| Arc::new(FileLlmCallLogger::new(p)) as Arc<dyn LlmCallLogger>);
+    pub fn with_trace_jsonl_path(mut self, path: Option<PathBuf>) -> Self {
+        self.env.trace_sink = path.map(|p| Arc::new(JsonlTraceSink::new(p)) as Arc<dyn TraceSink>);
         self
     }
 
-    pub fn with_llm_logger(mut self, logger: Option<Arc<dyn LlmCallLogger>>) -> Self {
-        self.env.llm_logger = logger;
+    pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
+        self.env.trace_sink = sink;
+        self
+    }
+
+    pub fn with_trace_context(mut self, context: TraceContext) -> Self {
+        self.env.trace_context = context;
         self
     }
 

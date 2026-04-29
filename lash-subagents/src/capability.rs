@@ -49,7 +49,7 @@ pub trait Capability: Send + Sync {
 }
 
 /// How a tier picks its execution mode relative to the parent session.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum TierExecutionMode {
     Inherit,
     Explicit(ExecutionMode),
@@ -89,9 +89,9 @@ impl Capability for TierCapability {
 
     fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilitySpec {
         let (model, variant) = pick_tier_model(self, ctx.parent_policy);
-        let execution_mode = match self.execution_mode {
+        let execution_mode = match &self.execution_mode {
             TierExecutionMode::Inherit => None,
-            TierExecutionMode::Explicit(mode) => Some(mode),
+            TierExecutionMode::Explicit(mode) => Some(mode.clone()),
         };
         CapabilitySpec {
             model: Some(model),

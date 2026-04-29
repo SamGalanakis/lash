@@ -106,7 +106,7 @@ impl PluginSession {
     }
 
     pub fn execution_mode(&self) -> ExecutionMode {
-        self.execution_mode
+        self.execution_mode.clone()
     }
 
     pub fn host(&self) -> &PluginHost {
@@ -136,20 +136,22 @@ impl PluginSession {
         self.mode_protocol_driver.clone()
     }
 
-    pub fn tool_surface(&self, session_id: &str, mode: ExecutionMode) -> crate::ToolSurface {
+    pub fn tool_surface(&self, session_id: &str, mode: ExecutionMode) -> Arc<crate::ToolSurface> {
         let mut tools = self.tools.definitions();
         if mode == self.execution_mode {
             tools.extend(self.mode_native_tools.definitions());
         }
-        self.resolve_tool_surface(ToolSurfaceContext {
-            session_id: session_id.to_string(),
-            mode,
-            tools: tools.clone(),
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("failed to resolve tool surface: {err}");
-            crate::ToolSurface::from_tools(tools, mode)
-        })
+        Arc::new(
+            self.resolve_tool_surface(ToolSurfaceContext {
+                session_id: session_id.to_string(),
+                mode: mode.clone(),
+                tools: tools.clone(),
+            })
+            .unwrap_or_else(|err| {
+                tracing::warn!("failed to resolve tool surface: {err}");
+                crate::ToolSurface::from_tools(tools, mode)
+            }),
+        )
     }
 
     pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
@@ -165,7 +167,7 @@ impl PluginSession {
             &self.tool_surface_contributors,
             ToolSurfaceContext {
                 session_id: ctx.session_id.clone(),
-                mode: ctx.mode,
+                mode: ctx.mode.clone(),
                 tools: ctx.tools.clone(),
             },
             |hook, ctx| hook(ctx),
@@ -318,6 +320,20 @@ impl PluginSession {
                         surface,
                     ));
                 }
+                PluginDirective::EmitTrace {
+                    name,
+                    payload,
+                    context,
+                } => {
+                    host.emit_trace_event(
+                        *context,
+                        lash_trace::TraceEvent::Custom {
+                            name: format!("plugin.{}.{}", emitted.plugin_id, name),
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
                 PluginDirective::ReplaceToolArgs { .. }
                 | PluginDirective::ShortCircuitTool { .. } => {
                     return Err(PluginError::Session(invalid_context.to_string()));
@@ -386,10 +402,25 @@ impl PluginSession {
                         surface,
                     ));
                 }
+                PluginDirective::EmitTrace {
+                    name,
+                    payload,
+                    context,
+                } => {
+                    ctx.host
+                        .emit_trace_event(
+                            *context,
+                            lash_trace::TraceEvent::Custom {
+                                name: format!("plugin.{}.{}", emitted.plugin_id, name),
+                                payload,
+                            },
+                        )
+                        .await?;
+                }
                 PluginDirective::ReplaceToolArgs { .. }
                 | PluginDirective::ShortCircuitTool { .. } => {
                     return Err(PluginError::Session(
-                        "checkpoint hooks only support abort, message enqueue, and session creation"
+                        "checkpoint hooks only support abort, message enqueue, session creation, events, and trace events"
                             .to_string(),
                     ));
                 }
@@ -562,7 +593,9 @@ impl PluginSession {
                 } => {
                     let messages = updated_messages.get_or_insert_with(|| {
                         crate::MessageSequence::from_base(
-                            turn.state.session_graph.shared_projected_messages(),
+                            turn.state
+                                .session_graph
+                                .shared_projected_conversation_messages(),
                         )
                     });
                     append_plugin_messages(messages, &plugin_messages);
@@ -578,10 +611,24 @@ impl PluginSession {
                         surface,
                     ));
                 }
+                PluginDirective::EmitTrace {
+                    name,
+                    payload,
+                    context,
+                } => {
+                    host.emit_trace_event(
+                        *context,
+                        lash_trace::TraceEvent::Custom {
+                            name: format!("plugin.{}.{}", emitted.plugin_id, name),
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
                 PluginDirective::ReplaceToolArgs { .. }
                 | PluginDirective::ShortCircuitTool { .. } => {
                     return Err(PluginError::Session(
-                        "only message enqueue and session creation are valid in after_turn"
+                        "only message enqueue, session creation, events, and trace events are valid in after_turn"
                             .to_string(),
                     ));
                 }

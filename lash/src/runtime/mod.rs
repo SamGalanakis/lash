@@ -29,10 +29,10 @@ use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, 
 use crate::plugin::{
     CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
 };
-use crate::sansio::{Effect, LlmCallError, Response, TurnMachine};
+use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, SessionEvent, SessionPolicy, TokenUsage,
-    fresh_message_id, make_error_event, reassign_part_ids, transport_stream_events,
+    fresh_message_id, make_error_event, reassign_part_ids, shared_parts, transport_stream_events,
 };
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call_with_execution_context};
 use crate::{
@@ -41,6 +41,7 @@ use crate::{
     SessionError, SessionHandle, SessionManager, SessionSnapshot, SessionStartPoint,
     ToolCallRecord,
 };
+use crate::{Effect, TurnMachine};
 
 use host::*;
 use session_manager::*;
@@ -60,9 +61,9 @@ use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
-    BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost, FileLlmCallLogger,
-    LlmCallLogger, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
-    ManagedTaskStatus, RuntimeCoreConfig, SessionTaskExecutor, TokioSessionTaskExecutor,
+    BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost, ManagedRunState,
+    ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, RuntimeCoreConfig,
+    SessionTaskExecutor, TokioSessionTaskExecutor,
 };
 use io::{normalize_input_items, projection_message_delta_if_base_preserved};
 pub use state::{PersistedSessionState, SessionStateEnvelope};
@@ -120,13 +121,9 @@ pub struct TurnInput {
     pub user_input: Option<crate::UserInputProvenance>,
     #[serde(default)]
     pub mode: Option<RunMode>,
-    /// Per-turn override for the session's RLM termination contract.
-    /// When `Some`, this turn validates `submit` against the supplied
-    /// schema (or, for `ProseWithoutFence`, drops validation entirely)
-    /// without mutating the session-scoped default. Used by
-    /// `followup_task` to retype a subagent for a single turn.
+    /// Per-turn override for mode-owned turn options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rlm_termination_override: Option<crate::RlmTermination>,
+    pub mode_turn_options: Option<crate::ModeTurnOptions>,
 }
 
 #[derive(Clone, Debug)]
@@ -327,13 +324,20 @@ pub struct LashRuntime {
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     pub(in crate::runtime) overflow_recovery_attempted: bool,
-    /// RLM termination contract for this session.
-    pub(in crate::runtime) rlm_termination: crate::RlmTermination,
+    /// Mode-owned turn options for this session.
+    pub(in crate::runtime) mode_turn_options: crate::ModeTurnOptions,
     /// Session-scoped token cost ledger. Shared by ALL
     /// `RuntimeSessionManager` instances created from this runtime
     /// (both per-turn and async maintenance). Entries accumulate here
     /// and are drained into `state.token_ledger` at turn-commit time.
     pub(in crate::runtime) shared_token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
     pub(in crate::runtime) background_sync_needed: Arc<AtomicBool>,
+    /// Seed `PluginMessage`s queued via
+    /// `SessionCreateRequest::first_turn_input` for child sessions.
+    /// Shared across `RuntimeSessionManager` instances built from this
+    /// runtime so the seed remains visible after the parent turn that
+    /// created the session has ended.
+    pub(in crate::runtime) pending_first_turn_inputs:
+        Arc<std::sync::Mutex<HashMap<String, crate::PluginMessage>>>,
     pub(in crate::runtime) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }

@@ -20,7 +20,7 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
         image_blobs,
         user_input: Some(turn.input_provenance.clone()),
         mode: Some(RunMode::Normal),
-        rlm_termination_override: None,
+        mode_turn_options: None,
     }
 }
 
@@ -101,7 +101,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         });
@@ -126,6 +127,7 @@ mod tests {
                         reasoning_tokens: 6,
                     },
                     last_prompt_usage: None,
+                    mode_turn_options: Default::default(),
                 },
                 dynamic_state_ref: None,
                 dynamic_state: None,
@@ -144,7 +146,7 @@ mod tests {
                 provider_id: "openai-compatible".into(),
                 configured_model: "gpt-5.4-mini".into(),
                 context_window: 0,
-                execution_mode: ExecutionMode::Rlm,
+                execution_mode: ExecutionMode::new("rlm"),
                 context_approach: ContextApproach::RollingHistory(RollingHistoryConfig),
                 model_variant: None,
             },
@@ -163,7 +165,7 @@ mod tests {
         let stale_state = persistence_state;
 
         assert_eq!(stale_state.iteration, 2);
-        assert_eq!(stale_state.projected_messages().len(), 1);
+        assert_eq!(stale_state.projected_conversation_messages().len(), 1);
         assert_eq!(stale_state.token_ledger.len(), 1);
         assert_eq!(stale_state.token_ledger[0].source, "turn");
         assert_eq!(stale_state.token_ledger[0].model, "gpt-5.4-mini");

@@ -263,17 +263,6 @@ fn filename_for_session_meta(
     })
 }
 
-pub(crate) fn filename_for_session_id(session_id: &str) -> Option<String> {
-    let session_id = session_id.trim();
-    if session_id.is_empty() {
-        return None;
-    }
-
-    filename_for_session_meta(collect_session_candidates(), |meta| {
-        meta.session_id == session_id
-    })
-}
-
 pub(crate) fn filename_for_session_identifier(identifier: &str) -> Option<String> {
     let identifier = identifier.trim();
     if identifier.is_empty() {
@@ -312,7 +301,8 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
     let head = store.load_session_head().unwrap_or_default();
     let graph = head.graph;
-    let messages = graph.project_messages();
+    let events = graph.active_events();
+    let messages = graph.project_conversation_messages();
     let tool_calls = graph.project_tool_calls();
     let ui_state = crate::app::UiProjectionState::default();
     let checkpoint = head
@@ -321,7 +311,7 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         .and_then(|blob_ref| store.get_checkpoint(blob_ref));
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
-    let blocks = projected_blocks_from_state(&messages, &tool_calls, &ui_state);
+    let blocks = projected_blocks_from_state(&events, &messages, &tool_calls, &ui_state);
     tracing::debug!(
         session_file = filename,
         messages = messages.len(),
@@ -369,6 +359,7 @@ mod tests {
                     iteration: 1,
                     token_usage,
                     last_prompt_usage: None,
+                    mode_turn_options: Default::default(),
                 },
                 dynamic_state_ref: None,
                 dynamic_state: Some(lash::DynamicStateSnapshot {
@@ -389,7 +380,7 @@ mod tests {
                 provider_id: "openai_generic".to_string(),
                 configured_model: "gpt-test".to_string(),
                 context_window: 200_000,
-                execution_mode: lash::ExecutionMode::Standard,
+                execution_mode: lash::ExecutionMode::standard(),
                 context_approach: lash::ContextApproach::default(),
                 model_variant: None,
             },
@@ -413,7 +404,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         }
@@ -434,7 +426,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         }

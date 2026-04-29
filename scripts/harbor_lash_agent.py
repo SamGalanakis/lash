@@ -40,15 +40,13 @@ stop promptly once the required end state exists.
 
 Most terminal-bench tasks are graded by inspecting the environment
 after you stop — files, services, running processes, configuration
-state — NOT by reading a value you `submit`. For these tasks:
+state. For these tasks:
 
 - Make the required changes directly to the filesystem / services.
 - Verify the end state from inside lashlang (re-open files, re-run the
   service's own check, probe the port, read the expected output).
-- **Stop without `submit`**: let your last lashlang block finish with
-  its verifying `call`/`exec` and no `submit`, or reply in plain prose
-  once you've confirmed the state. The verifier reads the environment
-  after you stop.
+- Submit the final result with `submit <expr>` once you've confirmed the
+  required end state.
 
 Only `submit <value>` when the task explicitly asks you to return a
 computed value (e.g. "print the total count"). Never submit
@@ -60,6 +58,13 @@ it were the answer — the grader is not reading your response.
 - You are graded by exact checks. Match required filenames, file
   contents, output formats, ports, protocols, and process state
   precisely. Approximate solutions fail.
+- `exec_command` is the completing shell tool: use it for builds,
+  installs, tests, migrations, service setup, and verification. Do not
+  move on, verify, or submit until its result has `status:
+  "completed"`, `done: true`, and an `exit_code`.
+- `start_command` and `write_stdin` can return `status: "running"` with
+  a `session_id`; that output is partial and is not proof that a build,
+  install, test, service setup, or verifier command finished.
 - Treat leftover build products, temp scripts, debug artifacts, and
   stray outputs as failures unless the task explicitly requires them.
   Clean up before finishing — but do not clean away the required end
@@ -71,11 +76,12 @@ it were the answer — the grader is not reading your response.
 
 ## Budget discipline
 
-- Inspect briefly, make the smallest plausible change, verify, stop.
-  Avoid broad rewrites or speculative reimplementation.
-- Don't re-grep or re-read the same artifact without new evidence.
-- When close to timeout, stop exploring, pick the simplest plan, make
-  the minimum required end state exist, verify it, and finish.
+- Work in short evidence-based loops: inspect enough to choose the next
+  action, make the change, verify the exact expected state, then finish.
+- Keep scope tight. Do not repeat the same searches or re-read the same
+  artifact unless new evidence changes what you are checking.
+- When time is tight, prioritize the required end state and direct
+  verification over cleanup, refactors, or broader investigation.
 """
 
 INSTALL_GNU_TIME_COMMAND = """
@@ -208,9 +214,9 @@ class LashAgent(BaseInstalledAgent):
         execution_mode = os.environ.get("LASH_BENCH_EXECUTION_MODE", "").strip()
         if execution_mode == "native-tools":
             execution_mode = "standard"
-        if execution_mode not in {"rlm", "standard"}:
+        if execution_mode not in {"rlm", "rlmpure", "standard"}:
             raise ValueError(
-                "LASH_BENCH_EXECUTION_MODE must be set to 'rlm' or 'standard'"
+                "LASH_BENCH_EXECUTION_MODE must be set to 'rlm', 'rlmpure', or 'standard'"
             )
 
         env: dict[str, str] = {
@@ -253,11 +259,6 @@ class LashAgent(BaseInstalledAgent):
             else ""
         )
         execution_mode_flag = f"--execution-mode {shlex.quote(execution_mode)} "
-        rlm_task_var_flag = ""
-        if execution_mode == "rlm":
-            rlm_task_var_flag = (
-                f"--rlm-var {shlex.quote(f'task={json.dumps(instruction)}')} "
-            )
         # The old `--prompt-replace` / `--prompt-append` /
         # `--prompt-disable` flags were removed from the lash CLI.
         # Instead, we own one benchmark-specific guidance block
@@ -282,7 +283,7 @@ class LashAgent(BaseInstalledAgent):
                 command=(
                     f"chmod +x {shlex.quote(lash_binary)} && "
                     f"{shlex.quote(lash_binary)} {provider_flag}{model_flag}{variant_flag}"
-                    f"{context_approach_flag}{execution_mode_flag}{rlm_task_var_flag}"
+                    f"{context_approach_flag}{execution_mode_flag}"
                     f"--print {prompt}"
                 ),
                 env=env,
@@ -354,7 +355,7 @@ class LashAgent(BaseInstalledAgent):
         saw_usage = False
 
         if sessions_dir.exists():
-            for path in sorted(sessions_dir.glob("*.llm.jsonl")):
+            for path in sorted(sessions_dir.glob("*.trace.jsonl")):
                 try:
                     with path.open() as f:
                         for line in f:

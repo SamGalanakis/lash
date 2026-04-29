@@ -84,7 +84,8 @@ pub(crate) async fn run_app(
     initial_execution_mode: ExecutionMode,
     startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut app = App::new(model, session_name);
+    let initial_session_id = runtime.session_id().to_string();
+    let mut app = App::new(model, session_name, initial_session_id);
     let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = vec![Arc::new(
         lash_autoresearch::AutoresearchUiExtension::default(),
     )];
@@ -303,7 +304,7 @@ pub(crate) async fn run_app(
                 last_turn = Some(TurnReplayPayload {
                     prepared_turn: prepared,
                     turn_input,
-                    execution_mode: current_execution_mode,
+                    execution_mode: current_execution_mode.clone(),
                 });
             }
         }
@@ -535,7 +536,7 @@ pub(crate) async fn run_app(
                         }
                     }
 
-                    history = state.project_messages();
+                    history = state.project_conversation_messages();
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
@@ -544,7 +545,7 @@ pub(crate) async fn run_app(
                         iteration = state.iteration,
                         status = ?done.result.status,
                         reason = ?done.result.done_reason,
-                        messages = state.projected_messages().len(),
+                        messages = state.projected_conversation_messages().len(),
                         blocks = app.blocks.len(),
                         had_live_turn = app.live_turn.is_some(),
                         running = app.running,
@@ -567,9 +568,11 @@ pub(crate) async fn run_app(
                             "Cancelled.".to_string()
                         };
                         app.stop_turn();
-                        let projected_messages = state.project_messages();
+                        let projected_events = state.active_events();
+                        let projected_messages = state.project_conversation_messages();
                         let projected_tool_calls = state.project_tool_calls();
                         app.blocks = app::project_interrupted_blocks(
+                            &projected_events,
                             &projected_messages,
                             &projected_tool_calls,
                             &ui_projection_state,
@@ -613,9 +616,14 @@ pub(crate) async fn run_app(
                         continue;
                     }
 
-                    let projected_messages = state.project_messages();
+                    let projected_events = state.active_events();
+                    let projected_messages = state.project_conversation_messages();
                     let projected_tool_calls = state.project_tool_calls();
-                    app.finish_turn_from_projection(&projected_messages, &projected_tool_calls);
+                    app.finish_turn_from_projection(
+                        &projected_events,
+                        &projected_messages,
+                        &projected_tool_calls,
+                    );
                     app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;

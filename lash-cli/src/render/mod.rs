@@ -970,7 +970,7 @@ fn render_block(
     viewport_width: usize,
     viewport_height: usize,
 ) -> Vec<Line<'static>> {
-    let mut app = App::new("test-model".into(), "test".into());
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks = blocks.to_vec();
     app.expand_level = expand_level;
     render_block_lines(&app, idx, viewport_width, viewport_height)

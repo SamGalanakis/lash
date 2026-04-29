@@ -161,7 +161,7 @@ fn draw_workspace_surface(
     app.ui_extensions().render_mounted_surface(
         surface,
         UiRenderContext {
-            session_id: crate::ROOT_SESSION_ID,
+            session_id: app.session_id.as_str(),
             capabilities,
             surface_id: &surface.id,
             focused: surfaces.focused.as_deref() == Some(surface.id.as_str()),
@@ -190,7 +190,7 @@ fn draw_surface_stack(
         app.ui_extensions().render_mounted_surface(
             surface,
             UiRenderContext {
-                session_id: crate::ROOT_SESSION_ID,
+                session_id: app.session_id.as_str(),
                 capabilities,
                 surface_id: &surface.id,
                 focused: surfaces.focused.as_deref() == Some(surface.id.as_str()),
@@ -219,7 +219,7 @@ fn draw_overlay_surface(
     app.ui_extensions().render_mounted_surface(
         surface,
         UiRenderContext {
-            session_id: crate::ROOT_SESSION_ID,
+            session_id: app.session_id.as_str(),
             capabilities,
             surface_id: &surface.id,
             focused: surfaces.focused.as_deref() == Some(surface.id.as_str()),
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn status_bar_shows_context_window_usage() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.model_variant = Some("high".into());
         app.context_window = Some(1_100_000);
         app.last_prompt_usage = Some(PromptUsage {
@@ -1232,7 +1232,11 @@ mod tests {
 
     #[test]
     fn input_badge_omits_session_name() {
-        let mut app = App::new("gpt-5.4".into(), "autumn-falls".into());
+        let mut app = App::new(
+            "gpt-5.4".into(),
+            "autumn-falls".into(),
+            "test-session-id".into(),
+        );
         app.repo_status = Some(crate::repo_status::RepoStatus {
             repo_root: std::path::PathBuf::from("/tmp/lash"),
             repo_name: "lash".into(),
@@ -1249,7 +1253,7 @@ mod tests {
 
     #[test]
     fn option_prompt_starts_at_top_of_question() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         let (response_tx, _response_rx) = mpsc::channel();
         app.show_prompt(PromptState {
             request: PromptRequest::single(
@@ -1276,7 +1280,7 @@ mod tests {
 
     #[test]
     fn prompt_panel_can_scroll_when_content_exceeds_viewport() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         let (response_tx, _response_rx) = mpsc::channel();
         app.show_prompt(PromptState {
             request: PromptRequest::single("Exit plan mode?", vec!["Exit".into()])
@@ -1303,7 +1307,7 @@ mod tests {
 
     #[test]
     fn history_selection_highlights_visible_cells() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.blocks = vec![crate::app::DisplayBlock::UserInput(
             "alpha\nbeta\ngamma".into(),
         )];
@@ -1329,7 +1333,7 @@ mod tests {
 
     #[test]
     fn history_selection_tracks_content_rows_while_scrolled() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.blocks = vec![crate::app::DisplayBlock::UserInput(
             "alpha\nbeta\ngamma\ndelta".into(),
         )];
@@ -1350,7 +1354,7 @@ mod tests {
 
     #[test]
     fn input_selection_highlights_visible_cells() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.set_input("alpha beta".into());
         app.start_input_selection(2);
         app.update_input_selection(7);
@@ -1456,7 +1460,7 @@ mod tests {
 
     #[test]
     fn workspace_surface_replaces_history_and_footer_renders_above_input() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.blocks = vec![crate::app::DisplayBlock::UserInput("history line".into())];
         let ui_extensions = Arc::new(
             UiExtensions::new(vec![Arc::new(SurfaceTestExtension)]).expect("surface extensions"),
@@ -1476,7 +1480,7 @@ mod tests {
 
     #[test]
     fn overlay_surface_renders_last_on_centered_scrim() {
-        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         let ui_extensions = Arc::new(
             UiExtensions::new(vec![Arc::new(SurfaceTestExtension)]).expect("surface extensions"),
         );

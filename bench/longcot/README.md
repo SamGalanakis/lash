@@ -12,10 +12,10 @@ All runtime artifacts live under ignored `.benchmarks/longcot/`.
 |---|---|---|
 | Model | `openai/gpt-5.2` | reference blog used `claude-sonnet-4.5` — change with `--model` |
 | Provider | `openai-compatible` (OpenRouter OAI-compat endpoint) | `--provider-id` |
-| Max turns | 50 | matches `dspy.RLM max_iterations=50` |
+| Max turns | 50 | matches the reference RLM iteration cap |
 | Max output tokens | 64,000 | matches reference `max_tokens=64000`; plumbed through the openrouter adapter |
 | Max context tokens | 1,000,000 | — |
-| Execution mode | `rlm` (lashlang DSL) | the intentional delta vs dspy.RLM |
+| Execution mode | `rlm` (lashlang DSL) | the intentional delta vs the reference runtime |
 | Context approach | `rolling_history` | — |
 
 ## Quickstart
@@ -93,7 +93,7 @@ bench/longcot/run.sh --variant xhigh
     answer.txt            # the model's final answer
     events.jsonl          # streamed session events
     session.db            # full session graph
-    session.llm.jsonl     # raw LLM request/response log
+    session.trace.jsonl   # structured runtime trace
     system_prompt.txt     # exact system prompt sent for this question
     trace.html            # self-contained session trace (from lash-export)
     result.json           # per-question structured result

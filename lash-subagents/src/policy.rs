@@ -14,9 +14,14 @@ pub(super) fn subagent_tool_definitions(
     registry: &CapabilityRegistry,
 ) -> Vec<ToolDefinition> {
     let names = registry.names();
-    match execution_mode {
-        lash::ExecutionMode::Standard => standard_subagent_tool_definitions(&names),
-        lash::ExecutionMode::Rlm => rlm_subagent_tool_definitions(&names),
+    if execution_mode == lash::ExecutionMode::standard() {
+        standard_subagent_tool_definitions(&names)
+    } else if execution_mode == lash::ExecutionMode::new("rlmpure") {
+        rlm_subagent_tool_definitions(&names, true)
+    } else if execution_mode == lash::ExecutionMode::new("rlm") {
+        rlm_subagent_tool_definitions(&names, false)
+    } else {
+        standard_subagent_tool_definitions(&names)
     }
 }
 
@@ -49,9 +54,12 @@ fn standard_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDe
     ]
 }
 
-fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDefinition> {
+fn rlm_subagent_tool_definitions(
+    capability_names: &[String],
+    include_pass_baton: bool,
+) -> Vec<ToolDefinition> {
     let example_capability = example_capability_name(capability_names);
-    vec![
+    let mut tools = vec![
         spawn_agent_definition(
             capability_names,
             vec![
@@ -80,7 +88,16 @@ fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDefinit
             r#"call wait_agent { targets: ["/root/inspect_auth"], timeout_ms: 30000 }"#.into(),
         ]),
         list_agents_definition(vec![r#"call list_agents { path_prefix: "/root" }"#.into()]),
-    ]
+    ];
+    if include_pass_baton {
+        tools.insert(
+            1,
+            pass_baton_definition(vec![
+                r#"call pass_baton { task: "filter the candidates by relevance to the user's query and submit the top 3", seed: { candidates: candidates, query: user_input_1 } }"#.into(),
+            ]),
+        );
+    }
+    tools
 }
 
 fn example_capability_name(capability_names: &[String]) -> String {
@@ -108,6 +125,25 @@ fn capability_list_for_description(capability_names: &[String]) -> String {
             let head = quoted[..quoted.len() - 1].join(", ");
             format!("{head}, or {last}")
         }
+    }
+}
+
+fn pass_baton_definition(examples: Vec<String>) -> ToolDefinition {
+    ToolDefinition {
+        name: "pass_baton".into(),
+        description: "Hand off to a fresh successor session and end the current session immediately. Use when most of your trajectory has become irrelevant or when context budget is approaching the limit. The successor inherits only the values you put in `seed` as lashlang globals and the `task` string as its `user_input_1`. It does not inherit prior conversation, trajectory, or globals. The successor keeps the current session's output schema, and the successor's `submit` becomes the user-facing answer.".into(),
+        params: vec![
+            ToolParam::typed("task", "str"),
+            ToolParam::optional("seed", "dict"),
+        ],
+        returns: "dict".into(),
+        examples,
+        availability: lash::ToolAvailabilityConfig::documented(),
+        activation: lash::ToolActivation::Always,
+        availability_override: None,
+        input_schema_override: Some(pass_baton_input_schema()),
+        output_schema_override: None,
+        execution_mode: ToolExecutionMode::Parallel,
     }
 }
 
@@ -212,6 +248,18 @@ fn list_agents_definition(examples: Vec<String>) -> ToolDefinition {
         output_schema_override: None,
         execution_mode: ToolExecutionMode::Parallel,
     }
+}
+
+fn pass_baton_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "task": { "type": "string" },
+            "seed": { "type": "object", "additionalProperties": true }
+        },
+        "required": ["task"],
+        "additionalProperties": false
+    })
 }
 
 fn spawn_agent_input_schema(capability_names: &[String]) -> serde_json::Value {

@@ -173,7 +173,7 @@ pub(super) fn handle_mode(
             app,
             format!(
                 "Current execution mode: `{}`\nThis is locked for the current session.\nStart a new session to use a different mode.\nUsage: `/mode {}`",
-                execution_mode_label(*current_execution_mode),
+                execution_mode_label(current_execution_mode),
                 execution_mode_usage()
             ),
         );
@@ -191,7 +191,7 @@ pub(super) fn handle_mode(
             app,
             format!(
                 "Execution mode is already `{}`.\nThis is locked for the current session.",
-                execution_mode_label(*current_execution_mode)
+                execution_mode_label(current_execution_mode)
             ),
         );
     } else {
@@ -199,9 +199,9 @@ pub(super) fn handle_mode(
             app,
             format!(
                 "Execution mode is locked for the current session (`{}`).\nStart a new session with `--mode {}` to use `{}`.",
-                execution_mode_label(*current_execution_mode),
-                execution_mode_label(new_mode),
-                execution_mode_label(new_mode)
+                execution_mode_label(current_execution_mode),
+                execution_mode_label(&new_mode),
+                execution_mode_label(&new_mode)
             ),
         );
     }

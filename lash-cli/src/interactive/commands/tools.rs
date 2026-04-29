@@ -56,7 +56,7 @@ pub(super) fn handle_tools(
         for (name, spec) in &desired_dynamic.tools {
             let availability = spec
                 .definition
-                .effective_availability(current_execution_mode);
+                .effective_availability(&current_execution_mode);
             lines.push(format!(
                 "  - {} [{}] adapter={} availability={}",
                 name,
@@ -159,7 +159,7 @@ pub(super) fn handle_tools(
                 let injected = inject == "true";
                 let availability = spec
                     .definition
-                    .effective_availability(current_execution_mode);
+                    .effective_availability(&current_execution_mode);
                 spec.definition.availability_override =
                     Some(update_documentation_state(availability, injected));
             }

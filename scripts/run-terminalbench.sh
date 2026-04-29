@@ -26,7 +26,7 @@ Options:
                                 (optional for lash, required for opencode and codex)
   --variant <name>              Provider-native model variant passed through when supported
                                 (required for all benchmark runs)
-  --execution-mode <mode>       Lash execution mode: rlm|standard
+  --execution-mode <mode>       Lash execution mode: rlm|rlmpure|standard
                                 (required for --agent lash; ignored for opencode)
   --context-approach <name>     Lash context approach: rolling_history|observational_memory
                                 (optional for --agent lash; ignored for opencode)
@@ -459,7 +459,7 @@ BINARY_PATH=""
 
 if [[ "${AGENT}" == "lash" ]]; then
   if [[ -z "${EXECUTION_MODE}" ]]; then
-    echo "error: --execution-mode is required for --agent lash (expected rlm|standard)" >&2
+    echo "error: --execution-mode is required for --agent lash (expected rlm|rlmpure|standard)" >&2
     exit 2
   fi
 
@@ -467,8 +467,8 @@ if [[ "${AGENT}" == "lash" ]]; then
     EXECUTION_MODE="standard"
   fi
 
-  if [[ "${EXECUTION_MODE}" != "rlm" && "${EXECUTION_MODE}" != "standard" ]]; then
-    echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected rlm|standard)" >&2
+  if [[ "${EXECUTION_MODE}" != "rlm" && "${EXECUTION_MODE}" != "rlmpure" && "${EXECUTION_MODE}" != "standard" ]]; then
+    echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected rlm|rlmpure|standard)" >&2
     exit 2
   fi
 

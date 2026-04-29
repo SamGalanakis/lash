@@ -49,12 +49,14 @@ pub async fn switch_to_tree_selection(
         .branch_to_node(target_leaf)
         .await
         .map_err(|err| err.to_string())?;
-    *history = state.project_messages();
+    *history = state.project_conversation_messages();
 
     app.stop_turn();
-    let projected_messages = state.project_messages();
+    let projected_events = state.active_events();
+    let projected_messages = state.project_conversation_messages();
     let projected_tool_calls = state.project_tool_calls();
     app.blocks = projected_blocks_from_state(
+        &projected_events,
         &projected_messages,
         &projected_tool_calls,
         &app.ui_projection_state(),

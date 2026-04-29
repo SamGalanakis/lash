@@ -1231,17 +1231,9 @@ impl UiExtension for PlanModeUiExtension {
                 == Some("fresh_context")
                 && let Some(session_id) = result.get("session_id").and_then(|value| value.as_str())
             {
-                let queued_turn = result
-                    .get("fresh_context_input")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|input| UiPreparedTurn {
-                        display_text: input.to_string(),
-                        effective_text: input.to_string(),
-                    });
                 effects.push(UiHostEffect::SwitchToNewSession {
                     session_id: session_id.to_string(),
-                    queued_turn,
+                    queued_turn: None,
                 });
             }
             effects
@@ -1397,7 +1389,6 @@ mod tests {
                 "approved": true,
                 "execution_mode": "fresh_context",
                 "session_id": "new-plan-session",
-                "fresh_context_input": "Do a full, faithful implementation of the plan found at: .lash/plans/demo.md"
             }),
             success: true,
             duration_ms: 12,
@@ -1415,10 +1406,7 @@ mod tests {
                 },
                 UiHostEffect::SwitchToNewSession {
                     session_id: "new-plan-session".to_string(),
-                    queued_turn: Some(UiPreparedTurn {
-                        display_text: "Do a full, faithful implementation of the plan found at: .lash/plans/demo.md".to_string(),
-                        effective_text: "Do a full, faithful implementation of the plan found at: .lash/plans/demo.md".to_string(),
-                    })
+                    queued_turn: None,
                 }
             ]
         );

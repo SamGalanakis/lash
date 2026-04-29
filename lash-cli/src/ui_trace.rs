@@ -256,6 +256,7 @@ impl TraceSessionEvent {
             | SessionEvent::RetryStatus { .. }
             | SessionEvent::InjectedTurnInputAccepted { .. }
             | SessionEvent::InjectedMessagesCommitted { .. }
+            | SessionEvent::SessionHandoff { .. }
             | SessionEvent::TypedFinish { .. }
             // Reasoning deltas are session-local display signals; UI
             // trace logs don't need to replay them.

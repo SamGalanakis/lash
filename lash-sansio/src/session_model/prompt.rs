@@ -22,7 +22,7 @@ pub enum PromptSlot {
     Environment,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PromptTemplateEntry {
     Text { content: String },
@@ -46,7 +46,7 @@ impl PromptTemplateEntry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PromptTemplateSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -74,7 +74,7 @@ impl PromptTemplateSection {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PromptTemplate {
     pub sections: Vec<PromptTemplateSection>,
 }
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn default_template_renders_builtin_sections() {
-        let mut ctx = prompt(crate::ExecutionMode::Rlm);
+        let mut ctx = prompt(crate::ExecutionMode::new("test_mode"));
         ctx.tool_names = vec!["ask".to_string()];
         let text = default_prompt_template().render(&ctx);
         assert!(text.contains(MAIN_AGENT_INTRO));
@@ -288,7 +288,7 @@ mod tests {
         // `ask` tool, so the guidance line telling the model "Ask
         // only when progress is blocked" would contradict the
         // run-time constraint. `render_core_guidance` must drop it.
-        let ctx = prompt(crate::ExecutionMode::Rlm);
+        let ctx = prompt(crate::ExecutionMode::new("test_mode"));
         assert!(!ctx.has_tool("ask"));
         let rendered = render_core_guidance(&ctx);
         assert!(rendered.contains("Be concise"));
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn core_guidance_keeps_ask_line_when_ask_tool_present() {
-        let mut ctx = prompt(crate::ExecutionMode::Rlm);
+        let mut ctx = prompt(crate::ExecutionMode::new("test_mode"));
         ctx.tool_names = vec!["ask".to_string()];
         let rendered = render_core_guidance(&ctx);
         assert!(rendered.contains("Ask only when progress is blocked"));
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn template_renders_slot_contributions_in_order() {
-        let mut prompt = prompt(crate::ExecutionMode::Rlm);
+        let mut prompt = prompt(crate::ExecutionMode::new("test_mode"));
         prompt.contributions = vec![
             PromptContribution::guidance("Second Guide", "Second details.").with_priority(10),
             PromptContribution::guidance("First Guide", "First details.").with_priority(0),
@@ -323,7 +323,7 @@ mod tests {
             "Guidance",
             vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
         )]);
-        let mut prompt = prompt(crate::ExecutionMode::Rlm);
+        let mut prompt = prompt(crate::ExecutionMode::new("test_mode"));
         prompt.contributions = vec![PromptContribution::guidance("Custom", "More guidance.")];
         let text = template.render(&prompt);
         assert!(text.contains("## Guidance"));
@@ -345,7 +345,7 @@ mod tests {
                 vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
             ),
         ]);
-        let mut prompt = prompt(crate::ExecutionMode::Rlm);
+        let mut prompt = prompt(crate::ExecutionMode::new("test_mode"));
         prompt.contributions = vec![
             PromptContribution::project_instructions("Repo rules"),
             PromptContribution::guidance("Shell", "Use exec_command."),
@@ -363,7 +363,7 @@ mod tests {
             "Environment",
             vec![PromptTemplateEntry::slot(PromptSlot::Environment)],
         )]);
-        let text = template.render(&prompt(crate::ExecutionMode::Rlm));
+        let text = template.render(&prompt(crate::ExecutionMode::new("test_mode")));
         assert!(text.is_empty());
     }
 }

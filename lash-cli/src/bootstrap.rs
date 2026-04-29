@@ -37,7 +37,8 @@ fn plugin_factories_for_surface(
     let low_tier_execution_mode = lash_config
         .runtime
         .low_tier_subagent_execution_mode
-        .unwrap_or(ExecutionMode::Standard);
+        .clone()
+        .unwrap_or(ExecutionMode::standard());
     let capability_registry = Arc::new(default_registry(
         &lash_config.agent_models,
         low_tier_execution_mode,
@@ -84,6 +85,9 @@ fn plugin_factories_for_surface(
     plugin_factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
+    plugin_factories.push(Arc::new(
+        lash_mode_rlmpure::BuiltinRlmpureModePluginFactory::default(),
+    ));
     plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy,
         capability_registry,
@@ -125,7 +129,7 @@ fn parse_rlm_var_arg(raw: &str) -> Result<(String, JsonValue), String> {
 
 fn resolve_rlm_globals_patch(
     args: &Args,
-) -> Result<Option<lash::RlmGlobalsPatchPluginBody>, String> {
+) -> Result<Option<lash_rlm_types::RlmGlobalsPatchPluginBody>, String> {
     let mut set = JsonMap::new();
     if let Some(path) = &args.rlm_vars_file {
         let raw = std::fs::read_to_string(path)
@@ -157,7 +161,7 @@ fn resolve_rlm_globals_patch(
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
 
-    let patch = lash::RlmGlobalsPatchPluginBody { set, unset };
+    let patch = lash_rlm_types::RlmGlobalsPatchPluginBody { set, unset };
     if patch.is_empty() {
         return Ok(None);
     }
@@ -232,13 +236,13 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         let execution_mode =
             ensure_supported_execution_mode(match args.execution_mode.as_deref() {
                 Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
-                None => ExecutionMode::Standard,
+                None => ExecutionMode::standard(),
             })
             .map_err(anyhow::Error::msg)?;
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
-        println!("{}", info_text_unconfigured(execution_mode, &cwd));
+        println!("{}", info_text_unconfigured(&execution_mode, &cwd));
         return Ok(());
     }
     let interactive_startup = !args.info && args.print_prompt.is_none();
@@ -343,10 +347,10 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         lash_config.set_model_default(active_provider.kind(), model.clone(), model_variant.clone());
         lash_config.save(&crate::paths::config_file())?;
     }
-    let llm_log_path = if crate::detailed_debug_logging_enabled(args.debug) {
+    let trace_path = if crate::detailed_debug_logging_enabled(args.debug) {
         let dir = crate::paths::lash_home().join("sessions");
         Some(dir.join(format!(
-            "{}.llm.jsonl",
+            "{}.trace.jsonl",
             chrono::Local::now().format("%Y%m%d_%H%M%S")
         )))
     } else {
@@ -358,7 +362,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     tracing::debug!(
         session_file = session_bootstrap.filename(),
         resumed = args.resume.is_some(),
-        llm_log_path = ?llm_log_path,
+        trace_path = ?trace_path,
         debug_logging = crate::detailed_debug_logging_enabled(args.debug),
         "prepared session bootstrap"
     );
@@ -395,9 +399,9 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         }
         None => persisted_session_config
             .as_ref()
-            .map(|config| config.execution_mode)
+            .map(|config| config.execution_mode.clone())
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
-            .unwrap_or(ExecutionMode::Standard),
+            .unwrap_or(ExecutionMode::standard()),
     };
 
     let configured_context_approach = match args.context_approach.as_deref() {
@@ -420,9 +424,11 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     )
     .map_err(anyhow::Error::msg)?;
     let rlm_globals_patch = resolve_rlm_globals_patch(&args).map_err(anyhow::Error::msg)?;
-    if rlm_globals_patch.is_some() && !matches!(execution_mode, ExecutionMode::Rlm) {
+    let rlm_globals_supported = execution_mode == ExecutionMode::new("rlm")
+        || execution_mode == ExecutionMode::new("rlmpure");
+    if rlm_globals_patch.is_some() && !rlm_globals_supported {
         return Err(anyhow::anyhow!(
-            "`--rlm-var`, `--rlm-vars-file`, and `--rlm-unset` require `--execution-mode rlm`."
+            "`--rlm-var`, `--rlm-vars-file`, and `--rlm-unset` require `--execution-mode rlm` or `--execution-mode rlmpure`."
         ));
     }
 
@@ -437,13 +443,14 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         model_variant,
         max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
-        execution_mode,
+        autonomous,
+        execution_mode: execution_mode.clone(),
         context_approach: configured_context_approach.clone(),
         ..Default::default()
     };
     let host_core = RuntimeCoreConfig::default()
         .with_prompt_template(prompt_template)
-        .with_llm_log_path(llm_log_path)
+        .with_trace_jsonl_path(trace_path)
         .with_credential_store_path(Some(crate::paths::config_file()));
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
@@ -452,7 +459,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
 
     let plugin_factories = plugin_factories_for_surface(
         autonomous,
-        execution_mode,
+        execution_mode.clone(),
         tavily_key,
         Arc::clone(&instruction_source),
         session_policy.clone(),
@@ -460,9 +467,12 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         host_docs.dir().to_path_buf(),
     );
     let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
+    let resolved_session_id = run_session_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let root_plugins = plugin_host.build_session(
-        "root",
-        execution_mode,
+        &resolved_session_id,
+        execution_mode.clone(),
         session_policy.context_approach.clone(),
         None,
     )?;
@@ -492,7 +502,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
                 &active_provider,
                 &model,
                 session_policy.model_variant.as_deref(),
-                execution_mode,
+                &execution_mode,
                 &session_policy.context_approach,
                 Some(resolved_model_spec.context_window()),
                 dynamic_tools_provider.definitions().len(),
@@ -507,7 +517,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     }
     let initial_model_variant = session_policy.model_variant.clone();
     let session_name = session_bootstrap.session_name();
-    let mut logger = session_bootstrap.logger(&model, run_session_id)?;
+    let mut logger = session_bootstrap.logger(&model, run_session_id.clone())?;
     let initial_graph = session_bootstrap.initial_graph();
     let services = lash::PersistentRuntimeServices::new_with_bridges(
         root_plugins,
@@ -516,7 +526,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         store.clone() as Arc<dyn RuntimeStore>,
     );
     let state = PersistedSessionState {
-        session_id: "root".to_string(),
+        session_id: resolved_session_id.clone(),
         policy: session_policy.clone(),
         session_graph: initial_graph,
         ..PersistedSessionState::default()
@@ -534,9 +544,10 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     if let Some(patch) = rlm_globals_patch {
         runtime
             .append_session_nodes(lash::AppendSessionNodesRequest {
-                nodes: vec![lash::SessionAppendNode::plugin(
-                    lash::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
-                    serde_json::to_value(patch).unwrap_or(serde_json::Value::Null),
+                nodes: vec![lash::SessionAppendNode::event(
+                    lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+                        lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch),
+                    )),
                 )],
                 requires_ancestor_node_id: None,
             })

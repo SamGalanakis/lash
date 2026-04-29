@@ -76,7 +76,11 @@ pub(crate) struct UiHarness {
 impl UiHarness {
     pub(crate) fn new(width: u16, height: u16) -> Self {
         let ui_extensions = Arc::new(UiExtensions::builtin().expect("builtin ui extensions"));
-        let mut app = App::new("gpt-5.4".to_string(), "test-session".to_string());
+        let mut app = App::new(
+            "gpt-5.4".to_string(),
+            "test-session".to_string(),
+            "test-session-id".into(),
+        );
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("lash-cli crate should live under repo root")

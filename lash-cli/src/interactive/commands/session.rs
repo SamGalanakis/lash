@@ -43,13 +43,14 @@ pub(super) async fn handle_clear(
         let mut state = SessionStateEnvelope {
             session_id: "root".to_string(),
             policy: SessionPolicy {
-                execution_mode: *current_execution_mode,
+                execution_mode: current_execution_mode.clone(),
                 ..rt.export_state().policy
             },
             session_graph: lash::SessionGraph::default(),
             iteration: *turn_counter,
             token_usage: app.token_usage.clone(),
             last_prompt_usage: None,
+            mode_turn_options: rt.export_state().mode_turn_options,
         };
         state.replace_projection(history, &[]);
         rt.set_persisted_state(lash::PersistedSessionState::from_state(state));
@@ -150,7 +151,7 @@ pub(super) async fn handle_fork(
     {
         Ok(forked) => {
             let fallback_command = fork_resume_command(&forked.session_id);
-            let exe = match std::env::current_exe() {
+            let exe = match fork::resolve_resume_executable() {
                 Ok(exe) => exe,
                 Err(err) => {
                     push_system_message(

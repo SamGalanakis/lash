@@ -267,17 +267,10 @@ struct OmGraphState {
     buffered_reflection: Option<BufferedReflectionState>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug)]
 struct MessageNode {
     timestamp: String,
     message: Message,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct MessageNodeRef<'a> {
-    timestamp: &'a str,
-    message: &'a Message,
 }
 
 trait ObservedMessageNode {
@@ -285,7 +278,6 @@ trait ObservedMessageNode {
     fn message(&self) -> &Message;
 }
 
-#[cfg(test)]
 impl ObservedMessageNode for MessageNode {
     fn timestamp(&self) -> &str {
         &self.timestamp
@@ -293,16 +285,6 @@ impl ObservedMessageNode for MessageNode {
 
     fn message(&self) -> &Message {
         &self.message
-    }
-}
-
-impl<'a> ObservedMessageNode for MessageNodeRef<'a> {
-    fn timestamp(&self) -> &str {
-        self.timestamp
-    }
-
-    fn message(&self) -> &Message {
-        self.message
     }
 }
 
@@ -326,6 +308,9 @@ impl PluginFactory for ObservationalMemoryPluginFactory {
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        if ctx.execution_mode != lash::ExecutionMode::standard() {
+            return Ok(Arc::new(DisabledObservationalMemoryPlugin));
+        }
         let ContextApproach::ObservationalMemory(config) = &ctx.context_approach else {
             return Ok(Arc::new(DisabledObservationalMemoryPlugin));
         };
@@ -476,8 +461,15 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         messages.extend(build_memory_context_messages(&active));
         messages.extend_from_slice(&input_messages[tail_start..]);
 
+        // Wrap as base + fresh render cache so the per-iteration chat
+        // projector reuses one rendered prompt across LLM iterations
+        // within this turn (OM only runs once per turn). Push-driven
+        // additions during the turn land in the delta and re-render
+        // each iteration as before.
+        let base = std::sync::Arc::new(messages);
+        let cache = std::sync::Arc::new(lash::BaseRenderCache::new());
         Ok(PreparedContext {
-            messages: lash::MessageSequence::from_owned(messages),
+            messages: lash::MessageSequence::from_base(base).with_base_render_cache(cache),
             ..input
         })
     }
@@ -1100,7 +1092,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
     Message {
         id: id.to_string(),
         role,
-        parts: vec![Part {
+        parts: lash::shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Prose,
             content,
@@ -1111,7 +1103,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
             tool_signature: None,
             prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
             plugin_id: OBSERVATIONAL_MEMORY_PLUGIN_ID.to_string(),
@@ -1181,10 +1173,10 @@ fn build_graph_state(graph: &SessionGraph) -> OmGraphState {
     state
 }
 
-fn active_unobserved_message_nodes<'a>(
-    graph: &'a SessionGraph,
+fn active_unobserved_message_nodes(
+    graph: &SessionGraph,
     observed_through_message_id: Option<&str>,
-) -> Vec<MessageNodeRef<'a>> {
+) -> Vec<MessageNode> {
     let mut seen_observed = observed_through_message_id.is_none();
     graph
         .active_path_nodes()
@@ -1200,8 +1192,8 @@ fn active_unobserved_message_nodes<'a>(
                 }
                 return None;
             }
-            Some(MessageNodeRef {
-                timestamp: node.timestamp.as_str(),
+            Some(MessageNode {
+                timestamp: node.timestamp.clone(),
                 message,
             })
         })
@@ -1374,11 +1366,11 @@ async fn run_worker_turn(
                 messages: vec![
                     DirectMessage {
                         role: DirectRole::System,
-                        parts: vec![DirectPart::Text(system_prompt.to_string())],
+                        parts: vec![DirectPart::Text(system_prompt.to_string())].into(),
                     },
                     DirectMessage {
                         role: DirectRole::User,
-                        parts: vec![DirectPart::Text(prompt.to_string())],
+                        parts: vec![DirectPart::Text(prompt.to_string())].into(),
                     },
                 ],
                 attachments: Vec::new(),
@@ -1534,7 +1526,8 @@ mod tests {
                     tool_signature: None,
                     prune_state: lash::PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]
+                .into(),
                 user_input: None,
                 origin: None,
             },

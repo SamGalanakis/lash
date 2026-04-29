@@ -4,6 +4,8 @@ use crate::llm::types::{
     LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice,
 };
 use crate::provider::{ProviderHandle, save_provider};
+use lash_trace::{TraceContext, TraceError, TraceEvent, TraceSink};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectRole {
@@ -106,6 +108,8 @@ impl From<LlmTransportError> for DirectLlmError {
 pub struct DirectLlmClient {
     provider: ProviderHandle,
     credential_store_path: Option<std::path::PathBuf>,
+    trace_sink: Option<Arc<dyn TraceSink>>,
+    trace_context: TraceContext,
 }
 
 impl DirectLlmClient {
@@ -113,6 +117,8 @@ impl DirectLlmClient {
         Self {
             provider,
             credential_store_path: None,
+            trace_sink: None,
+            trace_context: TraceContext::default(),
         }
     }
 
@@ -122,6 +128,16 @@ impl DirectLlmClient {
     /// `paths::config_file()`).
     pub fn with_credential_store_path(mut self, path: Option<std::path::PathBuf>) -> Self {
         self.credential_store_path = path;
+        self
+    }
+
+    pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
+        self.trace_sink = sink;
+        self
+    }
+
+    pub fn with_trace_context(mut self, context: TraceContext) -> Self {
+        self.trace_context = context;
         self
     }
 
@@ -163,10 +179,61 @@ impl DirectLlmClient {
         }
 
         let llm_request = build_llm_request(&self.provider, request, normalized_model);
-        self.provider
-            .complete(llm_request)
-            .await
-            .map_err(DirectLlmError::from)
+        let llm_call_id = if self.trace_sink.is_some() {
+            let id = uuid::Uuid::new_v4().to_string();
+            crate::trace::emit_trace(
+                &self.trace_sink,
+                &self.trace_context,
+                TraceContext::default().for_llm_call(id.clone()),
+                TraceEvent::LlmCallStarted {
+                    request: crate::trace::trace_llm_request(&llm_request),
+                },
+            );
+            Some(id)
+        } else {
+            None
+        };
+        match self.provider.complete(llm_request).await {
+            Ok(response) => {
+                if let Some(llm_call_id) = llm_call_id {
+                    crate::trace::emit_trace(
+                        &self.trace_sink,
+                        &self.trace_context,
+                        TraceContext::default().for_llm_call(llm_call_id),
+                        TraceEvent::LlmCallCompleted {
+                            response: crate::trace::trace_llm_response(
+                                response.full_text.clone(),
+                                0,
+                                crate::trace::trace_output_parts(&response.parts),
+                            ),
+                            usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),
+                            provider_usage: response.provider_usage.clone(),
+                            stream_summary: None,
+                        },
+                    );
+                }
+                Ok(response)
+            }
+            Err(error) => {
+                if let Some(llm_call_id) = llm_call_id {
+                    crate::trace::emit_trace(
+                        &self.trace_sink,
+                        &self.trace_context,
+                        TraceContext::default().for_llm_call(llm_call_id),
+                        TraceEvent::LlmCallFailed {
+                            error: TraceError {
+                                message: error.message.clone(),
+                                retryable: error.retryable,
+                                code: error.code.clone(),
+                                raw: error.raw.clone(),
+                            },
+                            stream_summary: None,
+                        },
+                    );
+                }
+                Err(DirectLlmError::from(error))
+            }
+        }
     }
 }
 
@@ -208,7 +275,7 @@ pub(crate) fn build_llm_request(
             match part {
                 DirectPart::Text(text) => {
                     if !text.is_empty() {
-                        blocks.push(LlmContentBlock::Text(text));
+                        blocks.push(LlmContentBlock::Text(text.into()));
                     }
                 }
                 DirectPart::Image(idx) => {

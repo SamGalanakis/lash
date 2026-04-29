@@ -55,10 +55,11 @@ impl LashRuntime {
         self.state.policy = self.policy.clone();
         self.state.iteration = iteration;
         if let Some(appended_messages) = projection_message_delta_if_base_preserved(
-            self.state.projected_messages(),
+            self.state.projected_conversation_messages(),
             messages.iter(),
         ) {
-            self.state.append_projected_messages(&appended_messages);
+            self.state
+                .append_projected_conversation_messages(&appended_messages);
         } else {
             let projected_messages = messages.shared();
             self.state
@@ -66,7 +67,9 @@ impl LashRuntime {
         }
 
         if let Some(session) = self.session.as_mut() {
-            if let Ok(snapshot) = session.snapshot_execution_state().await {
+            if session.execution_state_dirty()
+                && let Ok(snapshot) = session.snapshot_execution_state().await
+            {
                 self.state.set_execution_state_snapshot(snapshot);
             }
             let plugins = session.plugins();
@@ -142,8 +145,15 @@ impl LashRuntime {
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        let saved_messages = self.state.session_graph.shared_projected_messages();
-        let saved_tool_calls = self.state.session_graph.shared_projected_tool_calls();
+        // Capture lengths instead of Arcs: holding the projection Arcs across
+        // the turn forces every progress-boundary persist to clone the whole
+        // projected_messages / projected_tool_calls Vec via Arc::make_mut.
+        let saved_messages_len = self
+            .state
+            .session_graph
+            .projected_conversation_messages()
+            .len();
+        let saved_tool_calls_len = self.state.session_graph.projected_tool_calls().len();
         let saved_prompt_usage = self.state.last_prompt_usage.clone();
 
         let assembled = self
@@ -153,8 +163,15 @@ impl LashRuntime {
         if !self.overflow_recovery_attempted && Self::has_overflow_error(&assembled) {
             self.overflow_recovery_attempted = true;
             // Restore pre-turn state so the retry appends the user message cleanly.
+            // The turn only appends to the projection, so the original pre-turn
+            // state is exactly the prefix of the current projection.
+            let saved_messages: Vec<_> = self.state.session_graph.projected_conversation_messages()
+                [..saved_messages_len]
+                .to_vec();
+            let saved_tool_calls: Vec<_> =
+                self.state.session_graph.projected_tool_calls()[..saved_tool_calls_len].to_vec();
             self.state
-                .replace_projection(saved_messages.as_slice(), saved_tool_calls.as_slice());
+                .replace_projection(&saved_messages, &saved_tool_calls);
             self.state.last_prompt_usage = saved_prompt_usage;
             // Force-compact: strip images, prune, summarize.
             let _ = self
@@ -203,9 +220,36 @@ impl LashRuntime {
                 ));
             }
         };
+        if self.host.core.trace_sink.is_some() {
+            let mut trace_metadata = std::collections::BTreeMap::new();
+            trace_metadata.insert(
+                "input_item_count".to_string(),
+                serde_json::json!(normalized.len()),
+            );
+            trace_metadata.insert(
+                "has_user_input".to_string(),
+                serde_json::json!(input.user_input.is_some()),
+            );
+            crate::trace::emit_trace(
+                &self.host.core.trace_sink,
+                &self.host.core.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(self.state.session_id.clone())
+                    .for_iteration(self.state.iteration + 1),
+                lash_trace::TraceEvent::TurnStarted {
+                    metadata: trace_metadata,
+                },
+            );
+        }
 
-        let base_messages = self.state.session_graph.shared_projected_messages();
-        let base_rendered_prompt = self.state.session_graph.shared_projected_rendered_prompt();
+        let base_messages = self
+            .state
+            .session_graph
+            .shared_projected_conversation_messages();
+        let base_render_cache = self
+            .state
+            .session_graph
+            .shared_projected_messages_render_cache();
         let mut turn_delta = Vec::new();
         let mode = input.mode.unwrap_or(RunMode::Normal);
         let mode_msg = match mode {
@@ -216,7 +260,7 @@ impl LashRuntime {
             turn_delta.push(Message {
                 id: sys_id.clone(),
                 role: MessageRole::System,
-                parts: vec![Part {
+                parts: shared_parts(vec![Part {
                     id: format!("{}.p0", sys_id),
                     kind: PartKind::Text,
                     content,
@@ -227,7 +271,7 @@ impl LashRuntime {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
-                }],
+                }]),
                 user_input: None,
                 origin: None,
             });
@@ -295,7 +339,7 @@ impl LashRuntime {
         turn_delta.push(Message {
             id: user_id.clone(),
             role: MessageRole::User,
-            parts: user_parts,
+            parts: shared_parts(user_parts),
             user_input: input.user_input.clone(),
             origin: None,
         });
@@ -330,7 +374,7 @@ impl LashRuntime {
                         base_messages,
                         turn_delta,
                     )
-                    .with_base_rendered_prompt(Some(base_rendered_prompt)),
+                    .with_base_render_cache(base_render_cache),
                     ..Default::default()
                 },
             )
@@ -359,7 +403,7 @@ impl LashRuntime {
         self.stream_prepared_turn(
             messages,
             previous_prompt_usage,
-            input.rlm_termination_override.clone(),
+            input.mode_turn_options.clone(),
             events,
             cancel,
         )
@@ -380,7 +424,7 @@ impl LashRuntime {
         &mut self,
         messages: crate::MessageSequence,
         _previous_prompt_usage: Option<PromptUsage>,
-        rlm_termination_override: Option<crate::RlmTermination>,
+        mode_turn_options: Option<crate::ModeTurnOptions>,
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
@@ -472,10 +516,10 @@ impl LashRuntime {
 
             let mut state = self.state.clone();
             if let Some(appended_messages) = projection_message_delta_if_base_preserved(
-                state.projected_messages(),
+                state.projected_conversation_messages(),
                 prepared.messages.as_slice(),
             ) {
-                state.append_projected_messages(&appended_messages);
+                state.append_projected_conversation_messages(&appended_messages);
             } else {
                 let tool_calls = state.project_tool_calls();
                 state.replace_projection(prepared.messages.as_slice(), &tool_calls);
@@ -519,10 +563,14 @@ impl LashRuntime {
             .session
             .take()
             .expect("lash runtime session must be available");
+        let base_events = self.state.session_graph.shared_active_events();
+        let sansio_events_synced = base_events.len();
         let progress_graph = TurnGraphOverlay::new(
             Arc::new(self.state.session_graph.clone()),
-            self.state.session_graph.shared_projected_messages(),
-            self.state.session_graph.shared_projected_rendered_prompt(),
+            base_events,
+            self.state
+                .session_graph
+                .shared_projected_conversation_messages(),
             self.state.session_graph.shared_projected_tool_calls(),
         );
         let mut driver = RuntimeTurnDriver {
@@ -535,10 +583,11 @@ impl LashRuntime {
             llm_stream_summaries: HashMap::new(),
             session_manager: manager,
             prompt_bridge,
-            rlm_termination: rlm_termination_override
+            mode_turn_options: mode_turn_options
                 .clone()
-                .unwrap_or_else(|| self.rlm_termination.clone()),
+                .unwrap_or_else(|| self.mode_turn_options.clone()),
             turn_phase_probe: self.turn_phase_probe.clone(),
+            sansio_events_synced,
         };
         let run_offset = self.state.iteration;
         let run_task = tokio::spawn(async move {
@@ -659,7 +708,7 @@ impl LashRuntime {
             };
         if let Some(appended_messages) = appended_messages {
             if assembler.tool_calls.is_empty() {
-                progress_graph.append_projected_messages(&appended_messages);
+                progress_graph.append_projected_conversation_messages(&appended_messages);
             } else {
                 progress_graph.append_projection_delta(&appended_messages, &assembler.tool_calls);
             }
@@ -697,7 +746,7 @@ impl LashRuntime {
         };
         tracing::debug!(
             rss_kb = debug_rss_kb(),
-            state_message_count = self.state.projected_messages().len(),
+            state_message_count = self.state.projected_conversation_messages().len(),
             graph_node_count = self.state.session_graph.nodes.len(),
             token_ledger_entries = self.state.token_ledger.len(),
             "runtime before assembler.finish"
@@ -713,7 +762,7 @@ impl LashRuntime {
         );
         tracing::debug!(
             rss_kb = debug_rss_kb(),
-            assembled_message_count = assembled.state.projected_messages().len(),
+            assembled_message_count = assembled.state.projected_conversation_messages().len(),
             assembled_graph_node_count = assembled.state.session_graph.nodes.len(),
             "runtime after assembler.finish"
         );
@@ -732,7 +781,8 @@ impl LashRuntime {
             self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                finalized_message_count = finalized.turn.state.projected_messages().len(),
+                finalized_message_count =
+                    finalized.turn.state.projected_conversation_messages().len(),
                 "runtime after finalize_turn"
             );
             let mut returned_turn = finalized.turn;
@@ -750,7 +800,7 @@ impl LashRuntime {
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
                 persisted_graph_node_count = assembled_state.session_graph.nodes.len(),
-                persisted_message_count = assembled_state.projected_messages().len(),
+                persisted_message_count = assembled_state.projected_conversation_messages().len(),
                 "runtime after stamp_runtime_state"
             );
             if let Some(store) = self
@@ -792,9 +842,36 @@ impl LashRuntime {
                     .await;
             }
             self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
+            if self.host.core.trace_sink.is_some() {
+                crate::trace::emit_trace(
+                    &self.host.core.trace_sink,
+                    &self.host.core.trace_context,
+                    lash_trace::TraceContext::default()
+                        .for_session(returned_turn.state.session_id.clone())
+                        .for_iteration(returned_turn.state.iteration),
+                    lash_trace::TraceEvent::TurnCompleted {
+                        status: format!("{:?}", returned_turn.status).to_ascii_lowercase(),
+                        done_reason: format!("{:?}", returned_turn.done_reason)
+                            .to_ascii_lowercase(),
+                    },
+                );
+            }
             Ok(returned_turn)
         } else {
             self.state.apply_exported_state(&assembled.state);
+            if self.host.core.trace_sink.is_some() {
+                crate::trace::emit_trace(
+                    &self.host.core.trace_sink,
+                    &self.host.core.trace_context,
+                    lash_trace::TraceContext::default()
+                        .for_session(assembled.state.session_id.clone())
+                        .for_iteration(assembled.state.iteration),
+                    lash_trace::TraceEvent::TurnCompleted {
+                        status: format!("{:?}", assembled.status).to_ascii_lowercase(),
+                        done_reason: format!("{:?}", assembled.done_reason).to_ascii_lowercase(),
+                    },
+                );
+            }
             Ok(assembled)
         }
     }

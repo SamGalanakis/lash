@@ -23,12 +23,20 @@ pub mod oauth;
 
 const OPENAI_GPT5_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"];
 const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+const OPENAI_GPT55_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
 const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 
 fn has_xhigh_suffix(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     lower.contains("5.2") || lower.contains("5.3") || lower.contains("5.4")
+}
+
+fn model_id(model: &str) -> &str {
+    match model.rsplit_once('/') {
+        Some((_, tail)) => tail,
+        None => model,
+    }
 }
 
 /// OpenAI Codex OAuth provider (ChatGPT Plus/Pro/Team via device-code flow).
@@ -635,7 +643,7 @@ impl CodexProvider {
                     if let LlmContentBlock::Text(text) = block
                         && !text.is_empty()
                     {
-                        instructions.push(text.clone());
+                        instructions.push(text.to_string());
                     }
                 }
                 continue;
@@ -967,10 +975,7 @@ impl CodexProvider {
     /// `minimal` on gpt-5.4 or `xhigh` on gpt-5.1-codex-mini don't 4xx.
     fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
         // Strip any provider prefix (e.g. "openai/gpt-5.4").
-        let id = match model.rsplit_once('/') {
-            Some((_, tail)) => tail,
-            None => model,
-        };
+        let id = model_id(model);
 
         if (id.starts_with("gpt-5.2") || id.starts_with("gpt-5.3") || id.starts_with("gpt-5.4"))
             && effort == "minimal"
@@ -1437,6 +1442,9 @@ impl Provider for CodexProvider {
         if !lower.contains("gpt-5") {
             return &[];
         }
+        if model_id(&lower) == "gpt-5.5" {
+            return OPENAI_GPT55_VARIANTS;
+        }
         if lower.contains("codex") {
             if has_xhigh_suffix(&lower) {
                 CODEX_XHIGH_VARIANTS
@@ -1895,5 +1903,45 @@ impl ProviderFactory for CodexProviderFactory {
             options: cfg.options,
             client: build_http_client(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::provider::{Provider, ProviderOptions};
+
+    fn provider() -> CodexProvider {
+        CodexProvider {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: 0,
+            account_id: None,
+            options: ProviderOptions::default(),
+            client: build_http_client(),
+        }
+    }
+
+    #[test]
+    fn gpt_55_variants_match_codex_catalog() {
+        let provider = provider();
+
+        assert_eq!(
+            provider.supported_variants("gpt-5.5"),
+            ["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(provider.default_model_variant("gpt-5.5"), Some("medium"));
+        assert!(provider.validate_variant("gpt-5.5", "xhigh").is_ok());
+        assert!(provider.validate_variant("gpt-5.5", "minimal").is_err());
+    }
+
+    #[test]
+    fn gpt_55_variant_match_ignores_provider_prefix() {
+        let provider = provider();
+
+        assert_eq!(
+            provider.supported_variants("openai/gpt-5.5"),
+            ["low", "medium", "high", "xhigh"]
+        );
     }
 }

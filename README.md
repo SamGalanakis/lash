@@ -8,14 +8,15 @@ Patch-based editing, shell execution, file search, web search, planning, skills,
 
 ## What's different
 
-- **Two execution modes**
-  - `rlm` (default) runs a persistent `lashlang` DSL runtime that keeps state across turns. The model emits `lashlang` programs that are evaluated locally, with `parallel { }` blocks for concurrent tool execution.
-  - `standard` uses the provider's native tool-calling protocol directly. The model can emit multiple independent tool calls in a single response, which the runtime executes concurrently.
+- **Three execution modes**
+  - `standard` (default) uses the provider's native tool-calling protocol directly. The model can emit multiple independent tool calls in a single response, which the runtime executes concurrently.
+  - `rlm` runs a persistent `lashlang` DSL runtime that keeps state across turns. The model emits `lashlang` programs that are evaluated locally, with `parallel { }` blocks for concurrent tool execution.
+  - `rlmpure` uses the same persistent `lashlang` runtime with a compact context projector that renders task inputs plus REPL trajectory instead of full chat history.
 - **Plugin architecture**: tools, prompts, planning, UI activity, subagents, memory, and history are plugins. Embedders compose only what they need.
 - **Embeddable workspace**:
   - `lash-sansio`: pure turn machine, prompt model, messages, effects, and responses.
   - `lash`: async runtime, plugin host, providers, persistence, session graph, child-session orchestration, and built-in tools.
-  - `lash-mode-standard` / `lash-mode-rlm`: execution-mode plugins.
+  - `lash-mode-standard` / `lash-mode-rlm` / `lash-mode-rlmpure`: execution-mode plugins.
   - `lash-default-tools`, `lash-subagents`, `lash-plugin-*`, `lash-provider-*`: first-party tool, plugin, and provider crates.
   - `lash-cli`: end-user TUI, setup, provider auth, session bootstrap/resume/fork, and `--print` mode.
 
@@ -47,7 +48,7 @@ lash -p "summarize this repo"  # single-shot, output to stdout
 
 ## Docs
 
-- `docs/architecture.html` documents the current workspace architecture.
+- `docs/architecture/index.html` documents the current workspace architecture.
 - `docs/design-language.html` documents the TUI design language.
 
 ## License

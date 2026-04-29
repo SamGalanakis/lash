@@ -512,7 +512,7 @@ pub fn tree_message_preview(message: &Message) -> String {
     }
 
     let mut preview = String::new();
-    for part in &message.parts {
+    for part in message.parts.iter() {
         match part.kind {
             PartKind::Text | PartKind::Prose | PartKind::Code | PartKind::Output => {
                 if !part.content.trim().is_empty() {

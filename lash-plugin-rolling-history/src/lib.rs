@@ -314,7 +314,7 @@ fn hydrate_tool_result_parts(
     tool_calls: &HashMap<String, ToolCallRecord>,
 ) {
     for message in messages {
-        for part in &mut message.parts {
+        for part in std::sync::Arc::make_mut(&mut message.parts).iter_mut() {
             if !matches!(part.kind, PartKind::ToolResult) {
                 continue;
             }
@@ -388,8 +388,9 @@ fn prune_old_tool_results(
     }
 
     for (msg_idx, part_idx) in to_prune {
-        messages[msg_idx].parts[part_idx].prune_state = lash::PruneState::Cleared;
-        messages[msg_idx].parts[part_idx].content.clear();
+        let parts = std::sync::Arc::make_mut(&mut messages[msg_idx].parts);
+        parts[part_idx].prune_state = lash::PruneState::Cleared;
+        parts[part_idx].content.clear();
     }
     true
 }
@@ -417,7 +418,7 @@ fn prune_old_images(messages: &mut [Message]) -> bool {
         if recent_user_turns < PRUNE_RECENT_USER_TURNS {
             continue;
         }
-        for part in &mut messages[msg_idx].parts {
+        for part in std::sync::Arc::make_mut(&mut messages[msg_idx].parts).iter_mut() {
             changed |= strip_image_attachment(part, PRUNED_IMAGE_PLACEHOLDER);
         }
     }
@@ -428,7 +429,7 @@ fn prune_old_images(messages: &mut [Message]) -> bool {
 fn strip_all_image_attachments(messages: &mut [Message], placeholder: &str) -> bool {
     let mut changed = false;
     for message in messages {
-        for part in &mut message.parts {
+        for part in std::sync::Arc::make_mut(&mut message.parts).iter_mut() {
             changed |= strip_image_attachment(part, placeholder);
         }
     }
@@ -460,7 +461,7 @@ fn find_compaction_cut_point(messages: &[Message], prefix_len: usize) -> usize {
 
     let mut accumulated = 0usize;
     for idx in (start..messages.len()).rev() {
-        for part in &messages[idx].parts {
+        for part in messages[idx].parts.iter() {
             accumulated += approx_token_count(&part.content);
             if part.attachment.is_some() {
                 accumulated += 1200; // approximate image token cost
@@ -535,7 +536,7 @@ async fn summarize_compaction_prefix(
     }
 
     let mut snapshot = lash::PersistedSessionState::from_state(state.clone());
-    snapshot.policy.execution_mode = ExecutionMode::Standard;
+    snapshot.policy.execution_mode = ExecutionMode::standard();
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;
     strip_all_image_attachments(&mut messages, COMPACTED_IMAGE_PLACEHOLDER);
@@ -557,7 +558,7 @@ async fn summarize_compaction_prefix(
 
     let compaction_session_id = format!("{session_id}-compaction");
     let mut policy = snapshot.policy.clone();
-    policy.execution_mode = ExecutionMode::Standard;
+    policy.execution_mode = ExecutionMode::standard();
     policy.max_turns = Some(1);
     let handle = host
         .create_session(SessionCreateRequest {
@@ -569,6 +570,7 @@ async fn summarize_compaction_prefix(
             policy: Some(policy),
             plugin_mode: SessionPluginMode::Fresh,
             initial_nodes: Vec::new(),
+            first_turn_input: None,
             context_surface: SessionContextSurface {
                 include_base_tools: false,
                 tool_providers: Vec::new(),
@@ -594,7 +596,7 @@ async fn summarize_compaction_prefix(
                 image_blobs: HashMap::new(),
                 user_input: None,
                 mode: None,
-                rlm_termination_override: None,
+                mode_turn_options: None,
             },
         )
         .await;
@@ -618,7 +620,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
     out.push(Message {
         id: "compaction-summary".to_string(),
         role: MessageRole::Assistant,
-        parts: vec![Part {
+        parts: lash::shared_parts(vec![Part {
             id: "compaction-summary.p0".to_string(),
             kind: PartKind::Prose,
             content: format!("{COMPACTION_SUMMARY_TITLE}\n{summary}"),
@@ -629,7 +631,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
             tool_signature: None,
             prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
-        }],
+        }]),
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
             plugin_id: ROLLING_HISTORY_PLUGIN_ID.to_string(),
@@ -689,7 +691,9 @@ impl PluginFactory for RollingHistoryPluginFactory {
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        if !matches!(ctx.context_approach, ContextApproach::RollingHistory(_)) {
+        if ctx.execution_mode != ExecutionMode::standard()
+            || !matches!(ctx.context_approach, ContextApproach::RollingHistory(_))
+        {
             return Ok(Arc::new(DisabledRollingHistoryPlugin));
         }
         Ok(Arc::new(RollingHistoryPlugin {
@@ -886,7 +890,9 @@ impl HistoryRewriter for RollingHistoryRewriter {
                             if recent_user_turns < PRUNE_RECENT_USER_TURNS {
                                 continue;
                             }
-                            for part in &mut input.messages[msg_idx].parts {
+                            for part in std::sync::Arc::make_mut(&mut input.messages[msg_idx].parts)
+                                .iter_mut()
+                            {
                                 if matches!(part.kind, PartKind::ToolResult)
                                     && matches!(part.prune_state, lash::PruneState::Intact)
                                 {
@@ -996,7 +1002,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         }
@@ -1021,7 +1028,8 @@ mod tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
-            }],
+            }]
+            .into(),
             user_input: None,
             origin: None,
         }
@@ -1124,22 +1132,24 @@ mod tests {
         messages.push(Message {
             id: "a1".to_string(),
             role: MessageRole::Assistant,
-            parts: tool_calls
-                .iter()
-                .enumerate()
-                .map(|(idx, record)| Part {
-                    id: format!("a1.p{idx}"),
-                    kind: PartKind::ToolResult,
-                    content: String::new(),
-                    attachment: None,
-                    tool_call_id: record.call_id.clone(),
-                    tool_name: Some(record.tool.clone()),
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: lash::PruneState::Intact,
-                    reasoning_meta: None,
-                })
-                .collect(),
+            parts: Arc::new(
+                tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, record)| Part {
+                        id: format!("a1.p{idx}"),
+                        kind: PartKind::ToolResult,
+                        content: String::new(),
+                        attachment: None,
+                        tool_call_id: record.call_id.clone(),
+                        tool_name: Some(record.tool.clone()),
+                        tool_item_id: None,
+                        tool_signature: None,
+                        prune_state: lash::PruneState::Intact,
+                        reasoning_meta: None,
+                    })
+                    .collect(),
+            ),
             user_input: None,
             origin: None,
         });
@@ -1230,7 +1240,7 @@ mod tests {
         let state = SessionStateEnvelope {
             session_id: "root".to_string(),
             policy: SessionPolicy {
-                execution_mode: ExecutionMode::Standard,
+                execution_mode: ExecutionMode::standard(),
                 ..Default::default()
             },
             ..Default::default()

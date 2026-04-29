@@ -1,9 +1,12 @@
 [workspace]
 members = [
     "lash-sansio",
+    "lash-trace",
+    "lash-rlm-types",
     "lash",
     "lash-default-tools",
     "lash-mode-rlm",
+    "lash-mode-rlmpure",
     "lash-mode-standard",
     "lash-plugin-observational-memory",
     "lash-plugin-plan-mode",
@@ -19,6 +22,7 @@ members = [
     "lash-ui",
     "lash-tui",
     "lash-autoresearch",
+    "lash-gepa",
     "lash-cli",
     "lash-export",
     "lashlang",
@@ -29,7 +33,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.70"
+version = "0.2.71"
 license = "MIT"
 
 [profile.release]

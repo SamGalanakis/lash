@@ -11,7 +11,7 @@ use lash::{
 };
 
 use crate::driver::build_rlm_preamble;
-use crate::rlm_support::bound_variables_prompt_contributions;
+use crate::rlm_support::BoundVariablesCache;
 use crate::stream_mask;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -43,7 +43,7 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(RlmModePlugin {
-            active: matches!(ctx.execution_mode, ExecutionMode::Rlm),
+            active: ctx.execution_mode == ExecutionMode::new("rlm"),
             provider: Arc::new(DiscoveryToolsProvider::new()),
             config: self.config.clone(),
         }))
@@ -71,15 +71,17 @@ impl SessionPlugin for RlmModePlugin {
         reg.mode().protocol_driver(Arc::new(RlmProtocolDriver))?;
         reg.tools()
             .provider(Arc::clone(&self.provider) as Arc<dyn lash::ToolProvider>)?;
+        let bound_vars_cache = Arc::new(BoundVariablesCache::new());
         let bound_vars_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
-            Box::pin(async move { Ok(bound_variables_prompt_contributions(&ctx)) })
+            let cache = Arc::clone(&bound_vars_cache);
+            Box::pin(async move { Ok(cache.contributions(&ctx)) })
         });
         reg.prompt().contribute(bound_vars_hook);
         let root_final_response_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
             Box::pin(async move {
                 Ok(root_final_response_prompt_contribution(
                     &ctx.state,
-                    &ctx.rlm_termination,
+                    &ctx.mode_turn_options.rlm_termination(),
                 ))
             })
         });
@@ -98,8 +100,8 @@ impl SessionPlugin for RlmModePlugin {
 struct RlmProtocolDriver;
 
 impl ModeProtocolDriverPlugin for RlmProtocolDriver {
-    fn mode_id(&self) -> &'static str {
-        ExecutionMode::Rlm.plugin_id()
+    fn mode_id(&self) -> &str {
+        "rlm"
     }
 
     fn build_preamble(&self, input: ModeBuildInput) -> ModePreamble {
@@ -115,17 +117,21 @@ fn print_output_prompt_contribution(
     // focused on the recovery rule.
     PromptContribution::execution(
         "Print Output",
-        "`print` output is capped before reinjection. If you see a cap/truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
+        "`print` output is capped. If you see a truncation note, narrow the expression and inspect specific fields or slices instead of dumping the whole value.",
     )
 }
 
 fn root_final_response_prompt_contribution(
     state: &lash::SessionReadView,
-    termination: &lash::RlmTermination,
+    termination: &lash_rlm_types::RlmTermination,
 ) -> Vec<PromptContribution> {
-    let is_root_chat_session = state.policy().execution_mode == ExecutionMode::Rlm
-        && state.policy().session_id.is_none()
-        && matches!(termination, lash::RlmTermination::ProseWithoutFence);
+    let is_root_chat_session = state.policy().execution_mode == ExecutionMode::new("rlm")
+        && state.session_id() == "root"
+        && !state.policy().autonomous
+        && matches!(
+            termination,
+            lash_rlm_types::RlmTermination::ProseWithoutFence
+        );
     if !is_root_chat_session {
         return Vec::new();
     }
@@ -133,7 +139,7 @@ fn root_final_response_prompt_contribution(
     vec![
         PromptContribution::guidance(
             "Final Response Formatting",
-            "This is the root session and the final reply is rendered directly to the user. When there is no Required output schema, finish with prose or `submit` a polished Markdown string. Do not `submit` records, lists, raw tool results, or JSON-shaped diagnostics as the final root answer; use `print` for inspection and summarize the result instead. Structured records are appropriate for subagents and typed output schemas, not for untyped root replies.",
+            "Your reply renders directly to the user. With no Required output schema, finish with prose or `submit` a polished Markdown string. Don't `submit` records, lists, raw tool results, or JSON diagnostics — `print` to inspect, then `submit` a clean summary.",
         )
         .with_priority(100),
     ]
@@ -161,15 +167,19 @@ impl ModeSessionPlugin for RlmModeSession {
         if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
             ctx.restore_execution_state(&snapshot).await?;
         }
-        for body in state
+        for patch in state
             .session_graph
-            .active_path_plugins(lash::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE)
+            .active_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                lash::session_model::SessionEventRecord::Mode(event) => match event.rlm_event() {
+                    Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) => Some(patch),
+                    _ => None,
+                },
+                _ => None,
+            })
         {
-            let patch = serde_json::from_value::<lash::RlmGlobalsPatchPluginBody>(body.clone())
-                .map_err(|err| {
-                    SessionError::Protocol(format!("invalid RLM globals patch node: {err}"))
-                })?;
-            ctx.apply_rlm_globals_patch(&patch).await?;
+            ctx.apply_mode_globals_patch(&patch).await?;
         }
         Ok(())
     }
@@ -180,17 +190,14 @@ impl ModeSessionPlugin for RlmModeSession {
         nodes: &[lash::SessionAppendNode],
     ) -> Result<(), SessionError> {
         for node in nodes {
-            let lash::SessionAppendNode::Plugin { plugin_type, body } = node else {
-                continue;
-            };
-            if plugin_type != lash::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE {
-                continue;
+            if let lash::SessionAppendNode::Event {
+                event: lash::SessionEventRecord::Mode(event),
+            } = node
+                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
+                    event.rlm_event()
+            {
+                ctx.apply_mode_globals_patch(&patch).await?;
             }
-            let patch = serde_json::from_value::<lash::RlmGlobalsPatchPluginBody>(body.clone())
-                .map_err(|err| {
-                    SessionError::Protocol(format!("invalid RLM globals patch node body: {err}"))
-                })?;
-            ctx.apply_rlm_globals_patch(&patch).await?;
         }
         Ok(())
     }
@@ -200,8 +207,11 @@ impl ModeSessionPlugin for RlmModeSession {
         mut ctx: ModeRuntimeContext<'_>,
         request: &lash::SessionCreateRequest,
     ) {
-        if let lash::ModeExtras::Rlm(extras) = &request.mode_extras {
-            ctx.set_termination_mode(extras.termination.clone());
+        if let Ok(Some(extras)) = request
+            .mode_extras
+            .decode::<lash_rlm_types::RlmCreateExtras>(&ExecutionMode::new("rlm"))
+        {
+            ctx.set_rlm_termination_mode(extras.termination);
         }
     }
 }
@@ -210,11 +220,16 @@ impl ModeSessionPlugin for RlmModeSession {
 mod tests {
     use super::*;
 
-    fn state(execution_mode: ExecutionMode, run_session_id: Option<&str>) -> lash::SessionReadView {
+    fn state(
+        execution_mode: ExecutionMode,
+        session_id: &str,
+        autonomous: bool,
+    ) -> lash::SessionReadView {
         lash::SessionReadView::new(lash::SessionStateEnvelope {
+            session_id: session_id.to_string(),
             policy: lash::SessionPolicy {
                 execution_mode,
-                session_id: run_session_id.map(str::to_string),
+                autonomous,
                 ..lash::SessionPolicy::default()
             },
             ..lash::SessionStateEnvelope::default()
@@ -224,8 +239,8 @@ mod tests {
     #[test]
     fn root_final_response_guidance_is_root_untyped_only() {
         let contribution = root_final_response_prompt_contribution(
-            &state(ExecutionMode::Rlm, None),
-            &lash::RlmTermination::ProseWithoutFence,
+            &state(ExecutionMode::new("rlm"), "root", false),
+            &lash_rlm_types::RlmTermination::ProseWithoutFence,
         );
         assert_eq!(contribution.len(), 1);
         assert_eq!(
@@ -236,22 +251,29 @@ mod tests {
 
         assert!(
             root_final_response_prompt_contribution(
-                &state(ExecutionMode::Rlm, Some("child-session")),
-                &lash::RlmTermination::ProseWithoutFence,
+                &state(ExecutionMode::new("rlm"), "child-session", false),
+                &lash_rlm_types::RlmTermination::ProseWithoutFence,
             )
             .is_empty()
         );
         assert!(
             root_final_response_prompt_contribution(
-                &state(ExecutionMode::Rlm, None),
-                &lash::RlmTermination::Finish { schema: None },
+                &state(ExecutionMode::new("rlm"), "root", true),
+                &lash_rlm_types::RlmTermination::ProseWithoutFence,
             )
             .is_empty()
         );
         assert!(
             root_final_response_prompt_contribution(
-                &state(ExecutionMode::Standard, None),
-                &lash::RlmTermination::ProseWithoutFence,
+                &state(ExecutionMode::new("rlm"), "root", false),
+                &lash_rlm_types::RlmTermination::Finish { schema: None },
+            )
+            .is_empty()
+        );
+        assert!(
+            root_final_response_prompt_contribution(
+                &state(ExecutionMode::standard(), "root", false),
+                &lash_rlm_types::RlmTermination::ProseWithoutFence,
             )
             .is_empty()
         );
