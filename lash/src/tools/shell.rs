@@ -76,6 +76,16 @@ const DEFAULT_PTY_SIZE: PtySize = PtySize {
 };
 
 #[derive(Clone, Debug)]
+struct CommonCommandParams {
+    cmd: String,
+    workdir: PathBuf,
+    shell_path: String,
+    login: bool,
+    allow_failure: bool,
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
 struct ExecCommandParams {
     cmd: String,
     workdir: PathBuf,
@@ -579,10 +589,10 @@ impl StandardShell {
         self
     }
 
-    fn parse_exec_command_params(
+    fn parse_common_command_params(
         &self,
         args: &serde_json::Value,
-    ) -> Result<ExecCommandParams, ToolResult> {
+    ) -> Result<CommonCommandParams, ToolResult> {
         let cmd = require_str(args, "cmd")?.to_string();
         let workdir = self.runtime.resolve_workdir(
             args.get("workdir")
@@ -603,23 +613,39 @@ impl StandardShell {
             .get("allow_failure")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let timeout_ms = args
-            .get("timeout_ms")
-            .and_then(|value| value.as_u64())
-            .filter(|value| *value > 0);
         let max_output_tokens = args
             .get("max_output_tokens")
             .and_then(|value| value.as_u64())
             .map(|value| value as usize);
 
-        Ok(ExecCommandParams {
+        Ok(CommonCommandParams {
             cmd,
             workdir,
             shell_path,
             login,
             allow_failure,
-            timeout_ms,
             max_output_tokens,
+        })
+    }
+
+    fn parse_exec_command_params(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<ExecCommandParams, ToolResult> {
+        let common = self.parse_common_command_params(args)?;
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(|value| value.as_u64())
+            .filter(|value| *value > 0);
+
+        Ok(ExecCommandParams {
+            cmd: common.cmd,
+            workdir: common.workdir,
+            shell_path: common.shell_path,
+            login: common.login,
+            allow_failure: common.allow_failure,
+            timeout_ms,
+            max_output_tokens: common.max_output_tokens,
         })
     }
 
@@ -627,43 +653,20 @@ impl StandardShell {
         &self,
         args: &serde_json::Value,
     ) -> Result<StartCommandParams, ToolResult> {
-        let cmd = require_str(args, "cmd")?.to_string();
-        let workdir = self.runtime.resolve_workdir(
-            args.get("workdir")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty()),
-        );
-        let shell_path = args
-            .get("shell")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&self.runtime.shell_path)
-            .to_string();
-        let login = args
-            .get("login")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let allow_failure = args
-            .get("allow_failure")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+        let common = self.parse_common_command_params(args)?;
         let poll_ms = args
             .get("poll_ms")
             .and_then(|value| value.as_u64())
             .unwrap_or(DEFAULT_START_COMMAND_POLL_MS);
-        let max_output_tokens = args
-            .get("max_output_tokens")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize);
 
         Ok(StartCommandParams {
-            cmd,
-            workdir,
-            shell_path,
-            login,
-            allow_failure,
+            cmd: common.cmd,
+            workdir: common.workdir,
+            shell_path: common.shell_path,
+            login: common.login,
+            allow_failure: common.allow_failure,
             poll_ms,
-            max_output_tokens,
+            max_output_tokens: common.max_output_tokens,
         })
     }
 

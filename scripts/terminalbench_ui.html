@@ -27,10 +27,14 @@
       --sodium-ghost: rgba(232, 163, 60, 0.08);
       --lichen: #8a9e6c;
       --lichen-dim: rgba(138, 158, 108, 0.18);
+      --info: #8ca0b4;
+      --info-dim: rgba(140, 160, 180, 0.16);
       --error: #cc4444;
       --error-dim: rgba(204, 68, 68, 0.18);
-      --fail: #d4622d;
-      --fail-dim: rgba(212, 98, 45, 0.18);
+      --fail: #c25430;
+      --fail-dim: rgba(194, 84, 48, 0.20);
+      --lag: #6f6c5e;
+      --lag-dim: rgba(111, 108, 94, 0.20);
 
       --line: rgba(232, 228, 208, 0.10);
       --line-strong: rgba(232, 163, 60, 0.22);
@@ -54,7 +58,14 @@
         var(--form);
       font: 400 13px/1.5 var(--font-ui);
       min-height: 100vh;
-      overflow-x: hidden;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
     }
 
     body::before {
@@ -80,7 +91,6 @@
       grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
       min-height: 100vh;
       max-width: 100vw;
-      overflow: hidden;
     }
 
     .shell.sidebar-collapsed {
@@ -124,17 +134,17 @@
     /* ── Sidebar toggle ── */
     .sidebar-toggle {
       position: fixed;
-      top: 6px;
-      left: 6px;
-      width: 22px;
-      height: 22px;
+      top: 12px;
+      left: 12px;
+      width: 32px;
+      height: 32px;
       display: none;
       align-items: center;
       justify-content: center;
       border: 1px solid var(--ash-mid);
       background: var(--form-deep);
       color: var(--chalk-dim);
-      font: 500 12px/1 var(--font-ui);
+      font: 500 16px/1 var(--font-ui);
       cursor: pointer;
       z-index: 20;
       padding: 0;
@@ -156,23 +166,61 @@
     .sidebar-header {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 6px 8px;
+      gap: 8px;
+      padding: 10px 10px;
       border-bottom: 1px solid var(--line);
       min-height: 0;
     }
 
     .sidebar-header h1 {
-      font: 700 9px/1 var(--font-display);
-      letter-spacing: 0.22em;
+      font: 700 12px/1 var(--font-display);
+      letter-spacing: 0.18em;
       text-transform: uppercase;
-      color: var(--chalk-dim);
+      color: var(--chalk);
       white-space: nowrap;
     }
 
     .sidebar-header h1 .slash { color: var(--sodium); }
 
     .sidebar-header .spacer { flex: 1; }
+
+    .sidebar-header .icon-btn {
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font: 500 14px/1 var(--font-ui);
+      letter-spacing: 0;
+      text-transform: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--chalk-dim);
+    }
+
+    .sidebar-header .icon-btn:hover:not(:disabled) {
+      color: var(--chalk);
+      border-color: var(--ash-mid);
+    }
+
+    .sidebar-header .header-action {
+      padding: 4px 8px;
+      font: 500 9px/1 var(--font-ui);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .sidebar-header .header-action.danger {
+      border-color: rgba(204, 68, 68, 0.32);
+      color: var(--error);
+    }
+
+    .sidebar-header .header-action.danger:hover:not(:disabled) {
+      background: var(--error-dim);
+      border-color: var(--error);
+      color: var(--chalk);
+    }
 
     /* ── Sidebar toolbar ── */
     .toolbar {
@@ -290,24 +338,62 @@
     select.has-value { color: var(--sodium); border-color: var(--line-strong); }
 
     .sidebar-banner {
-      padding: 2px 8px;
-      font: 400 9px/1.4 var(--font-ui);
-      color: var(--ash-text);
+      padding: 6px 10px;
+      font: 400 10px/1.4 var(--font-ui);
+      color: var(--chalk-dim);
       border-bottom: 1px solid var(--line);
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      gap: 6px;
+      letter-spacing: 0.02em;
+    }
+
+    .sidebar-banner .selection-count {
+      color: var(--info);
+      font-weight: 600;
+    }
+
+    .sidebar-banner .selection-hint {
+      color: var(--ash-text);
     }
 
     .workspace-banner {
-      margin-bottom: 12px;
-      padding: 10px 12px;
-      border: 1px solid rgba(212, 98, 45, 0.28);
-      background: rgba(212, 98, 45, 0.08);
-      color: var(--warn);
-      font: 500 10px/1.5 var(--font-ui);
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin: 12px 18px 0;
+      padding: 12px 14px;
+      border: 1px solid rgba(140, 160, 180, 0.32);
+      background: var(--info-dim);
+      color: var(--chalk-mid);
+      font: 400 13px/1.55 var(--font-body);
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .workspace-banner[hidden] {
+      display: none;
+    }
+
+    .workspace-banner::before {
+      content: "i";
+      flex-shrink: 0;
+      width: 18px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--info);
+      color: var(--info);
+      font: 700 11px/1 var(--font-display);
+      font-style: italic;
+      margin-top: 1px;
+    }
+
+    .workspace-banner strong {
+      color: var(--chalk);
+      font-family: var(--font-ui);
+      font-weight: 600;
     }
 
     button {
@@ -499,8 +585,8 @@
     .panel h3 {
       padding: 14px 18px;
       border-bottom: 1px solid var(--line);
-      font: 600 11px/1 var(--font-display);
-      letter-spacing: 0.22em;
+      font: 700 11px/1 var(--font-display);
+      letter-spacing: 0.16em;
       text-transform: uppercase;
       color: var(--sodium);
     }
@@ -515,12 +601,30 @@
       grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
       gap: 1px;
       background: var(--line);
-      border: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .stats-grid--headline {
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      border-top: 1px solid var(--line);
+    }
+
+    .stats-grid--secondary {
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      border-top: 1px solid var(--line);
     }
 
     .stat {
       padding: 14px 16px;
       background: var(--form-raised);
+    }
+
+    .stats-grid--headline .stat {
+      padding: 18px 18px 20px;
+    }
+
+    .stats-grid--secondary .stat {
+      padding: 12px 14px;
     }
 
     .stat label {
@@ -538,6 +642,23 @@
       color: var(--chalk);
       font-variant-numeric: tabular-nums;
     }
+
+    .stats-grid--headline .stat strong {
+      margin-top: 10px;
+      font: 700 30px/1 var(--font-display);
+      letter-spacing: -0.02em;
+    }
+
+    .stats-grid--secondary .stat strong {
+      margin-top: 6px;
+      font: 600 15px/1.1 var(--font-ui);
+      color: var(--chalk-mid);
+    }
+
+    /* Tone the headline number based on intent. */
+    .stats-grid--headline .stat strong.tone-good { color: var(--lichen); }
+    .stats-grid--headline .stat strong.tone-warn { color: var(--sodium); }
+    .stats-grid--headline .stat strong.tone-bad  { color: var(--error); }
 
     /* ── Workspace tabs ── */
     .workspace-tabs {
@@ -767,8 +888,8 @@
     }
 
     .compare-metrics-table .cell-worst {
-      color: var(--error);
-      opacity: 0.7;
+      color: var(--lag);
+      font-weight: 400;
     }
 
     /* ── Tables ── */
@@ -798,12 +919,33 @@
     }
 
     .table-wrap {
-      overflow-x: auto;
+      position: relative;
+      max-height: 70vh;
+      overflow: auto;
     }
 
-    .table-wrap::-webkit-scrollbar { height: 4px; }
+    /* Right-edge fade so users see there's more table to scroll to. */
+    .table-wrap::after {
+      content: "";
+      position: sticky;
+      top: 0;
+      right: 0;
+      float: right;
+      height: 100%;
+      width: 24px;
+      margin-left: -24px;
+      pointer-events: none;
+      background: linear-gradient(90deg, transparent, var(--form) 80%);
+      opacity: 0;
+      transition: opacity 160ms;
+    }
+
+    .table-wrap.has-overflow::after { opacity: 0.7; }
+
+    .table-wrap::-webkit-scrollbar { width: 6px; height: 6px; }
     .table-wrap::-webkit-scrollbar-track { background: var(--form-deep); }
     .table-wrap::-webkit-scrollbar-thumb { background: var(--ash-mid); }
+    .table-wrap::-webkit-scrollbar-thumb:hover { background: var(--ash-text); }
 
     .num {
       text-align: right;
@@ -981,8 +1123,8 @@
     }
 
     .matchup-detail-table .cell-worst {
-      color: var(--error);
-      opacity: 0.7;
+      color: var(--lag);
+      font-weight: 400;
     }
 
     .matchup-missing {
@@ -994,7 +1136,9 @@
 
     /* ── Status pills ── */
     .status-pill {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
       padding: 3px 8px;
       font: 700 10px/1 var(--font-ui);
       letter-spacing: 0.08em;
@@ -1002,29 +1146,39 @@
       border: 1px solid;
     }
 
+    .status-pill::before {
+      font-weight: 700;
+      font-size: 11px;
+      line-height: 1;
+    }
+
     .status-pass {
       border-color: rgba(138, 158, 108, 0.4);
       background: var(--lichen-dim);
       color: var(--lichen);
     }
+    .status-pass::before { content: "•"; }
 
     .status-fail {
-      border-color: rgba(212, 98, 45, 0.4);
+      border-color: rgba(194, 84, 48, 0.45);
       background: var(--fail-dim);
       color: var(--fail);
     }
+    .status-fail::before { content: "×"; }
 
     .status-error {
-      border-color: rgba(204, 68, 68, 0.4);
+      border-color: rgba(204, 68, 68, 0.45);
       background: var(--error-dim);
       color: var(--error);
     }
+    .status-error::before { content: "×"; }
 
     .status-no-reward {
       border-color: var(--ash);
       background: rgba(42, 42, 40, 0.5);
       color: var(--ash-text);
     }
+    .status-no-reward::before { content: "—"; }
 
     /* ── Logs ── */
     .logs {
@@ -1091,10 +1245,23 @@
     }
 
     .run-meta-line {
-      padding: 10px 18px;
-      font: 400 11px/1.5 var(--font-ui);
-      color: var(--chalk-dim);
+      padding: 12px 18px;
+      font: 400 13px/1.55 var(--font-body);
+      color: var(--chalk-mid);
       border-top: 1px solid var(--line);
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .run-meta-line strong {
+      color: var(--chalk);
+      font-family: var(--font-ui);
+      font-weight: 600;
+    }
+
+    .run-meta-line .sep {
+      color: var(--ash-mid);
+      margin: 0 6px;
     }
 
     .trial-meta-block {
@@ -1102,7 +1269,7 @@
       background: var(--form-deep);
       border: 1px solid var(--line);
       display: grid;
-      gap: 4px;
+      gap: 6px;
     }
 
     .trial-meta-block strong {
@@ -1111,20 +1278,34 @@
     }
 
     .trial-meta-block .muted {
-      font: 400 11px/1.5 var(--font-ui);
+      font: 400 12px/1.55 var(--font-body);
+      color: var(--chalk-dim);
+      letter-spacing: 0;
+      text-transform: none;
     }
 
     /* ── Responsive ── */
-    @media (max-width: 1200px) {
+    @media (max-width: 1100px) {
       .shell { grid-template-columns: 1fr; }
-      .sidebar { position: relative; height: auto; max-height: 50vh; }
+      .sidebar {
+        position: relative;
+        height: auto;
+        max-height: 48vh;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
       .compare-run-strip { flex-wrap: wrap; }
       .split { grid-template-columns: 1fr; }
+      .stats-grid--secondary { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
     }
 
     @media (max-width: 760px) {
-      .content { padding: 12px; }
-      .stats-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+      .content { padding: 14px; gap: 14px; }
+      .stats-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+      .stats-grid--headline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .workspace-tabs { padding: 10px 12px; }
+      .panel h3 { padding: 12px 14px; }
+      .panel-body { padding: 14px; }
     }
   </style>
 </head>
@@ -1134,11 +1315,11 @@
     <aside class="sidebar">
       <div class="sidebar-inner">
       <div class="sidebar-header">
-        <button id="sidebarHideBtn" class="ghost" style="padding:2px 5px;font-size:9px" title="Hide sidebar">&lsaquo;</button>
+        <button id="sidebarHideBtn" class="icon-btn" title="Hide sidebar" aria-label="Hide sidebar">&lsaquo;</button>
         <h1>lash <span class="slash">/</span> bench</h1>
         <span class="spacer"></span>
-        <button id="clearFiltersButton" class="ghost" style="padding:2px 5px;font-size:8px">clr</button>
-        <button id="deleteButton" class="danger" disabled style="padding:2px 5px;font-size:8px">del</button>
+        <button id="clearFiltersButton" class="ghost header-action" title="Clear filters">clear</button>
+        <button id="deleteButton" class="header-action danger" disabled title="Delete selected runs">delete</button>
       </div>
 
       <div class="toolbar">
@@ -1154,7 +1335,7 @@
         </div>
       </div>
 
-      <div class="sidebar-banner"><span id="selectionBanner"></span> <button id="selectAllBtn" class="ghost" style="padding:1px 4px;font-size:8px;margin-left:auto">all</button></div>
+      <div class="sidebar-banner"><span id="selectionBanner"></span><button id="selectAllBtn" class="ghost" style="padding:2px 6px;font-size:9px;margin-left:auto;letter-spacing:0.1em">all</button></div>
 
       <div class="run-list" id="runList"></div>
       </div><!-- .sidebar-inner -->
@@ -1172,7 +1353,8 @@
       <section class="workspace active" id="exploreWorkspace">
         <section class="panel">
           <h3>Active Run</h3>
-          <div class="stats-grid" id="runStats"></div>
+          <div class="stats-grid stats-grid--headline" id="runStatsHeadline"></div>
+          <div class="stats-grid stats-grid--secondary" id="runStatsSecondary"></div>
           <div class="run-meta-line" id="runMeta"></div>
         </section>
 
@@ -1324,6 +1506,42 @@
       const value = tokens || {};
       if (value.non_cache_total != null) return value.non_cache_total || 0;
       return (value.input || 0) + (value.output || 0) + (value.reasoning || 0);
+    }
+    function safeRatio(numerator, denominator) {
+      if (!denominator) return null;
+      return numerator / denominator;
+    }
+    function totalTokens(tokens) {
+      return (tokens || {}).total || 0;
+    }
+    function outputShare(tokens) {
+      const value = tokens || {};
+      return safeRatio(value.output || 0, nonCacheTokens(value));
+    }
+    function nonCachePerPass(stats) {
+      const value = stats || {};
+      return safeRatio(nonCacheTokens(value.tokens_total), value.trials_passed || 0);
+    }
+    function totalTokensPerPass(stats) {
+      const value = stats || {};
+      return safeRatio(totalTokens(value.tokens_total), value.trials_passed || 0);
+    }
+    function nonCachePerTask(stats) {
+      const value = stats || {};
+      return safeRatio(nonCacheTokens(value.tokens_total), value.trials_total || 0);
+    }
+    function rollupPassedAttempts(rollup) {
+      if (!rollup) return 0;
+      return (rollup.attempts || 0) * (rollup.pass_rate || 0);
+    }
+    function rollupNonCachePerPass(rollup) {
+      return rollup ? safeRatio(nonCacheTokens(rollup.tokens_total), rollupPassedAttempts(rollup)) : null;
+    }
+    function rollupTotalPerPass(rollup) {
+      return rollup ? safeRatio(totalTokens(rollup.tokens_total), rollupPassedAttempts(rollup)) : null;
+    }
+    function fmtMetricInt(value) {
+      return value == null || !Number.isFinite(value) ? "-" : fmtInt(value);
     }
     function fmtSignedNumber(value, suffix = "") {
       if (value == null) return "-";
@@ -1507,6 +1725,7 @@
       runList.innerHTML = filtered.map(run => {
         const pct = fmtPct(run.pass_rate);
         const nc = fmtInt(run.tokens_non_cache_total || 0);
+        const ncPerPass = safeRatio(run.tokens_non_cache_total || 0, run.trials_passed || 0);
         const scope = scopeSummaryFromSource(run, run.trials_total);
         const pCls = passRateClass(run.pass_rate || 0);
         return `
@@ -1518,7 +1737,7 @@
               <span class="run-card-pass ${pCls}">${pct}</span>
             </div>
             <h3>${escapeHtml(run.job_name)}</h3>
-            <div class="run-card-meta">${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "")} · ${escapeHtml(scopeSummaryText(scope))}${scope.mismatch ? " · mismatch" : ""} · ${nc} nc</div>
+            <div class="run-card-meta">${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "")} · ${escapeHtml(scopeSummaryText(scope))}${scope.mismatch ? " · mismatch" : ""} · ${nc} nc · ${fmtMetricInt(ncPerPass)} nc/pass</div>
           </div>
         </div>`;
       }).join("");
@@ -1560,12 +1779,14 @@
 
     function renderSelectionBanner(filteredCount = getFilteredRuns().length) {
       const count = state.selectedRunIds.size;
-      const ready = count >= 2 ? `compare ${count} runs` : "check 2+ to compare";
       const total = state.runs.length;
       const visible = filteredCount === total
-        ? `${fmtInt(total)} visible`
-        : `${fmtInt(filteredCount)}/${fmtInt(total)} visible`;
-      document.getElementById("selectionBanner").textContent = `${visible} · ${count} selected · ${ready}`;
+        ? `${fmtInt(total)} runs`
+        : `${fmtInt(filteredCount)} of ${fmtInt(total)} runs`;
+      const selected = count > 0
+        ? `<span class="selection-count">${count} selected</span>`
+        : `<span class="selection-hint">select 2+ to compare</span>`;
+      document.getElementById("selectionBanner").innerHTML = `${escapeHtml(visible)} <span class="sep" style="color:var(--ash-mid)">·</span> ${selected}`;
       document.getElementById("deleteButton").disabled = state.selectedRunIds.size === 0;
     }
 
@@ -1586,6 +1807,25 @@
         "\"": "&quot;",
         "'": "&#39;"
       }[char]));
+    }
+
+    // Benign shell warnings emitted by every passing trial; not informative
+    // per-row, so we suppress them. Real failure reasons still pass through.
+    const BENIGN_TRIAL_NOISE = [
+      /^bash:\s*cannot set terminal process group/i,
+      /^bash:\s*no job control in this shell/i,
+    ];
+    function taskRowAnnotation(trial) {
+      const reason = (trial?.failure_reason || "").trim();
+      if (!reason) return "";
+      const status = (trial.status || "").toLowerCase();
+      // For passing trials, hide noise that isn't actionable.
+      if (status === "pass" && BENIGN_TRIAL_NOISE.some(re => re.test(reason))) {
+        return "";
+      }
+      // Trim long reasons to one line for the table view.
+      const firstLine = reason.split(/\n/)[0];
+      return firstLine.length > 120 ? firstLine.slice(0, 117) + "…" : firstLine;
     }
 
     function agentIcon(name) {
@@ -1707,6 +1947,11 @@
           passRate: s.pass_rate || 0,
           duration: s.duration_seconds_avg || 0,
           nonCache: nonCacheTokens(s.tokens_total),
+          totalTokens: totalTokens(s.tokens_total),
+          nonCachePerPass: nonCachePerPass(s),
+          totalTokensPerPass: totalTokensPerPass(s),
+          nonCachePerTask: nonCachePerTask(s),
+          outputShare: outputShare(s.tokens_total),
           cache: (s.tokens_total || {}).cache || 0,
           cacheRatio: cacheRatio(s.tokens_total),
           llmCalls: (s.activity_total || {}).llm_calls || 0,
@@ -1723,14 +1968,15 @@
       const requestedCounts = [...new Set(runData.map(d => d.scope.requested || 0))];
       const executedCounts = [...new Set(runData.map(d => d.scope.executed || 0))];
       const warningBits = [];
-      if (datasets.length > 1) warningBits.push(`datasets differ: ${datasets.join(" vs ")}`);
-      if (requestedCounts.length > 1) warningBits.push(`requested task counts differ: ${requestedCounts.join(" vs ")}`);
-      if (executedCounts.length > 1) warningBits.push(`executed task counts differ: ${executedCounts.join(" vs ")}`);
-      if (runData.some(d => d.scope.mismatch)) warningBits.push("at least one run did not execute the full requested task set");
+      if (datasets.length > 1) warningBits.push(`datasets differ (${datasets.join(" vs ")})`);
+      if (requestedCounts.length > 1) warningBits.push(`requested tasks differ (${requestedCounts.join(" vs ")})`);
+      if (executedCounts.length > 1) warningBits.push(`executed tasks differ (${executedCounts.join(" vs ")})`);
+      if (runData.some(d => d.scope.mismatch)) warningBits.push("one or more runs did not execute the full requested task set");
       const banner = document.getElementById("workspaceBanner");
       if (warningBits.length) {
         banner.hidden = false;
-        banner.textContent = `Invalid side-by-side compare: ${warningBits.join(" · ")}`;
+        const lead = warningBits.length === 1 ? warningBits[0] : warningBits.join("; ");
+        banner.innerHTML = `<div><strong>Comparison may be misleading.</strong> ${escapeHtml(lead)}. Per-run numbers below are still accurate; cross-run aggregates are not.</div>`;
       }
 
       // Code letters for runs
@@ -1783,6 +2029,11 @@
         { label: "Executed Tasks",  vals: runData.map(d => d.scope.executed), fmt: runData.map(d => fmtInt(d.scope.executed)), higher: false },
         { label: "Avg Duration",    vals: runData.map(d => d.duration),   fmt: runData.map(d => fmtSeconds(d.duration)),     higher: false },
         { label: "Non-Cache Tok",   vals: runData.map(d => d.nonCache),   fmt: runData.map(d => fmtInt(d.nonCache)),         higher: false },
+        { label: "NC / Passed",     vals: runData.map(d => d.nonCachePerPass ?? Infinity), fmt: runData.map(d => fmtMetricInt(d.nonCachePerPass)), higher: false },
+        { label: "Total / Passed",  vals: runData.map(d => d.totalTokensPerPass ?? Infinity), fmt: runData.map(d => fmtMetricInt(d.totalTokensPerPass)), higher: false },
+        { label: "NC / Task",       vals: runData.map(d => d.nonCachePerTask ?? Infinity), fmt: runData.map(d => fmtMetricInt(d.nonCachePerTask)), higher: false },
+        { label: "Output / NC",     vals: runData.map(d => d.outputShare ?? 0), fmt: runData.map(d => d.outputShare == null ? "-" : fmtPct(d.outputShare)), higher: null },
+        { label: "Total Tokens",    vals: runData.map(d => d.totalTokens), fmt: runData.map(d => fmtInt(d.totalTokens)),       higher: false },
         { label: "Cache Tokens",    vals: runData.map(d => d.cache),      fmt: runData.map(d => fmtInt(d.cache)),            higher: false },
         { label: "Cache %",         vals: runData.map(d => d.cacheRatio), fmt: runData.map(d => fmtPct(d.cacheRatio)),       higher: true  },
         { label: "LLM Turns",       vals: runData.map(d => d.turns),      fmt: runData.map(d => fmtInt(d.turns)),            higher: false },
@@ -1810,7 +2061,9 @@
           </tr></thead>
           <tbody>
             ${metrics.map(m => {
-              const cells = nWayMetricCells(m.vals, m.fmt, m.higher);
+              const cells = m.higher == null
+                ? m.fmt.map(text => ({ text, cls: "" }))
+                : nWayMetricCells(m.vals, m.fmt, m.higher);
               return `<tr>
                 <td>${escapeHtml(m.label)}</td>
                 ${cells.map(c => `<td class="${c.cls}">${escapeHtml(c.text)}</td>`).join("")}
@@ -1821,6 +2074,7 @@
         </div>`;
 
       compareGrid.innerHTML = runStrip + metricsTable;
+      updateOverflowAffordance(compareGrid.querySelector(".table-wrap"));
       renderComparisonTable(selected);
     }
 
@@ -1861,6 +2115,9 @@
           { label: "Pass Rate",    extract: d => d ? (d.pass_rate || 0) : null,              format: v => v == null ? "-" : fmtPct(v),            higher: true },
           { label: "Duration",     extract: d => d ? (d.duration_seconds_avg || 0) : null,   format: v => v == null ? "-" : fmtSeconds(v),         higher: false },
           { label: "Non-Cache",    extract: d => d ? nonCacheTokens(d.tokens_total) : null,  format: v => v == null ? "-" : fmtInt(v),             higher: false },
+          { label: "NC / Passed",  extract: d => d ? rollupNonCachePerPass(d) : null,        format: fmtMetricInt,                                  higher: false },
+          { label: "Total / Passed", extract: d => d ? rollupTotalPerPass(d) : null,         format: fmtMetricInt,                                  higher: false },
+          { label: "Output / NC",  extract: d => d ? outputShare(d.tokens_total) : null,     format: v => v == null ? "-" : fmtPct(v),              higher: null },
           { label: "Total Tokens", extract: d => d ? ((d.tokens_total||{}).total||0) : null, format: v => v == null ? "-" : fmtInt(v),             higher: false },
           { label: "Cache %",      extract: d => d ? cacheRatio(d.tokens_total) : null,      format: v => v == null ? "-" : fmtPct(v),             higher: true },
           { label: "Input",        extract: d => d ? ((d.tokens_total||{}).input||0) : null, format: v => v == null ? "-" : fmtInt(v),             higher: false },
@@ -1890,7 +2147,9 @@
                 const rawVals = items.map(m.extract);
                 const numericVals = rawVals.map(v => v ?? (m.higher ? -Infinity : Infinity));
                 const formatted = rawVals.map(m.format);
-                const cells = nWayMetricCells(numericVals, formatted, m.higher);
+                const cells = m.higher == null
+                  ? formatted.map(text => ({ text, cls: "" }))
+                  : nWayMetricCells(numericVals, formatted, m.higher);
                 return `<tr>
                   <td>${escapeHtml(m.label)}</td>
                   ${cells.map((c, ci) => `<td class="${rawVals[ci] == null ? "" : c.cls}">${escapeHtml(c.text)}</td>`).join("")}
@@ -1929,10 +2188,12 @@
 
     function renderActiveRun() {
       const run = state.runDetails.get(state.activeRunId);
-      const statsRoot = document.getElementById("runStats");
+      const headlineRoot = document.getElementById("runStatsHeadline");
+      const secondaryRoot = document.getElementById("runStatsSecondary");
       const metaRoot = document.getElementById("runMeta");
       if (!run) {
-        statsRoot.innerHTML = ``;
+        headlineRoot.innerHTML = ``;
+        secondaryRoot.innerHTML = ``;
         metaRoot.textContent = "";
         document.getElementById("tasksTable").innerHTML = ``;
         document.getElementById("trialMeta").innerHTML = ``;
@@ -1944,19 +2205,31 @@
       const stats = run.global_stats || {};
       const params = run.params || {};
       const activeScope = scopeSummaryFromSource({ params, trials_total: stats.trials_total }, stats.trials_total || 0);
-      statsRoot.innerHTML = [
-        statCard("Pass Rate", fmtPct(stats.pass_rate)),
-        statCard("Trials", `${fmtInt(stats.trials_total)} total`),
-        statCard("Passed", fmtInt(stats.trials_passed)),
-        statCard("Requested Tasks", fmtInt(activeScope.requested || activeScope.executed)),
-        statCard("Executed Tasks", fmtInt(activeScope.executed)),
+      const passRate = stats.pass_rate || 0;
+      const passTone = passRate >= 0.8 ? "tone-good" : passRate >= 0.5 ? "tone-warn" : "tone-bad";
+      const errors = stats.trials_errors || 0;
+      const errorTone = errors === 0 ? "tone-good" : errors > 3 ? "tone-bad" : "tone-warn";
+
+      headlineRoot.innerHTML = [
+        statCard("Pass Rate", fmtPct(stats.pass_rate), passTone),
+        statCard("Passed / Trials", `${fmtInt(stats.trials_passed)} / ${fmtInt(stats.trials_total)}`),
+        statCard("Reward Mean", fmtFixed(stats.reward_mean)),
         statCard("Avg Duration", fmtSeconds(stats.duration_seconds_avg)),
-        statCard("Non-Cache Tokens", fmtInt(nonCacheTokens(stats.tokens_total))),
+        statCard("NC / Passed", fmtMetricInt(nonCachePerPass(stats))),
+        statCard("Errors", fmtInt(errors), errorTone),
+      ].join("");
+
+      secondaryRoot.innerHTML = [
+        statCard("Requested", fmtInt(activeScope.requested || activeScope.executed)),
+        statCard("Executed", fmtInt(activeScope.executed)),
+        statCard("Total / Passed", fmtMetricInt(totalTokensPerPass(stats))),
+        statCard("NC / Task", fmtMetricInt(nonCachePerTask(stats))),
+        statCard("Output / NC", outputShare(stats.tokens_total) == null ? "-" : fmtPct(outputShare(stats.tokens_total))),
         statCard("Total Tokens", fmtInt((stats.tokens_total || {}).total)),
-        statCard("Input Tokens", fmtInt((stats.tokens_total || {}).input)),
-        statCard("Output Tokens", fmtInt((stats.tokens_total || {}).output)),
-        statCard("Reasoning Tokens", fmtInt((stats.tokens_total || {}).reasoning)),
-        statCard("Cache Tokens", fmtInt((stats.tokens_total || {}).cache)),
+        statCard("Input", fmtInt((stats.tokens_total || {}).input)),
+        statCard("Output", fmtInt((stats.tokens_total || {}).output)),
+        statCard("Reasoning", fmtInt((stats.tokens_total || {}).reasoning)),
+        statCard("Cache", fmtInt((stats.tokens_total || {}).cache)),
         statCard("Cache %", fmtPct(cacheRatio(stats.tokens_total))),
         statCard("LLM Turns", fmtInt((stats.activity_total || {}).llm_turns)),
         statCard("LLM Calls", fmtInt((stats.activity_total || {}).llm_calls)),
@@ -1966,17 +2239,35 @@
         statCard("Main Peak RSS", fmtMemoryKb((stats.resource_usage || {}).max_rss_kb_max)),
         statCard("All Cmd CPU", fmtSeconds(((stats.resource_usage_all_commands || {}).cpu_seconds_sum))),
         statCard("Overhead CPU", fmtSeconds(((stats.resource_usage_overhead_commands || {}).cpu_seconds_sum))),
-        statCard("Reward Mean", fmtFixed(stats.reward_mean)),
-        statCard("Errors", fmtInt(stats.trials_errors)),
       ].join("");
-      metaRoot.innerHTML = `${escapeHtml(run.job_name)} · ${escapeHtml(params.dataset || "-")} · ${escapeHtml(params.agent || "-")} · provider ${escapeHtml((params.provider || {}).active_provider || "-")} · model ${escapeHtml(params.requested_model || "resolved in trial")} · variant ${escapeHtml(params.variant || "default")} · ${escapeHtml(scopeSummaryText(activeScope))}${activeScope.mismatch ? ` <span class="chip fail">scope mismatch</span>` : ""} <span class="chip mode" style="margin-left:6px">${escapeHtml(params.execution_mode || "default")}</span> <span class="chip context">${escapeHtml(params.context_approach || params.context_strategy || "default")}</span>${params.preset ? ` <span class="chip preset">${escapeHtml(params.preset)}</span>` : ""}`;
+
+      const resolvedModel = (Array.isArray(params.resolved_models) && params.resolved_models[0])
+        || params.requested_model
+        || "—";
+      const sep = `<span class="sep">·</span>`;
+      const metaParts = [
+        escapeHtml(run.job_name),
+        escapeHtml(params.dataset || "-"),
+        escapeHtml(params.agent || "-"),
+        `provider <strong>${escapeHtml((params.provider || {}).active_provider || "-")}</strong>`,
+        `model <strong>${escapeHtml(resolvedModel)}</strong>`,
+        `variant <strong>${escapeHtml(params.variant || "default")}</strong>`,
+        escapeHtml(scopeSummaryText(activeScope)) + (activeScope.mismatch ? ` <span class="chip fail">scope mismatch</span>` : ""),
+      ];
+      const chips = [];
+      if (params.execution_mode) chips.push(`<span class="chip mode">${escapeHtml(params.execution_mode)}</span>`);
+      const ctx = params.context_approach || params.context_strategy;
+      if (ctx) chips.push(`<span class="chip context">${escapeHtml(ctx)}</span>`);
+      if (params.preset) chips.push(`<span class="chip preset">${escapeHtml(params.preset)}</span>`);
+      metaRoot.innerHTML = `${metaParts.join(sep)}${chips.length ? ` &nbsp; ${chips.join(" ")}` : ""}`;
 
       renderTasksTable(run.task_rollups || [], run.trials || []);
       renderTrialDetail();
     }
 
-    function statCard(label, value) {
-      return `<div class="stat"><label>${escapeHtml(label)}</label><strong>${escapeHtml(value)}</strong></div>`;
+    function statCard(label, value, toneClass) {
+      const tone = toneClass ? ` ${toneClass}` : "";
+      return `<div class="stat"><label>${escapeHtml(label)}</label><strong class="${tone.trim()}">${escapeHtml(value)}</strong></div>`;
     }
 
     function renderTasksTable(rollups, trials) {
@@ -2028,11 +2319,12 @@
               const activity = item?.activity_avg || item?.activity_total || trial.metadata || {};
               const tokens = item?.tokens_avg || item?.tokens_total || trial.tokens || {};
               const active = state.activeTrial?.trial_name && trial.trial_name === state.activeTrial.trial_name;
+              const annotation = taskRowAnnotation(trial);
               return `
               <tr class="task-row ${active ? "active" : ""}" data-trial-name="${escapeHtml(trial.trial_name || "")}">
                 <td>
-                  <strong>${escapeHtml(item?.task_name || trial.task_name)}</strong><br>
-                  <small class="muted">${escapeHtml(trial.failure_reason || trial.trial_name || "No trial details yet")}</small>
+                  <strong>${escapeHtml(item?.task_name || trial.task_name)}</strong>
+                  ${annotation ? `<br><small class="muted">${escapeHtml(annotation)}</small>` : ""}
                 </td>
                 <td><span class="status-pill status-${escapeHtml(trial.status || "no-reward")}">${escapeHtml(trial.status || "no-reward")}</span></td>
                 <td class="num">${item ? fmtPct(item.pass_rate) : "-"}</td>
@@ -2058,6 +2350,23 @@
           renderTrialDetail();
         });
       });
+      updateOverflowAffordance(root.querySelector(".table-wrap"));
+    }
+
+    function updateOverflowAffordance(wrap) {
+      if (!wrap) return;
+      const apply = () => {
+        const more = wrap.scrollWidth - wrap.clientWidth - wrap.scrollLeft > 4;
+        wrap.classList.toggle("has-overflow", more);
+      };
+      apply();
+      wrap.addEventListener("scroll", apply, { passive: true });
+      // Re-evaluate on resize since column widths shift fluidly.
+      if (!wrap.__resizeObserver) {
+        const ro = new ResizeObserver(apply);
+        ro.observe(wrap);
+        wrap.__resizeObserver = ro;
+      }
     }
 
     function renderTrialDetail() {
