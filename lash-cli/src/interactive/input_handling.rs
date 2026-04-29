@@ -1177,6 +1177,19 @@ pub(super) async fn handle_key_event(
             }
             let _ = apply_terminal_action(app, terminal, UiAction::SuggestionDown);
         }
+        // Enter with the suggestion popup open accepts the highlighted entry,
+        // matching Tab. Shift/Alt+Enter still falls through to insert a newline.
+        KeyCode::Enter
+            if app.has_suggestions()
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+        {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_suggestion_complete();
+            }
+            let _ = apply_terminal_action(app, terminal, UiAction::SuggestionComplete);
+        }
         KeyCode::Enter => {
             // Shift+Enter or Alt+Enter → insert newline
             if key.modifiers.contains(KeyModifiers::SHIFT)
