@@ -100,6 +100,8 @@ pub type PreparedTurnMachine = lash_sansio::PreparedTurnMachine<HostModeProtocol
 pub type SansIoTurnInput = lash_sansio::SansIoTurnInput<HostModeProtocol>;
 pub type TurnMachine = lash_sansio::TurnMachine<HostModeProtocol>;
 pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostModeProtocol>;
+#[cfg(feature = "otel-trace")]
+pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
     JsonlTraceSink, TraceAttachment, TraceContentBlock, TraceContext, TraceError, TraceEvent,
     TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent, TraceRecord,

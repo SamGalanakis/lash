@@ -8,6 +8,7 @@ license.workspace = true
 # Keep core portable by default. The lashlang-backed `rlm` runtime is always on.
 default = []
 sqlite-store = ["dep:rusqlite", "dep:flate2"]
+otel-trace = ["lash-trace/otel"]
 tool-impls = [
     "dep:fff-search",
     "dep:globset",
