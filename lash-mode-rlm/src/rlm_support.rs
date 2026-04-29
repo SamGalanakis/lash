@@ -22,12 +22,22 @@ pub fn budget_prompt_contributions(
         return Vec::new();
     }
     let pct = (used * 100).checked_div(max).unwrap_or(0);
-    vec![PromptContribution::execution(
-        "Context Budget",
+    let content = if used >= max {
         format!(
-            "Used: {used} / {max} tokens ({pct}%)\nHand off via `pass_baton` when this becomes inefficient. The next agent starts fresh."
-        ),
-    )]
+            "Used: {used} / {max} tokens ({pct}%)\n\
+You are over the configured context-budget handoff threshold. Do not continue ordinary work in this session.\n\
+Choose exactly one:\n\
+1. Hand off now: preserve the required state in named lashlang variables and call `pass_baton(task=..., seed={{...}})`.\n\
+2. If completion is one small bounded step away, finish that step, summarize the result, then call `pass_baton(task=..., seed={{...}})`.\n\
+3. If required state is not captured yet, capture only the minimal state needed for the next session, then call `pass_baton(task=..., seed={{...}})`."
+        )
+    } else {
+        format!(
+            "Used: {used} / {max} tokens ({pct}%)\n\
+Prepare to hand off via `pass_baton(task=..., seed={{...}})` as soon as carrying the current context becomes inefficient. The next agent starts fresh."
+        )
+    };
+    vec![PromptContribution::execution("Context Budget", content)]
 }
 
 pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {

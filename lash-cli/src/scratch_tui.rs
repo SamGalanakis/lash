@@ -3,6 +3,8 @@ use lash_ui::{UiRenderContext, UiSurfaceScene, UiSurfaceSlot};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, format_tokens};
+#[cfg(test)]
+use crate::chrome_ui::animated_lash_word;
 use crate::editor::SuggestionKind;
 use crate::{render, theme};
 
@@ -25,9 +27,10 @@ pub fn draw_with_capabilities(
 
     frame.clear(bg(theme::surface_base()));
 
+    sync_chrome_turn_status(app);
+
     let history = render::history_area(app, area.width, area.height);
     let dock_area = render::dock_area(app, area.width, area.height);
-    let turn_area = render::turn_status_area(app, area.width, area.height);
     let queue_lines = render::queue_preview_lines_snapshot(app, area.width);
     let queue_area = render::queue_area(app, area.width, area.height);
     let footer_area = render::footer_area(app, area.width, area.height);
@@ -52,9 +55,6 @@ pub fn draw_with_capabilities(
             dock_area,
             capabilities,
         );
-    }
-    if turn_area.height > 0 {
-        draw_turn_status(frame, app, turn_area);
     }
     if queue_area.height > 0 {
         draw_lines_region(frame, queue_area, &queue_lines, bg(theme::surface_raised()));
@@ -621,36 +621,42 @@ fn selection_ordered(sel: &crate::app::TextSelection) -> ((u16, usize), (u16, us
     }
 }
 
-fn draw_turn_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let Some(turn) = app.live_turn.as_ref() else {
-        return;
+/// Push the live-turn snapshot into the `chrome_ui` extension and
+/// mount/unmount its `turn_status` footer surface accordingly. The
+/// indicator is hidden whenever a prompt is open — the prompt panel
+/// itself communicates the paused state.
+///
+/// Callable from layout-query paths (e.g. tests) so the surface
+/// registry is in sync before `chrome_layout` reads footer heights.
+pub(crate) fn sync_chrome_turn_status(app: &App) {
+    use crate::chrome_ui::{
+        CHROME_UI_ID, TURN_STATUS_KEY, TurnStatusLabel, TurnStatusSnapshot, set_turn_status,
+        turn_status_surface_spec,
     };
-    frame.fill(area, ' ', bg(theme::surface_raised()));
-    let label = if turn.status_text == "error" {
-        "Error"
-    } else if app.has_prompt() {
-        "Paused"
-    } else if turn.status_text == "thinking" {
-        "Thinking"
-    } else if turn.status_text == "responding" {
-        "Responding"
+
+    let snapshot = if app.has_prompt() {
+        None
     } else {
-        "Working"
+        app.live_turn.as_ref().map(|turn| TurnStatusSnapshot {
+            label: match turn.status_text.as_str() {
+                "error" => TurnStatusLabel::Error,
+                "thinking" => TurnStatusLabel::Thinking,
+                "responding" => TurnStatusLabel::Responding,
+                _ => TurnStatusLabel::Working,
+            },
+            turn_started_at: turn.turn_started_at,
+        })
     };
-    let elapsed = crate::util::format_duration_ms_if_visible(
-        turn.turn_started_at.elapsed().as_millis() as u64,
-    )
-    .unwrap_or_default();
-    let mut spans = animated_lash_word(turn.turn_started_at.elapsed());
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(label.to_string(), theme::turn_status_state()));
-    if !elapsed.is_empty() {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(elapsed, theme::turn_status_elapsed()));
+
+    set_turn_status(&app.chrome_state, snapshot.clone());
+
+    let extensions = app.ui_extensions();
+    let mounted = extensions.surface_is_mounted(CHROME_UI_ID, TURN_STATUS_KEY);
+    match (snapshot.is_some(), mounted) {
+        (true, false) => extensions.mount_surface(CHROME_UI_ID, turn_status_surface_spec()),
+        (false, true) => extensions.unmount_surface(CHROME_UI_ID, TURN_STATUS_KEY),
+        _ => {}
     }
-    let line = Line::from(spans);
-    let x = area.width.saturating_sub(line.width() as u16) / 2;
-    frame.write_line(x, area.y, &line, area.width.saturating_sub(x));
 }
 
 fn current_context_budget_tokens(app: &App) -> Option<i64> {
@@ -668,28 +674,6 @@ fn current_context_budget_tokens(app: &App) -> Option<i64> {
     } else {
         (input - cached).max(0) + output + cached
     })
-}
-
-fn animated_lash_word(elapsed: std::time::Duration) -> Vec<Span<'static>> {
-    let frame = ((elapsed.as_millis() / 180) % 5) as usize;
-    let glyphs = match frame {
-        0 => vec!['/', 'L', 'A', 'S', 'H'],
-        1 => vec!['L', '/', 'A', 'S', 'H'],
-        2 => vec!['L', 'A', '/', 'S', 'H'],
-        3 => vec!['L', 'A', 'S', '/', 'H'],
-        _ => vec!['L', 'A', 'S', 'H', '/'],
-    };
-
-    glyphs
-        .into_iter()
-        .map(|glyph| {
-            if glyph == '/' {
-                Span::styled(glyph.to_string(), theme::turn_status_slash())
-            } else {
-                Span::styled(glyph.to_string(), theme::turn_status_brand())
-            }
-        })
-        .collect()
 }
 
 fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect) {

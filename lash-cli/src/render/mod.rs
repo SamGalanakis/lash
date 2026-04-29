@@ -85,10 +85,6 @@ fn queue_preview_height(app: &App, frame_width: u16) -> u16 {
     queue_preview_lines_snapshot(app, frame_width).len() as u16
 }
 
-fn turn_status_height(app: &App) -> u16 {
-    if app.live_turn.is_some() { 1 } else { 0 }
-}
-
 /// Rows the plan checklist contributes to the trailing end of the
 /// transcript: 1 blank gutter + N items. Drops the `PLAN` header and
 /// the scribe rule that were dock-chrome when the panel was pinned —
@@ -104,7 +100,6 @@ pub fn plan_dock_trailing_height(app: &App) -> usize {
 struct ChromeLayout {
     history_height: u16,
     dock_height: u16,
-    turn_height: u16,
     queue_height: u16,
     footer_height: u16,
     input_height: u16,
@@ -112,25 +107,22 @@ struct ChromeLayout {
 
 fn chrome_layout(app: &App, frame_width: u16, frame_height: u16) -> ChromeLayout {
     let surfaces = app.ui_extensions().surface_scene();
-    let turn_height = turn_status_height(app);
     let queue_height = queue_preview_height(app, frame_width);
     let footer_available = frame_height
-        .saturating_sub(1 + turn_height + queue_height)
+        .saturating_sub(1 + queue_height)
         .saturating_sub(MIN_HISTORY_HEIGHT);
     let footer_height = surfaces.stack_height(UiSurfaceSlot::Footer, footer_available);
     let dock_available = frame_height
-        .saturating_sub(1 + turn_height + queue_height + footer_height)
+        .saturating_sub(1 + queue_height + footer_height)
         .saturating_sub(MIN_HISTORY_HEIGHT);
     let dock_height = surfaces.stack_height(UiSurfaceSlot::Dock, dock_available);
-    let reserved_height = 1 + dock_height + turn_height + queue_height + footer_height;
+    let reserved_height = 1 + dock_height + queue_height + footer_height;
     let input_height = input_height(app, frame_width, frame_height, reserved_height);
-    let history_height = frame_height.saturating_sub(
-        1 + dock_height + turn_height + queue_height + footer_height + input_height,
-    );
+    let history_height =
+        frame_height.saturating_sub(1 + dock_height + queue_height + footer_height + input_height);
     ChromeLayout {
         history_height,
         dock_height,
-        turn_height,
         queue_height,
         footer_height,
         input_height,
@@ -156,21 +148,11 @@ pub fn dock_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     )
 }
 
-pub fn turn_status_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
-    let layout = chrome_layout(app, frame_width, frame_height);
-    Rect::new(
-        0,
-        1 + layout.history_height + layout.dock_height,
-        frame_width,
-        layout.turn_height,
-    )
-}
-
 pub fn queue_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     let layout = chrome_layout(app, frame_width, frame_height);
     Rect::new(
         0,
-        1 + layout.history_height + layout.dock_height + layout.turn_height,
+        1 + layout.history_height + layout.dock_height,
         frame_width,
         layout.queue_height,
     )
@@ -180,7 +162,7 @@ pub fn footer_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     let layout = chrome_layout(app, frame_width, frame_height);
     Rect::new(
         0,
-        1 + layout.history_height + layout.dock_height + layout.turn_height + layout.queue_height,
+        1 + layout.history_height + layout.dock_height + layout.queue_height,
         frame_width,
         layout.footer_height,
     )
@@ -188,12 +170,8 @@ pub fn footer_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
 
 pub fn input_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     let layout = chrome_layout(app, frame_width, frame_height);
-    let y = 1
-        + layout.history_height
-        + layout.dock_height
-        + layout.turn_height
-        + layout.queue_height
-        + layout.footer_height;
+    let y =
+        1 + layout.history_height + layout.dock_height + layout.queue_height + layout.footer_height;
     Rect::new(0, y, frame_width, layout.input_height)
 }
 

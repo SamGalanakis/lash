@@ -1035,6 +1035,37 @@ fn update_plan_panel_lights_up_plan_dock() {
 }
 
 #[test]
+fn rlmpure_budget_warning_uses_status_not_user_message() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.blocks = vec![DisplayBlock::AssistantText("working".into())];
+
+    app.handle_session_event(SessionEvent::PluginEvent {
+        plugin_id: "mode_rlmpure".into(),
+        event: lash::PluginSurfaceEvent::Custom {
+            name: "rlmpure_context_budget_warning".into(),
+            payload: serde_json::json!({
+                "used": 120292,
+                "threshold": 100000,
+            }),
+        },
+    });
+
+    assert!(
+        app.blocks
+            .iter()
+            .all(|block| !matches!(block, DisplayBlock::UserInput(_))),
+        "runtime budget warning must not be rendered as user input"
+    );
+    assert!(app.live_turn.as_ref().is_some_and(|turn| {
+        turn.status_text == "context budget"
+            && turn
+                .status_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("choose handoff path"))
+    }));
+}
+
+#[test]
 fn plugin_panel_events_upsert_and_clear_blocks() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();

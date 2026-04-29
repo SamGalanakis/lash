@@ -3,12 +3,12 @@ mod projection;
 mod view;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use lash::{
-    Message, MessageRole, PartKind, PluginMessage, PromptUsage, SessionEvent, SkillCatalog,
-    TokenUsage, ToolCallRecord, UserInputProvenance, UserInputTransform, append_skill_blocks,
-    collect_skill_mentions, plugin_surface_event_renders_visible_output,
+    Message, MessageRole, PartKind, PluginMessage, PluginSurfaceEvent, PromptUsage, SessionEvent,
+    SkillCatalog, TokenUsage, ToolCallRecord, UserInputProvenance, UserInputTransform,
+    append_skill_blocks, collect_skill_mentions, plugin_surface_event_renders_visible_output,
 };
 use lash_tui::{Line, Rect};
 use lash_ui::UiExtensions;
@@ -50,6 +50,21 @@ fn user_turn_start_indices(blocks: &[DisplayBlock]) -> Vec<usize> {
             .then_some(idx)
         })
         .collect()
+}
+
+fn runtime_status_from_plugin_event(event: &PluginSurfaceEvent) -> Option<(String, String)> {
+    let PluginSurfaceEvent::Custom { name, payload } = event else {
+        return None;
+    };
+    if name != "rlmpure_context_budget_warning" {
+        return None;
+    }
+    let used = payload.get("used").and_then(|value| value.as_u64())?;
+    let threshold = payload.get("threshold").and_then(|value| value.as_u64())?;
+    Some((
+        "context budget".to_string(),
+        format!("{used} tokens used; warn at {threshold}; choose handoff path"),
+    ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -558,6 +573,11 @@ pub struct App {
     pub plan_dock: Option<PlanDockState>,
     /// UI extension registry used for slash-command completion and host actions.
     ui_extensions: Arc<UiExtensions>,
+    /// Shared state for the lash-cli chrome UI extension. The scratch-tui
+    /// draw loop pushes live-turn snapshots through this so the
+    /// `chrome_ui` extension's `turn_status` surface participates in the
+    /// regular footer layout instead of being hand-placed.
+    pub chrome_state: Arc<Mutex<crate::chrome_ui::ChromeUiState>>,
     /// Current working directory with ~ substitution.
     pub cwd: String,
     /// Handle state used to derive semantic activity rows from raw tool calls.
@@ -845,6 +865,7 @@ impl App {
             plugin_mode_indicators: BTreeMap::new(),
             plan_dock: None,
             ui_extensions: Arc::new(UiExtensions::default()),
+            chrome_state: Arc::new(Mutex::new(crate::chrome_ui::ChromeUiState::default())),
             cwd,
             activity_state: ActivityState::default(),
             manual_interrupt_requested: false,
@@ -1519,6 +1540,14 @@ impl App {
             }
             SessionEvent::ChildTokenUsage { .. } => {}
             SessionEvent::PluginEvent { plugin_id, event } => {
+                if let Some((status, detail)) = runtime_status_from_plugin_event(&event) {
+                    self.set_transient_status(
+                        status,
+                        Some(detail),
+                        std::time::Duration::from_secs(8),
+                    );
+                    self.dirty = true;
+                }
                 let renders_visible_output = plugin_surface_event_renders_visible_output(&event);
                 let mutation = plugin_surface::apply_surface_event(
                     &mut self.blocks,
@@ -1650,6 +1679,10 @@ impl App {
 
     pub fn set_ui_extensions(&mut self, ui_extensions: Arc<UiExtensions>) {
         self.ui_extensions = ui_extensions;
+    }
+
+    pub fn set_chrome_state(&mut self, state: Arc<Mutex<crate::chrome_ui::ChromeUiState>>) {
+        self.chrome_state = state;
     }
 
     pub fn upsert_mode_indicator(&mut self, key: impl Into<String>, label: impl Into<String>) {

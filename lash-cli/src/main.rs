@@ -3,6 +3,7 @@ mod app;
 mod assistant_text;
 mod autonomous;
 mod bootstrap;
+mod chrome_ui;
 mod cli_support;
 mod clipboard;
 mod command;
