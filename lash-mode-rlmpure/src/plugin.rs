@@ -17,6 +17,8 @@ use lash_mode_rlm::{BoundVariablesCache, budget_prompt_contributions};
 use crate::driver::{RlmpureProjectorConfig, build_rlmpure_preamble};
 use crate::stream_mask;
 
+const BUDGET_WARNING_EVENT: &str = "rlmpure_context_budget_warning";
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct RlmpureModePluginConfig {
@@ -193,14 +195,15 @@ impl RlmpureModeSession {
             return Ok(Vec::new());
         }
         *warned = true;
-        Ok(vec![PluginDirective::EnqueueMessages {
-            messages: vec![lash::PluginMessage::text(
-                lash::MessageRole::User,
-                format!(
-                    "[runtime] Context budget at {used} tokens, past the {threshold}-token warning threshold. If your progress is captured in named lashlang variables, prefer `pass_baton(task=..., seed={{...}})` over continuing here. Otherwise, continue but keep the budget in mind."
-                ),
-            )],
-        }])
+        Ok(vec![PluginDirective::emit_events(vec![
+            lash::PluginSurfaceEvent::Custom {
+                name: BUDGET_WARNING_EVENT.to_string(),
+                payload: serde_json::json!({
+                    "used": used,
+                    "threshold": threshold,
+                }),
+            },
+        ])])
     }
 }
 
@@ -548,6 +551,74 @@ mod tests {
         assert_eq!(contributions.len(), 1);
         assert!(contributions[0].content.contains("47213 / 200000"));
         assert!(contributions[0].content.contains("23%"));
+        assert!(contributions[0].content.contains("Prepare to hand off"));
+    }
+
+    #[test]
+    fn budget_prompt_contribution_over_threshold_forces_handoff_choice() {
+        let state = lash::SessionStateEnvelope {
+            last_prompt_usage: Some(lash::PromptUsage {
+                prompt_context_tokens: 120_292,
+                input_tokens: 120_292,
+                cached_input_tokens: 0,
+                context_budget_tokens: 120_292,
+            }),
+            ..Default::default()
+        };
+        let ctx = lash::plugin::PromptHookContext {
+            session_id: "root".to_string(),
+            host: std::sync::Arc::new(NoopPromptManager),
+            state: lash::SessionReadView::new(state),
+            mode_turn_options: lash::ModeTurnOptions::default(),
+        };
+
+        let contributions = budget_prompt_contributions(&ctx, Some(100_000));
+
+        assert_eq!(contributions.len(), 1);
+        let content = &contributions[0].content;
+        assert!(content.contains("120292 / 100000"));
+        assert!(content.contains("Do not continue ordinary work"));
+        assert!(content.contains("Choose exactly one:"));
+        assert!(content.contains("1. Hand off now"));
+        assert!(content.contains("2. If completion is one small bounded step away"));
+        assert!(content.contains("3. If required state is not captured yet"));
+        assert!(!content.contains("Otherwise"));
+        assert!(!content.contains("otherwise"));
+    }
+
+    #[test]
+    fn soft_budget_warning_emits_surface_event_not_user_message() {
+        let session = RlmpureModeSession::new(RlmpureModePluginConfig {
+            baton_soft_warn_tokens: Some(100_000),
+            ..Default::default()
+        });
+        let state = lash::SessionStateEnvelope {
+            token_usage: lash::TokenUsage {
+                input_tokens: 120_292,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let directives = session
+            .soft_warn_directives(lash::plugin::CheckpointHookContext {
+                session_id: "root".to_string(),
+                checkpoint: lash::CheckpointKind::AfterWork,
+                state: lash::SessionReadView::new(state),
+                host: std::sync::Arc::new(NoopPromptManager),
+            })
+            .expect("warning directives");
+
+        assert_eq!(directives.len(), 1);
+        let lash::plugin::PluginDirective::EmitEvents { events } = &directives[0] else {
+            panic!("budget warning must be a surface event, not an injected message");
+        };
+        assert_eq!(events.len(), 1);
+        let lash::PluginSurfaceEvent::Custom { name, payload } = &events[0] else {
+            panic!("budget warning should use a custom surface event");
+        };
+        assert_eq!(name, BUDGET_WARNING_EVENT);
+        assert_eq!(payload["used"], serde_json::json!(120_292));
+        assert_eq!(payload["threshold"], serde_json::json!(100_000));
     }
 
     #[test]

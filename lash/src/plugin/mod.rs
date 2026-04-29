@@ -433,12 +433,6 @@ pub trait SessionManager: Send + Sync {
     ) -> Result<Option<PluginMessage>, PluginError> {
         Ok(None)
     }
-    async fn session_mode_turn_options(
-        &self,
-        _session_id: &str,
-    ) -> Result<ModeTurnOptions, PluginError> {
-        Ok(ModeTurnOptions::default())
-    }
     async fn close_session(&self, session_id: &str) -> Result<(), PluginError>;
     async fn start_turn_stream(
         &self,

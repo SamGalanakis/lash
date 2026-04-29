@@ -331,6 +331,7 @@ pub(crate) fn render_screen_snapshot_with_perf(
     height: u16,
     previous: Option<&ScreenSnapshot>,
 ) -> (ScreenSnapshot, PerfCounters) {
+    scratch_tui::sync_chrome_turn_status(app);
     let viewport_height = render::history_viewport_height(app, width, height);
     let viewport_width = width as usize;
     app.ensure_height_cache_pub(viewport_width, viewport_height);

@@ -86,14 +86,17 @@ pub(crate) async fn run_app(
 ) -> anyhow::Result<()> {
     let initial_session_id = runtime.session_id().to_string();
     let mut app = App::new(model, session_name, initial_session_id);
-    let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = vec![Arc::new(
-        lash_autoresearch::AutoresearchUiExtension::default(),
-    )];
+    let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeUiExtension::new();
+    let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = vec![
+        Arc::new(lash_autoresearch::AutoresearchUiExtension::default()),
+        chrome_ext,
+    ];
     let ui_extensions = Arc::new(
         UiExtensions::with_builtins(extra_ui_extensions)
             .map_err(|err| anyhow::anyhow!("failed to build UI extensions: {err}"))?,
     );
     app.set_ui_extensions(Arc::clone(&ui_extensions));
+    app.set_chrome_state(chrome_state);
     if let Some(plugin_session) = runtime.plugin_session() {
         app.plugin_commands = plugin_session.command_catalog();
     }

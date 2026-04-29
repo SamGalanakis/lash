@@ -512,6 +512,29 @@ impl UiExtensions {
         }
     }
 
+    pub fn mount_surface(&self, owner_id: &str, spec: UiSurfaceSpec) {
+        self.surfaces
+            .lock()
+            .expect("surface registry poisoned")
+            .mount(owner_id, spec);
+    }
+
+    pub fn unmount_surface(&self, owner_id: &str, key: &str) {
+        self.surfaces
+            .lock()
+            .expect("surface registry poisoned")
+            .unmount(owner_id, key);
+    }
+
+    pub fn surface_is_mounted(&self, owner_id: &str, key: &str) -> bool {
+        let id = surface::global_surface_id(owner_id, key);
+        self.surfaces
+            .lock()
+            .expect("surface registry poisoned")
+            .surface(&id)
+            .is_some()
+    }
+
     pub fn render_surface(&self, id: &str, ctx: UiRenderContext<'_>, frame: &mut Frame<'_>) {
         let surface = self
             .surfaces

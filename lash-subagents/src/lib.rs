@@ -215,12 +215,7 @@ impl SubagentToolsProvider {
             .snapshot_session(&context.session_id)
             .await
             .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-        let termination = context
-            .host
-            .session_mode_turn_options(&context.session_id)
-            .await
-            .map_err(|err| format!("failed to read current termination mode: {err}"))?
-            .rlm_termination();
+        let termination = current_snapshot.mode_turn_options.rlm_termination();
         let mut policy = current_snapshot.policy.clone();
         policy.execution_mode = lash::ExecutionMode::new("rlmpure");
 
@@ -1075,19 +1070,6 @@ mod tests {
 
             async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
                 Ok(())
-            }
-
-            async fn session_mode_turn_options(
-                &self,
-                _session_id: &str,
-            ) -> Result<lash::ModeTurnOptions, PluginError> {
-                Ok(lash::ModeTurnOptions::rlm(RlmTermination::Finish {
-                    schema: Some(json!({
-                        "type": "object",
-                        "properties": { "answer": { "type": "string" } },
-                        "required": ["answer"]
-                    })),
-                }))
             }
         }
 
