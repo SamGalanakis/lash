@@ -151,7 +151,7 @@ impl GoogleOAuthProvider {
             let mut parts: Vec<Value> = Vec::new();
             for block in msg.blocks.iter() {
                 match block {
-                    LlmContentBlock::Text(text) => {
+                    LlmContentBlock::Text { text, .. } => {
                         if text.is_empty() {
                             continue;
                         }
@@ -271,7 +271,7 @@ impl GoogleOAuthProvider {
                 continue;
             }
             for block in msg.blocks.iter() {
-                if let LlmContentBlock::Text(text) = block
+                if let LlmContentBlock::Text { text, .. } = block
                     && !text.is_empty()
                 {
                     parts.push(text.to_string());
@@ -500,6 +500,7 @@ impl GoogleOAuthProvider {
                     } else {
                         parts.push(LlmOutputPart::Text {
                             text: text.to_string(),
+                            response_meta: None,
                         });
                     }
                 }
@@ -919,7 +920,7 @@ impl GoogleOAuthProvider {
             let full_text = parts
                 .iter()
                 .filter_map(|part| match part {
-                    LlmOutputPart::Text { text } => Some(text.as_str()),
+                    LlmOutputPart::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -977,7 +978,10 @@ impl GoogleOAuthProvider {
 
         let mut parts = Vec::new();
         if !full.is_empty() {
-            parts.push(LlmOutputPart::Text { text: full.clone() });
+            parts.push(LlmOutputPart::Text {
+                text: full.clone(),
+                response_meta: None,
+            });
         }
         parts.extend(tool_call_parts);
 

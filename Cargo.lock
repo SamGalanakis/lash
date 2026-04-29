@@ -2011,21 +2011,6 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
-name = "lash-mode-rlmpure"
-version = "0.2.75"
-dependencies = [
- "async-trait",
- "lash",
- "lash-mode-rlm",
- "lash-rlm-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-=======
->>>>>>> dca461c (checkpoint before responses cutover)
 name = "lash-mode-standard"
 version = "0.2.75"
 dependencies = [

@@ -26,6 +26,7 @@ fn push_history_system_message(history: &mut Vec<Message>, content: String) {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]),
         user_input: None,
         origin: None,

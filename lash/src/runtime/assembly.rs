@@ -154,9 +154,10 @@ impl StandardStreamFallback {
             return;
         }
         match self.parts.last_mut() {
-            Some(LlmOutputPart::Text { text }) => append_stream_piece(text, piece),
+            Some(LlmOutputPart::Text { text, .. }) => append_stream_piece(text, piece),
             _ => self.parts.push(LlmOutputPart::Text {
                 text: piece.to_string(),
+                response_meta: None,
             }),
         }
     }
@@ -215,7 +216,7 @@ impl StandardStreamFallback {
 
     pub(super) fn is_empty(&self) -> bool {
         !self.parts.iter().any(|part| match part {
-            LlmOutputPart::Text { text } => !text.is_empty(),
+            LlmOutputPart::Text { text, .. } => !text.is_empty(),
             LlmOutputPart::Reasoning { .. } => true,
             LlmOutputPart::ToolCall { .. } => true,
         })
@@ -224,7 +225,7 @@ impl StandardStreamFallback {
     pub(super) fn full_text(&self) -> String {
         let mut full_text = String::new();
         for part in &self.parts {
-            if let LlmOutputPart::Text { text } = part {
+            if let LlmOutputPart::Text { text, .. } = part {
                 full_text.push_str(text);
             }
         }

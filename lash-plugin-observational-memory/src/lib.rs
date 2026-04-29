@@ -1103,6 +1103,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
             tool_signature: None,
             prune_state: lash::PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]),
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
@@ -1366,11 +1367,11 @@ async fn run_worker_turn(
                 messages: vec![
                     DirectMessage {
                         role: DirectRole::System,
-                        parts: vec![DirectPart::Text(system_prompt.to_string())].into(),
+                        parts: vec![DirectPart::Text(system_prompt.to_string())],
                     },
                     DirectMessage {
                         role: DirectRole::User,
-                        parts: vec![DirectPart::Text(prompt.to_string())].into(),
+                        parts: vec![DirectPart::Text(prompt.to_string())],
                     },
                 ],
                 attachments: Vec::new(),
@@ -1526,6 +1527,7 @@ mod tests {
                     tool_signature: None,
                     prune_state: lash::PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 }]
                 .into(),
                 user_input: None,

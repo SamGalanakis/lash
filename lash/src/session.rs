@@ -1380,27 +1380,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    #[cfg(feature = "tool-impls")]
-    struct CurrentDirGuard {
-        original: std::path::PathBuf,
-    }
-
-    #[cfg(feature = "tool-impls")]
-    impl CurrentDirGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let original = std::env::current_dir().expect("current dir");
-            std::env::set_current_dir(path).expect("set current dir");
-            Self { original }
-        }
-    }
-
-    #[cfg(feature = "tool-impls")]
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.original).expect("restore current dir");
-        }
-    }
-
     struct NoopManager;
 
     #[async_trait::async_trait]
@@ -1631,7 +1610,7 @@ submit "ok"
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("alpha.txt"), "hello\n").expect("write alpha");
         std::fs::write(temp.path().join("beta.rs"), "fn main() {}\n").expect("write beta");
-        let _cwd = CurrentDirGuard::set(temp.path());
+        let temp_path = temp.path().display().to_string();
 
         let plugin_host = PluginHost::new(vec![
             Arc::new(StaticPluginFactory::new(
@@ -1667,12 +1646,15 @@ submit "ok"
                 "root",
                 manager,
                 &event_tx,
-                r#"
-files = call ls { path: "." }
-match = call grep { query: "fn main" }
+                &format!(
+                    r#"
+files = call ls {{ path: "{}" }}
+match = call grep {{ query: "fn main", path: "{}" }}
 print files
 print match
 "#,
+                    temp_path, temp_path
+                ),
                 false,
             )
             .await

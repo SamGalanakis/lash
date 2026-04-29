@@ -124,6 +124,7 @@ pub(crate) fn plugin_message_to_message(
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]
     } else {
         plugin_message.parts.clone()
@@ -147,6 +148,7 @@ pub(crate) fn plugin_message_to_message(
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }));
     }
     reassign_part_ids(&message_id, &mut parts);

@@ -218,7 +218,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
         let mut reasoning_text = String::new();
         for part in normalized_response_parts(&llm_response) {
             match part {
-                LlmOutputPart::Text { text } => {
+                LlmOutputPart::Text { text, .. } => {
                     append_assistant_text_part(&mut assistant_text, &text);
                 }
                 LlmOutputPart::Reasoning { text, summary, .. } => {
@@ -584,6 +584,7 @@ fn assistant_prose_message(content: String) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]),
         user_input: None,
         origin: None,
@@ -606,6 +607,7 @@ fn submit_required_reminder_message() -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]),
         user_input: None,
         origin: None,
@@ -630,6 +632,7 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]),
         user_input: None,
         origin: None,

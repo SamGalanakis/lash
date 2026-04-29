@@ -42,6 +42,7 @@ fn user_message(content: &str) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]
         .into(),
         user_input: None,
@@ -69,6 +70,7 @@ fn text_message(role: MessageRole, content: impl Into<String>) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]
         .into(),
         user_input: None,
@@ -359,6 +361,7 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             },
             Part {
                 id: "m0.p1".to_string(),
@@ -371,6 +374,7 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             },
         ]
         .into(),
@@ -391,7 +395,7 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
     }));
     assert!(request.messages.iter().any(|msg| {
         msg.blocks.iter().any(|block| match block {
-            LlmContentBlock::Text(text) => text.contains("explain this"),
+            LlmContentBlock::Text { text, .. } => text.contains("explain this"),
             _ => false,
         })
     }));
@@ -412,8 +416,8 @@ fn driver_can_finish_via_checkpoint() {
             full_text: "Hello".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hello".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -465,8 +469,8 @@ fn retryable_error_preserves_driver_state_across_retry() {
             full_text: "ok".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "ok".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -503,8 +507,8 @@ fn checkpoint_messages_resume_prepare_iteration() {
             full_text: "Hello".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hello".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -636,8 +640,8 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
             full_text: "advance".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "advance".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -677,7 +681,7 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
             && message.blocks.iter().any(|block| {
                 matches!(
                     block,
-                    crate::llm::types::LlmContentBlock::Text(text)
+                    crate::llm::types::LlmContentBlock::Text { text, .. }
                         if text.as_ref() == "updated prompt"
                 )
             })

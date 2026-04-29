@@ -434,6 +434,7 @@ impl TurnTerminationPolicyState {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]),
             user_input: None,
             origin: None,

@@ -119,7 +119,7 @@ impl AnthropicProvider {
     /// empty text block — Anthropic 400s on those).
     fn content_block_value(req: &LlmRequest, block: &LlmContentBlock) -> Option<Value> {
         match block {
-            LlmContentBlock::Text(text) => {
+            LlmContentBlock::Text { text, .. } => {
                 if text.trim().is_empty() {
                     return None;
                 }
@@ -444,7 +444,7 @@ fn sanitize_surrogates(s: &str) -> String {
 fn collect_text(blocks: &[LlmContentBlock]) -> String {
     let mut out = String::new();
     for block in blocks {
-        if let LlmContentBlock::Text(text) = block {
+        if let LlmContentBlock::Text { text, .. } = block {
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
@@ -726,7 +726,10 @@ impl AnthropicProvider {
                 BlockKind::Text => {
                     if !block.text.is_empty() {
                         full_text.push_str(&block.text);
-                        parts.push(LlmOutputPart::Text { text: block.text });
+                        parts.push(LlmOutputPart::Text {
+                            text: block.text,
+                            response_meta: None,
+                        });
                     }
                 }
                 BlockKind::Thinking => {

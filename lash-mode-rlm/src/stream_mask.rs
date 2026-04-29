@@ -75,9 +75,10 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
                             .iter()
                             .any(|part| matches!(part, lash::LlmOutputPart::Text { .. }));
                         if needs_text_part {
-                            response
-                                .parts
-                                .push(lash::LlmOutputPart::Text { text: spliced });
+                            response.parts.push(lash::LlmOutputPart::Text {
+                                text: spliced,
+                                response_meta: None,
+                            });
                         }
                     }
                     detector.reset();

@@ -109,7 +109,7 @@ fn trace_llm_message(message: &LlmMessage) -> TraceLlmMessage {
 
 fn trace_content_block(block: &LlmContentBlock) -> TraceContentBlock {
     match block {
-        LlmContentBlock::Text(text) => TraceContentBlock::Text {
+        LlmContentBlock::Text { text, .. } => TraceContentBlock::Text {
             text: text.to_string(),
         },
         LlmContentBlock::Image { attachment_idx } => TraceContentBlock::Image {
@@ -210,7 +210,7 @@ pub(crate) fn trace_output_parts(parts: &[LlmOutputPart]) -> Option<serde_json::
     let parts = parts
         .iter()
         .map(|part| match part {
-            LlmOutputPart::Text { text } => serde_json::json!({
+            LlmOutputPart::Text { text, .. } => serde_json::json!({
                 "type": "text",
                 "text": text,
             }),

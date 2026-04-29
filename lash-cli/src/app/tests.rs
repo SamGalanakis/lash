@@ -27,6 +27,7 @@ fn part(id: &str, kind: PartKind, content: &str) -> Part {
         tool_signature: None,
         prune_state: PruneState::Intact,
         reasoning_meta: None,
+        response_meta: None,
     }
 }
 
@@ -1437,6 +1438,7 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]
         .into(),
         user_input: None,
@@ -2861,9 +2863,7 @@ fn at_completion_finds_nested_file_via_fuzzy() {
     );
     let suggestions: Vec<&str> = app.suggestions().iter().map(|s| s.name.as_str()).collect();
     assert!(
-        suggestions
-            .iter()
-            .any(|s| *s == "lash-cli/src/interactive/input_handling.rs"),
+        suggestions.contains(&"lash-cli/src/interactive/input_handling.rs"),
         "expected fuzzy match to surface input_handling.rs; got {suggestions:?}"
     );
 }

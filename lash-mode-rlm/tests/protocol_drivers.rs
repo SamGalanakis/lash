@@ -56,6 +56,7 @@ fn user_message(content: &str) -> Message {
             tool_signature: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
+            response_meta: None,
         }]
         .into(),
         user_input: None,
@@ -143,8 +144,8 @@ fn standard_prose_only_response_emits_done() {
             full_text: "Hello there!".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Hello there!".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -178,6 +179,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
             parts: vec![
                 LlmOutputPart::Text {
                     text: "Let me read that.".to_string(),
+                    response_meta: None,
                 },
                 LlmOutputPart::ToolCall {
                     call_id: "tc1".to_string(),
@@ -186,8 +188,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
                     item_id: None,
                     signature: None,
                 },
-            ]
-            .into(),
+            ],
             ..LlmResponse::default()
         }),
     });
@@ -251,8 +252,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
                 input_json: r#"{"plan":[{"step":"done","status":"completed"}]}"#.to_string(),
                 item_id: None,
                 signature: None,
-            }]
-            .into(),
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -339,8 +339,7 @@ fn standard_max_turns_stops_iteration() {
                 input_json: "{}".to_string(),
                 item_id: None,
                 signature: None,
-            }]
-            .into(),
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -458,8 +457,8 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
             full_text: "Quick check.\n\n```lashlang\nprint \"hi\"\n```\n".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "Quick check.\n\n```lashlang\nprint \"hi\"\n```\n".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -524,8 +523,8 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
             full_text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     });
@@ -601,9 +600,9 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
                 },
                 LlmOutputPart::Text {
                     text: "```lashlang\nsubmit \"Hi.\"\n```".to_string(),
+                    response_meta: None,
                 },
-            ]
-            .into(),
+            ],
             ..LlmResponse::default()
         }),
     });
@@ -670,8 +669,8 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
             full_text: "```lashlang\nsubmit { missing: true }\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
                 text: "```lashlang\nsubmit { missing: true }\n```".to_string(),
-            }]
-            .into(),
+                response_meta: None,
+            }],
             ..LlmResponse::default()
         }),
     });

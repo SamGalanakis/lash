@@ -561,7 +561,7 @@ impl RuntimeTurnDriver {
                         .await;
                 }
             }
-            LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+            LlmStreamEvent::Part(LlmOutputPart::Text { text, .. }) => {
                 if !text.is_empty() {
                     *state.text_streamed = true;
                     let raw_text = self.host.core.trace_sink.as_ref().map(|_| text.clone());
@@ -727,7 +727,7 @@ pub(in crate::runtime) fn llm_response_has_content(response: &LlmResponse) -> bo
         return true;
     }
     response.parts.iter().any(|part| match part {
-        LlmOutputPart::Text { text } => !text.is_empty(),
+        LlmOutputPart::Text { text, .. } => !text.is_empty(),
         // Reasoning-only responses still count as "has content" so the
         // adapter's stream-fallback buffer is preserved for replay.
         LlmOutputPart::Reasoning { .. } => true,

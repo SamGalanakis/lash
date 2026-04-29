@@ -321,7 +321,7 @@ where
         })
     }
 
-    fn select_batch<'a>(&self, examples: &'a [Example], generation: usize) -> Vec<Example> {
+    fn select_batch(&self, examples: &[Example], generation: usize) -> Vec<Example> {
         let limit = self.config.minibatch_size.max(1).min(examples.len());
         if examples.is_empty() {
             return Vec::new();

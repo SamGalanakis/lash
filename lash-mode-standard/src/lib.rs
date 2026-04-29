@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lash::llm::types::ResponseTextMeta;
 use lash::plugin::{
     AssistantResponseTransform, ModeNativeToolsPlugin, ModeProtocolDriverPlugin,
     ModeSessionContext, ModeSessionPlugin, PluginError, PluginFactory, PluginRegistrar,
@@ -380,6 +381,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
     ) -> Vec<DriverAction> {
         let response_parts = normalized_response_parts(&llm_response);
         let mut assistant_text = String::new();
+        let mut assistant_text_parts: Vec<(String, Option<ResponseTextMeta>)> = Vec::new();
         let mut tool_calls: Vec<StandardToolCall> = Vec::new();
         // Reasoning items captured with their position in the original
         // response. The `usize` is the index in `tool_calls` that this
@@ -393,10 +395,15 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
 
         for part in response_parts {
             match part {
-                LlmOutputPart::Text { text } => {
+                LlmOutputPart::Text {
+                    text,
+                    response_meta,
+                } => {
                     if !text.is_empty() {
                         let previous_len = assistant_text.len();
                         append_assistant_text_part(&mut assistant_text, &text);
+                        assistant_text_parts
+                            .push((assistant_text[previous_len..].to_string(), response_meta));
                         if !text_streamed {
                             actions.push(DriverAction::Emit(SessionEvent::TextDelta {
                                 content: assistant_text[previous_len..].to_string(),
@@ -481,11 +488,14 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
             for (_, meta, text) in reasoning_items {
                 parts_out.push(reasoning_part(&asst_id, parts_out.len(), text, meta));
             }
-            if !assistant_text.trim().is_empty() {
+            for (content, response_meta) in assistant_text_parts {
+                if content.trim().is_empty() {
+                    continue;
+                }
                 parts_out.push(Part {
                     id: format!("{}.p{}", asst_id, parts_out.len()),
                     kind: PartKind::Prose,
-                    content: assistant_text,
+                    content,
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
@@ -493,6 +503,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta,
                 });
             }
             if parts_out.is_empty() {
@@ -523,11 +534,14 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
 
         let asst_id = fresh_message_id();
         let mut assistant_parts = Vec::new();
-        if !assistant_text.trim().is_empty() {
+        for (content, response_meta) in assistant_text_parts {
+            if content.trim().is_empty() {
+                continue;
+            }
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
                 kind: PartKind::Prose,
-                content: assistant_text,
+                content,
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -535,6 +549,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta,
             });
         }
 
@@ -563,6 +578,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 tool_signature: tool_call.signature.clone(),
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             });
 
             let args = serde_json::from_str::<Value>(&tool_call.input_json)
@@ -617,6 +633,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 tool_signature: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             });
 
             for (image_offset, image) in outcome.model_result.images.into_iter().enumerate() {
@@ -631,6 +648,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 });
                 result_parts.push(Part {
                     id: String::new(),
@@ -647,6 +665,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     tool_signature: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
+                    response_meta: None,
                 });
             }
         }

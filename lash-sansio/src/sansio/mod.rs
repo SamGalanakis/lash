@@ -835,6 +835,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                         tool_signature: None,
                         prune_state: PruneState::Intact,
                         reasoning_meta: None,
+                        response_meta: None,
                     }]
                 } else {
                     message.parts.clone()
@@ -858,6 +859,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                         tool_signature: None,
                         prune_state: PruneState::Intact,
                         reasoning_meta: None,
+                        response_meta: None,
                     }));
                 }
                 reassign_part_ids(&message_id, &mut parts);
@@ -1032,7 +1034,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             .parts
             .iter()
             .filter_map(|part| match part {
-                LlmOutputPart::Text { text } if !text.is_empty() => Some(serde_json::json!({
+                LlmOutputPart::Text { text, .. } if !text.is_empty() => Some(serde_json::json!({
                     "type": "text",
                     "text": text,
                 })),

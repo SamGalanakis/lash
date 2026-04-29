@@ -1,3 +1,20 @@
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseTextPhase {
+    Commentary,
+    FinalAnswer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResponseTextMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ResponseTextPhase>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LlmToolSpec {
     pub name: String,
@@ -18,6 +35,7 @@ pub enum LlmToolChoice {
 pub enum LlmOutputPart {
     Text {
         text: String,
+        response_meta: Option<ResponseTextMeta>,
     },
     /// Model "thinking" / reasoning output from providers that expose a
     /// chain-of-thought channel (Anthropic `thinking`, Codex Responses API
@@ -71,13 +89,14 @@ pub enum LlmRole {
 /// adapters can emit the right shape without re-coalescing flat messages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LlmContentBlock {
-    Text(Arc<str>),
+    Text {
+        text: Arc<str>,
+        response_meta: Option<ResponseTextMeta>,
+    },
     /// Index into the enclosing `LlmRequest.attachments` vector. User-role
     /// messages may embed images; adapters drop them for providers that
     /// don't accept vision input.
-    Image {
-        attachment_idx: usize,
-    },
+    Image { attachment_idx: usize },
     /// Assistant tool call. `item_id` carries provider-specific pairing ids
     /// (Codex `fc_...`, Anthropic `toolu_...`).
     ToolCall {
@@ -134,14 +153,17 @@ impl LlmMessage {
     pub fn text(role: LlmRole, text: impl Into<Arc<str>>) -> Self {
         Self {
             role,
-            blocks: Arc::new(vec![LlmContentBlock::Text(text.into())]),
+            blocks: Arc::new(vec![LlmContentBlock::Text {
+                text: text.into(),
+                response_meta: None,
+            }]),
         }
     }
 
     /// True if every block is a `Text` whose content is whitespace-only.
     pub fn is_blank(&self) -> bool {
         self.blocks.iter().all(|b| match b {
-            LlmContentBlock::Text(t) => t.trim().is_empty(),
+            LlmContentBlock::Text { text, .. } => text.trim().is_empty(),
             _ => false,
         })
     }

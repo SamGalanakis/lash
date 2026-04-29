@@ -211,10 +211,13 @@ impl ShellRuntime {
         }
         cmd.cwd(workdir.as_os_str());
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|err| format!("Failed to spawn PTY command: {err}"))?;
+        let child = pair.slave.spawn_command(cmd).map_err(|err| {
+            format!(
+                "Failed to spawn PTY command with shell `{}` in `{}`: {err}",
+                shell_path,
+                workdir.display()
+            )
+        })?;
         let killer = child.clone_killer();
         let reader = pair
             .master
@@ -1495,9 +1498,13 @@ mod tests {
     use serde_json::json;
     use std::fs;
 
+    fn test_shell() -> StandardShell {
+        StandardShell::new().with_cwd("/")
+    }
+
     #[tokio::test]
     async fn exec_command_returns_exit_code_when_command_finishes() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let result = shell
             .execute("exec_command", &json!({"cmd": "echo hello"}))
             .await;
@@ -1566,7 +1573,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_stdin_reuses_running_exec_handle() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let cmd = "python3 -u -c 'import sys; line = sys.stdin.readline(); print(\"got:\" + line.strip())'";
         let open = shell
             .execute(
@@ -1597,7 +1604,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_stdin_prefers_completed_state_for_short_lived_commands() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let cmd = "python3 -u -c 'import sys; line = sys.stdin.readline(); print(\"got:\" + line.strip())'";
         for _ in 0..16 {
             let open = shell
@@ -1633,7 +1640,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_stdin_can_close_stdin_to_send_eof() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let open = shell
             .execute(
                 "start_command",
@@ -1671,7 +1678,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_pipeline_failure_uses_pipefail() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let result = shell
             .execute("exec_command", &json!({"cmd": "false | cat"}))
             .await;
@@ -1685,7 +1692,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_allow_failure_returns_nonzero_as_success() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let result = shell
             .execute(
                 "exec_command",
@@ -1705,7 +1712,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_stdin_nonzero_exit_fails_by_default() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let cmd = "python3 -u -c 'import sys; sys.stdin.readline(); sys.exit(7)'";
         let open = shell
             .execute(
@@ -1732,7 +1739,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_reports_full_output_path_when_token_truncated() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let result = shell
             .execute(
                 "exec_command",
@@ -1749,7 +1756,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_spills_full_output_when_buffer_overflows() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let result = shell
             .execute(
                 "exec_command",
@@ -1766,7 +1773,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_reports_full_output_path_for_large_output() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let result = shell
             .execute(
                 "exec_command",
@@ -1782,7 +1789,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_stdin_reports_full_output_path_when_token_truncated() {
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let cmd = "python3 -u -c 'import sys; data = sys.stdin.read(); sys.stdout.write(data)'";
         let open = shell
             .execute(
@@ -1839,7 +1846,7 @@ mod tests {
         use std::sync::Arc;
         use std::time::Instant;
 
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let token = CancellationToken::new();
         let ctx = ToolExecutionContext {
             session_id: "test".to_string(),
@@ -1892,7 +1899,7 @@ mod tests {
             std::path::Path::new(&format!("/proc/{pid}")).exists()
         }
 
-        let shell = StandardShell::default();
+        let shell = test_shell();
         let token = CancellationToken::new();
         let ctx = ToolExecutionContext {
             session_id: "test".to_string(),

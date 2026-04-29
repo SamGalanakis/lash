@@ -343,6 +343,7 @@ mod tests {
                 tool_signature: None,
                 prune_state: lash::PruneState::Intact,
                 reasoning_meta: None,
+                response_meta: None,
             }]
             .into(),
             user_input: None,

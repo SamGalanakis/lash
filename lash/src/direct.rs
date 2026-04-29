@@ -275,7 +275,10 @@ pub(crate) fn build_llm_request(
             match part {
                 DirectPart::Text(text) => {
                     if !text.is_empty() {
-                        blocks.push(LlmContentBlock::Text(text.into()));
+                        blocks.push(LlmContentBlock::Text {
+                            text: text.into(),
+                            response_meta: None,
+                        });
                     }
                 }
                 DirectPart::Image(idx) => {
