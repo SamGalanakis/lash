@@ -55,8 +55,7 @@ pub type CommandHandler =
 mod mode;
 pub use mode::{
     ModeExtras, ModeNativeToolsPlugin, ModeProtocolDriverPlugin, ModeRuntimeContext,
-    ModeSessionContext, ModeSessionPlugin, RlmCreateExtras, RlmpureCreateExtras,
-    StandardCreateExtras,
+    ModeSessionContext, ModeSessionPlugin, RlmCreateExtras, StandardCreateExtras,
 };
 
 mod history;
@@ -285,6 +284,7 @@ pub fn plugin_surface_event_renders_visible_output(event: &PluginSurfaceEvent) -
         PluginSurfaceEvent::PanelAppend { content, .. } => !content.is_empty(),
         PluginSurfaceEvent::ModeIndicatorUpsert { .. }
         | PluginSurfaceEvent::ModeIndicatorClear { .. }
+        | PluginSurfaceEvent::Status { .. }
         | PluginSurfaceEvent::PanelClear { .. }
         | PluginSurfaceEvent::Custom { .. } => false,
     }

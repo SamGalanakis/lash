@@ -257,7 +257,7 @@ impl<'de> Deserialize<'de> for ModeExtras {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StandardCreateExtras {}
 
-pub use lash_rlm_types::{RlmCreateExtras, RlmpureCreateExtras};
+pub use lash_rlm_types::RlmCreateExtras;
 
 #[cfg(test)]
 mod tests {
@@ -291,15 +291,15 @@ mod tests {
         assert_eq!(standard.payload, serde_json::json!({}));
 
         let extras = ModeExtras::typed(
-            ExecutionMode::new("rlmpure"),
-            RlmpureCreateExtras {
+            ExecutionMode::new("rlm"),
+            RlmCreateExtras {
                 termination: lash_rlm_types::RlmTermination::ProseWithoutFence,
             },
         )
         .expect("encode");
         let json = serde_json::to_value(&extras).expect("serialize");
-        assert_eq!(json["mode_id"], "rlmpure");
+        assert_eq!(json["mode_id"], "rlm");
         let decoded: ModeExtras = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(decoded.mode_id, ExecutionMode::new("rlmpure"));
+        assert_eq!(decoded.mode_id, ExecutionMode::new("rlm"));
     }
 }

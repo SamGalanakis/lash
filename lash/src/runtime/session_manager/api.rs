@@ -233,14 +233,9 @@ impl SessionManager for RuntimeSessionManager {
         if let Some(store) = &session_store {
             let mut persisted_state = runtime.export_persisted_state();
             super::normalize_session_graph(&mut persisted_state);
-            let result = store
-                .apply_runtime_commit(crate::store::PersistedStateCommit::persisted_state(
-                    &persisted_state,
-                    &[],
-                ))
+            super::commit_runtime_state(store.as_ref(), &mut persisted_state, &[])
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-            persisted_state.apply_persisted_commit_result(result);
         }
         self.registry
             .lock()
@@ -769,9 +764,11 @@ impl SessionManager for RuntimeSessionManager {
             super::normalize_session_graph(&mut state);
             state
         };
-        if self.persist_usage_to_store {
-            let _ = self.merge_drained_token_ledger(&mut state);
-        }
+        let usage_deltas = if self.persist_usage_to_store {
+            self.merge_drained_token_ledger(&mut state)
+        } else {
+            Vec::new()
+        };
         if let Some(required) = request.requires_ancestor_node_id.as_deref()
             && !state.session_graph.active_path_contains(required)
         {
@@ -781,14 +778,9 @@ impl SessionManager for RuntimeSessionManager {
         }
         let node_ids = append_session_nodes_to_state(&mut state, &request.nodes);
         let leaf_node_id = state.session_graph.leaf_node_id.clone().unwrap_or_default();
-        let result = store
-            .apply_runtime_commit(crate::store::PersistedStateCommit::persisted_state(
-                &state,
-                &[],
-            ))
+        super::commit_runtime_state(store.as_ref(), &mut state, &usage_deltas)
             .await
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        state.apply_persisted_commit_result(result);
         self.background_sync_needed.store(true, Ordering::Release);
         Ok(crate::AppendSessionNodesResult::Appended {
             node_ids,

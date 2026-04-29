@@ -6,7 +6,6 @@ members = [
     "lash",
     "lash-default-tools",
     "lash-mode-rlm",
-    "lash-mode-rlmpure",
     "lash-mode-standard",
     "lash-plugin-observational-memory",
     "lash-plugin-plan-mode",

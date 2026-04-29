@@ -145,7 +145,7 @@ impl RuntimeEnvironment {
 /// webserver; bounded memory cost regardless of session history size.
 pub struct ParkedSession {
     pub(crate) session_id: String,
-    pub(crate) store: Arc<dyn crate::store::RuntimeStore>,
+    pub(crate) store: Arc<dyn crate::store::RuntimePersistence>,
     pub(crate) policy: crate::SessionPolicy,
 }
 

@@ -46,8 +46,9 @@ pub fn load_session_from_path(store_path: &Path) -> Result<LoadedSession> {
         .with_context(|| format!("opening session store at {}", store_path.display()))?;
     let meta = store.load_session_meta();
     let graph = load_graph(&store);
-    let messages = graph.project_conversation_messages();
-    let tool_calls = graph.project_tool_calls();
+    let projection = graph.shared_projection();
+    let messages = projection.messages.as_ref().clone();
+    let tool_calls = projection.tool_calls.as_ref().clone();
     Ok(LoadedSession {
         meta,
         messages,

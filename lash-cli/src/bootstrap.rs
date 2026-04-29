@@ -85,9 +85,6 @@ fn plugin_factories_for_surface(
     plugin_factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
-    plugin_factories.push(Arc::new(
-        lash_mode_rlmpure::BuiltinRlmpureModePluginFactory::default(),
-    ));
     plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy,
         capability_registry,
@@ -424,11 +421,10 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     )
     .map_err(anyhow::Error::msg)?;
     let rlm_globals_patch = resolve_rlm_globals_patch(&args).map_err(anyhow::Error::msg)?;
-    let rlm_globals_supported = execution_mode == ExecutionMode::new("rlm")
-        || execution_mode == ExecutionMode::new("rlmpure");
+    let rlm_globals_supported = execution_mode == ExecutionMode::new("rlm");
     if rlm_globals_patch.is_some() && !rlm_globals_supported {
         return Err(anyhow::anyhow!(
-            "`--rlm-var`, `--rlm-vars-file`, and `--rlm-unset` require `--execution-mode rlm` or `--execution-mode rlmpure`."
+            "`--rlm-var`, `--rlm-vars-file`, and `--rlm-unset` require `--execution-mode rlm`."
         ));
     }
 
@@ -523,7 +519,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         root_plugins,
         turn_injection_bridge.clone(),
         turn_input_injection_bridge.clone(),
-        store.clone() as Arc<dyn RuntimeStore>,
+        store.clone() as Arc<dyn RuntimePersistence>,
     );
     let state = PersistedSessionState {
         session_id: resolved_session_id.clone(),

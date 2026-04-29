@@ -4,9 +4,9 @@ use std::sync::Arc;
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
     BackgroundRuntimeHost, EmbeddedRuntimeHost, LashRuntime, PathResolver, PersistedSessionState,
-    PersistentRuntimeServices, RuntimeCoreConfig, RuntimeServices, RuntimeStore, SanitizerPolicy,
-    SessionError, SessionPolicy, SessionStoreFactory, SessionTaskExecutor, TerminationPolicy,
-    TurnInjectionBridge, TurnInputInjectionBridge,
+    PersistentRuntimeServices, RuntimeCoreConfig, RuntimePersistence, RuntimeServices,
+    SanitizerPolicy, SessionError, SessionPolicy, SessionStoreFactory, SessionTaskExecutor,
+    TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 
 enum PluginSource {
@@ -23,7 +23,7 @@ pub struct EmbeddedRuntimeBuilder {
     turn_input_injection_bridge: TurnInputInjectionBridge,
     core: RuntimeCoreConfig,
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
-    store: Option<Arc<dyn RuntimeStore>>,
+    store: Option<Arc<dyn RuntimePersistence>>,
     session_task_executor: Option<Arc<dyn SessionTaskExecutor>>,
 }
 
@@ -150,7 +150,7 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_store(mut self, store: Arc<dyn RuntimeStore>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn RuntimePersistence>) -> Self {
         self.store = Some(store);
         self
     }
@@ -188,7 +188,9 @@ impl EmbeddedRuntimeBuilder {
             });
         }
         if let Some(store) = &self.store {
-            if let Some(mut state) = store.load_persisted_session_state().await {
+            if let Some(mut state) =
+                crate::store::load_persisted_session_state(store.as_ref()).await
+            {
                 if let Some(session_id) = &self.session_id
                     && &state.session_id != session_id
                 {
@@ -300,7 +302,7 @@ impl EmbeddedRuntimeBuilder {
 
     pub async fn build_persistent(
         mut self,
-        store: Arc<dyn RuntimeStore>,
+        store: Arc<dyn RuntimePersistence>,
     ) -> Result<LashRuntime, SessionError> {
         self.store = Some(store);
         self.session_task_executor = None;
@@ -309,7 +311,7 @@ impl EmbeddedRuntimeBuilder {
 
     pub async fn build_background_persistent(
         mut self,
-        store: Arc<dyn RuntimeStore>,
+        store: Arc<dyn RuntimePersistence>,
         session_task_executor: Arc<dyn SessionTaskExecutor>,
     ) -> Result<LashRuntime, SessionError> {
         self.store = Some(store);

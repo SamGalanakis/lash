@@ -6,9 +6,6 @@ license.workspace = true
 
 [features]
 default = []
-# Enables the hybrid/regex-ranked `discover_tools` backend (depends on
-# lash's `sqlite-store` feature for the underlying search machinery).
-# Without it, `discover_tools` falls back to a simpler substring filter.
 sqlite-store = ["lash/sqlite-store"]
 
 [dependencies]

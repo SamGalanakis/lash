@@ -126,19 +126,19 @@ impl RuntimeTurnDriver {
             self.progress_state.persisted_graph_node_count,
             self.progress_state.graph_replace_required,
         );
-        let commit = crate::store::PersistedStateCommit::persisted_state_with_graph_commit(
-            &self.progress_state,
+        match commit_runtime_state_with_graph_commit(
+            store.as_ref(),
+            &mut self.progress_state,
             graph,
             &[],
-        );
-        let result = match store.apply_runtime_commit(commit).await {
-            Ok(result) => result,
+        )
+        .await
+        {
+            Ok(()) => {}
             Err(err) => {
                 tracing::warn!("failed to persist runtime progress boundary: {err}");
-                return;
             }
-        };
-        self.progress_state.apply_persisted_commit_result(result);
+        }
     }
 
     fn mark_phase_begin(&self, phase: RuntimeTurnPhase) {
@@ -376,7 +376,7 @@ impl RuntimeTurnDriver {
             model,
             mode: execution_surface.execution_mode,
             messages,
-            events: self.progress_state.shared_active_events(),
+            events: self.progress_state.shared_projection().active_events,
             run_offset,
             tool_surface: execution_surface.tool_surface,
             mode_preamble: execution_surface.mode_preamble,

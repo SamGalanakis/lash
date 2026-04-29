@@ -34,37 +34,45 @@ use self::projection::{
 };
 
 pub(crate) use self::projection::{
-    interrupted_assistant_tail, preview_text_lines, project_interrupted_blocks,
-    projected_blocks_from_state, smart_truncate_preview_line, strip_ansi_escape_sequences,
+    UiTimelineItem, interrupted_assistant_tail, preview_text_lines, project_interrupted_blocks,
+    projected_timeline_items_from_projection, smart_truncate_preview_line,
+    strip_ansi_escape_sequences,
+};
+#[cfg(test)]
+pub(crate) use self::projection::{
+    project_interrupted_blocks_from_parts, projected_timeline_items_from_parts,
 };
 
-fn user_turn_start_indices(blocks: &[DisplayBlock]) -> Vec<usize> {
+fn user_turn_start_indices(blocks: &[UiTimelineItem]) -> Vec<usize> {
     blocks
         .iter()
         .enumerate()
         .filter_map(|(idx, block)| {
             matches!(
                 block,
-                DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
+                UiTimelineItem::TurnStart(turn) if turn.role == TurnRole::User
             )
             .then_some(idx)
         })
         .collect()
 }
 
-fn runtime_status_from_plugin_event(event: &PluginSurfaceEvent) -> Option<(String, String)> {
-    let PluginSurfaceEvent::Custom { name, payload } = event else {
-        return None;
-    };
-    if name != "rlmpure_context_budget_warning" {
-        return None;
+fn runtime_status_from_plugin_event(
+    event: &PluginSurfaceEvent,
+) -> Option<(String, Option<String>, std::time::Duration)> {
+    match event {
+        PluginSurfaceEvent::Status {
+            label,
+            detail,
+            transient_ms,
+            ..
+        } => Some((
+            label.clone(),
+            detail.clone(),
+            std::time::Duration::from_millis(transient_ms.unwrap_or(8_000)),
+        )),
+        _ => None,
     }
-    let used = payload.get("used").and_then(|value| value.as_u64())?;
-    let threshold = payload.get("threshold").and_then(|value| value.as_u64())?;
-    Some((
-        "context budget".to_string(),
-        format!("{used} tokens used; warn at {threshold}; choose handoff path"),
-    ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -382,38 +390,6 @@ impl Turn {
     }
 }
 
-/// A renderable block in the scrollable history.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum DisplayBlock {
-    /// Turn boundary. Carries the Turn metadata and is the source of
-    /// truth for the separator rule (which used to be a peephole in
-    /// the renderer that checked "is the next block a UserInput?").
-    TurnStart(Turn),
-    UserInput(String),
-    /// Model reasoning summary ("thinking"). Rendered above the
-    /// assistant's final text in a muted/italic style so the user can see
-    /// the model's scratch thoughts without confusing them with the
-    /// actual reply. Display-only; never persisted back into prompts.
-    AssistantReasoning(String),
-    AssistantText(String),
-    Activity(Box<ActivityBlock>),
-    ShellOutput {
-        command: String,
-        output: String,
-        error: Option<String>,
-    },
-    Error(String),
-    /// Informational message from the system (e.g. /help output).
-    SystemMessage(String),
-    PluginPanel(PluginPanelBlock),
-    /// The fenced `lashlang` source from an RLM turn, captured so the
-    /// transcript can reveal the code that produced the subsequent tool
-    /// activities. Hidden by default; shown when the user presses
-    /// `Alt+O` (expand_level 2) so the full executed program is visible.
-    LashlangCode(String),
-    Splash,
-}
-
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct UiProjectionState {
     #[serde(default)]
@@ -439,7 +415,7 @@ impl UiProjectionState {
                 .blocks
                 .iter()
                 .filter_map(|block| match block {
-                    DisplayBlock::PluginPanel(panel) => Some(panel.clone()),
+                    UiTimelineItem::PluginPanel(panel) => Some(panel.clone()),
                     _ => None,
                 })
                 .collect(),
@@ -490,7 +466,7 @@ struct BlockRenderCacheEntry {
 }
 
 pub struct App {
-    pub blocks: Vec<DisplayBlock>,
+    pub blocks: Vec<UiTimelineItem>,
     pub scroll_offset: usize,
     pub expand_level: u8,
     pub running: bool,
@@ -601,18 +577,13 @@ impl App {
         UiProjectionState::from_app(self)
     }
 
-    pub fn finish_turn_from_projection(
-        &mut self,
-        events: &[lash::SessionEventRecord],
-        messages: &[Message],
-        tool_calls: &[ToolCallRecord],
-    ) {
+    pub fn finish_turn_from_projection(&mut self, projection: &lash::SessionProjection) {
         let current_turn_starts = user_turn_start_indices(&self.blocks);
         let current_turn_start = current_turn_starts.last().copied();
 
         self.stop_turn();
         let ui_state = UiProjectionState::from_app(self);
-        let projected_blocks = projected_blocks_from_state(events, messages, tool_calls, &ui_state);
+        let projected_blocks = projected_timeline_items_from_projection(projection, &ui_state);
         let projected_turn_starts = user_turn_start_indices(&projected_blocks);
         let projected_turn_start = current_turn_start
             .and_then(|_| {
@@ -799,7 +770,7 @@ impl App {
         }
         let changed_idx = self.blocks.len();
         let invalidate_from = self.append_invalidation_start();
-        self.blocks.push(DisplayBlock::UserInput(display));
+        self.blocks.push(UiTimelineItem::UserInput(display));
         self.invalidate_height_cache_from(
             invalidate_from
                 .min(changed_idx)
@@ -821,7 +792,7 @@ impl App {
             }
         };
         Self {
-            blocks: vec![DisplayBlock::Splash],
+            blocks: vec![UiTimelineItem::Splash],
             scroll_offset: 0,
             expand_level: 1,
             running: false,
@@ -951,7 +922,7 @@ impl App {
             .filter(|&idx| {
                 matches!(
                     self.blocks.get(idx),
-                    Some(DisplayBlock::AssistantReasoning(_))
+                    Some(UiTimelineItem::AssistantReasoning(_))
                 )
             })
     }
@@ -970,11 +941,11 @@ impl App {
     /// Remove the empty-state splash once real conversation content is present.
     #[cfg(test)]
     pub fn dismiss_splash(&mut self) {
-        if !matches!(self.blocks.first(), Some(DisplayBlock::Splash)) {
+        if !matches!(self.blocks.first(), Some(UiTimelineItem::Splash)) {
             return;
         }
         self.blocks
-            .retain(|block| !matches!(block, DisplayBlock::Splash));
+            .retain(|block| !matches!(block, UiTimelineItem::Splash));
         self.invalidate_height_cache();
     }
 
@@ -1058,9 +1029,9 @@ impl App {
 
         match self.blocks.last() {
             Some(
-                DisplayBlock::AssistantReasoning(_)
-                | DisplayBlock::Splash
-                | DisplayBlock::TurnStart(_),
+                UiTimelineItem::AssistantReasoning(_)
+                | UiTimelineItem::Splash
+                | UiTimelineItem::TurnStart(_),
             )
             | None => 0,
             _ => 1,
@@ -1077,10 +1048,10 @@ impl App {
 
         match self.blocks.last() {
             Some(
-                DisplayBlock::AssistantText(_)
-                | DisplayBlock::AssistantReasoning(_)
-                | DisplayBlock::Splash
-                | DisplayBlock::TurnStart(_),
+                UiTimelineItem::AssistantText(_)
+                | UiTimelineItem::AssistantReasoning(_)
+                | UiTimelineItem::Splash
+                | UiTimelineItem::TurnStart(_),
             )
             | None => 0,
             _ => 1,
@@ -1112,7 +1083,7 @@ impl App {
             .enumerate()
             .rev()
             .find_map(|(idx, block)| match block {
-                DisplayBlock::Activity(activity)
+                UiTimelineItem::Activity(activity)
                     if matches!(
                         activity.call.kind,
                         ActivityKind::ShellCommand
@@ -1142,7 +1113,7 @@ impl App {
     }
 
     fn reconcile_trailing_assistant_block(&mut self, text: &str) -> bool {
-        let Some(DisplayBlock::AssistantText(existing)) = self.blocks.last_mut() else {
+        let Some(UiTimelineItem::AssistantText(existing)) = self.blocks.last_mut() else {
             return false;
         };
         if text.starts_with(existing.as_str()) {
@@ -1216,7 +1187,7 @@ impl App {
     }
 
     fn merge_into_trailing_reasoning_block(&mut self, text: &str) -> bool {
-        let Some(DisplayBlock::AssistantReasoning(existing)) = self.blocks.last_mut() else {
+        let Some(UiTimelineItem::AssistantReasoning(existing)) = self.blocks.last_mut() else {
             return false;
         };
         let changed = merge_assistant_reasoning_text(existing, text);
@@ -1277,7 +1248,7 @@ impl App {
                 }
                 MessageRole::System => {
                     self.blocks
-                        .push(DisplayBlock::SystemMessage(message.content.clone()));
+                        .push(UiTimelineItem::SystemMessage(message.content.clone()));
                 }
                 _ => continue,
             }
@@ -1314,19 +1285,19 @@ impl App {
             .rposition(|block| {
                 matches!(
                     block,
-                    DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
+                    UiTimelineItem::TurnStart(turn) if turn.role == TurnRole::User
                 )
             })
             .unwrap_or(0);
         if self.blocks[scan_start..].iter().any(
-            |block| matches!(block, DisplayBlock::UserInput(text) if text.trim() == history_text),
+            |block| matches!(block, UiTimelineItem::UserInput(text) if text.trim() == history_text),
         ) {
             return;
         }
         let changed_idx = self.blocks.len();
         let invalidate_from = self.append_invalidation_start();
         push_user_turn_start(&mut self.blocks);
-        self.blocks.push(DisplayBlock::UserInput(history_text));
+        self.blocks.push(UiTimelineItem::UserInput(history_text));
         self.invalidate_height_cache_from(
             invalidate_from
                 .min(changed_idx)
@@ -1405,7 +1376,7 @@ impl App {
                 for activity in activities {
                     self.push_activity_block(activity);
                 }
-                if !matches!(self.blocks.last(), Some(DisplayBlock::Splash)) {
+                if !matches!(self.blocks.last(), Some(UiTimelineItem::Splash)) {
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
@@ -1413,13 +1384,13 @@ impl App {
             SessionEvent::Message { text, kind } => {
                 if kind == "lashlang_code" {
                     // Captured source of the fenced lashlang block the
-                    // model just emitted. Pushed as its own DisplayBlock
+                    // model just emitted. Pushed as its own UiTimelineItem
                     // so the renderer can hide it by default and reveal
                     // it when the user hits Alt+O (full expansion).
                     self.finalize_live_markdown();
                     let changed_idx = self.blocks.len();
                     let invalidate_from = self.append_invalidation_start();
-                    self.blocks.push(DisplayBlock::LashlangCode(text));
+                    self.blocks.push(UiTimelineItem::LashlangCode(text));
                     self.invalidate_height_cache_from(
                         invalidate_from
                             .min(changed_idx)
@@ -1515,7 +1486,7 @@ impl App {
                     );
                     let changed_idx = self.blocks.len();
                     let invalidate_from = self.append_invalidation_start();
-                    self.blocks.push(DisplayBlock::Error(message));
+                    self.blocks.push(UiTimelineItem::Error(message));
                     self.invalidate_height_cache_from(
                         invalidate_from
                             .min(changed_idx)
@@ -1540,12 +1511,8 @@ impl App {
             }
             SessionEvent::ChildTokenUsage { .. } => {}
             SessionEvent::PluginEvent { plugin_id, event } => {
-                if let Some((status, detail)) = runtime_status_from_plugin_event(&event) {
-                    self.set_transient_status(
-                        status,
-                        Some(detail),
-                        std::time::Duration::from_secs(8),
-                    );
+                if let Some((status, detail, duration)) = runtime_status_from_plugin_event(&event) {
+                    self.set_transient_status(status, detail, duration);
                     self.dirty = true;
                 }
                 let renders_visible_output = plugin_surface_event_renders_visible_output(&event);

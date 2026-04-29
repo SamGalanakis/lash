@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub fn clear(&mut self) {
-        self.blocks = vec![DisplayBlock::Splash];
+        self.blocks = vec![UiTimelineItem::Splash];
         self.scroll_offset = 0;
         self.follow_mode = FollowOutputMode::Bottom;
         self.live_assistant.clear();
@@ -181,7 +181,7 @@ impl App {
         let Some(last_idx) = self
             .blocks
             .iter()
-            .rposition(|block| matches!(block, DisplayBlock::UserInput(_)))
+            .rposition(|block| matches!(block, UiTimelineItem::UserInput(_)))
         else {
             self.scroll_to_bottom();
             return;
@@ -204,7 +204,7 @@ impl App {
         let block_content_start = self.block_content_start_offset(last_idx);
         let has_splash_before = self.blocks[..last_idx]
             .iter()
-            .any(|block| matches!(block, DisplayBlock::Splash));
+            .any(|block| matches!(block, UiTimelineItem::Splash));
 
         let awaiting_first_visible_output = self
             .live_turn
@@ -272,7 +272,7 @@ impl App {
         let search_start = self
             .blocks
             .iter()
-            .rposition(|block| matches!(block, DisplayBlock::UserInput(_)))
+            .rposition(|block| matches!(block, UiTimelineItem::UserInput(_)))
             .map(|idx| idx + 1)
             .unwrap_or(0);
 
@@ -293,15 +293,15 @@ impl App {
             .then_some(history_tail + self.live_assistant_leading_padding())
     }
 
-    fn is_turn_visible_output_block(block: &DisplayBlock) -> bool {
+    fn is_turn_visible_output_block(block: &UiTimelineItem) -> bool {
         matches!(
             block,
-            DisplayBlock::AssistantText(_)
-                | DisplayBlock::AssistantReasoning(_)
-                | DisplayBlock::Activity(_)
-                | DisplayBlock::ShellOutput { .. }
-                | DisplayBlock::Error(_)
-                | DisplayBlock::PluginPanel(_)
+            UiTimelineItem::AssistantText(_)
+                | UiTimelineItem::AssistantReasoning(_)
+                | UiTimelineItem::Activity(_)
+                | UiTimelineItem::ShellOutput { .. }
+                | UiTimelineItem::Error(_)
+                | UiTimelineItem::PluginPanel(_)
         )
     }
 
@@ -309,7 +309,7 @@ impl App {
         let Some(last_idx) = self
             .blocks
             .iter()
-            .rposition(|block| matches!(block, DisplayBlock::UserInput(_)))
+            .rposition(|block| matches!(block, UiTimelineItem::UserInput(_)))
         else {
             return max_scroll;
         };
@@ -349,12 +349,12 @@ impl App {
         }
 
         match self.blocks.get(idx) {
-            Some(DisplayBlock::UserInput(_)) => {
-                usize::from(!matches!(self.blocks[idx - 1], DisplayBlock::Splash))
+            Some(UiTimelineItem::UserInput(_)) => {
+                usize::from(!matches!(self.blocks[idx - 1], UiTimelineItem::Splash))
             }
-            Some(DisplayBlock::AssistantText(_)) => usize::from(!matches!(
+            Some(UiTimelineItem::AssistantText(_)) => usize::from(!matches!(
                 self.blocks[idx - 1],
-                DisplayBlock::AssistantText(_) | DisplayBlock::Splash
+                UiTimelineItem::AssistantText(_) | UiTimelineItem::Splash
             )),
             _ => 0,
         }

@@ -1,6 +1,6 @@
 use lash::{DynamicStateSnapshot, LashRuntime, Message, MessageRole, SessionMessageTreeNode};
 
-use crate::app::{App, projected_blocks_from_state};
+use crate::app::{App, projected_timeline_items_from_projection};
 use crate::overlay::TreeSelection;
 use crate::persistence::persist_committed_runtime_state;
 use crate::session_log::SessionLogger;
@@ -49,18 +49,11 @@ pub async fn switch_to_tree_selection(
         .branch_to_node(target_leaf)
         .await
         .map_err(|err| err.to_string())?;
-    *history = state.project_conversation_messages();
+    let projection = state.shared_projection();
+    *history = projection.messages.as_ref().clone();
 
     app.stop_turn();
-    let projected_events = state.active_events();
-    let projected_messages = state.project_conversation_messages();
-    let projected_tool_calls = state.project_tool_calls();
-    app.blocks = projected_blocks_from_state(
-        &projected_events,
-        &projected_messages,
-        &projected_tool_calls,
-        &app.ui_projection_state(),
-    );
+    app.blocks = projected_timeline_items_from_projection(&projection, &app.ui_projection_state());
     app.token_usage = state.token_usage.clone();
     app.last_prompt_usage = state.last_prompt_usage.clone();
     // Branching to a different leaf means the handle maps from the

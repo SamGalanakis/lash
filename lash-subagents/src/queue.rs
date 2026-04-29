@@ -137,7 +137,7 @@ pub(crate) fn build_session_summary(
         parent_session_id: agent.parent_session_id.clone(),
         task: task.to_string(),
         iterations: turn.state.iteration,
-        tool_calls: turn.state.projected_tool_calls().len(),
+        tool_calls: turn.state.shared_projection().tool_calls.len(),
         model: turn.state.policy.model.clone(),
         model_variant: turn.state.policy.model_variant.clone(),
         token_usage: json!({

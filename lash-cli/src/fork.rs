@@ -790,7 +790,7 @@ mod fork_tests {
             .turn_state;
         assert_eq!(child_turn.iteration, 1);
 
-        let child_messages = child_graph.project_conversation_messages();
+        let child_messages = child_graph.shared_projection().messages;
         assert_eq!(child_messages.len(), 1);
         assert_eq!(child_messages[0].parts[0].content, "hello");
     }

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use lash::{
     ExecutionMode, LashRuntime, Message, MessageRole, Part, PartKind, PersistedSessionConfig,
-    PersistedTurnState, PruneState, RuntimeStore, SessionGraph, SessionHead, Store, TokenUsage,
+    PersistedTurnState, PruneState, RuntimePersistence, SessionGraph, SessionHead, Store,
+    TokenUsage,
 };
 
 fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
@@ -71,7 +72,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
     });
 
     let runtime = LashRuntime::builder()
-        .with_store(store.clone() as Arc<dyn RuntimeStore>)
+        .with_store(store.clone() as Arc<dyn RuntimePersistence>)
         .with_plugin_factories(vec![Arc::new(
             lash_mode_standard::BuiltinStandardModePluginFactory::default(),
         )])
@@ -80,11 +81,9 @@ async fn embedded_runtime_builder_loads_state_from_store() {
         .expect("runtime");
 
     let state = runtime.export_state();
-    assert_eq!(state.projected_conversation_messages().len(), 1);
-    assert_eq!(
-        state.projected_conversation_messages()[0].parts[0].content,
-        "stored question"
-    );
+    let projection = state.shared_projection();
+    assert_eq!(projection.messages.len(), 1);
+    assert_eq!(projection.messages[0].parts[0].content, "stored question");
     assert_eq!(state.iteration, 3);
     assert_eq!(state.token_usage.input_tokens, 20);
     assert_eq!(state.policy.model, "gpt-5.4-mini");
@@ -110,7 +109,7 @@ async fn embedded_runtime_builder_rejects_store_bound_to_different_session_id() 
     });
 
     let err = match LashRuntime::builder()
-        .with_store(store as Arc<dyn RuntimeStore>)
+        .with_store(store as Arc<dyn RuntimePersistence>)
         .with_session_id("beta")
         .with_plugin_factories(vec![Arc::new(
             lash_mode_standard::BuiltinStandardModePluginFactory::default(),

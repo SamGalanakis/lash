@@ -16,8 +16,8 @@ use crate::activity::{
     patch_file_subject, patch_status_title,
 };
 use crate::app::{
-    App, DisplayBlock, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
-    preview_text_lines,
+    App, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
+    UiTimelineItem, preview_text_lines,
 };
 use crate::assistant_text;
 use crate::diff::render_inline_diff;
@@ -942,7 +942,7 @@ pub(crate) fn render_block_lines(
 
 #[cfg(test)]
 fn render_block(
-    blocks: &[DisplayBlock],
+    blocks: &[UiTimelineItem],
     idx: usize,
     expand_level: u8,
     viewport_width: usize,
@@ -964,7 +964,7 @@ fn render_block_into(
     let blocks = &app.blocks;
     let expand_level = app.expand_level;
     match &blocks[idx] {
-        DisplayBlock::TurnStart(turn) => {
+        UiTimelineItem::TurnStart(turn) => {
             if turn.show_separator {
                 let rule_width = (viewport_width * 2 / 5).max(8).min(viewport_width);
                 let pad_left = (viewport_width.saturating_sub(rule_width)) / 2;
@@ -984,7 +984,7 @@ fn render_block_into(
             // features (turn folding, turn addressing) scan between
             // `TurnStart` markers without changing the renderer.
         }
-        DisplayBlock::UserInput(text) => {
+        UiTimelineItem::UserInput(text) => {
             let marker_style = Style::default().fg(theme::brand());
             let prefix_w = 2;
             let cap = viewport_width.saturating_sub(prefix_w);
@@ -1013,7 +1013,7 @@ fn render_block_into(
                 }
             }
         }
-        DisplayBlock::AssistantText(text) => {
+        UiTimelineItem::AssistantText(text) => {
             // Insert a blank row before the assistant's spoken text
             // unless it directly follows other spoken text (where the
             // gap would be noise). Reasoning used to be in this list,
@@ -1023,9 +1023,9 @@ fn render_block_into(
             let add_spacing_before = idx > 0
                 && !matches!(
                     blocks[idx - 1],
-                    DisplayBlock::AssistantText(_)
-                        | DisplayBlock::Splash
-                        | DisplayBlock::TurnStart(_)
+                    UiTimelineItem::AssistantText(_)
+                        | UiTimelineItem::Splash
+                        | UiTimelineItem::TurnStart(_)
                 );
             lines.extend(assistant_text::render_assistant_text_block(
                 text,
@@ -1033,13 +1033,13 @@ fn render_block_into(
                 add_spacing_before,
             ));
         }
-        DisplayBlock::AssistantReasoning(text) => {
+        UiTimelineItem::AssistantReasoning(text) => {
             let add_spacing_before = idx > 0
                 && !matches!(
                     blocks[idx - 1],
-                    DisplayBlock::AssistantReasoning(_)
-                        | DisplayBlock::Splash
-                        | DisplayBlock::TurnStart(_)
+                    UiTimelineItem::AssistantReasoning(_)
+                        | UiTimelineItem::Splash
+                        | UiTimelineItem::TurnStart(_)
                 );
             // Show full reasoning only when either (a) the user has
             // opted into full expansion (Alt+O -> level 2), or (b) this
@@ -1064,13 +1064,13 @@ fn render_block_into(
                 ));
             }
         }
-        DisplayBlock::Activity(activity) => {
+        UiTimelineItem::Activity(activity) => {
             render_activity_block(activity, expand_level, lines, viewport_width);
             if app.live_tool_output_anchor_block_index() == Some(idx) {
                 render_live_tool_output_inline(lines, app, &activity.call.kind, viewport_width);
             }
         }
-        DisplayBlock::ShellOutput {
+        UiTimelineItem::ShellOutput {
             command,
             output,
             error,
@@ -1096,7 +1096,7 @@ fn render_block_into(
                 }
             }
         }
-        DisplayBlock::Error(message) => render_bordered_text_block(
+        UiTimelineItem::Error(message) => render_bordered_text_block(
             "ERROR",
             message.lines().map(str::to_string).collect(),
             lines,
@@ -1105,7 +1105,7 @@ fn render_block_into(
             theme::error_title(),
             theme::error(),
         ),
-        DisplayBlock::SystemMessage(text) => {
+        UiTimelineItem::SystemMessage(text) => {
             for line in text.lines() {
                 lines.push(Line::from(Span::styled(
                     line.to_string(),
@@ -1113,10 +1113,10 @@ fn render_block_into(
                 )));
             }
         }
-        DisplayBlock::PluginPanel(panel) => {
+        UiTimelineItem::PluginPanel(panel) => {
             render_section_panel_block(&panel.title, &panel.content, lines, viewport_width);
         }
-        DisplayBlock::LashlangCode(code) => {
+        UiTimelineItem::LashlangCode(code) => {
             // Only shown at full expansion (Alt+O). At lower levels the
             // block contributes zero lines — its tool activities carry
             // the visible story already.
@@ -1124,7 +1124,7 @@ fn render_block_into(
                 render_lashlang_code_block(code, lines, viewport_width);
             }
         }
-        DisplayBlock::Splash => {
+        UiTimelineItem::Splash => {
             render_splash(lines, viewport_width, viewport_height, blocks.len() == 1)
         }
     }

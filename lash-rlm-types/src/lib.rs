@@ -115,14 +115,6 @@ pub struct RlmCreateExtras {
     pub termination: RlmTermination,
 }
 
-/// Pure-RLM-mode session config. Uses the same termination contract as
-/// RLM while projecting history as a structured REPL trajectory.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct RlmpureCreateExtras {
-    #[serde(default)]
-    pub termination: RlmTermination,
-}
-
 #[derive(Clone, Debug)]
 pub struct RlmModeProtocol;
 

@@ -20,16 +20,13 @@ fn test_config_with_termination(
 ) -> TurnMachineConfig {
     let protocol_driver: Arc<dyn ProtocolDriverHandle<lash::HostModeProtocol>> = match &mode {
         mode if *mode == ExecutionMode::standard() => Arc::new(StandardDriver),
-        mode if *mode == ExecutionMode::new("rlm") || *mode == ExecutionMode::new("rlmpure") => {
-            Arc::new(RlmDriver)
-        }
+        mode if *mode == ExecutionMode::new("rlm") => Arc::new(RlmDriver),
         _ => Arc::new(StandardDriver),
     };
     TurnMachineConfig {
         protocol_driver,
         projector: Arc::new(ChatContextProjector),
-        sync_execution_surface: mode == ExecutionMode::new("rlm")
-            || mode == ExecutionMode::new("rlmpure"),
+        sync_execution_surface: mode == ExecutionMode::new("rlm"),
         model: "test-model".to_string(),
         max_turns: None,
         model_variant: None,
@@ -580,7 +577,7 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
 #[test]
 fn rlm_reasoning_part_is_preserved_in_trajectory() {
     let config = test_config_with_termination(
-        ExecutionMode::new("rlmpure"),
+        ExecutionMode::new("rlm"),
         RlmTermination::Finish { schema: None },
     );
     let msgs = vec![user_message("say hi")];

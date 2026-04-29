@@ -21,7 +21,7 @@ pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
     pub turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
-    pub(crate) store: Option<Arc<dyn crate::store::RuntimeStore>>,
+    pub(crate) store: Option<Arc<dyn crate::store::RuntimePersistence>>,
 }
 
 #[derive(Clone)]
@@ -119,7 +119,10 @@ impl RuntimeServices {
 }
 
 impl PersistentRuntimeServices {
-    pub fn new(plugins: Arc<PluginSession>, store: Arc<dyn crate::store::RuntimeStore>) -> Self {
+    pub fn new(
+        plugins: Arc<PluginSession>,
+        store: Arc<dyn crate::store::RuntimePersistence>,
+    ) -> Self {
         Self::new_with_bridges(
             plugins,
             crate::session::TurnInjectionBridge::new(),
@@ -132,7 +135,7 @@ impl PersistentRuntimeServices {
         plugins: Arc<PluginSession>,
         turn_injection_bridge: crate::session::TurnInjectionBridge,
         turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
-        store: Arc<dyn crate::store::RuntimeStore>,
+        store: Arc<dyn crate::store::RuntimePersistence>,
     ) -> Self {
         Self(RuntimeServices {
             plugins,
@@ -146,7 +149,7 @@ impl PersistentRuntimeServices {
         self.0
     }
 
-    pub fn store(&self) -> Arc<dyn crate::store::RuntimeStore> {
+    pub fn store(&self) -> Arc<dyn crate::store::RuntimePersistence> {
         self.0
             .store
             .as_ref()

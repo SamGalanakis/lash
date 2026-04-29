@@ -158,7 +158,7 @@ pub use session::{
 };
 pub use session_graph::{
     PersistedSessionConfig, PersistedTurnState, SessionGraph, SessionMessageTreeNode,
-    SessionNodePayload, SessionNodeRecord,
+    SessionNodePayload, SessionNodeRecord, SessionProjection,
 };
 pub use session_model::SessionPolicy;
 pub use session_model::context::PreparedContext;
@@ -170,10 +170,14 @@ pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
 pub use store::{
-    BlobArtifactDescriptor, BlobCompression, BlobRef, BlobStorageHint, GcReport,
+    BlobArtifactDescriptor, BlobCompression, BlobRef, BlobStorageHint, BlobStore, GcReport,
     HydratedSessionCheckpoint, PersistedArtifactKind, PersistedStateCommit,
-    PersistedStateCommitResult, RetainedArtifactRef, RuntimeStore, SessionCheckpoint,
-    SessionGraphCommit, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo, VacuumReport,
+    PersistedStateCommitResult, RetainedArtifactRef, RetentionStore, RuntimePersistence,
+    SessionCheckpoint, SessionGraphCommit, SessionGraphStore, SessionHead, SessionHeadMeta,
+    SessionHeadStore, SessionMeta, SessionPickerInfo, UsageLedgerStore, VacuumReport,
+    apply_runtime_commit, head_copy_from_store, load_persisted_session_state,
+    load_persisted_session_state_active_path, load_session_head, refresh_persisted_session_state,
+    save_session_head,
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{BuiltinBlobProfile, SqliteStore, Store, StoreGcPolicy, StoreOptions};

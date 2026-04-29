@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use lash::PluginSurfaceEvent;
 
-use crate::app::{DisplayBlock, PlanDockItem, PlanDockItemStatus, PlanDockState, PluginPanelBlock};
+use crate::app::{
+    PlanDockItem, PlanDockItemStatus, PlanDockState, PluginPanelBlock, UiTimelineItem,
+};
 
 pub struct PluginSurfaceMutation {
     pub blocks_changed: bool,
@@ -115,7 +117,7 @@ fn plan_state_from_panel(title: &str, content: &str) -> PlanDockState {
 }
 
 pub fn apply_surface_event(
-    blocks: &mut Vec<DisplayBlock>,
+    blocks: &mut Vec<UiTimelineItem>,
     indicators: &mut BTreeMap<String, String>,
     plan_dock: &Option<PlanDockState>,
     plugin_id: &str,
@@ -168,7 +170,7 @@ pub fn apply_surface_event(
 
             let target_key = surface_key(plugin_id, &key);
             if let Some(existing) = blocks.iter_mut().find_map(|block| match block {
-                DisplayBlock::PluginPanel(panel)
+                UiTimelineItem::PluginPanel(panel)
                     if surface_key(&panel.plugin_id, &panel.key) == target_key =>
                 {
                     Some(panel)
@@ -180,7 +182,7 @@ pub fn apply_surface_event(
                 existing.content = content;
                 PluginSurfaceMutation::blocks_changed(changed)
             } else {
-                blocks.push(DisplayBlock::PluginPanel(PluginPanelBlock {
+                blocks.push(UiTimelineItem::PluginPanel(PluginPanelBlock {
                     plugin_id: plugin_id.to_string(),
                     key,
                     title,
@@ -207,7 +209,7 @@ pub fn apply_surface_event(
 
             let target_key = surface_key(plugin_id, &key);
             if let Some(existing) = blocks.iter_mut().find_map(|block| match block {
-                DisplayBlock::PluginPanel(panel)
+                UiTimelineItem::PluginPanel(panel)
                     if surface_key(&panel.plugin_id, &panel.key) == target_key =>
                 {
                     Some(panel)
@@ -232,13 +234,14 @@ pub fn apply_surface_event(
             let original_len = blocks.len();
             let target_key = surface_key(plugin_id, &key);
             blocks.retain(|block| match block {
-                DisplayBlock::PluginPanel(panel) => {
+                UiTimelineItem::PluginPanel(panel) => {
                     surface_key(&panel.plugin_id, &panel.key) != target_key
                 }
                 _ => true,
             });
             PluginSurfaceMutation::blocks_changed(blocks.len() != original_len)
         }
+        PluginSurfaceEvent::Status { .. } => PluginSurfaceMutation::blocks_changed(false),
         PluginSurfaceEvent::Custom { .. } => PluginSurfaceMutation::blocks_changed(false),
     }
 }

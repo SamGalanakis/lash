@@ -54,8 +54,9 @@ impl LashRuntime {
 
         self.state.policy = self.policy.clone();
         self.state.iteration = iteration;
+        let state_projection = self.state.shared_projection();
         if let Some(appended_messages) = projection_message_delta_if_base_preserved(
-            self.state.projected_conversation_messages(),
+            state_projection.messages.as_slice(),
             messages.iter(),
         ) {
             self.state
@@ -76,15 +77,12 @@ impl LashRuntime {
             self.state.refresh_plugin_snapshots(plugins.as_ref());
         }
 
-        let commit = crate::store::PersistedStateCommit::persisted_state(&self.state, &[]);
-        let result = store
-            .apply_runtime_commit(commit)
+        commit_runtime_state(store.as_ref(), &mut self.state, &[])
             .await
             .map_err(|err| RuntimeError {
                 code: "store_commit_failed".to_string(),
                 message: err.to_string(),
             })?;
-        self.state.apply_persisted_commit_result(result);
         Ok(())
     }
 
@@ -148,12 +146,9 @@ impl LashRuntime {
         // Capture lengths instead of Arcs: holding the projection Arcs across
         // the turn forces every progress-boundary persist to clone the whole
         // projected_messages / projected_tool_calls Vec via Arc::make_mut.
-        let saved_messages_len = self
-            .state
-            .session_graph
-            .projected_conversation_messages()
-            .len();
-        let saved_tool_calls_len = self.state.session_graph.projected_tool_calls().len();
+        let saved_projection = self.state.shared_projection();
+        let saved_messages_len = saved_projection.messages.len();
+        let saved_tool_calls_len = saved_projection.tool_calls.len();
         let saved_prompt_usage = self.state.last_prompt_usage.clone();
 
         let assembled = self
@@ -165,11 +160,10 @@ impl LashRuntime {
             // Restore pre-turn state so the retry appends the user message cleanly.
             // The turn only appends to the projection, so the original pre-turn
             // state is exactly the prefix of the current projection.
-            let saved_messages: Vec<_> = self.state.session_graph.projected_conversation_messages()
-                [..saved_messages_len]
-                .to_vec();
+            let current_projection = self.state.shared_projection();
+            let saved_messages: Vec<_> = current_projection.messages[..saved_messages_len].to_vec();
             let saved_tool_calls: Vec<_> =
-                self.state.session_graph.projected_tool_calls()[..saved_tool_calls_len].to_vec();
+                current_projection.tool_calls[..saved_tool_calls_len].to_vec();
             self.state
                 .replace_projection(&saved_messages, &saved_tool_calls);
             self.state.last_prompt_usage = saved_prompt_usage;
@@ -242,14 +236,9 @@ impl LashRuntime {
             );
         }
 
-        let base_messages = self
-            .state
-            .session_graph
-            .shared_projected_conversation_messages();
-        let base_render_cache = self
-            .state
-            .session_graph
-            .shared_projected_messages_render_cache();
+        let base_projection = self.state.shared_projection();
+        let base_messages = base_projection.messages;
+        let base_render_cache = base_projection.messages_render_cache;
         let mut turn_delta = Vec::new();
         let mode = input.mode.unwrap_or(RunMode::Normal);
         let mode_msg = match mode {
@@ -515,13 +504,14 @@ impl LashRuntime {
             drop(event_tx);
 
             let mut state = self.state.clone();
+            let state_projection = state.shared_projection();
             if let Some(appended_messages) = projection_message_delta_if_base_preserved(
-                state.projected_conversation_messages(),
+                state_projection.messages.as_slice(),
                 prepared.messages.as_slice(),
             ) {
                 state.append_projected_conversation_messages(&appended_messages);
             } else {
-                let tool_calls = state.project_tool_calls();
+                let tool_calls = state_projection.tool_calls.as_ref().clone();
                 state.replace_projection(prepared.messages.as_slice(), &tool_calls);
             }
             let issue = TurnIssue {
@@ -551,10 +541,10 @@ impl LashRuntime {
                 &self.host.core.termination,
             ));
         }
-        let current_tool_calls = self.state.session_graph.shared_projected_tool_calls();
+        let current_projection = self.state.session_graph.shared_projection();
         self.persist_progress_boundary(
             &prepared.messages,
-            current_tool_calls.as_slice(),
+            current_projection.tool_calls.as_slice(),
             self.state.iteration,
         )
         .await?;
@@ -563,15 +553,14 @@ impl LashRuntime {
             .session
             .take()
             .expect("lash runtime session must be available");
-        let base_events = self.state.session_graph.shared_active_events();
+        let base_projection = self.state.session_graph.shared_projection();
+        let base_events = base_projection.active_events;
         let sansio_events_synced = base_events.len();
         let progress_graph = TurnGraphOverlay::new(
             Arc::new(self.state.session_graph.clone()),
             base_events,
-            self.state
-                .session_graph
-                .shared_projected_conversation_messages(),
-            self.state.session_graph.shared_projected_tool_calls(),
+            base_projection.messages,
+            base_projection.tool_calls,
         );
         let mut driver = RuntimeTurnDriver {
             session,
@@ -746,7 +735,7 @@ impl LashRuntime {
         };
         tracing::debug!(
             rss_kb = debug_rss_kb(),
-            state_message_count = self.state.projected_conversation_messages().len(),
+            state_message_count = self.state.shared_projection().messages.len(),
             graph_node_count = self.state.session_graph.nodes.len(),
             token_ledger_entries = self.state.token_ledger.len(),
             "runtime before assembler.finish"
@@ -762,7 +751,7 @@ impl LashRuntime {
         );
         tracing::debug!(
             rss_kb = debug_rss_kb(),
-            assembled_message_count = assembled.state.projected_conversation_messages().len(),
+            assembled_message_count = assembled.state.shared_projection().messages.len(),
             assembled_graph_node_count = assembled.state.session_graph.nodes.len(),
             "runtime after assembler.finish"
         );
@@ -781,8 +770,7 @@ impl LashRuntime {
             self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                finalized_message_count =
-                    finalized.turn.state.projected_conversation_messages().len(),
+                finalized_message_count = finalized.turn.state.shared_projection().messages.len(),
                 "runtime after finalize_turn"
             );
             let mut returned_turn = finalized.turn;
@@ -800,7 +788,7 @@ impl LashRuntime {
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
                 persisted_graph_node_count = assembled_state.session_graph.nodes.len(),
-                persisted_message_count = assembled_state.projected_conversation_messages().len(),
+                persisted_message_count = assembled_state.shared_projection().messages.len(),
                 "runtime after stamp_runtime_state"
             );
             if let Some(store) = self
@@ -808,19 +796,12 @@ impl LashRuntime {
                 .as_ref()
                 .and_then(|session| session.history_store())
             {
-                let commit = crate::store::PersistedStateCommit::persisted_state(
-                    &assembled_state,
-                    &turn_usage_delta,
-                );
-                let result =
-                    store
-                        .apply_runtime_commit(commit)
-                        .await
-                        .map_err(|err| RuntimeError {
-                            code: "store_commit_failed".to_string(),
-                            message: err.to_string(),
-                        })?;
-                assembled_state.apply_persisted_commit_result(result);
+                commit_runtime_state(store.as_ref(), &mut assembled_state, &turn_usage_delta)
+                    .await
+                    .map_err(|err| RuntimeError {
+                        code: "store_commit_failed".to_string(),
+                        message: err.to_string(),
+                    })?;
             } else {
                 clear_persisted_runtime_caches(&mut assembled_state);
             }

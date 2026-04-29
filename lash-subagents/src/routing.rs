@@ -198,7 +198,8 @@ pub fn truncate_snapshot_to_recent_turns(
         return snapshot;
     }
 
-    let messages = snapshot.project_conversation_messages();
+    let projection = snapshot.shared_projection();
+    let messages = projection.messages.as_slice();
     let user_turn_starts = messages
         .iter()
         .enumerate()
@@ -214,9 +215,10 @@ pub fn truncate_snapshot_to_recent_turns(
         .flat_map(|message| message.parts.iter())
         .filter_map(|part| part.tool_call_id.clone())
         .collect::<HashSet<_>>();
-    let kept_tool_calls = snapshot
-        .project_tool_calls()
-        .into_iter()
+    let kept_tool_calls = projection
+        .tool_calls
+        .iter()
+        .cloned()
         .filter(|tool_call| {
             tool_call
                 .call_id

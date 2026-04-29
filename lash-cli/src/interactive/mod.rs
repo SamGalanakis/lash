@@ -16,7 +16,7 @@ use lash_ui::{UiCommandInvocation, UiContext, UiExtensions};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{self, App, DisplayBlock, PreparedTurn};
+use crate::app::{self, App, PreparedTurn, UiTimelineItem};
 use crate::command;
 use crate::event::AppEvent;
 use crate::render;
@@ -564,7 +564,8 @@ pub(crate) async fn run_app(
                         }
                     }
 
-                    history = state.project_conversation_messages();
+                    let projection = state.shared_projection();
+                    history = projection.messages.as_ref().clone();
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
@@ -573,7 +574,7 @@ pub(crate) async fn run_app(
                         iteration = state.iteration,
                         status = ?done.result.status,
                         reason = ?done.result.done_reason,
-                        messages = state.projected_conversation_messages().len(),
+                        messages = projection.messages.len(),
                         blocks = app.blocks.len(),
                         had_live_turn = app.live_turn.is_some(),
                         running = app.running,
@@ -582,7 +583,7 @@ pub(crate) async fn run_app(
                     if interrupted {
                         let had_manual_interrupt_message = matches!(
                             app.blocks.last(),
-                            Some(DisplayBlock::SystemMessage(message))
+                            Some(UiTimelineItem::SystemMessage(message))
                                 if message == crate::util::manual_interrupt_message()
                         );
                         let mut ui_projection_state = app.ui_projection_state();
@@ -596,13 +597,8 @@ pub(crate) async fn run_app(
                             "Cancelled.".to_string()
                         };
                         app.stop_turn();
-                        let projected_events = state.active_events();
-                        let projected_messages = state.project_conversation_messages();
-                        let projected_tool_calls = state.project_tool_calls();
                         app.blocks = app::project_interrupted_blocks(
-                            &projected_events,
-                            &projected_messages,
-                            &projected_tool_calls,
+                            &projection,
                             &ui_projection_state,
                             interrupted_message.clone(),
                         );
@@ -644,14 +640,7 @@ pub(crate) async fn run_app(
                         continue;
                     }
 
-                    let projected_events = state.active_events();
-                    let projected_messages = state.project_conversation_messages();
-                    let projected_tool_calls = state.project_tool_calls();
-                    app.finish_turn_from_projection(
-                        &projected_events,
-                        &projected_messages,
-                        &projected_tool_calls,
-                    );
+                    app.finish_turn_from_projection(&projection);
                     app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;

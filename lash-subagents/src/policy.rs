@@ -16,10 +16,8 @@ pub(super) fn subagent_tool_definitions(
     let names = registry.names();
     if execution_mode == lash::ExecutionMode::standard() {
         standard_subagent_tool_definitions(&names)
-    } else if execution_mode == lash::ExecutionMode::new("rlmpure") {
-        rlm_subagent_tool_definitions(&names, true)
     } else if execution_mode == lash::ExecutionMode::new("rlm") {
-        rlm_subagent_tool_definitions(&names, false)
+        rlm_subagent_tool_definitions(&names)
     } else {
         standard_subagent_tool_definitions(&names)
     }
@@ -54,12 +52,9 @@ fn standard_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDe
     ]
 }
 
-fn rlm_subagent_tool_definitions(
-    capability_names: &[String],
-    include_pass_baton: bool,
-) -> Vec<ToolDefinition> {
+fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDefinition> {
     let example_capability = example_capability_name(capability_names);
-    let mut tools = vec![
+    vec![
         spawn_agent_definition(
             capability_names,
             vec![
@@ -77,6 +72,9 @@ fn rlm_subagent_tool_definitions(
                 r#"update = await wait"#.into(),
             ],
         ),
+        pass_baton_definition(vec![
+            r#"call pass_baton { task: "filter the candidates by relevance to the user's query and submit the top 3", seed: { candidates: candidates, query: user_input_1 } }"#.into(),
+        ]),
         send_message_definition(vec![
             r#"call send_message { target: "/root", message: "Found the config file and traced the parse path." }"#.into(),
         ]),
@@ -88,16 +86,7 @@ fn rlm_subagent_tool_definitions(
             r#"call wait_agent { targets: ["/root/inspect_auth"], timeout_ms: 30000 }"#.into(),
         ]),
         list_agents_definition(vec![r#"call list_agents { path_prefix: "/root" }"#.into()]),
-    ];
-    if include_pass_baton {
-        tools.insert(
-            1,
-            pass_baton_definition(vec![
-                r#"call pass_baton { task: "filter the candidates by relevance to the user's query and submit the top 3", seed: { candidates: candidates, query: user_input_1 } }"#.into(),
-            ]),
-        );
-    }
-    tools
+    ]
 }
 
 fn example_capability_name(capability_names: &[String]) -> String {

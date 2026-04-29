@@ -10,7 +10,7 @@ use crate::{ExternalInvokeError, SessionError};
 use super::LashRuntime;
 use super::state::{
     PersistedSessionState, SessionStateEnvelope, append_session_nodes_to_state,
-    normalize_session_graph, persist_session_graph_and_head,
+    normalize_session_graph, persist_runtime_state,
 };
 
 impl LashRuntime {
@@ -59,7 +59,7 @@ impl LashRuntime {
             .as_ref()
             .and_then(|session| session.history_store())
         {
-            persist_session_graph_and_head(store.as_ref(), &mut self.state).await;
+            persist_runtime_state(store.as_ref(), &mut self.state).await;
         }
         Ok(crate::AppendSessionNodesResult::Appended {
             node_ids,

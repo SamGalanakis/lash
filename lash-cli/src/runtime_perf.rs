@@ -34,24 +34,21 @@ pub(crate) enum RuntimePerfScenario {
     Standard,
     Rlm,
     RlmGlobals,
-    Rlmpure,
     ObservationalMemory,
     OpenAiCompatStream,
 }
 
 impl RuntimePerfScenario {
-    const DEFAULTS: [Self; 5] = [
+    const DEFAULTS: [Self; 4] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmGlobals,
-        Self::Rlmpure,
         Self::ObservationalMemory,
     ];
-    const KNOWN: [Self; 6] = [
+    const KNOWN: [Self; 5] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmGlobals,
-        Self::Rlmpure,
         Self::ObservationalMemory,
         Self::OpenAiCompatStream,
     ];
@@ -61,7 +58,6 @@ impl RuntimePerfScenario {
             "standard" => Some(Self::Standard),
             "rlm" => Some(Self::Rlm),
             "rlm_globals" => Some(Self::RlmGlobals),
-            "rlmpure" => Some(Self::Rlmpure),
             "observational_memory" => Some(Self::ObservationalMemory),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
             _ => None,
@@ -73,7 +69,6 @@ impl RuntimePerfScenario {
             Self::Standard => "standard",
             Self::Rlm => "rlm",
             Self::RlmGlobals => "rlm_globals",
-            Self::Rlmpure => "rlmpure",
             Self::ObservationalMemory => "observational_memory",
             Self::OpenAiCompatStream => "openai_compat_stream",
         }
@@ -85,7 +80,6 @@ impl RuntimePerfScenario {
                 ExecutionMode::standard()
             }
             Self::Rlm | Self::RlmGlobals => ExecutionMode::new("rlm"),
-            Self::Rlmpure => ExecutionMode::new("rlmpure"),
         }
     }
 
@@ -308,7 +302,7 @@ struct RuntimePerfStore {
 }
 
 #[async_trait::async_trait]
-impl RuntimeStore for RuntimePerfStore {
+impl BlobStore for RuntimePerfStore {
     async fn put_blob(&self, content: &[u8]) -> BlobRef {
         let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
         let key = format!("perf-blob-{id}");
@@ -326,7 +320,10 @@ impl RuntimeStore for RuntimePerfStore {
             .get(blob_ref.as_str())
             .cloned()
     }
+}
 
+#[async_trait::async_trait]
+impl UsageLedgerStore for RuntimePerfStore {
     async fn append_usage_deltas(&self, entries: &[TokenLedgerEntry]) {
         self.usage_deltas
             .lock()
@@ -340,7 +337,10 @@ impl RuntimeStore for RuntimePerfStore {
             .expect("lock perf usage deltas")
             .clone()
     }
+}
 
+#[async_trait::async_trait]
+impl SessionHeadStore for RuntimePerfStore {
     async fn save_session_head_meta(&self, meta: SessionHeadMeta) {
         *self
             .session_head_meta
@@ -355,6 +355,20 @@ impl RuntimeStore for RuntimePerfStore {
             .clone()
     }
 
+    async fn save_session_meta(&self, meta: store::SessionMeta) {
+        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
+    }
+
+    async fn load_session_meta(&self) -> Option<store::SessionMeta> {
+        self.session_meta
+            .lock()
+            .expect("lock perf session meta")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionGraphStore for RuntimePerfStore {
     async fn replace_session_graph(&self, graph: &SessionGraph) {
         *self.session_graph.lock().expect("lock perf graph") = graph.clone();
     }
@@ -369,18 +383,10 @@ impl RuntimeStore for RuntimePerfStore {
     async fn load_session_graph(&self) -> SessionGraph {
         self.session_graph.lock().expect("lock perf graph").clone()
     }
-
-    async fn save_session_meta(&self, meta: store::SessionMeta) {
-        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
-    }
-
-    async fn load_session_meta(&self) -> Option<store::SessionMeta> {
-        self.session_meta
-            .lock()
-            .expect("lock perf session meta")
-            .clone()
-    }
 }
+
+#[async_trait::async_trait]
+impl RetentionStore for RuntimePerfStore {}
 
 impl OpenAiCompatBenchServer {
     async fn start(profile: BenchmarkStreamProfile) -> anyhow::Result<Self> {
@@ -802,7 +808,7 @@ async fn run_once(
         export_state_ms,
         total_ms: elapsed_ms(total_started),
         session_nodes: state.session_graph.nodes.len(),
-        active_path_messages: state.projected_conversation_messages().len(),
+        active_path_messages: state.shared_projection().messages.len(),
         memory: RuntimePerfMemoryRunResult {
             rss_before_kb: before_memory.rss_kb,
             rss_after_build_kb: after_build_memory.rss_kb,
@@ -861,7 +867,7 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
     };
 
     let profile = DefaultToolSurfaceProfile::for_runtime(&context_approach, false, false);
-    let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimeStore>;
+    let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimePersistence>;
     let mut factories = tool_plugin_factories(DefaultToolPluginOptions {
         execution_mode,
         context_approach: context_approach.clone(),
@@ -874,9 +880,6 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
     ));
     factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
-    ));
-    factories.push(Arc::new(
-        lash_mode_rlmpure::BuiltinRlmpureModePluginFactory::default(),
     ));
     let plugin_host = PluginHost::new(factories).with_dynamic_tools();
     let builder = LashRuntime::builder()
@@ -954,7 +957,8 @@ async fn seed_runtime_state(
     if matches!(scenario, RuntimePerfScenario::ObservationalMemory) {
         let observed_through_message_id = runtime
             .export_state()
-            .projected_conversation_messages()
+            .shared_projection()
+            .messages
             .last()
             .map(|message| message.id.clone())
             .ok_or_else(|| anyhow::anyhow!("OM scenario expected seeded messages"))?;
@@ -1050,14 +1054,6 @@ fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize) -> String 
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
-        RuntimePerfScenario::Rlmpure => format!(
-            "Turn {} in rlmpure mode. Continue the trajectory benchmark and reply with exactly: {}",
-            turn_index + 1,
-            DEFAULT_PROMPT
-                .rsplit_once(": ")
-                .map(|(_, text)| text)
-                .unwrap_or("runtime perf benchmark ok")
-        ),
         RuntimePerfScenario::ObservationalMemory => format!(
             "Turn {} in observational memory mode. Continue the same longer benchmark conversation and reply with exactly: {}",
             turn_index + 1,
@@ -1095,9 +1091,7 @@ fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> BenchmarkStreamPro
                 deltas,
             }
         }
-        RuntimePerfScenario::Rlm
-        | RuntimePerfScenario::RlmGlobals
-        | RuntimePerfScenario::Rlmpure => {
+        RuntimePerfScenario::Rlm | RuntimePerfScenario::RlmGlobals => {
             let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
             BenchmarkStreamProfile {
                 full_text: text.clone(),

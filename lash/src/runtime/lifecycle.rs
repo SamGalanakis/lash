@@ -136,7 +136,7 @@ impl LashRuntime {
         env: &RuntimeEnvironment,
         policy: SessionPolicy,
         mut state: PersistedSessionState,
-        store: Option<Arc<dyn crate::store::RuntimeStore>>,
+        store: Option<Arc<dyn crate::store::RuntimePersistence>>,
     ) -> Result<Self, SessionError> {
         // ActivePathOnly without a store is a data-loss footgun: trim
         // drops orphans from RAM with nowhere to reload them from.
@@ -211,7 +211,7 @@ impl LashRuntime {
         let session_id = self.state.session_id.clone();
         let policy = self.policy.clone();
         // Flush any dirty resident state to the store before dropping.
-        persist_session_graph_and_head(store.as_ref(), &mut self.state).await;
+        persist_runtime_state(store.as_ref(), &mut self.state).await;
         // Drain pending tombstones if any. Under KeepHistory this is a
         // no-op (tombstones never get added). Under DropOrphans,
         // Phase-9's not-yet-wired rewrite path would have populated the
@@ -238,12 +238,11 @@ impl LashRuntime {
         // graph then forks, which is correct but slower on large
         // histories.
         let loaded = match env.residency {
-            Residency::KeepAll => parked.store.load_persisted_session_state().await,
+            Residency::KeepAll => {
+                crate::store::load_persisted_session_state(parked.store.as_ref()).await
+            }
             Residency::ActivePathOnly => {
-                parked
-                    .store
-                    .load_persisted_session_state_active_path()
-                    .await
+                crate::store::load_persisted_session_state_active_path(parked.store.as_ref()).await
             }
         };
         let state = loaded.unwrap_or_else(|| PersistedSessionState {

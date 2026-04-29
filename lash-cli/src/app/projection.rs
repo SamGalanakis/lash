@@ -36,19 +36,26 @@ impl UiTimeline {
         self.items.as_slice()
     }
 
-    pub(crate) fn to_display_blocks(&self) -> Vec<DisplayBlock> {
-        self.items.iter().cloned().map(Into::into).collect()
+    pub(crate) fn to_items(&self) -> Vec<UiTimelineItem> {
+        self.items.clone()
     }
 
-    fn into_display_blocks(self) -> Vec<DisplayBlock> {
-        self.items.into_iter().map(Into::into).collect()
+    fn into_items(self) -> Vec<UiTimelineItem> {
+        self.items
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A renderable item in the scrollable history timeline.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum UiTimelineItem {
+    /// Turn boundary. Carries the Turn metadata and is the source of
+    /// truth for the separator rule.
     TurnStart(Turn),
     UserInput(String),
+    /// Model reasoning summary ("thinking"). Rendered above the
+    /// assistant's final text in a muted/italic style so the user can see
+    /// the model's scratch thoughts without confusing them with the
+    /// actual reply. Display-only; never persisted back into prompts.
     AssistantReasoning(String),
     AssistantText(String),
     Activity(Box<ActivityBlock>),
@@ -58,74 +65,55 @@ pub(crate) enum UiTimelineItem {
         error: Option<String>,
     },
     Error(String),
+    /// Informational message from the system (e.g. /help output).
     SystemMessage(String),
     PluginPanel(PluginPanelBlock),
+    /// The fenced `lashlang` source from an RLM turn, captured so the
+    /// transcript can reveal the code that produced the subsequent tool
+    /// activities. Hidden by default; shown at full expansion.
     LashlangCode(String),
     Splash,
 }
 
-impl From<UiTimelineItem> for DisplayBlock {
-    fn from(item: UiTimelineItem) -> Self {
-        match item {
-            UiTimelineItem::TurnStart(turn) => DisplayBlock::TurnStart(turn),
-            UiTimelineItem::UserInput(text) => DisplayBlock::UserInput(text),
-            UiTimelineItem::AssistantReasoning(text) => DisplayBlock::AssistantReasoning(text),
-            UiTimelineItem::AssistantText(text) => DisplayBlock::AssistantText(text),
-            UiTimelineItem::Activity(activity) => DisplayBlock::Activity(activity),
-            UiTimelineItem::ShellOutput {
-                command,
-                output,
-                error,
-            } => DisplayBlock::ShellOutput {
-                command,
-                output,
-                error,
-            },
-            UiTimelineItem::Error(text) => DisplayBlock::Error(text),
-            UiTimelineItem::SystemMessage(text) => DisplayBlock::SystemMessage(text),
-            UiTimelineItem::PluginPanel(panel) => DisplayBlock::PluginPanel(panel),
-            UiTimelineItem::LashlangCode(code) => DisplayBlock::LashlangCode(code),
-            UiTimelineItem::Splash => DisplayBlock::Splash,
-        }
-    }
+pub(crate) fn projected_timeline_items_from_projection(
+    projection: &lash::SessionProjection,
+    ui_state: &UiProjectionState,
+) -> Vec<UiTimelineItem> {
+    projected_timeline_from_projection(projection, ui_state).into_items()
 }
 
-impl From<DisplayBlock> for UiTimelineItem {
-    fn from(block: DisplayBlock) -> Self {
-        match block {
-            DisplayBlock::TurnStart(turn) => UiTimelineItem::TurnStart(turn),
-            DisplayBlock::UserInput(text) => UiTimelineItem::UserInput(text),
-            DisplayBlock::AssistantReasoning(text) => UiTimelineItem::AssistantReasoning(text),
-            DisplayBlock::AssistantText(text) => UiTimelineItem::AssistantText(text),
-            DisplayBlock::Activity(activity) => UiTimelineItem::Activity(activity),
-            DisplayBlock::ShellOutput {
-                command,
-                output,
-                error,
-            } => UiTimelineItem::ShellOutput {
-                command,
-                output,
-                error,
-            },
-            DisplayBlock::Error(text) => UiTimelineItem::Error(text),
-            DisplayBlock::SystemMessage(text) => UiTimelineItem::SystemMessage(text),
-            DisplayBlock::PluginPanel(panel) => UiTimelineItem::PluginPanel(panel),
-            DisplayBlock::LashlangCode(code) => UiTimelineItem::LashlangCode(code),
-            DisplayBlock::Splash => UiTimelineItem::Splash,
-        }
-    }
+pub(crate) fn projected_timeline_from_projection(
+    projection: &lash::SessionProjection,
+    ui_state: &UiProjectionState,
+) -> UiTimeline {
+    let mut timeline = timeline_from_events(
+        projection.active_events.as_slice(),
+        projection.messages.as_slice(),
+        projection.tool_calls.as_slice(),
+    );
+    append_live_projection_items(&mut timeline, ui_state);
+    timeline.extend(
+        ui_state
+            .plugin_panels
+            .iter()
+            .cloned()
+            .map(UiTimelineItem::PluginPanel),
+    );
+    timeline
 }
 
-pub(crate) fn projected_blocks_from_state(
+#[cfg(test)]
+pub(crate) fn projected_timeline_items_from_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
-) -> Vec<DisplayBlock> {
-    projected_timeline_from_state(events, messages, tool_calls, ui_state).into_display_blocks()
+) -> Vec<UiTimelineItem> {
+    projected_timeline_from_parts(events, messages, tool_calls, ui_state).into_items()
 }
 
-pub(crate) fn projected_timeline_from_state(
+#[cfg(test)]
+pub(crate) fn projected_timeline_from_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
@@ -144,15 +132,26 @@ pub(crate) fn projected_timeline_from_state(
 }
 
 pub(crate) fn project_interrupted_blocks(
+    projection: &lash::SessionProjection,
+    ui_state: &UiProjectionState,
+    status_message: impl Into<String>,
+) -> Vec<UiTimelineItem> {
+    let mut timeline = projected_timeline_from_projection(projection, ui_state);
+    push_system_message_item_if_new(&mut timeline, status_message.into());
+    timeline.into_items()
+}
+
+#[cfg(test)]
+pub(crate) fn project_interrupted_blocks_from_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
-) -> Vec<DisplayBlock> {
-    let mut timeline = projected_timeline_from_state(events, messages, tool_calls, ui_state);
+) -> Vec<UiTimelineItem> {
+    let mut timeline = projected_timeline_from_parts(events, messages, tool_calls, ui_state);
     push_system_message_item_if_new(&mut timeline, status_message.into());
-    timeline.into_display_blocks()
+    timeline.into_items()
 }
 
 fn timeline_from_events(
@@ -268,7 +267,7 @@ fn strip_first_lashlang_fence(text: &str) -> String {
     out
 }
 
-pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) -> Option<String> {
+pub(crate) fn interrupted_assistant_tail(blocks: &[UiTimelineItem], text: &str) -> Option<String> {
     let cleaned = normalize_assistant_text(text);
     if cleaned.is_empty() {
         return None;
@@ -286,7 +285,7 @@ pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) ->
         .rposition(|block| {
             matches!(
                 block,
-                DisplayBlock::TurnStart(turn) if turn.role == TurnRole::User
+                UiTimelineItem::TurnStart(turn) if turn.role == TurnRole::User
             )
         })
         .unwrap_or(0);
@@ -294,7 +293,7 @@ pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) ->
     let mut peel_failed = false;
     let mut remaining = cleaned.as_str();
     for block in &blocks[scan_start..] {
-        let DisplayBlock::AssistantText(existing) = block else {
+        let UiTimelineItem::AssistantText(existing) = block else {
             continue;
         };
         let normalized = normalize_assistant_text(existing);
@@ -317,7 +316,7 @@ pub(crate) fn interrupted_assistant_tail(blocks: &[DisplayBlock], text: &str) ->
         return (!trailing.is_empty()).then(|| trailing.to_string());
     }
 
-    if let Some(DisplayBlock::AssistantText(existing)) = blocks.last() {
+    if let Some(UiTimelineItem::AssistantText(existing)) = blocks.last() {
         let normalized = normalize_assistant_text(existing);
         if cleaned.starts_with(normalized.as_str()) {
             let trailing = cleaned[normalized.len()..].trim_start_matches('\n').trim();
@@ -336,20 +335,20 @@ fn append_live_projection_items(timeline: &mut UiTimeline, ui_state: &UiProjecti
         let _ = push_assistant_reasoning_item(timeline, text);
     }
     if let Some(text) = ui_state.live_assistant_text.as_deref()
-        && let Some(tail) = interrupted_assistant_tail(&timeline.to_display_blocks(), text)
+        && let Some(tail) = interrupted_assistant_tail(&timeline.to_items(), text)
     {
         let _ = push_assistant_text_item(timeline, &tail);
     }
 }
 
-pub(crate) fn push_system_message_block_if_new(blocks: &mut Vec<DisplayBlock>, message: String) {
+pub(crate) fn push_system_message_block_if_new(blocks: &mut Vec<UiTimelineItem>, message: String) {
     if matches!(
         blocks.last(),
-        Some(DisplayBlock::SystemMessage(existing)) if existing == &message
+        Some(UiTimelineItem::SystemMessage(existing)) if existing == &message
     ) {
         return;
     }
-    blocks.push(DisplayBlock::SystemMessage(message));
+    blocks.push(UiTimelineItem::SystemMessage(message));
 }
 
 /// Emit a `TurnStart` marker before a `UserInput` block. The marker is the
@@ -357,14 +356,14 @@ pub(crate) fn push_system_message_block_if_new(blocks: &mut Vec<DisplayBlock>, m
 /// first turn in the stream (nothing above it, or only a `Splash` above
 /// it) does not show a separator — the rule is a *between* signal, not a
 /// *leading* ornament.
-pub(crate) fn push_user_turn_start(blocks: &mut Vec<DisplayBlock>) {
+pub(crate) fn push_user_turn_start(blocks: &mut Vec<UiTimelineItem>) {
     let show_separator = match blocks.last() {
         None => false,
-        Some(DisplayBlock::Splash) => false,
-        Some(DisplayBlock::TurnStart(_)) => false,
+        Some(UiTimelineItem::Splash) => false,
+        Some(UiTimelineItem::TurnStart(_)) => false,
         Some(_) => true,
     };
-    blocks.push(DisplayBlock::TurnStart(Turn::user(show_separator)));
+    blocks.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
 }
 
 fn timeline_from_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> UiTimeline {
@@ -385,8 +384,8 @@ fn timeline_from_transcript(messages: &[Message], tool_calls: &[ToolCallRecord])
     timeline
 }
 
-pub(crate) fn append_activity_block(blocks: &mut Vec<DisplayBlock>, activity: ActivityBlock) {
-    if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
+pub(crate) fn append_activity_block(blocks: &mut Vec<UiTimelineItem>, activity: ActivityBlock) {
+    if let Some(UiTimelineItem::Activity(existing)) = blocks.last_mut()
         && existing.call.kind == ActivityKind::Exploration
         && activity.call.kind == ActivityKind::Exploration
         && existing.result.status == ActivityStatus::Completed
@@ -395,7 +394,7 @@ pub(crate) fn append_activity_block(blocks: &mut Vec<DisplayBlock>, activity: Ac
     {
         return;
     }
-    if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
+    if let Some(UiTimelineItem::Activity(existing)) = blocks.last_mut()
         && existing.call.kind == ActivityKind::Edit
         && activity.call.kind == ActivityKind::Edit
         && existing.result.status == ActivityStatus::Completed
@@ -404,7 +403,7 @@ pub(crate) fn append_activity_block(blocks: &mut Vec<DisplayBlock>, activity: Ac
     {
         return;
     }
-    blocks.push(DisplayBlock::Activity(Box::new(activity)));
+    blocks.push(UiTimelineItem::Activity(Box::new(activity)));
 }
 
 fn append_activity_item(timeline: &mut UiTimeline, activity: ActivityBlock) {

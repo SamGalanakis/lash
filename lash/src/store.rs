@@ -31,8 +31,6 @@ pub enum StoreError {
         bound_session_id: String,
         attempted_session_id: String,
     },
-    #[error("store has inconsistent session bindings: {session_ids:?}")]
-    InconsistentSessionBindings { session_ids: Vec<String> },
 }
 
 /// SQLite-backed store for checkpoint blobs and the canonical session head.
@@ -240,7 +238,7 @@ pub struct GcReport {
     pub deleted_blob_count: usize,
 }
 
-/// Result of a `RuntimeStore::vacuum()` call.
+/// Result of a `RetentionStore::vacuum()` call.
 /// `removed_node_count` counts the tombstoned graph-node rows that were
 /// physically deleted from the store. Returned so hosts can emit metrics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -586,9 +584,9 @@ impl Default for SessionHeadMeta {
     }
 }
 
-/// Persistence backend for checkpoint blobs and committed session heads.
+/// Blob/artifact blob persistence.
 #[async_trait::async_trait]
-pub trait RuntimeStore: Send + Sync {
+pub trait BlobStore: Send + Sync {
     #[doc(hidden)]
     async fn put_blob(&self, content: &[u8]) -> BlobRef;
     async fn put_artifact_blob(
@@ -601,25 +599,37 @@ pub trait RuntimeStore: Send + Sync {
     }
     #[doc(hidden)]
     async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>>;
+}
+
+/// Persistent usage ledger storage.
+#[async_trait::async_trait]
+pub trait UsageLedgerStore: Send + Sync {
     #[doc(hidden)]
     async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]);
     #[doc(hidden)]
     async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry>;
+}
+
+/// Session head and session metadata storage.
+#[async_trait::async_trait]
+pub trait SessionHeadStore: Send + Sync {
     #[doc(hidden)]
     async fn save_session_head_meta(&self, meta: SessionHeadMeta);
     #[doc(hidden)]
     async fn load_session_head_meta(&self) -> Option<SessionHeadMeta>;
+    async fn save_session_meta(&self, meta: SessionMeta);
+    async fn load_session_meta(&self) -> Option<SessionMeta>;
+}
+
+/// Session graph storage.
+#[async_trait::async_trait]
+pub trait SessionGraphStore: Send + Sync {
     #[doc(hidden)]
     async fn replace_session_graph(&self, graph: &crate::SessionGraph);
     #[doc(hidden)]
     async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]);
     #[doc(hidden)]
     async fn load_session_graph(&self) -> crate::SessionGraph;
-    async fn save_session_meta(&self, meta: SessionMeta);
-    async fn load_session_meta(&self) -> Option<SessionMeta>;
-    async fn gc_unreachable(&self) -> GcReport {
-        GcReport::default()
-    }
 
     /// Load only the active-path chain from `leaf_node_id` back to its
     /// root (or from `load_session_head_meta().leaf_node_id` when
@@ -655,6 +665,17 @@ pub trait RuntimeStore: Send + Sync {
     async fn get_node(&self, node_id: &str) -> Option<crate::SessionNodeRecord> {
         self.load_session_graph().await.find_node(node_id).cloned()
     }
+}
+
+/// Retention and space-reclamation storage primitives.
+#[async_trait::async_trait]
+pub trait RetentionStore: Send + Sync {
+    async fn gc_unreachable(&self) -> GcReport {
+        GcReport::default()
+    }
+
+    #[doc(hidden)]
+    async fn record_runtime_commit(&self) {}
 
     /// Mark nodes as eligible for `vacuum()`. Host-called primitive for
     /// bounded-disk embedders. Default: no-op (backends that don't
@@ -667,73 +688,107 @@ pub trait RuntimeStore: Send + Sync {
     async fn vacuum(&self) -> VacuumReport {
         VacuumReport::default()
     }
+}
 
-    async fn load_persisted_session_state(&self) -> Option<crate::PersistedSessionState> {
-        let head = self.load_session_head().await?;
-        let checkpoint = match head.checkpoint_ref.as_ref() {
-            Some(blob_ref) => get_checkpoint(self, blob_ref).await,
-            None => None,
-        };
-        Some(persisted_session_state_from_head(head, checkpoint))
+/// Composite persistence capability required by the runtime.
+pub trait RuntimePersistence:
+    BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + RetentionStore
+{
+}
+
+impl<T> RuntimePersistence for T where
+    T: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + RetentionStore
+{
+}
+
+pub async fn load_persisted_session_state<S>(store: &S) -> Option<crate::PersistedSessionState>
+where
+    S: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
+{
+    let head = load_session_head(store).await?;
+    let checkpoint = match head.checkpoint_ref.as_ref() {
+        Some(blob_ref) => get_checkpoint(store, blob_ref).await,
+        None => None,
+    };
+    Some(persisted_session_state_from_head(head, checkpoint))
+}
+
+/// Like `load_persisted_session_state` but loads only the active-path
+/// chain. Used by `LashRuntime::resume` under `Residency::ActivePathOnly`
+/// so hydration is O(active-path) instead of O(total-history).
+pub async fn load_persisted_session_state_active_path<S>(
+    store: &S,
+) -> Option<crate::PersistedSessionState>
+where
+    S: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
+{
+    let meta = store.load_session_head_meta().await?;
+    let mut graph = store
+        .load_active_path_graph(meta.leaf_node_id.as_deref())
+        .await;
+    graph.set_leaf_node_id(meta.leaf_node_id.clone());
+    let head = SessionHead {
+        session_id: meta.session_id,
+        graph,
+        config: meta.config,
+        checkpoint_ref: meta.checkpoint_ref.clone(),
+        token_ledger: merge_token_ledger_entries(store.load_usage_deltas().await),
+    };
+    let checkpoint = match head.checkpoint_ref.as_ref() {
+        Some(blob_ref) => get_checkpoint(store, blob_ref).await,
+        None => None,
+    };
+    Some(persisted_session_state_from_head(head, checkpoint))
+}
+
+pub async fn refresh_persisted_session_state<S>(store: &S, state: &mut crate::PersistedSessionState)
+where
+    S: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
+{
+    if let Some(mut fresh) = load_persisted_session_state(store).await {
+        // The store owns persisted graph/checkpoint/config state, but not
+        // live provider credentials or other runtime-only policy fields.
+        fresh.policy.provider = state.policy.provider.clone();
+        fresh.policy.session_id = state.policy.session_id.clone();
+        fresh.policy.max_turns = state.policy.max_turns;
+        *state = fresh;
     }
+}
 
-    /// Like `load_persisted_session_state` but loads only the active-path
-    /// chain. Used by `LashRuntime::resume` under `Residency::ActivePathOnly`
-    /// so hydration is O(active-path) instead of O(total-history). Default
-    /// delegates to `load_active_path_graph` (which itself falls back to
-    /// full-load-then-fork unless overridden).
-    async fn load_persisted_session_state_active_path(
-        &self,
-    ) -> Option<crate::PersistedSessionState> {
-        let meta = self.load_session_head_meta().await?;
-        let mut graph = self
-            .load_active_path_graph(meta.leaf_node_id.as_deref())
-            .await;
-        graph.set_leaf_node_id(meta.leaf_node_id.clone());
-        let head = SessionHead {
-            session_id: meta.session_id,
-            graph,
-            config: meta.config,
-            checkpoint_ref: meta.checkpoint_ref.clone(),
-            token_ledger: merge_token_ledger_entries(self.load_usage_deltas().await),
-        };
-        let checkpoint = match head.checkpoint_ref.as_ref() {
-            Some(blob_ref) => get_checkpoint(self, blob_ref).await,
-            None => None,
-        };
-        Some(persisted_session_state_from_head(head, checkpoint))
+pub async fn apply_runtime_commit<S>(
+    store: &S,
+    commit: PersistedStateCommit,
+) -> Result<PersistedStateCommitResult, StoreError>
+where
+    S: RuntimePersistence + ?Sized,
+{
+    if let Some(bound_session_id) = store
+        .load_session_head_meta()
+        .await
+        .map(|meta| meta.session_id)
+        && bound_session_id != commit.session_id
+    {
+        return Err(StoreError::SessionBindingMismatch {
+            bound_session_id,
+            attempted_session_id: commit.session_id,
+        });
     }
-
-    async fn refresh_persisted_session_state(&self, state: &mut crate::PersistedSessionState) {
-        if let Some(mut fresh) = self.load_persisted_session_state().await {
-            // The store owns persisted graph/checkpoint/config state, but not
-            // live provider credentials or other runtime-only policy fields.
-            fresh.policy.provider = state.policy.provider.clone();
-            fresh.policy.session_id = state.policy.session_id.clone();
-            fresh.policy.max_turns = state.policy.max_turns;
-            *state = fresh;
-        }
+    let stored_checkpoint = put_checkpoint(store, &commit.checkpoint).await;
+    if !commit.usage_deltas.is_empty() {
+        store.append_usage_deltas(&commit.usage_deltas).await;
     }
-
-    async fn apply_runtime_commit(
-        &self,
-        commit: PersistedStateCommit,
-    ) -> Result<PersistedStateCommitResult, StoreError> {
-        let stored_checkpoint = put_checkpoint(self, &commit.checkpoint).await;
-        if !commit.usage_deltas.is_empty() {
-            self.append_usage_deltas(&commit.usage_deltas).await;
+    match &commit.graph {
+        SessionGraphCommit::Replace(graph) => {
+            store.replace_session_graph(graph).await;
         }
-        match &commit.graph {
-            SessionGraphCommit::Replace(graph) => {
-                self.replace_session_graph(graph).await;
-            }
-            SessionGraphCommit::Append { nodes, .. } if !nodes.is_empty() => {
-                self.append_session_graph_nodes(nodes).await;
-            }
-            SessionGraphCommit::Append { .. } => {}
+        SessionGraphCommit::Append { nodes, .. } if !nodes.is_empty() => {
+            store.append_session_graph_nodes(nodes).await;
         }
-        let graph_node_count = commit.graph.graph_node_count();
-        self.save_session_head_meta(SessionHeadMeta {
+        SessionGraphCommit::Append { .. } => {}
+    }
+    let graph_node_count = commit.graph.graph_node_count();
+    store
+        .save_session_head_meta(SessionHeadMeta {
             session_id: commit.session_id,
             config: commit.config,
             checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
@@ -742,46 +797,51 @@ pub trait RuntimeStore: Send + Sync {
             token_ledger: Vec::new(),
         })
         .await;
-        Ok(PersistedStateCommitResult {
-            checkpoint_ref: stored_checkpoint.checkpoint_ref,
-            manifest: stored_checkpoint.manifest,
-            persisted_graph_node_count: graph_node_count,
-        })
-    }
+    store.record_runtime_commit().await;
+    Ok(PersistedStateCommitResult {
+        checkpoint_ref: stored_checkpoint.checkpoint_ref,
+        manifest: stored_checkpoint.manifest,
+        persisted_graph_node_count: graph_node_count,
+    })
+}
 
-    async fn save_session_head(&self, head: SessionHead) {
-        self.replace_session_graph(&head.graph).await;
-        self.save_session_head_meta(session_head_meta(&head)).await;
-    }
+pub async fn save_session_head<S>(store: &S, head: SessionHead)
+where
+    S: SessionHeadStore + SessionGraphStore + ?Sized,
+{
+    store.replace_session_graph(&head.graph).await;
+    store.save_session_head_meta(session_head_meta(&head)).await;
+}
 
-    async fn load_session_head(&self) -> Option<SessionHead> {
-        let meta = self.load_session_head_meta().await?;
-        let mut graph = self.load_session_graph().await;
-        graph.set_leaf_node_id(meta.leaf_node_id.clone());
-        Some(SessionHead {
-            session_id: meta.session_id,
-            graph,
-            config: meta.config,
-            checkpoint_ref: meta.checkpoint_ref,
-            token_ledger: merge_token_ledger_entries(self.load_usage_deltas().await),
-        })
-    }
+pub async fn load_session_head<S>(store: &S) -> Option<SessionHead>
+where
+    S: SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
+{
+    let meta = store.load_session_head_meta().await?;
+    let mut graph = store.load_session_graph().await;
+    graph.set_leaf_node_id(meta.leaf_node_id.clone());
+    Some(SessionHead {
+        session_id: meta.session_id,
+        graph,
+        config: meta.config,
+        checkpoint_ref: meta.checkpoint_ref,
+        token_ledger: merge_token_ledger_entries(store.load_usage_deltas().await),
+    })
+}
 
-    async fn save_turn_checkpoint(&self, head: SessionHead) {
-        self.save_session_head(head).await;
-    }
-
-    async fn head_copy_from_store(&self, source: &(dyn RuntimeStore + '_))
-    where
-        Self: Sized,
-    {
-        if let Some(head) = source.load_session_head().await {
-            if let Some(checkpoint_ref) = &head.checkpoint_ref {
-                let _ = copy_checkpoint_blobs_from_store(self, source, checkpoint_ref).await;
-            }
-            self.replace_session_graph(&head.graph).await;
-            self.save_session_head_meta(session_head_meta(&head)).await;
+pub async fn head_copy_from_store<T, S>(target: &T, source: &S)
+where
+    T: BlobStore + SessionHeadStore + SessionGraphStore + ?Sized,
+    S: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
+{
+    if let Some(head) = load_session_head(source).await {
+        if let Some(checkpoint_ref) = &head.checkpoint_ref {
+            let _ = copy_checkpoint_blobs_from_store(target, source, checkpoint_ref).await;
         }
+        target.replace_session_graph(&head.graph).await;
+        target
+            .save_session_head_meta(session_head_meta(&head))
+            .await;
     }
 }
 
@@ -850,156 +910,6 @@ fn decode_artifact_blob(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(feature = "sqlite-store")]
-fn put_artifact_blob_tx(
-    tx: &rusqlite::Transaction<'_>,
-    profile: BuiltinBlobProfile,
-    descriptor: &BlobArtifactDescriptor,
-    content: &[u8],
-) -> BlobRef {
-    let stored = encode_artifact_blob(descriptor, profile, content);
-    let hash = format!("{:x}", Sha256::digest(content));
-    tx.execute(
-        "INSERT OR IGNORE INTO blobs (hash, content) VALUES (?1, ?2)",
-        params![hash, stored],
-    )
-    .expect("persist artifact blob");
-    BlobRef(hash)
-}
-
-#[cfg(feature = "sqlite-store")]
-fn put_typed_artifact_blob_tx<T: serde::Serialize>(
-    tx: &rusqlite::Transaction<'_>,
-    profile: BuiltinBlobProfile,
-    descriptor: &BlobArtifactDescriptor,
-    value: &T,
-) -> BlobRef {
-    let bytes = encode_msgpack(value);
-    put_artifact_blob_tx(tx, profile, descriptor, &bytes)
-}
-
-#[cfg(feature = "sqlite-store")]
-fn put_checkpoint_tx(
-    tx: &rusqlite::Transaction<'_>,
-    profile: BuiltinBlobProfile,
-    checkpoint: &HydratedSessionCheckpoint,
-) -> StoredSessionCheckpoint {
-    let dynamic_state_ref = checkpoint
-        .dynamic_state
-        .as_ref()
-        .map(|snapshot| {
-            put_typed_artifact_blob_tx(
-                tx,
-                profile,
-                &BlobArtifactDescriptor::dynamic_state_snapshot(),
-                snapshot,
-            )
-        })
-        .or_else(|| checkpoint.dynamic_state_ref.clone());
-    let plugin_snapshot_ref = checkpoint
-        .plugin_snapshot
-        .as_ref()
-        .map(|snapshot| {
-            put_typed_artifact_blob_tx(
-                tx,
-                profile,
-                &BlobArtifactDescriptor::plugin_session_snapshot(),
-                snapshot,
-            )
-        })
-        .or_else(|| checkpoint.plugin_snapshot_ref.clone());
-    let execution_state_ref = checkpoint
-        .execution_state
-        .as_ref()
-        .map(|snapshot| {
-            put_typed_artifact_blob_tx(
-                tx,
-                profile,
-                &BlobArtifactDescriptor::execution_state_snapshot(),
-                snapshot,
-            )
-        })
-        .or_else(|| checkpoint.execution_state_ref.clone());
-    let manifest = SessionCheckpoint {
-        turn_state: checkpoint.turn_state.clone(),
-        dynamic_state_ref,
-        plugin_snapshot_ref,
-        plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
-        execution_state_ref,
-    };
-    let checkpoint_ref = put_typed_artifact_blob_tx(
-        tx,
-        profile,
-        &BlobArtifactDescriptor::checkpoint_manifest(),
-        &manifest,
-    );
-    StoredSessionCheckpoint {
-        checkpoint_ref,
-        manifest,
-    }
-}
-
-#[cfg(feature = "sqlite-store")]
-fn append_usage_deltas_tx(tx: &rusqlite::Transaction<'_>, entries: &[crate::TokenLedgerEntry]) {
-    if entries.is_empty() {
-        return;
-    }
-    let mut stmt = tx
-        .prepare(
-            "INSERT INTO usage_deltas (
-                source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .expect("usage delta statement");
-    for entry in entries {
-        stmt.execute(params![
-            entry.source,
-            entry.model,
-            entry.usage.input_tokens,
-            entry.usage.output_tokens,
-            entry.usage.cached_input_tokens,
-            entry.usage.reasoning_tokens,
-        ])
-        .expect("usage delta insert");
-    }
-}
-
-#[cfg(feature = "sqlite-store")]
-fn save_session_head_meta_tx(tx: &rusqlite::Transaction<'_>, meta: SessionHeadMeta) {
-    let head_json = encode_json(&meta);
-    tx.execute(
-        "INSERT OR REPLACE INTO session_head (singleton, session_id, head_json)
-         VALUES (1, ?1, ?2)",
-        params![meta.session_id, head_json],
-    )
-    .expect("persist session head");
-}
-
-#[cfg(feature = "sqlite-store")]
-fn replace_session_graph_tx(tx: &rusqlite::Transaction<'_>, graph: &crate::SessionGraph) {
-    tx.execute("DELETE FROM graph_nodes", [])
-        .expect("clear graph rows");
-    append_session_graph_nodes_tx(tx, &graph.nodes);
-}
-
-#[cfg(feature = "sqlite-store")]
-fn append_session_graph_nodes_tx(
-    tx: &rusqlite::Transaction<'_>,
-    nodes: &[crate::SessionNodeRecord],
-) {
-    if nodes.is_empty() {
-        return;
-    }
-    for node in nodes {
-        let node_json = encode_json(node);
-        tx.execute(
-            "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
-            params![node.node_id, node_json],
-        )
-        .expect("persist graph node");
-    }
-}
-
-#[cfg(feature = "sqlite-store")]
 fn load_session_head_meta_from_conn(conn: &Connection) -> Option<SessionHeadMeta> {
     let head_json: String = conn
         .query_row(
@@ -1029,44 +939,6 @@ fn load_session_meta_from_conn(conn: &Connection) -> Option<SessionMeta> {
         },
     )
     .ok()
-}
-
-#[cfg(feature = "sqlite-store")]
-fn load_bound_session_id_from_head_conn(conn: &Connection) -> Option<String> {
-    conn.query_row(
-        "SELECT session_id FROM session_head WHERE singleton = 1",
-        [],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
-#[cfg(feature = "sqlite-store")]
-fn bound_session_id_from_conn(conn: &Connection) -> Result<Option<String>, StoreError> {
-    let mut session_ids = std::collections::BTreeSet::new();
-    if let Some(session_id) = load_bound_session_id_from_head_conn(conn) {
-        session_ids.insert(session_id);
-    }
-    match session_ids.len() {
-        0 => Ok(None),
-        1 => Ok(session_ids.into_iter().next()),
-        _ => Err(StoreError::InconsistentSessionBindings {
-            session_ids: session_ids.into_iter().collect(),
-        }),
-    }
-}
-
-#[cfg(feature = "sqlite-store")]
-fn validate_session_binding_conn(conn: &Connection, session_id: &str) -> Result<(), StoreError> {
-    if let Some(bound_session_id) = bound_session_id_from_conn(conn)?
-        && bound_session_id != session_id
-    {
-        return Err(StoreError::SessionBindingMismatch {
-            bound_session_id,
-            attempted_session_id: session_id.to_string(),
-        });
-    }
-    Ok(())
 }
 
 pub fn encode_checkpoint(checkpoint: &SessionCheckpoint) -> Vec<u8> {
@@ -1114,7 +986,7 @@ fn merge_token_ledger_entries(
     merged
 }
 
-pub async fn put_typed_blob<T: serde::Serialize, S: RuntimeStore + ?Sized>(
+pub async fn put_typed_blob<T: serde::Serialize, S: BlobStore + ?Sized>(
     store: &S,
     value: &T,
 ) -> BlobRef {
@@ -1126,7 +998,7 @@ pub async fn put_typed_blob<T: serde::Serialize, S: RuntimeStore + ?Sized>(
     .await
 }
 
-pub async fn put_typed_artifact_blob<T: serde::Serialize, S: RuntimeStore + ?Sized>(
+pub async fn put_typed_artifact_blob<T: serde::Serialize, S: BlobStore + ?Sized>(
     store: &S,
     descriptor: BlobArtifactDescriptor,
     value: &T,
@@ -1135,7 +1007,7 @@ pub async fn put_typed_artifact_blob<T: serde::Serialize, S: RuntimeStore + ?Siz
     store.put_artifact_blob(descriptor, &bytes).await
 }
 
-pub async fn get_typed_blob<T: serde::de::DeserializeOwned, S: RuntimeStore + ?Sized>(
+pub async fn get_typed_blob<T: serde::de::DeserializeOwned, S: BlobStore + ?Sized>(
     store: &S,
     blob_ref: &BlobRef,
 ) -> Option<T> {
@@ -1143,7 +1015,7 @@ pub async fn get_typed_blob<T: serde::de::DeserializeOwned, S: RuntimeStore + ?S
     decode_msgpack(&bytes)
 }
 
-pub async fn put_checkpoint<S: RuntimeStore + ?Sized>(
+pub async fn put_checkpoint<S: BlobStore + ?Sized>(
     store: &S,
     checkpoint: &HydratedSessionCheckpoint,
 ) -> StoredSessionCheckpoint {
@@ -1199,20 +1071,20 @@ pub async fn put_checkpoint<S: RuntimeStore + ?Sized>(
     }
 }
 
-pub async fn append_usage_deltas<S: RuntimeStore + ?Sized>(
+pub async fn append_usage_deltas<S: UsageLedgerStore + ?Sized>(
     store: &S,
     entries: &[crate::TokenLedgerEntry],
 ) {
     store.append_usage_deltas(entries).await;
 }
 
-pub async fn load_usage_deltas<S: RuntimeStore + ?Sized>(
+pub async fn load_usage_deltas<S: UsageLedgerStore + ?Sized>(
     store: &S,
 ) -> Vec<crate::TokenLedgerEntry> {
     store.load_usage_deltas().await
 }
 
-pub async fn get_checkpoint<S: RuntimeStore + ?Sized>(
+pub async fn get_checkpoint<S: BlobStore + ?Sized>(
     store: &S,
     checkpoint_ref: &BlobRef,
 ) -> Option<HydratedSessionCheckpoint> {
@@ -1241,10 +1113,7 @@ pub async fn get_checkpoint<S: RuntimeStore + ?Sized>(
     })
 }
 
-pub async fn copy_checkpoint_blobs_from_store<
-    T: RuntimeStore + ?Sized,
-    S: RuntimeStore + ?Sized,
->(
+pub async fn copy_checkpoint_blobs_from_store<T: BlobStore + ?Sized, S: BlobStore + ?Sized>(
     target: &T,
     source: &S,
     checkpoint_ref: &BlobRef,
@@ -1679,43 +1548,6 @@ impl Store {
         Self::load_session_graph_from_conn(&conn, None)
     }
 
-    pub fn apply_runtime_commit(
-        &self,
-        commit: PersistedStateCommit,
-    ) -> Result<PersistedStateCommitResult, StoreError> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction().expect("runtime commit transaction");
-        validate_session_binding_conn(&tx, &commit.session_id)?;
-        let stored_checkpoint =
-            put_checkpoint_tx(&tx, self.options.blob_profile, &commit.checkpoint);
-        append_usage_deltas_tx(&tx, &commit.usage_deltas);
-        match &commit.graph {
-            SessionGraphCommit::Replace(graph) => replace_session_graph_tx(&tx, graph),
-            SessionGraphCommit::Append { nodes, .. } => append_session_graph_nodes_tx(&tx, nodes),
-        }
-        let graph_node_count = commit.graph.graph_node_count();
-        save_session_head_meta_tx(
-            &tx,
-            SessionHeadMeta {
-                session_id: commit.session_id,
-                config: commit.config,
-                checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
-                leaf_node_id: commit.graph.leaf_node_id().cloned(),
-                graph_node_count,
-                token_ledger: Vec::new(),
-            },
-        );
-        let result = PersistedStateCommitResult {
-            checkpoint_ref: stored_checkpoint.checkpoint_ref,
-            manifest: stored_checkpoint.manifest,
-            persisted_graph_node_count: graph_node_count,
-        };
-        tx.commit().expect("runtime commit commit");
-        drop(conn);
-        self.maybe_auto_gc();
-        Ok(result)
-    }
-
     pub fn gc_unreachable(&self) -> GcReport {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().expect("gc transaction");
@@ -1870,7 +1702,7 @@ impl Store {
 
 #[cfg(feature = "sqlite-store")]
 #[async_trait::async_trait]
-impl RuntimeStore for Store {
+impl BlobStore for Store {
     async fn put_blob(&self, content: &[u8]) -> BlobRef {
         Self::put_blob(self, content)
     }
@@ -1886,7 +1718,11 @@ impl RuntimeStore for Store {
     async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>> {
         Self::get_blob(self, blob_ref)
     }
+}
 
+#[cfg(feature = "sqlite-store")]
+#[async_trait::async_trait]
+impl UsageLedgerStore for Store {
     async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
         Self::append_usage_deltas(self, entries);
     }
@@ -1894,7 +1730,11 @@ impl RuntimeStore for Store {
     async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry> {
         Self::load_usage_deltas(self)
     }
+}
 
+#[cfg(feature = "sqlite-store")]
+#[async_trait::async_trait]
+impl SessionHeadStore for Store {
     async fn save_session_head_meta(&self, meta: SessionHeadMeta) {
         Self::save_session_head_meta(self, meta);
     }
@@ -1903,6 +1743,18 @@ impl RuntimeStore for Store {
         Self::load_session_head_meta(self)
     }
 
+    async fn save_session_meta(&self, meta: SessionMeta) {
+        Self::save_session_meta(self, meta);
+    }
+
+    async fn load_session_meta(&self) -> Option<SessionMeta> {
+        Self::load_session_meta(self)
+    }
+}
+
+#[cfg(feature = "sqlite-store")]
+#[async_trait::async_trait]
+impl SessionGraphStore for Store {
     async fn replace_session_graph(&self, graph: &crate::SessionGraph) {
         Self::replace_session_graph(self, graph);
     }
@@ -1915,25 +1767,6 @@ impl RuntimeStore for Store {
         Self::load_session_graph(self)
     }
 
-    async fn save_session_meta(&self, meta: SessionMeta) {
-        Self::save_session_meta(self, meta);
-    }
-
-    async fn load_session_meta(&self) -> Option<SessionMeta> {
-        Self::load_session_meta(self)
-    }
-
-    async fn gc_unreachable(&self) -> GcReport {
-        Self::gc_unreachable(self)
-    }
-
-    async fn apply_runtime_commit(
-        &self,
-        commit: PersistedStateCommit,
-    ) -> Result<PersistedStateCommitResult, StoreError> {
-        Self::apply_runtime_commit(self, commit)
-    }
-
     async fn get_node(&self, node_id: &str) -> Option<crate::SessionNodeRecord> {
         let conn = self.conn.lock().unwrap();
         let row: Option<String> = conn
@@ -1944,6 +1777,18 @@ impl RuntimeStore for Store {
             )
             .ok();
         row.and_then(|json| serde_json::from_str(&json).ok())
+    }
+}
+
+#[cfg(feature = "sqlite-store")]
+#[async_trait::async_trait]
+impl RetentionStore for Store {
+    async fn gc_unreachable(&self) -> GcReport {
+        Self::gc_unreachable(self)
+    }
+
+    async fn record_runtime_commit(&self) {
+        self.maybe_auto_gc();
     }
 
     async fn tombstone_nodes(&self, ids: &[String]) {
@@ -2101,7 +1946,8 @@ mod tests {
         target.head_copy_from_store(&source);
 
         let graph = target.load_session_head().expect("session head").graph;
-        let messages = graph.project_conversation_messages();
+        let projection = graph.shared_projection();
+        let messages = projection.messages.as_slice();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].parts[0].content, "hello");
         assert_eq!(messages[1].parts[0].content, "world");
@@ -2133,7 +1979,8 @@ mod tests {
         });
 
         let graph = store.load_session_head().expect("session head").graph;
-        let messages = graph.project_conversation_messages();
+        let projection = graph.shared_projection();
+        let messages = projection.messages.as_slice();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].parts[0].content, "updated");
     }
@@ -2209,8 +2056,8 @@ mod tests {
         assert!(loaded.plugin_snapshot.is_none());
     }
 
-    #[test]
-    fn runtime_commit_preserves_execution_state_ref_when_snapshot_is_reused() {
+    #[tokio::test]
+    async fn runtime_commit_preserves_execution_state_ref_when_snapshot_is_reused() {
         let store = mem();
         let mut state = crate::PersistedSessionState {
             session_graph: crate::SessionGraph::from_projection(
@@ -2221,9 +2068,10 @@ mod tests {
             ..crate::PersistedSessionState::default()
         };
 
-        let result = store
-            .apply_runtime_commit(PersistedStateCommit::persisted_state(&state, &[]))
-            .expect("first commit");
+        let result =
+            apply_runtime_commit(&store, PersistedStateCommit::persisted_state(&state, &[]))
+                .await
+                .expect("first commit");
         state.apply_persisted_commit_result(result);
         let execution_ref = state
             .execution_state_ref
@@ -2231,9 +2079,10 @@ mod tests {
             .expect("execution state ref");
 
         state.iteration += 1;
-        let result = store
-            .apply_runtime_commit(PersistedStateCommit::persisted_state(&state, &[]))
-            .expect("second commit");
+        let result =
+            apply_runtime_commit(&store, PersistedStateCommit::persisted_state(&state, &[]))
+                .await
+                .expect("second commit");
         state.apply_persisted_commit_result(result);
 
         assert_eq!(state.execution_state_ref.as_ref(), Some(&execution_ref));

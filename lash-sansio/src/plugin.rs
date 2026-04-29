@@ -191,6 +191,14 @@ pub enum PluginSurfaceEvent {
     PanelClear {
         key: String,
     },
+    Status {
+        key: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transient_ms: Option<u64>,
+    },
     Custom {
         name: String,
         payload: serde_json::Value,

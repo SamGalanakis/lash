@@ -5,7 +5,7 @@ pub(crate) async fn persist_committed_runtime_state(
     store: &Store,
     state: &mut PersistedSessionState,
 ) {
-    match lash::RuntimeStore::apply_runtime_commit(
+    match lash::apply_runtime_commit(
         store,
         lash::PersistedStateCommit::persisted_state(state, &[]),
     )
