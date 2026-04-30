@@ -112,6 +112,11 @@ impl Record {
         self.insert_symbolized(symbol, Arc::<str>::from(name), value)
     }
 
+    pub(crate) fn insert_str(&mut self, name: &str, value: Value) -> Option<Value> {
+        let symbol = intern_symbol(name);
+        self.insert_symbolized(symbol, symbol_name(symbol), value)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
         self.entries
             .iter()
@@ -129,6 +134,11 @@ impl Record {
     pub(crate) fn get_symbol(&self, symbol: Symbol) -> Option<&Value> {
         let index = self.position_for(symbol)?;
         Some(&self.entries[index].value)
+    }
+
+    pub(crate) fn get_symbol_mut(&mut self, symbol: Symbol) -> Option<&mut Value> {
+        let index = self.position_for(symbol)?;
+        Some(&mut self.entries[index].value)
     }
 
     pub(crate) fn insert_symbolized(

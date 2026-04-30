@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--base-url')
     p.add_argument('--api-key')
     p.add_argument('--execution-mode', default=DEFAULT_EXECUTION_MODE)
-    p.add_argument('--context-approach', default=DEFAULT_CONTEXT_APPROACH)
+    p.add_argument('--context-approach')
     p.add_argument('--variant')
     p.add_argument('--max-concurrency', type=int, default=1)
     p.add_argument('--prompt-template', choices=['default', 'qa'], default='default')
@@ -219,8 +219,11 @@ def run_one(repo_root: Path, args: argparse.Namespace, example: Example) -> dict
         '--print', prompt,
         '--model', args.model,
         '--execution-mode', args.execution_mode,
-        '--context-approach', args.context_approach,
     ]
+    if args.context_approach:
+        if args.execution_mode != 'standard':
+            raise ValueError('--context-approach only applies to --execution-mode standard')
+        cmd.extend(['--context-approach', args.context_approach])
     if args.variant:
         cmd.extend(['--variant', args.variant])
     if args.base_url:
@@ -293,7 +296,7 @@ def main() -> int:
         'model': args.model,
         'provider_id': args.provider_id,
         'execution_mode': args.execution_mode,
-        'context_approach': args.context_approach,
+        'context_approach': args.context_approach if args.execution_mode == 'standard' else None,
         'variant': args.variant,
         'max_concurrency': args.max_concurrency,
         'prompt_template': args.prompt_template,

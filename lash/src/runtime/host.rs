@@ -400,6 +400,7 @@ pub struct RuntimeCoreConfig {
     pub path_resolver: Arc<dyn PathResolver>,
     pub prompt_template: crate::PromptTemplate,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
+    pub trace_stream_events: bool,
     pub trace_context: TraceContext,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
@@ -419,6 +420,7 @@ impl Default for RuntimeCoreConfig {
             path_resolver: Arc::new(DefaultPathResolver),
             prompt_template: crate::default_prompt_template(),
             trace_sink: None,
+            trace_stream_events: false,
             trace_context: TraceContext::default(),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
@@ -452,6 +454,11 @@ impl RuntimeCoreConfig {
 
     pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
         self.trace_sink = sink;
+        self
+    }
+
+    pub fn with_trace_stream_events(mut self, enabled: bool) -> Self {
+        self.trace_stream_events = enabled;
         self
     }
 

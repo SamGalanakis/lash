@@ -127,7 +127,7 @@ impl SessionManager for RuntimeSessionManager {
                     &session_id,
                     request.parent_session_id.clone(),
                     policy.execution_mode.clone(),
-                    policy.context_approach.clone(),
+                    policy.standard_context_approach.clone(),
                     None,
                 )
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
@@ -136,7 +136,7 @@ impl SessionManager for RuntimeSessionManager {
                 .fork_for_session(
                     &session_id,
                     policy.execution_mode.clone(),
-                    policy.context_approach.clone(),
+                    policy.standard_context_approach.clone(),
                 )
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
         };

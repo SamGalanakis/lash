@@ -372,6 +372,129 @@ fn executes_if_for_and_list_concat() {
 }
 
 #[test]
+fn break_exits_loop_and_restores_loop_binding() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        item = "outer"
+        seen = []
+        for item in [1, 2, 3] {
+          if item == 2 {
+            break
+          }
+          seen = seen + [item]
+        }
+        submit { seen: seen, item: item }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let record = value.as_record().expect("expected record");
+    assert_eq!(record["seen"], Value::List(vec![Value::Number(1.0)].into()));
+    assert_eq!(record["item"], Value::String("outer".to_string().into()));
+}
+
+#[test]
+fn continue_skips_to_next_iteration() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        seen = []
+        for n in [1, 2, 3, 4] {
+          if n == 2 {
+            continue
+          }
+          seen = seen + [n]
+        }
+        submit seen
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    assert_eq!(
+        value,
+        Value::List(vec![Value::Number(1.0), Value::Number(3.0), Value::Number(4.0)].into())
+    );
+}
+
+#[test]
+fn nested_loop_control_targets_nearest_loop() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        seen = []
+        for outer in [1, 2] {
+          for inner in [1, 2, 3] {
+            if inner == 2 {
+              continue
+            }
+            if inner == 3 {
+              break
+            }
+            seen = seen + [format("{}:{}", outer, inner)]
+          }
+          seen = seen + [format("outer={}", outer)]
+        }
+        submit seen
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    assert_eq!(
+        value,
+        Value::List(
+            vec![
+                Value::String("1:1".to_string().into()),
+                Value::String("outer=1".to_string().into()),
+                Value::String("2:1".to_string().into()),
+                Value::String("outer=2".to_string().into()),
+            ]
+            .into()
+        )
+    );
+}
+
+#[test]
+fn submit_inside_loop_still_terminates_program() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        for n in [1, 2, 3] {
+          submit n
+        }
+        submit 99
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    assert_eq!(value, Value::Number(1.0));
+}
+
+#[test]
 fn ternary_selects_the_correct_branch() {
     let host = TestHost::default();
     let mut state = State::new();
@@ -1085,6 +1208,212 @@ fn negative_indices_and_record_contains_are_supported() {
     assert_eq!(record["last_char"], Value::String("c".to_string().into()));
     assert_eq!(record["record_has_key"], Value::Bool(true));
     assert_eq!(record["record_missing_key"], Value::Bool(false));
+}
+
+#[test]
+fn dynamic_record_indexing_reads_fields() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        key = "foo"
+        record = { foo: 42 }
+        submit { found: record[key], missing: record["missing"] }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(record["found"], Value::Number(42.0));
+    assert_eq!(record["missing"], Value::Null);
+}
+
+#[test]
+fn indexed_and_field_assignment_update_collections() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        record = {}
+        key = "count"
+        record[key] = 1
+        record.count = record.count + 1
+        record.extra = "ok"
+        items = [1, 2, 3]
+        items[1] = 20
+        items[-1] = 30
+        submit { record: record, items: items }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    let counts = record["record"]
+        .as_record()
+        .expect("expected nested record");
+    assert_eq!(counts["count"], Value::Number(2.0));
+    assert_eq!(counts["extra"], Value::String("ok".into()));
+    assert_eq!(
+        record["items"],
+        Value::List(vec![Value::Number(1.0), Value::Number(20.0), Value::Number(30.0)].into())
+    );
+}
+
+#[test]
+fn nested_path_assignment_and_histogram_loops_work() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        state = { groups: { a: { counts: [1, 2] }, b: { counts: [3] } } }
+        g = "a"
+        state.groups[g].counts[1] = 5
+        counts = {}
+        labels = ["a", "b", "a", "c", "b", "a"]
+        for label in labels {
+          counts[label] = counts[label] + 1
+        }
+        submit { state: state, counts: counts }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    let state = record["state"].as_record().expect("expected state record");
+    let groups = state["groups"].as_record().expect("expected groups record");
+    let group_a = groups["a"].as_record().expect("expected group record");
+    assert_eq!(
+        group_a["counts"],
+        Value::List(vec![Value::Number(1.0), Value::Number(5.0)].into())
+    );
+    let counts = record["counts"]
+        .as_record()
+        .expect("expected counts record");
+    assert_eq!(counts["a"], Value::Number(3.0));
+    assert_eq!(counts["b"], Value::Number(2.0));
+    assert_eq!(counts["c"], Value::Number(1.0));
+}
+
+#[test]
+fn path_assignment_preserves_alias_isolation() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        record = { x: 1, nested: { y: 1 }, items: [1, 2] }
+        alias = record
+        record.x = 2
+        record.nested.y = 3
+        record.items[0] = 9
+        submit { record: record, alias: alias }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    let updated = record["record"]
+        .as_record()
+        .expect("expected updated record");
+    let alias = record["alias"].as_record().expect("expected alias record");
+    assert_eq!(updated["x"], Value::Number(2.0));
+    assert_eq!(
+        updated["nested"].as_record().unwrap()["y"],
+        Value::Number(3.0)
+    );
+    assert_eq!(
+        updated["items"],
+        Value::List(vec![Value::Number(9.0), Value::Number(2.0)].into())
+    );
+    assert_eq!(alias["x"], Value::Number(1.0));
+    assert_eq!(
+        alias["nested"].as_record().unwrap()["y"],
+        Value::Number(1.0)
+    );
+    assert_eq!(
+        alias["items"],
+        Value::List(vec![Value::Number(1.0), Value::Number(2.0)].into())
+    );
+}
+
+#[test]
+fn path_assignment_reports_invalid_targets() {
+    assert!(matches!(
+        runtime_error("items = [1]\nitems[2] = 2"),
+        RuntimeError::ValueError { message } if message.contains("out of bounds")
+    ));
+    assert!(matches!(
+        runtime_error("items = [1]\nitems[0.5] = 2"),
+        RuntimeError::TypeError { message } if message.contains("integer")
+    ));
+    assert!(matches!(
+        runtime_error("items = [1]\nitems[\"0\"] = 2"),
+        RuntimeError::TypeError { message } if message.contains("integer")
+    ));
+    assert!(matches!(
+        runtime_error("text = \"abc\"\ntext[0] = \"x\""),
+        RuntimeError::TypeError { message } if message.contains("string")
+    ));
+    assert!(matches!(
+        runtime_error("record = {}\nrecord.missing.value = 1"),
+        RuntimeError::ValueError { message } if message.contains("missing field")
+    ));
+    assert!(matches!(
+        runtime_error("record = { item: 1 }\nrecord.item.value = 2"),
+        RuntimeError::TypeError { message } if message.contains("number")
+    ));
+}
+
+#[test]
+fn parallel_path_assignment_conflicts_on_root_slot() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let error = execute(
+        r#"
+        record = {}
+        parallel {
+          record.a = 1
+          record.b = 2
+        }
+        submit record
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect_err("execution should fail");
+
+    assert!(matches!(
+        error,
+        lashlang::ExecuteError::Runtime(RuntimeError::ParallelConflict { name }) if name == "record"
+    ));
 }
 
 #[test]

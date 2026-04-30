@@ -93,24 +93,23 @@ mod tests {
         WaitingLlmState,
     };
     use crate::{
-        ExecutionMode, PromptContribution, ToolDefinition, ToolExecutionMode, ToolParam,
+        ExecutionMode, PromptContribution, ToolDefinition, ToolExecutionMode,
         default_prompt_template,
     };
 
     fn tool(name: &str) -> ToolDefinition {
-        ToolDefinition {
-            name: name.to_string(),
-            description: format!("Tool {name}"),
-            params: vec![ToolParam::typed("path", "str")],
-            returns: "str".to_string(),
-            examples: Vec::new(),
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }
+        let mut definition = ToolDefinition::new(
+            name,
+            format!("Tool {name}"),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+            serde_json::json!({ "type": "string" }),
+        );
+        definition.execution_mode = ToolExecutionMode::Parallel;
+        definition
     }
 
     /// Minimal no-op driver so the turn-machine test can build a

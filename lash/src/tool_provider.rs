@@ -72,14 +72,14 @@ pub trait ToolProvider: Send + Sync + 'static {
     }
 
     /// Execute with progress streaming and session context. Default: delegates to
-    /// `execute_streaming()`.
+    /// `execute_with_context()`.
     async fn execute_streaming_with_context(
         &self,
         name: &str,
         args: &serde_json::Value,
-        _context: &ToolExecutionContext,
-        progress: Option<&ProgressSender>,
+        context: &ToolExecutionContext,
+        _progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        self.execute_streaming(name, args, progress).await
+        self.execute_with_context(name, args, context).await
     }
 }

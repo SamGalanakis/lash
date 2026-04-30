@@ -386,7 +386,7 @@ impl Session {
     ) -> ToolSurfaceHandle {
         let mut tools = self.tools().definitions();
         if self.include_base_tools && mode == self.plugins().execution_mode() {
-            tools.extend(self.plugins().mode_native_tools().definitions());
+            tools.extend(self.plugins().mode_native_tool_definitions());
         }
         let fallback_tools = tools.clone();
         let surface = Arc::new(
@@ -1449,32 +1449,23 @@ mod tests {
     impl crate::ToolProvider for AsyncTestToolProvider {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![
-                ToolDefinition {
-                    name: "echo_async".into(),
-                    description: "Return an echo result after a short delay.".into(),
-                    params: vec![crate::ToolParam::typed("text", "str")],
-                    returns: "dict".into(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "wait_for_cancel".into(),
-                    description: "Wait until the async task is cancelled.".into(),
-                    params: vec![],
-                    returns: "dict".into(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
+                ToolDefinition::new(
+                    "echo_async",
+                    "Return an echo result after a short delay.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "text": { "type": "string" } },
+                        "required": ["text"],
+                        "additionalProperties": false
+                    }),
+                    serde_json::json!({ "type": "object", "additionalProperties": true }),
+                ),
+                ToolDefinition::new(
+                    "wait_for_cancel",
+                    "Wait until the async task is cancelled.",
+                    ToolDefinition::default_input_schema(),
+                    serde_json::json!({ "type": "object", "additionalProperties": true }),
+                ),
             ]
         }
 
@@ -1518,7 +1509,7 @@ mod tests {
             .build_session(
                 "root",
                 crate::ExecutionMode::standard(),
-                crate::ContextApproach::default(),
+                Some(crate::StandardContextApproach::default()),
                 None,
             )
             .expect("plugin session");
@@ -1555,12 +1546,7 @@ mod tests {
             PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
         ))]);
         let plugin_session = plugin_host
-            .build_session(
-                "root",
-                crate::ExecutionMode::new("rlm"),
-                crate::ContextApproach::default(),
-                None,
-            )
+            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
             .expect("plugin session");
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
@@ -1623,12 +1609,7 @@ submit "ok"
             )),
         ]);
         let plugin_session = plugin_host
-            .build_session(
-                "root",
-                crate::ExecutionMode::new("rlm"),
-                crate::ContextApproach::default(),
-                None,
-            )
+            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
             .expect("plugin session");
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
@@ -1682,12 +1663,7 @@ print match
             PluginSpec::new().with_tool_provider(Arc::clone(&async_tools)),
         ))]);
         let plugin_session = plugin_host
-            .build_session(
-                "root",
-                crate::ExecutionMode::new("rlm"),
-                crate::ContextApproach::default(),
-                None,
-            )
+            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
             .expect("plugin session");
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
@@ -1750,12 +1726,7 @@ print result
             PluginSpec::new().with_tool_provider(Arc::clone(&async_tools)),
         ))]);
         let plugin_session = plugin_host
-            .build_session(
-                "root",
-                crate::ExecutionMode::new("rlm"),
-                crate::ContextApproach::default(),
-                None,
-            )
+            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
             .expect("plugin session");
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),

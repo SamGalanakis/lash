@@ -83,12 +83,12 @@ impl RuntimePerfScenario {
         }
     }
 
-    fn context_approach(self) -> ContextApproach {
+    fn standard_context_approach(self) -> StandardContextApproach {
         match self {
             Self::ObservationalMemory => {
-                ContextApproach::ObservationalMemory(ObservationalMemoryConfig::default())
+                StandardContextApproach::ObservationalMemory(ObservationalMemoryConfig::default())
             }
-            _ => ContextApproach::RollingHistory(RollingHistoryConfig),
+            _ => StandardContextApproach::RollingHistory(RollingHistoryConfig),
         }
     }
 }
@@ -842,7 +842,7 @@ async fn run_once(
 
 async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<BenchmarkRuntime> {
     let execution_mode = scenario.execution_mode();
-    let context_approach = scenario.context_approach();
+    let standard_context_approach = scenario.standard_context_approach();
     let openai_compat_server = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
         Some(OpenAiCompatBenchServer::start(benchmark_stream_profile(scenario)).await?)
     } else {
@@ -863,19 +863,22 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         provider,
         max_context_tokens: Some(200_000),
         execution_mode: execution_mode.clone(),
-        context_approach: context_approach.clone(),
+        standard_context_approach: Some(standard_context_approach.clone()),
         ..SessionPolicy::default()
     };
 
-    let profile = DefaultToolSurfaceProfile::for_runtime(&context_approach, false, false);
+    let profile =
+        DefaultToolSurfaceProfile::for_runtime(Some(&standard_context_approach), false, false);
     let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimePersistence>;
     let mut factories = tool_plugin_factories(DefaultToolPluginOptions {
         execution_mode,
-        context_approach: context_approach.clone(),
+        standard_context_approach: Some(standard_context_approach.clone()),
         bundles: profile.bundles,
         tavily_api_key: None,
         instruction_source: None,
     });
+    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
+    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
     factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));

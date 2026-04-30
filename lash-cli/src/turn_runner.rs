@@ -148,7 +148,9 @@ mod tests {
                 configured_model: "gpt-5.4-mini".into(),
                 context_window: 0,
                 execution_mode: ExecutionMode::new("rlm"),
-                context_approach: ContextApproach::RollingHistory(RollingHistoryConfig),
+                standard_context_approach: Some(StandardContextApproach::RollingHistory(
+                    RollingHistoryConfig,
+                )),
                 model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),

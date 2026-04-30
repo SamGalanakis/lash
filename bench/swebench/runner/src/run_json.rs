@@ -50,7 +50,7 @@ pub fn write_dashboard_run_json(
             "preset_source": settings.preset.as_ref().map(|_| "explicit"),
             "requested_model": settings.model,
             "variant": settings.variant,
-            "context_approach": settings.context_approach_label,
+            "standard_context_approach": settings.standard_context_approach_label,
             "provider": {
                 "active_provider": settings.provider_kind,
                 "active_provider_type": settings.provider_kind,

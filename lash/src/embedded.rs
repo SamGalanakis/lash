@@ -624,6 +624,7 @@ fn is_code_complete(code: &str) -> bool {
         Err(FlowParseError::Expected { found, .. } | FlowParseError::Unexpected { found, .. }) => {
             found != "end of input"
         }
+        Err(FlowParseError::LoopControlOutsideLoop { .. }) => true,
         Err(FlowParseError::Lex(_)) => true,
     }
 }

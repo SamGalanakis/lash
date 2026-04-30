@@ -4,8 +4,8 @@ mod parser;
 mod runtime;
 
 pub use ast::{
-    BinaryOp, CallExpr, Expr, NamedParallelBranch, ParallelBranches, Program, Stmt, TypeExpr,
-    TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, BinaryOp, CallExpr, Expr, NamedParallelBranch, ParallelBranches,
+    Program, Stmt, TypeExpr, TypeField, UnaryOp,
 };
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use parser::{ParseError, parse};

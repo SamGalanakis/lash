@@ -1,4 +1,3 @@
-pub mod context_approach;
 pub mod direct;
 pub mod dynamic;
 pub mod embedded;
@@ -19,11 +18,13 @@ pub mod session_graph;
 pub mod session_model;
 pub mod skill_catalog;
 pub mod skill_prompt;
+pub mod standard_context_approach;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tool_dispatch;
 mod tool_provider;
+mod tool_schema;
 pub mod tools;
 mod trace;
 
@@ -33,9 +34,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 
 // Re-exports
-pub use context_approach::{
-    ContextApproach, ContextApproachKind, ObservationalMemoryConfig, RollingHistoryConfig,
-};
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
@@ -54,12 +52,17 @@ pub use lash_sansio::{
     PromptContext, PromptContribution, PromptPanel, PromptRequest, PromptResponse,
     PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
     PruneState, RenderedPrompt, Response, SessionEvent, TokenUsage, ToolActivation,
-    ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition, ToolExecutionMode,
-    ToolImage, ToolParam, ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
-    UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
-    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
-    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, reasoning_part, shared_parts, turn_limit_exhausted_message,
+    ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition,
+    ToolDiscoveryMetadata, ToolExecutionMode, ToolImage, ToolResult, ToolSurface,
+    ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, UserInputProvenance,
+    UserInputTransform, append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
+    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
+    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part, shared_parts,
+    turn_limit_exhausted_message,
+};
+pub use standard_context_approach::{
+    ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
+    StandardContextApproachKind,
 };
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", content = "options", rename_all = "snake_case")]
@@ -131,11 +134,12 @@ pub use plugin::{
     SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
     SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
     SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionTurnHandle,
-    SnapshotReader, SnapshotWriter, StandardCreateExtras, ToolResultProjectionContext,
-    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
-    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
-    TurnResultHookContext, TurnResultSummary, TurnTransformContext,
-    plugin_surface_event_renders_visible_output,
+    SnapshotReader, SnapshotWriter, StandardCreateExtras, ToolDiscoveryContext,
+    ToolDiscoveryContribution, ToolDiscoveryContributor, ToolDiscoveryToolContribution,
+    ToolResultProjectionContext, ToolResultProjectionHook, ToolResultProjectionMode,
+    ToolResultProjectionPluginConfig, ToolResultProjector, ToolSurfaceContribution,
+    TurnContextTransform, TurnHookContext, TurnResultHookContext, TurnResultSummary,
+    TurnTransformContext, plugin_surface_event_renders_visible_output,
 };
 pub use provider::{
     AgentModelSelection, LashConfig, Provider, ProviderFactory, ProviderHandle, ProviderOptions,
@@ -153,6 +157,7 @@ pub use runtime::{
     TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
     TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
+pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use session::{
     InjectedTurnInput, Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,
 };

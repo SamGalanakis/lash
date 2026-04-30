@@ -253,6 +253,10 @@ class LashAgent(BaseInstalledAgent):
         variant = os.environ.get("LASH_BENCH_MODEL_VARIANT", "").strip()
         variant_flag = f"--variant {shlex.quote(variant)} " if variant else ""
         context_approach = os.environ.get("LASH_BENCH_CONTEXT_APPROACH", "").strip()
+        if context_approach and execution_mode != "standard":
+            raise ValueError(
+                "LASH_BENCH_CONTEXT_APPROACH only applies to standard execution mode"
+            )
         context_approach_flag = (
             f"--context-approach {shlex.quote(context_approach)} "
             if context_approach

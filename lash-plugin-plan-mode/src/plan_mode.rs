@@ -47,7 +47,7 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "grep",
         "ls",
         "read_file",
-        "discover_tools",
+        "search_tools",
         "load_tools",
         "search_web",
         "apply_patch",
@@ -563,19 +563,17 @@ impl PlanModeTools {
 #[async_trait::async_trait]
 impl ToolProvider for PlanModeTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "plan_exit".into(),
-            description: "Ask whether to exit plan mode.".into(),
-            params: Vec::new(),
-            returns: "dict".into(),
-            examples: vec!["plan_exit()".into()],
-            availability: lash::ToolAvailabilityConfig::hidden(),
-            activation: lash::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+        vec![
+            ToolDefinition::new(
+                "plan_exit",
+                "Ask whether to exit plan mode.",
+                ToolDefinition::default_input_schema(),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_examples(vec!["plan_exit()".into()])
+            .with_availability(lash::ToolAvailabilityConfig::hidden())
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
 
     async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {

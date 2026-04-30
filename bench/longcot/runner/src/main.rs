@@ -14,12 +14,12 @@ use dataset::{LongCoTQuestion, load_questions};
 use lash::plugin::PluginFactory;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot,
-    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
-    RuntimePersistence, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
-    diff_usage_reports,
+    EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
+    PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
+    RuntimePersistence, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport,
+    StandardContextApproach, Store, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput,
+    TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_export::{ExportFormat, SessionSelector, export};
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
@@ -134,8 +134,8 @@ struct Args {
     #[arg(long, default_value = DEFAULT_EXECUTION_MODE)]
     execution_mode: String,
 
-    #[arg(long, default_value = DEFAULT_CONTEXT_APPROACH)]
-    context_approach: String,
+    #[arg(long)]
+    standard_context_approach: Option<String>,
 
     #[arg(long, default_value_t = DEFAULT_MAX_TURNS)]
     max_turns: usize,
@@ -173,7 +173,7 @@ struct RunManifest {
     /// label differs.
     harness: String,
     execution_mode: String,
-    context_approach: String,
+    standard_context_approach: Option<String>,
     max_turns: usize,
     max_context_tokens: usize,
     max_output_tokens: u64,
@@ -239,7 +239,7 @@ struct QuestionResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LashRunSnapshot {
     execution_mode: String,
-    context_approach: String,
+    standard_context_approach: Option<String>,
     variant: Option<String>,
     max_turns: usize,
     max_output_tokens: u64,
@@ -319,7 +319,10 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("create {}", responses_dir.display()))?;
 
     let execution_mode = parse_execution_mode(&args.execution_mode)?;
-    let context_approach = parse_context_approach(&args.context_approach)?;
+    let standard_context_approach = resolve_standard_context_approach(
+        &execution_mode,
+        args.standard_context_approach.as_deref(),
+    )?;
     let model_slug = args.model.replace(['/', ':'], "_");
     let domain_label = summarize_domain_selection(&args.domain);
     let diff_label = args.difficulty.clone().unwrap_or_else(|| "all".to_string());
@@ -337,7 +340,10 @@ async fn main() -> anyhow::Result<()> {
         base_url: resolve_base_url(&args),
         harness: args.harness.clone(),
         execution_mode: execution_mode_label(&execution_mode).to_string(),
-        context_approach: context_approach_label(&context_approach).to_string(),
+        standard_context_approach: standard_context_approach
+            .as_ref()
+            .map(standard_context_approach_label)
+            .map(str::to_string),
         max_turns: args.max_turns,
         max_context_tokens: args.max_context_tokens,
         max_output_tokens: args.max_output_tokens,
@@ -396,7 +402,9 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("  pending:          {}", pending.len());
     eprintln!("  model:            {}", args.model);
     eprintln!("  execution-mode:   {}", manifest.execution_mode);
-    eprintln!("  context-approach: {}", manifest.context_approach);
+    if let Some(standard_context_approach) = &manifest.standard_context_approach {
+        eprintln!("  context-approach: {standard_context_approach}");
+    }
     eprintln!("  max_turns:        {}", args.max_turns);
     eprintln!("  max_output_tokens:{}", args.max_output_tokens);
     eprintln!("  batch_size:       {}", args.batch_size.max(1));
@@ -429,7 +437,7 @@ async fn main() -> anyhow::Result<()> {
         let args = args_shared.clone();
         let output_dir = output_dir_shared.clone();
         let responses_path = responses_path_shared.clone();
-        let context_approach = context_approach.clone();
+        let standard_context_approach = standard_context_approach.clone();
         let execution_mode = execution_mode.clone();
         join_set.spawn(async move {
             let _permit = permit;
@@ -438,7 +446,7 @@ async fn main() -> anyhow::Result<()> {
                 provider.as_ref(),
                 args.as_ref(),
                 execution_mode,
-                &context_approach,
+                standard_context_approach.as_ref(),
                 question,
             )
             .await;
@@ -584,7 +592,7 @@ async fn run_question(
     provider: &ProviderHandle,
     args: &Args,
     execution_mode: ExecutionMode,
-    context_approach: &ContextApproach,
+    standard_context_approach: Option<&StandardContextApproach>,
     question: LongCoTQuestion,
 ) -> anyhow::Result<QuestionResult> {
     let question_dir = output_dir.join("questions").join(&question.question_id);
@@ -605,14 +613,17 @@ async fn run_question(
         provider: provider.clone(),
         max_context_tokens: Some(args.max_context_tokens),
         execution_mode: execution_mode.clone(),
-        context_approach: context_approach.clone(),
+        standard_context_approach: standard_context_approach.cloned(),
         model_variant: Some(args.variant.clone()),
         max_turns: Some(args.max_turns),
         ..SessionPolicy::default()
     };
 
-    let plugin_session =
-        build_plugin_session(execution_mode.clone(), context_approach.clone(), &policy)?;
+    let plugin_session = build_plugin_session(
+        execution_mode.clone(),
+        standard_context_approach.cloned(),
+        &policy,
+    )?;
     let services = PersistentRuntimeServices::new_with_bridges(
         plugin_session,
         TurnInjectionBridge::new(),
@@ -728,7 +739,9 @@ async fn run_question(
         failure_reason,
         lash: LashRunSnapshot {
             execution_mode: execution_mode_label(&execution_mode).to_string(),
-            context_approach: context_approach_label(context_approach).to_string(),
+            standard_context_approach: standard_context_approach
+                .map(standard_context_approach_label)
+                .map(str::to_string),
             variant: Some(args.variant.clone()),
             max_turns: args.max_turns,
             max_output_tokens: args.max_output_tokens,
@@ -820,21 +833,25 @@ fn extract_text(content: Option<&Value>) -> String {
 /// tools: LongCoT prompts explicitly forbid external tool use.
 fn build_plugin_session(
     execution_mode: ExecutionMode,
-    context_approach: ContextApproach,
+    standard_context_approach: Option<StandardContextApproach>,
     policy: &SessionPolicy,
 ) -> anyhow::Result<Arc<lash::PluginSession>> {
     let mut factories: Vec<Arc<dyn PluginFactory>> =
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
-    match context_approach {
-        ContextApproach::RollingHistory(_) => {
-            factories.push(Arc::new(RollingHistoryPluginFactory::default()));
-        }
-        ContextApproach::ObservationalMemory(_) => {
-            factories.push(Arc::new(ObservationalMemoryPluginFactory));
+    if let Some(standard_context_approach) = &standard_context_approach {
+        match standard_context_approach {
+            StandardContextApproach::RollingHistory(_) => {
+                factories.push(Arc::new(RollingHistoryPluginFactory::default()));
+            }
+            StandardContextApproach::ObservationalMemory(_) => {
+                factories.push(Arc::new(ObservationalMemoryPluginFactory));
+            }
         }
     }
     // The RLM runtime refuses to start without mode-session plugins
     // registered, so wire up both built-ins the same way lash-cli does.
+    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
+    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
     factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));
@@ -863,7 +880,7 @@ fn build_plugin_session(
     )));
     let plugin_host = PluginHost::new(factories);
     plugin_host
-        .build_session("root", execution_mode, context_approach, None)
+        .build_session("root", execution_mode, standard_context_approach, None)
         .context("build plugin session")
 }
 
@@ -1018,22 +1035,37 @@ fn parse_execution_mode(raw: &str) -> anyhow::Result<ExecutionMode> {
     }
 }
 
-fn parse_context_approach(raw: &str) -> anyhow::Result<ContextApproach> {
+fn parse_standard_context_approach(raw: &str) -> anyhow::Result<StandardContextApproach> {
     match raw {
-        "rolling_history" => Ok(ContextApproach::RollingHistory(Default::default())),
-        "observational_memory" => Ok(ContextApproach::ObservationalMemory(Default::default())),
+        "rolling_history" => Ok(StandardContextApproach::RollingHistory(Default::default())),
+        "observational_memory" => Ok(StandardContextApproach::ObservationalMemory(
+            Default::default(),
+        )),
         _ => bail!("unsupported context approach `{raw}`"),
     }
+}
+
+fn resolve_standard_context_approach(
+    execution_mode: &ExecutionMode,
+    raw: Option<&str>,
+) -> anyhow::Result<Option<StandardContextApproach>> {
+    if *execution_mode == ExecutionMode::standard() {
+        return parse_standard_context_approach(raw.unwrap_or(DEFAULT_CONTEXT_APPROACH)).map(Some);
+    }
+    if raw.is_some() {
+        bail!("--context-approach only applies to --execution-mode standard");
+    }
+    Ok(None)
 }
 
 fn execution_mode_label(mode: &ExecutionMode) -> &str {
     mode.plugin_id()
 }
 
-fn context_approach_label(approach: &ContextApproach) -> &'static str {
+fn standard_context_approach_label(approach: &StandardContextApproach) -> &'static str {
     match approach {
-        ContextApproach::RollingHistory(_) => "rolling_history",
-        ContextApproach::ObservationalMemory(_) => "observational_memory",
+        StandardContextApproach::RollingHistory(_) => "rolling_history",
+        StandardContextApproach::ObservationalMemory(_) => "observational_memory",
     }
 }
 

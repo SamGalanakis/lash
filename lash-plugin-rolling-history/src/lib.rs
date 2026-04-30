@@ -28,8 +28,8 @@ use lash::plugin::{
 use lash::session_model::context::PreparedContext;
 use lash::session_model::format_tool_result_content;
 use lash::{
-    ContextApproach, ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind,
-    PromptUsage, RollingHistoryConfig, SessionStateEnvelope, ToolCallRecord, TurnInput,
+    ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
+    RollingHistoryConfig, SessionStateEnvelope, StandardContextApproach, ToolCallRecord, TurnInput,
 };
 
 fn tool_spill_dir() -> std::path::PathBuf {
@@ -689,13 +689,18 @@ impl PluginFactory for RollingHistoryPluginFactory {
         ROLLING_HISTORY_PLUGIN_ID
     }
 
-    fn supported_context_approaches(&self) -> &'static [lash::ContextApproachKind] {
-        &[lash::ContextApproachKind::RollingHistory]
+    fn supported_standard_context_approaches(
+        &self,
+    ) -> &'static [lash::StandardContextApproachKind] {
+        &[lash::StandardContextApproachKind::RollingHistory]
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         if ctx.execution_mode != ExecutionMode::standard()
-            || !matches!(ctx.context_approach, ContextApproach::RollingHistory(_))
+            || !matches!(
+                ctx.standard_context_approach,
+                Some(StandardContextApproach::RollingHistory(_))
+            )
         {
             return Ok(Arc::new(DisabledRollingHistoryPlugin));
         }

@@ -103,7 +103,8 @@ fn main() {
         .map(|value| {
             Scenario::parse(value).unwrap_or_else(|| {
                 panic!(
-                    "unknown scenario `{value}`; expected baseline, async_await, direct_unwrap, or general_parallel"
+                    "unknown scenario `{value}`; expected {}",
+                    Scenario::expected_values()
                 )
             })
         })

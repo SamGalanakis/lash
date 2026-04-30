@@ -240,14 +240,16 @@ pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String>
     }
 }
 
-pub(crate) fn parse_context_approach(input: &str) -> Result<lash::ContextApproach, String> {
+pub(crate) fn parse_standard_context_approach(
+    input: &str,
+) -> Result<lash::StandardContextApproach, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Context approach cannot be empty.".to_string()),
-        "rolling" | "rolling-history" | "rolling_history" => {
-            Ok(lash::ContextApproach::RollingHistory(Default::default()))
-        }
+        "rolling" | "rolling-history" | "rolling_history" => Ok(
+            lash::StandardContextApproach::RollingHistory(Default::default()),
+        ),
         "om" | "observational" | "observational-memory" | "observational_memory" => Ok(
-            lash::ContextApproach::ObservationalMemory(Default::default()),
+            lash::StandardContextApproach::ObservationalMemory(Default::default()),
         ),
         other => Err(format!(
             "Unknown context approach `{other}`. Expected `rolling_history` or `observational_memory`."
@@ -256,8 +258,8 @@ pub(crate) fn parse_context_approach(input: &str) -> Result<lash::ContextApproac
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_context_approach_overrides(
-    mut approach: lash::ContextApproach,
+pub(crate) fn apply_standard_context_approach_overrides(
+    mut approach: lash::StandardContextApproach,
     om_observation_message_tokens: Option<usize>,
     om_observation_buffer_tokens: Option<usize>,
     om_observation_block_after_tokens: Option<usize>,
@@ -266,7 +268,7 @@ pub(crate) fn apply_context_approach_overrides(
     om_reflection_observation_tokens: Option<usize>,
     om_reflection_buffer_activation_percent: Option<u16>,
     om_reflection_block_after_tokens: Option<usize>,
-) -> Result<lash::ContextApproach, String> {
+) -> Result<lash::StandardContextApproach, String> {
     let has_om_overrides = om_observation_message_tokens.is_some()
         || om_observation_buffer_tokens.is_some()
         || om_observation_block_after_tokens.is_some()
@@ -279,7 +281,7 @@ pub(crate) fn apply_context_approach_overrides(
         return Ok(approach);
     }
 
-    let lash::ContextApproach::ObservationalMemory(config) = &mut approach else {
+    let lash::StandardContextApproach::ObservationalMemory(config) = &mut approach else {
         return Err(
             "OM tuning flags require `--context-approach observational_memory`.".to_string(),
         );
@@ -506,10 +508,6 @@ pub(crate) fn info_text_unconfigured(execution_mode: &ExecutionMode, cwd: &str) 
         "configured model: (not configured)".to_string(),
         "resolved model: (not configured)".to_string(),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
-        format!(
-            "context approach: {}",
-            lash::ContextApproach::default().label()
-        ),
         "context window: unknown".to_string(),
         format!("cwd: {}", cwd),
         "session: (not started)".to_string(),
@@ -523,7 +521,7 @@ pub(crate) fn info_text(
     configured_model: &str,
     model_variant: Option<&str>,
     execution_mode: &ExecutionMode,
-    context_approach: &lash::ContextApproach,
+    standard_context_approach: Option<&lash::StandardContextApproach>,
     context_window: Option<u64>,
     tool_count: usize,
     toolset_hash: &str,
@@ -545,8 +543,13 @@ pub(crate) fn info_text(
         format!("resolved model: {}", resolved_model),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
     ];
-    if *execution_mode == ExecutionMode::standard() {
-        lines.push(format!("context approach: {}", context_approach.label()));
+    if *execution_mode == ExecutionMode::standard()
+        && let Some(standard_context_approach) = standard_context_approach
+    {
+        lines.push(format!(
+            "context approach: {}",
+            standard_context_approach.label()
+        ));
     }
 
     if let Some(variant) = model_variant {
@@ -833,9 +836,9 @@ mod tests {
     }
 
     #[test]
-    fn observational_memory_overrides_apply_to_context_approach() {
-        let approach = apply_context_approach_overrides(
-            lash::ContextApproach::ObservationalMemory(Default::default()),
+    fn observational_memory_overrides_apply_to_standard_context_approach() {
+        let approach = apply_standard_context_approach_overrides(
+            lash::StandardContextApproach::ObservationalMemory(Default::default()),
             Some(45_000),
             Some(8_000),
             None,
@@ -846,7 +849,7 @@ mod tests {
             None,
         )
         .expect("overrides");
-        let lash::ContextApproach::ObservationalMemory(config) = approach else {
+        let lash::StandardContextApproach::ObservationalMemory(config) = approach else {
             panic!("expected observational_memory");
         };
         assert_eq!(config.observation_message_tokens, 45_000);
@@ -857,9 +860,9 @@ mod tests {
     }
 
     #[test]
-    fn observational_memory_overrides_require_om_context_approach() {
-        let err = apply_context_approach_overrides(
-            lash::ContextApproach::RollingHistory(Default::default()),
+    fn observational_memory_overrides_require_om_standard_context_approach() {
+        let err = apply_standard_context_approach_overrides(
+            lash::StandardContextApproach::RollingHistory(Default::default()),
             Some(45_000),
             None,
             None,
@@ -885,7 +888,7 @@ mod tests {
             "google/gemini-3-flash-preview",
             None,
             &ExecutionMode::new("rlm"),
-            &lash::ContextApproach::default(),
+            None,
             Some(123_000),
             7,
             "abcd1234",

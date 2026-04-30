@@ -15,7 +15,7 @@ struct BuildPluginSessionRequest<'a> {
     session_id: String,
     parent_session_id: Option<String>,
     execution_mode: ExecutionMode,
-    context_approach: crate::ContextApproach,
+    standard_context_approach: Option<crate::StandardContextApproach>,
     snapshot: Option<&'a PluginSessionSnapshot>,
     tool_surface_overlay: ToolSurfaceContribution,
     tool_snapshot: Option<crate::DynamicStateSnapshot>,
@@ -58,11 +58,16 @@ impl PluginHost {
         self.factories.as_ref().as_slice()
     }
 
-    pub fn supports_context_approach(&self, context_approach: &crate::ContextApproach) -> bool {
-        let required = context_approach.kind();
-        self.factories()
-            .iter()
-            .any(|factory| factory.supported_context_approaches().contains(&required))
+    pub fn supports_standard_context_approach(
+        &self,
+        standard_context_approach: &crate::StandardContextApproach,
+    ) -> bool {
+        let required = standard_context_approach.kind();
+        self.factories().iter().any(|factory| {
+            factory
+                .supported_standard_context_approaches()
+                .contains(&required)
+        })
     }
 
     pub fn build_standard_session(
@@ -73,7 +78,7 @@ impl PluginHost {
         self.build_session(
             session_id,
             ExecutionMode::standard(),
-            crate::ContextApproach::default(),
+            Some(crate::StandardContextApproach::default()),
             snapshot,
         )
     }
@@ -82,13 +87,13 @@ impl PluginHost {
         &self,
         session_id: impl Into<String>,
         execution_mode: ExecutionMode,
-        context_approach: crate::ContextApproach,
+        standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_with_surface(
             session_id,
             execution_mode,
-            context_approach,
+            standard_context_approach,
             snapshot,
             ToolSurfaceContribution::default(),
             None,
@@ -105,14 +110,14 @@ impl PluginHost {
         session_id: impl Into<String>,
         parent_session_id: Option<String>,
         execution_mode: ExecutionMode,
-        context_approach: crate::ContextApproach,
+        standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_inner(BuildPluginSessionRequest {
             session_id: session_id.into(),
             parent_session_id,
             execution_mode,
-            context_approach,
+            standard_context_approach,
             snapshot,
             tool_surface_overlay: ToolSurfaceContribution::default(),
             tool_snapshot: None,
@@ -123,7 +128,7 @@ impl PluginHost {
         &self,
         session_id: impl Into<String>,
         execution_mode: ExecutionMode,
-        context_approach: crate::ContextApproach,
+        standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
         tool_surface_overlay: ToolSurfaceContribution,
         tool_snapshot: Option<crate::DynamicStateSnapshot>,
@@ -132,7 +137,7 @@ impl PluginHost {
             session_id: session_id.into(),
             parent_session_id: None,
             execution_mode,
-            context_approach,
+            standard_context_approach,
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
@@ -147,25 +152,36 @@ impl PluginHost {
             session_id,
             parent_session_id,
             execution_mode,
-            context_approach,
+            standard_context_approach,
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
         } = request;
-        if matches!(
-            context_approach,
-            crate::ContextApproach::ObservationalMemory(_)
-        ) && !self.supports_context_approach(&context_approach)
-        {
-            return Err(PluginError::Registration(format!(
-                "context approach `{}` requires a supporting plugin factory on this plugin host",
-                context_approach.label()
-            )));
+        if execution_mode == ExecutionMode::standard() {
+            let approach = standard_context_approach.as_ref().ok_or_else(|| {
+                PluginError::Registration(
+                    "standard execution requires a standard context approach".to_string(),
+                )
+            })?;
+            if matches!(
+                approach,
+                crate::StandardContextApproach::ObservationalMemory(_)
+            ) && !self.supports_standard_context_approach(approach)
+            {
+                return Err(PluginError::Registration(format!(
+                    "standard context approach `{}` requires a supporting plugin factory on this plugin host",
+                    approach.label()
+                )));
+            }
+        } else if standard_context_approach.is_some() {
+            return Err(PluginError::Registration(
+                "standard context approach only applies to standard execution mode".to_string(),
+            ));
         }
         let ctx = PluginSessionContext {
             session_id,
             execution_mode: execution_mode.clone(),
-            context_approach: context_approach.clone(),
+            standard_context_approach: standard_context_approach.clone(),
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();
@@ -190,21 +206,18 @@ impl PluginHost {
             .hook;
         let mode_native_tools = reg
             .mode_native_tools
-            .take()
-            .ok_or_else(|| {
-                PluginError::Registration(format!(
-                    "missing mode native tool capability for {:?}",
-                    execution_mode
-                ))
-            })?
-            .hook;
+            .into_iter()
+            .map(|entry| entry.hook)
+            .collect::<Vec<_>>();
         let mode_protocol_driver = reg.mode_protocol_driver.take().map(|entry| entry.hook);
-        for def in mode_native_tools.definitions() {
-            if !reg.tool_names.insert(def.name.clone()) {
-                return Err(PluginError::Registration(format!(
-                    "duplicate mode native tool name `{}`",
-                    def.name
-                )));
+        for provider in &mode_native_tools {
+            for def in provider.definitions() {
+                if !reg.tool_names.insert(def.name.clone()) {
+                    return Err(PluginError::Registration(format!(
+                        "duplicate mode native tool name `{}`",
+                        def.name
+                    )));
+                }
             }
         }
         let base_tools: Arc<dyn ToolProvider> = Arc::new(
@@ -254,6 +267,7 @@ impl PluginHost {
             prompt_contributors: reg.prompt_contributors,
             prompt_request_hooks: reg.prompt_request_hooks,
             tool_surface_contributors: reg.tool_surface_contributors,
+            tool_discovery_contributors: reg.tool_discovery_contributors,
             before_turn_hooks: reg.before_turn_hooks,
             before_tool_call_hooks: reg.before_tool_call_hooks,
             after_tool_call_hooks: reg.after_tool_call_hooks,
@@ -285,7 +299,7 @@ impl PluginHost {
         let ready = SessionReadyContext {
             session_id: session.session_id.clone(),
             execution_mode,
-            context_approach,
+            standard_context_approach,
             host: self.clone(),
         };
         for plugin in &session.plugins {

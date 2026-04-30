@@ -8,17 +8,27 @@ pub enum Scenario {
     AsyncAwait,
     DirectUnwrap,
     GeneralParallel,
+    LoopControl,
+    IndexedAssignment,
 }
 
 impl Scenario {
+    #[allow(dead_code)]
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "baseline" => Self::Baseline,
             "async_await" => Self::AsyncAwait,
             "direct_unwrap" => Self::DirectUnwrap,
             "general_parallel" => Self::GeneralParallel,
+            "loop_control" => Self::LoopControl,
+            "indexed_assignment" => Self::IndexedAssignment,
             _ => return None,
         })
+    }
+
+    #[allow(dead_code)]
+    pub fn expected_values() -> &'static str {
+        "baseline, async_await, direct_unwrap, general_parallel, loop_control, or indexed_assignment"
     }
 }
 
@@ -29,6 +39,8 @@ impl fmt::Display for Scenario {
             Self::AsyncAwait => "async_await",
             Self::DirectUnwrap => "direct_unwrap",
             Self::GeneralParallel => "general_parallel",
+            Self::LoopControl => "loop_control",
+            Self::IndexedAssignment => "indexed_assignment",
         })
     }
 }
@@ -124,6 +136,46 @@ results = parallel {
   right: format("{0}:{1}", seed[1], len(seed))
 }
 submit format("{0}|{1}", results.left, results.right)
+"#
+        }
+        Scenario::LoopControl => {
+            r#"
+items = range(0, 128)
+outer = "restored"
+kept = 0
+skipped = 0
+for outer in items {
+  if outer < 32 {
+    skipped = skipped + 1
+    continue
+  }
+  if outer >= 96 {
+    break
+  }
+  if outer % 3 == 0 {
+    continue
+  }
+  kept = kept + 1
+}
+submit { kept: kept, skipped: skipped, outer: outer }
+"#
+        }
+        Scenario::IndexedAssignment => {
+            r#"
+groups = ["alpha", "beta", "alpha", "gamma", "beta", "alpha", "delta", "gamma"]
+counts = {}
+for group in groups {
+  counts[group] = counts[group] + 1
+}
+state = { groups: { alpha: { count: 0 }, beta: { count: 0 }, gamma: { count: 0 }, delta: { count: 0 } } }
+for group in keys(counts) {
+  state.groups[group].count = counts[group]
+}
+summary = []
+for group in keys(counts) {
+  summary = summary + [format("{0}:{1}", group, state.groups[group].count)]
+}
+submit { counts: counts, state: state, summary: join(summary, ",") }
 "#
         }
     }

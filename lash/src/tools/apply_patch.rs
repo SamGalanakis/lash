@@ -1,9 +1,9 @@
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
-use super::{compact_diff, require_str, run_blocking};
+use super::{compact_diff, object_schema, require_str, run_blocking};
 
 const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
 const END_PATCH_MARKER: &str = "*** End Patch";
@@ -71,42 +71,34 @@ pub struct PatchFileOp {
 #[async_trait::async_trait]
 impl ToolProvider for ApplyPatchTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "apply_patch".into(),
-            description: APPLY_PATCH_INSTRUCTIONS.into(),
-            params: vec![
-                ToolParam {
-                    name: "input".into(),
-                    r#type: "str".into(),
-                    description: "Patch body in apply_patch format".into(),
-                    default_value: None,
-                    required: true,
-                },
-                ToolParam {
-                    name: "workdir".into(),
-                    r#type: "str".into(),
-                    description: "Optional working directory used to resolve relative patch paths"
-                        .into(),
-                    default_value: None,
-                    required: false,
-                },
-            ],
-            returns: "dict".into(),
-            examples: vec![
+        vec![
+            ToolDefinition::new(
+                "apply_patch",
+                APPLY_PATCH_INSTRUCTIONS,
+                object_schema(
+                    serde_json::json!({
+                        "input": {
+                            "type": "string",
+                            "description": "Patch body in apply_patch format"
+                        },
+                        "workdir": {
+                            "type": "string",
+                            "description": "Optional working directory used to resolve relative patch paths"
+                        }
+                    }),
+                    &["input"],
+                ),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_examples(vec![
                 "apply_patch(input=\"*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch\")"
                     .into(),
                 "apply_patch(input=\"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\")"
                     .into(),
-            ],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            // apply_patch mutates the working tree; it must not run in
-            // parallel with other mutating tools in the same batch.
-            execution_mode: ToolExecutionMode::Serial,
-        }]
+            ])
+            .with_discovery(crate::tools::discovery_metadata("filesystem", &["patch", "edit_file"]))
+            .with_execution_mode(ToolExecutionMode::Serial),
+        ]
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         let input = match require_str(args, "input") {

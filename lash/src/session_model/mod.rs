@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use crate::llm::types::{LlmEventSender, LlmStreamEvent};
 use crate::plugin::PluginMessage;
 use crate::provider::ProviderHandle;
-use crate::{ContextApproach, ExecutionMode};
+use crate::{ExecutionMode, StandardContextApproach};
 
 pub use lash_sansio::session_model::{
     CORE_GUIDANCE_SECTION, ConversationRecord, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS,
@@ -170,7 +170,7 @@ pub(crate) fn plugin_message_to_message(
 /// [`crate::provider::ProviderSpec`], rebuilt via the global
 /// [`crate::provider::ProviderRegistry`] on load. Hosts register the
 /// concrete provider types they support at startup.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionPolicy {
     pub model: String,
     pub provider: ProviderHandle,
@@ -181,8 +181,24 @@ pub struct SessionPolicy {
     pub autonomous: bool,
     pub max_turns: Option<usize>,
     pub execution_mode: ExecutionMode,
-    #[serde(default)]
-    pub context_approach: ContextApproach,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard_context_approach: Option<StandardContextApproach>,
+}
+
+impl Default for SessionPolicy {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            provider: ProviderHandle::default(),
+            max_context_tokens: None,
+            model_variant: None,
+            session_id: None,
+            autonomous: false,
+            max_turns: None,
+            execution_mode: ExecutionMode::standard(),
+            standard_context_approach: Some(StandardContextApproach::default()),
+        }
+    }
 }
 
 pub(crate) fn transport_stream_events(

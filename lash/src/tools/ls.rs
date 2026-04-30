@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::{
-    build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
-    rg_file_list, run_blocking,
+    build_path_entry, filesystem_entries_result, object_schema, parse_optional_bool,
+    parse_optional_usize_arg, rg_file_list, run_blocking,
 };
-use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 /// List filesystem entries in a directory tree.
 #[derive(Default)]
@@ -17,79 +17,63 @@ const MAX_ENTRIES: usize = 500;
 #[async_trait::async_trait]
 impl ToolProvider for Ls {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "ls".into(),
-            description: format!(
+        vec![
+            ToolDefinition::new(
+                "ls",
+                format!(
                 "List filesystem entries. By default this includes hidden files and respects `.gitignore` only inside Git repos. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false, include_hidden=true, respect_gitignore=true.",
                 DEFAULT_DEPTH, MAX_ENTRIES
             ),
-            params: vec![
-                ToolParam {
-                    name: "path".into(),
-                    r#type: "str".into(),
-                    description: "Directory to list (default: current directory)".into(),
-                    default_value: Some(serde_json::json!(".")),
-                    required: false,
-                },
-                ToolParam {
-                    name: "ignore".into(),
-                    r#type: "list".into(),
-                    description: "Additional glob patterns to ignore.".into(),
-                    default_value: None,
-                    required: false,
-                },
-                ToolParam {
-                    name: "depth".into(),
-                    r#type: "int".into(),
-                    description: format!(
-                        "Maximum directory depth to traverse (default: {}). Use null or \"none\" for no depth cap.",
-                        DEFAULT_DEPTH
-                    ),
-                    default_value: Some(serde_json::json!(DEFAULT_DEPTH)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "limit".into(),
-                    r#type: "int".into(),
-                    description: format!(
-                        "Maximum entries to return (default: {}). Use null or \"none\" for no cap.",
-                        MAX_ENTRIES
-                    ),
-                    default_value: Some(serde_json::json!(MAX_ENTRIES)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "with_lines".into(),
-                    r#type: "bool".into(),
-                    description: "Count text lines for file entries (`lines`). Default: false."
-                        .into(),
-                    default_value: Some(serde_json::json!(false)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "include_hidden".into(),
-                    r#type: "bool".into(),
-                    description: "Include dotfiles and dot-directories. Default: true.".into(),
-                    default_value: Some(serde_json::json!(true)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "respect_gitignore".into(),
-                    r#type: "bool".into(),
-                    description: "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled.".into(),
-                    default_value: Some(serde_json::json!(true)),
-                    required: false,
-                },
-            ],
-            returns: "dict".into(),
-            examples: vec![],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+                object_schema(
+                    serde_json::json!({
+                        "path": {
+                            "type": "string",
+                            "default": ".",
+                            "description": "Directory to list (default: current directory)"
+                        },
+                        "ignore": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Additional glob patterns to ignore."
+                        },
+                        "depth": {
+                            "type": ["integer", "null", "string"],
+                            "minimum": 1,
+                            "default": DEFAULT_DEPTH,
+                            "description": format!("Maximum directory depth to traverse (default: {}). Use null or \"none\" for no depth cap.", DEFAULT_DEPTH)
+                        },
+                        "limit": {
+                            "type": ["integer", "null", "string"],
+                            "minimum": 1,
+                            "default": MAX_ENTRIES,
+                            "description": format!("Maximum entries to return (default: {}). Use null or \"none\" for no cap.", MAX_ENTRIES)
+                        },
+                        "with_lines": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Count text lines for file entries (`lines`). Default: false."
+                        },
+                        "include_hidden": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Include dotfiles and dot-directories. Default: true."
+                        },
+                        "respect_gitignore": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled."
+                        }
+                    }),
+                    &[],
+                ),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_discovery(crate::tools::discovery_metadata(
+                "filesystem",
+                &["list_files", "list_directory"],
+            ))
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");

@@ -16,11 +16,11 @@ use dataset::{LongMemEvalQuestion, load_questions};
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    ContextApproach, EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
-    RuntimePersistence, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, Store,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
+    EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
+    PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, ProviderHandle, RuntimeCoreConfig, RuntimePersistence,
+    SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
+    Store, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
@@ -125,8 +125,8 @@ struct Args {
     #[arg(long, default_value = DEFAULT_EXECUTION_MODE)]
     execution_mode: String,
 
-    #[arg(long, default_value = DEFAULT_CONTEXT_APPROACH)]
-    context_approach: String,
+    #[arg(long)]
+    standard_context_approach: Option<String>,
 
     #[arg(long, default_value_t = DEFAULT_MAX_CONTEXT_TOKENS)]
     max_context_tokens: usize,
@@ -175,7 +175,7 @@ struct RunManifest {
     provider_id: String,
     variant: Option<String>,
     execution_mode: String,
-    context_approach: String,
+    standard_context_approach: Option<String>,
     prompt_profile: String,
     session_tools: bool,
     batch_size: usize,
@@ -330,7 +330,10 @@ async fn main() -> anyhow::Result<()> {
     fs::create_dir_all(&output_dir).with_context(|| format!("create {}", output_dir.display()))?;
 
     let execution_mode = parse_execution_mode(&args.execution_mode)?;
-    let context_approach = parse_context_approach(&args.context_approach)?;
+    let standard_context_approach = resolve_standard_context_approach(
+        &execution_mode,
+        args.standard_context_approach.as_deref(),
+    )?;
 
     let manifest = RunManifest {
         run_id: run_id.clone(),
@@ -341,7 +344,10 @@ async fn main() -> anyhow::Result<()> {
         provider_id: args.provider_id.clone(),
         variant: args.variant.clone(),
         execution_mode: execution_mode_label(&execution_mode).to_string(),
-        context_approach: context_approach_label(&context_approach).to_string(),
+        standard_context_approach: standard_context_approach
+            .as_ref()
+            .map(standard_context_approach_label)
+            .map(str::to_string),
         prompt_profile: match args.prompt_profile {
             PromptProfile::Baseline => "baseline",
             PromptProfile::TemporalObservations => "temporal_observations",
@@ -409,7 +415,7 @@ async fn main() -> anyhow::Result<()> {
         let output_dir = output_dir.clone();
         let provider = provider.clone();
         let args = args.clone();
-        let context_approach = context_approach.clone();
+        let standard_context_approach = standard_context_approach.clone();
         let execution_mode = execution_mode.clone();
         join_set.spawn(async move {
             let _permit = permit;
@@ -418,7 +424,7 @@ async fn main() -> anyhow::Result<()> {
                 provider.as_ref(),
                 args.as_ref(),
                 execution_mode,
-                &context_approach,
+                standard_context_approach.as_ref(),
                 question,
             )
             .await;
@@ -562,7 +568,7 @@ async fn run_question(
     provider: &ProviderHandle,
     args: &Args,
     execution_mode: ExecutionMode,
-    context_approach: &ContextApproach,
+    standard_context_approach: Option<&StandardContextApproach>,
     question: LongMemEvalQuestion,
 ) -> anyhow::Result<QuestionResult> {
     let question_dir = output_dir.join("questions").join(&question.question_id);
@@ -585,13 +591,13 @@ async fn run_question(
         provider: provider.clone(),
         max_context_tokens: Some(args.max_context_tokens),
         execution_mode: execution_mode.clone(),
-        context_approach: context_approach.clone(),
+        standard_context_approach: standard_context_approach.cloned(),
         model_variant: args.variant.clone(),
         ..SessionPolicy::default()
     };
     let root_plugins = build_plugin_session(
         execution_mode,
-        context_approach.clone(),
+        standard_context_approach.cloned(),
         args.session_tools,
         benchmark_context,
         &policy,
@@ -739,19 +745,21 @@ async fn run_question(
 
 fn build_plugin_session(
     execution_mode: ExecutionMode,
-    context_approach: ContextApproach,
+    standard_context_approach: Option<StandardContextApproach>,
     session_tools: bool,
     benchmark_context: BenchmarkQuestionContext,
     session_policy: &SessionPolicy,
 ) -> anyhow::Result<Arc<lash::PluginSession>> {
     let mut factories: Vec<Arc<dyn PluginFactory>> =
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
-    match context_approach {
-        ContextApproach::RollingHistory(_) => {
-            factories.push(Arc::new(RollingHistoryPluginFactory::default()));
-        }
-        ContextApproach::ObservationalMemory(_) => {
-            factories.push(Arc::new(ObservationalMemoryPluginFactory));
+    if let Some(standard_context_approach) = &standard_context_approach {
+        match standard_context_approach {
+            StandardContextApproach::RollingHistory(_) => {
+                factories.push(Arc::new(RollingHistoryPluginFactory::default()));
+            }
+            StandardContextApproach::ObservationalMemory(_) => {
+                factories.push(Arc::new(ObservationalMemoryPluginFactory));
+            }
         }
     }
     let mut subagent_models = std::collections::BTreeMap::new();
@@ -777,7 +785,7 @@ fn build_plugin_session(
     }
     let plugin_host = PluginHost::new(factories);
     plugin_host
-        .build_session("root", execution_mode, context_approach, None)
+        .build_session("root", execution_mode, standard_context_approach, None)
         .context("build plugin session")
 }
 
@@ -866,10 +874,12 @@ print result
 - After each result, either write another fenced block to continue or `submit <value>` (or plain prose with no fenced block) to end the turn.
 - When you are done, reply with plain prose only — or `submit <value>` from inside a fenced block.
 - Variables persist across iterations.
+- You can update variable-rooted collection paths: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms. Record assignment inserts/replaces fields; list assignment replaces an existing integer index only. Dynamic record reads return `null` when missing, so `counts[g] = counts[g] + 1` works for histograms.
 - If the prompt includes bound variables, use them directly.
 - Call tools with `call tool_name { arg: expr }`. Tool calls return `{ ok, value/error }` wrappers; use `(call tool_name { arg: expr })?` for the normal fail-fast path.
 - Start background work with `start call tool_name { arg: expr }`, wait with `await handle`, and stop it with `cancel handle`. Prefer `await { name: handle }` for multiple handles so results are named. Use `(await handle)?` for the normal fail-fast path.
 - Use `print expr` to inspect a value mid-turn (keeps running). Use `submit <expr>` to end with a final answer.
+- In `for` loops, `break` exits the nearest loop and `continue` skips to the next iteration. `submit` still exits the whole turn.
 - Break large tasks into smaller, bounded steps instead of brute-force scanning."#
     } else {
         r#"In this mode you work by writing `lashlang` code inside your response and the runtime executes it.
@@ -891,6 +901,7 @@ print result
 - After each result, either write another fenced block to continue or `submit <value>` (or plain prose with no fenced block) to end the turn.
 - When you are done, reply with plain prose only — or `submit <value>` from inside a fenced block.
 - Variables persist across iterations.
+- You can update variable-rooted collection paths: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms. Record assignment inserts/replaces fields; list assignment replaces an existing integer index only. Dynamic record reads return `null` when missing, so `counts[g] = counts[g] + 1` works for histograms.
 - If the prompt includes bound variables, use them directly.
 - In this run, do not assume any retrieval or search tools exist. The only helper tools are the subagent tools.
 - If there is no Available Tools section, do not invent tool names.
@@ -900,6 +911,7 @@ print result
 - Use `spawn_agent` for focused recursive subproblems such as narrowing candidate sessions, extracting date candidates, or verifying one hypothesis.
 - Keep each child task bounded and concrete. Do not fan out one agent per session unless the narrowed candidate set is already small.
 - Use `print expr` to inspect a value mid-turn (keeps running). Use `submit <expr>` for the final answer.
+- In `for` loops, `break` exits the nearest loop and `continue` skips to the next iteration. `submit` still exits the whole turn.
 - Avoid printing the entire haystack unless it is already small."#
     })];
     if matches!(profile, PromptProfile::TemporalObservations) {
@@ -979,22 +991,37 @@ fn parse_execution_mode(raw: &str) -> anyhow::Result<ExecutionMode> {
     }
 }
 
-fn parse_context_approach(raw: &str) -> anyhow::Result<ContextApproach> {
+fn parse_standard_context_approach(raw: &str) -> anyhow::Result<StandardContextApproach> {
     match raw {
-        "rolling_history" => Ok(ContextApproach::RollingHistory(Default::default())),
-        "observational_memory" => Ok(ContextApproach::ObservationalMemory(Default::default())),
+        "rolling_history" => Ok(StandardContextApproach::RollingHistory(Default::default())),
+        "observational_memory" => Ok(StandardContextApproach::ObservationalMemory(
+            Default::default(),
+        )),
         _ => bail!("unsupported context approach `{raw}`"),
     }
+}
+
+fn resolve_standard_context_approach(
+    execution_mode: &ExecutionMode,
+    raw: Option<&str>,
+) -> anyhow::Result<Option<StandardContextApproach>> {
+    if *execution_mode == ExecutionMode::standard() {
+        return parse_standard_context_approach(raw.unwrap_or(DEFAULT_CONTEXT_APPROACH)).map(Some);
+    }
+    if raw.is_some() {
+        bail!("--context-approach only applies to --execution-mode standard");
+    }
+    Ok(None)
 }
 
 fn execution_mode_label(mode: &ExecutionMode) -> &str {
     mode.plugin_id()
 }
 
-fn context_approach_label(approach: &ContextApproach) -> &'static str {
+fn standard_context_approach_label(approach: &StandardContextApproach) -> &'static str {
     match approach {
-        ContextApproach::RollingHistory(_) => "rolling_history",
-        ContextApproach::ObservationalMemory(_) => "observational_memory",
+        StandardContextApproach::RollingHistory(_) => "rolling_history",
+        StandardContextApproach::ObservationalMemory(_) => "observational_memory",
     }
 }
 

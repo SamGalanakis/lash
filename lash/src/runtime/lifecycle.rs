@@ -162,7 +162,7 @@ impl LashRuntime {
             .build_session(
                 state.session_id.as_str(),
                 policy.execution_mode.clone(),
-                policy.context_approach.clone(),
+                policy.standard_context_approach.clone(),
                 state.plugin_snapshot.as_ref(),
             )
             .map_err(|err| SessionError::Protocol(err.to_string()))?;

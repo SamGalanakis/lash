@@ -7,7 +7,8 @@
 //! is now a lie.
 
 use lashlang::{
-    ExecuteError, ExecutionOutcome, Record, State, ToolHost, ToolHostError, Value, execute,
+    ExecuteError, ExecutionOutcome, ParseError, Record, State, ToolHost, ToolHostError, Value,
+    execute, parse,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -218,6 +219,32 @@ fn prompt_claim_assignment_persists_within_program() {
     assert_eq!(
         run(&host, "x = 7\ny = x + 3\nsubmit y"),
         Value::Number(10.0)
+    );
+}
+
+#[test]
+fn prompt_claim_indexed_and_field_assignment_examples_work() {
+    let host = MockHost::default();
+    let Value::Record(result) = run(
+        &host,
+        r#"
+counts = {}
+g = "alpha"
+counts[g] = counts[g] + 1
+counts.total = 1
+items = [0, 0]
+items[1] = counts[g]
+submit { counts: counts, items: items }
+"#,
+    ) else {
+        panic!("expected record");
+    };
+    let counts = result["counts"].as_record().expect("counts record");
+    assert_eq!(counts["alpha"], Value::Number(1.0));
+    assert_eq!(counts["total"], Value::Number(1.0));
+    assert_eq!(
+        result["items"],
+        Value::List(vec![Value::Number(0.0), Value::Number(1.0)].into())
     );
 }
 
@@ -510,9 +537,11 @@ fn prompt_claim_bare_submit_terminates_with_null() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Prompt claim: "Control flow: statement `if`/`for`; expression ternary
-// `cond ? yes : no` (there is no expression-form `if`); boolean negation
-// via `!cond` or `not cond`."
+// Prompt claim: "Control flow: statement `if`/`for`; `break` exits the
+// nearest `for`; `continue` skips to the nearest `for`'s next iteration;
+// expression ternary `cond ? yes : no` (there is no expression-form `if`);
+// boolean negation via `!cond` or `not cond`. `submit` is different from
+// `break`: it ends the whole program/turn."
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -537,6 +566,65 @@ submit total"#,
         run(&host, "if 1 < 2 { submit 7 } else { submit 9 }"),
         Value::Number(7.0)
     );
+}
+
+#[test]
+fn prompt_claim_break_and_continue_control_nearest_loop() {
+    let host = MockHost::default();
+    assert_eq!(
+        run(
+            &host,
+            r#"seen = []
+for outer in [1, 2] {
+  for inner in [1, 2, 3] {
+    if inner == 2 {
+      continue
+    }
+    if inner == 3 {
+      break
+    }
+    seen = seen + [format("{}:{}", outer, inner)]
+  }
+}
+submit seen"#,
+        ),
+        Value::List(
+            vec![
+                Value::String("1:1".to_string().into()),
+                Value::String("2:1".to_string().into()),
+            ]
+            .into()
+        )
+    );
+}
+
+#[test]
+fn prompt_claim_submit_exits_whole_program_not_loop() {
+    let host = MockHost::default();
+    assert_eq!(
+        run(
+            &host,
+            r#"for n in [1, 2, 3] {
+  submit n
+}
+submit 99"#,
+        ),
+        Value::Number(1.0)
+    );
+}
+
+#[test]
+fn prompt_claim_loop_control_requires_loop() {
+    for (source, keyword) in [("break", "break"), ("continue", "continue")] {
+        let err = parse(source).expect_err("loop control outside loop should fail");
+        assert!(matches!(
+            err,
+            ParseError::LoopControlOutsideLoop {
+                keyword: actual,
+                ..
+            } if actual == keyword
+        ));
+    }
 }
 
 #[test]

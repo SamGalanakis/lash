@@ -27,9 +27,7 @@ use lash::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     PluginSurfaceEvent, SessionPlugin,
 };
-use lash::{
-    PromptContribution, ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult,
-};
+use lash::{PromptContribution, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 const PLUGIN_ID: &str = "update_plan";
 const PANEL_KEY: &str = "plan";
@@ -95,25 +93,41 @@ struct UpdatePlanTool {
 #[async_trait::async_trait]
 impl ToolProvider for UpdatePlanTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "update_plan".into(),
-            description: "Update the sticky plan dock at the bottom of the TUI. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time. Use this to keep user-visible progress current for substantial multi-step work. After updating the plan, do not repeat the full checklist in prose; briefly summarize what changed and what comes next.".into(),
-            params: vec![
-                ToolParam::optional("explanation", "str"),
-                ToolParam::typed("plan", "list"),
-            ],
-            returns: "str".into(),
-            examples: vec![
+        vec![
+            ToolDefinition::new(
+                "update_plan",
+                "Update the sticky plan dock at the bottom of the TUI. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time. Use this to keep user-visible progress current for substantial multi-step work. After updating the plan, do not repeat the full checklist in prose; briefly summarize what changed and what comes next.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "explanation": { "type": "string" },
+                        "plan": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "step": { "type": "string" },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "completed"]
+                                    }
+                                },
+                                "required": ["step", "status"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["plan"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({ "type": "string" }),
+            )
+            .with_examples(vec![
                 "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}"
                     .into(),
-            ],
-            availability: lash::ToolAvailabilityConfig::documented(),
-            activation: lash::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+            ])
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
@@ -398,13 +412,13 @@ mod tests {
         let root_ctx = PluginSessionContext {
             session_id: "root".into(),
             execution_mode: lash::ExecutionMode::standard(),
-            context_approach: lash::ContextApproach::default(),
+            standard_context_approach: Some(lash::StandardContextApproach::default()),
             parent_session_id: None,
         };
         let child_ctx = PluginSessionContext {
             session_id: "child".into(),
             execution_mode: lash::ExecutionMode::standard(),
-            context_approach: lash::ContextApproach::default(),
+            standard_context_approach: Some(lash::StandardContextApproach::default()),
             parent_session_id: Some("root".into()),
         };
         assert!(root_ctx.is_root_session());
@@ -450,7 +464,7 @@ mod tests {
                 "child",
                 Some("root".to_string()),
                 ExecutionMode::standard(),
-                lash::ContextApproach::default(),
+                Some(lash::StandardContextApproach::default()),
                 None,
             )
             .expect("session");

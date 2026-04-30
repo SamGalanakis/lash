@@ -10,11 +10,11 @@ The lash agent uses **your local Codex OAuth subscription** by default — the h
 # Smoke test — one easy task, RLM + gpt-5.4 at high effort.
 bench/terminalbench2/run.sh --sample --preset trivial --execution-mode rlm --model gpt-5.4 --variant high
 
-# Full sample dataset (~70 tasks), RLM + rolling history.
-bench/terminalbench2/run.sh --sample --execution-mode rlm --model gpt-5.4 --variant high --context-approach rolling_history
+# Full sample dataset (~70 tasks), RLM.
+bench/terminalbench2/run.sh --sample --execution-mode rlm --model gpt-5.4 --variant high
 
-# Full dataset (~270 tasks), Standard mode.
-bench/terminalbench2/run.sh --full --execution-mode standard --model gpt-5.4 --variant high
+# Full dataset (~270 tasks), Standard mode + rolling history.
+bench/terminalbench2/run.sh --full --execution-mode standard --model gpt-5.4 --variant high --context-approach rolling_history
 ```
 
 `--model` is optional; if `~/.lash/config.json`'s active provider is Codex, passing just `--variant high` picks up whatever model that provider is configured with. We pin `--model gpt-5.4` in examples to make runs reproducible across config changes.
@@ -57,7 +57,7 @@ bench/terminalbench2/run.sh --sample --tasks regex-log,fix-code-vulnerability --
 | `--execution-mode` | yes (for lash) | `rlm` or `standard`. No `repl` (old name). |
 | `--variant` | yes | Provider-native effort level: `high`, `xhigh`, etc. |
 | `--model` | optional for lash | Defaults to the active provider's model in `~/.lash/config.json`. Pass `--model gpt-5.4` to pin. |
-| `--context-approach` | optional | `rolling_history` or `observational_memory`. |
+| `--context-approach` | optional | Standard mode only: `rolling_history` or `observational_memory`. |
 | `--build-mode` | optional | `docker-bookworm` (default) / `docker-bullseye` / `host`. |
 | `--n-concurrent` | optional | Parallel trials. Default 1. |
 | `--attempts` | optional | Attempts per trial. Default 1. |

@@ -7,8 +7,8 @@ use sha2::Digest;
 
 use crate::session_model::{ConversationRecord, SessionEventRecord, ToolEvent};
 use crate::{
-    BaseRenderCache, ContextApproach, ExecutionMode, Message, MessageRole, PromptUsage, TokenUsage,
-    ToolCallRecord,
+    BaseRenderCache, ExecutionMode, Message, MessageRole, PromptUsage, StandardContextApproach,
+    TokenUsage, ToolCallRecord,
 };
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -139,8 +139,8 @@ pub struct PersistedSessionConfig {
     pub configured_model: String,
     pub context_window: u64,
     pub execution_mode: ExecutionMode,
-    #[serde(default)]
-    pub context_approach: ContextApproach,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard_context_approach: Option<StandardContextApproach>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
 }

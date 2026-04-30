@@ -60,7 +60,7 @@ Common files and directories:
 - `lash.log`: CLI log output when file logging is enabled.
 - `cache/`: cache directory when `LASH_HOME` is set. Without `LASH_HOME`, cache usually lives under the platform cache directory.
 
-Use `lash --info` to inspect the active provider, model, execution mode, context approach, working directory, session id, and session database.
+Use `lash --info` to inspect the active provider, model, execution mode, standard-mode context approach, working directory, session id, and session database.
 "#;
 
 const SESSIONS_MD: &str = r#"# Sessions
@@ -234,6 +234,8 @@ mod tests {
     async fn plugin_contributes_docs_prompt() {
         let docs_dir = PathBuf::from("/tmp/lash-home/docs/lash-cli");
         let plugin_host = lash::PluginHost::new(vec![
+            Arc::new(lash::BuiltinTaskControlsPluginFactory::new()),
+            Arc::new(lash::BuiltinMonitorToolPluginFactory::new()),
             Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory),
             Arc::new(HostDocsPluginFactory::new(docs_dir.clone())),
         ]);

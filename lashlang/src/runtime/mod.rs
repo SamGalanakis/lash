@@ -1,4 +1,7 @@
-use crate::ast::{BinaryOp, CallExpr, Expr, ParallelBranches, Program, Stmt, TypeExpr, UnaryOp};
+use crate::ast::{
+    AssignPathStep, AssignTarget, BinaryOp, CallExpr, Expr, ParallelBranches, Program, Stmt,
+    TypeExpr, UnaryOp,
+};
 use crate::lexer::Span;
 use compact_str::CompactString;
 use rayon::prelude::*;
@@ -358,6 +361,7 @@ struct Chunk {
     pure_named_parallel_sets: Vec<Box<[(usize, PureExpr)]>>,
     branch_sets: Vec<Box<[Chunk]>>,
     named_branch_sets: Vec<Box<[NamedBranchChunk]>>,
+    assign_paths: Vec<CompiledAssignPath>,
 }
 
 #[derive(Clone)]
@@ -398,6 +402,18 @@ enum CompiledSchemaKind {
     /// Union of alternative shapes (`str | null`, `int | str`, …).
     /// A value matches the union if it matches any of the variants.
     Union(Box<[CompiledSchema]>),
+}
+
+#[derive(Clone)]
+struct CompiledAssignPath {
+    steps: Box<[CompiledAssignPathStep]>,
+    dynamic_index_count: usize,
+}
+
+#[derive(Clone, Copy)]
+enum CompiledAssignPathStep {
+    Field(usize),
+    Index,
 }
 
 #[derive(Clone)]
@@ -453,6 +469,7 @@ enum Instruction {
     LoadFieldUnwrap { slot: usize, field: usize },
     Field(usize),
     Index,
+    PathAssign { slot: usize, path: usize },
     ResultUnwrap,
     Unary(UnaryOp),
     Binary(BinaryOp),
@@ -524,9 +541,9 @@ impl Instruction {
         match self {
             Instruction::PushConst(_) => InstructionProfileTag::PushConst,
             Instruction::LoadName(_) => InstructionProfileTag::LoadName,
-            Instruction::StoreName(_) | Instruction::StoreConst { .. } => {
-                InstructionProfileTag::StoreName
-            }
+            Instruction::StoreName(_)
+            | Instruction::StoreConst { .. }
+            | Instruction::PathAssign { .. } => InstructionProfileTag::StoreName,
             Instruction::BuildList(_) => InstructionProfileTag::BuildList,
             Instruction::BuildRecord(_) => InstructionProfileTag::BuildRecord,
             Instruction::LoadField { .. } | Instruction::Field(_) => InstructionProfileTag::Field,
@@ -809,8 +826,15 @@ struct Compiler {
     pure_named_parallel_sets: Vec<Box<[(usize, PureExpr)]>>,
     branch_sets: Vec<Box<[Chunk]>>,
     named_branch_sets: Vec<Box<[NamedBranchChunk]>>,
+    assign_paths: Vec<CompiledAssignPath>,
     compile_stats: Rc<RefCell<CompileStats>>,
     const_slots: Vec<Option<Value>>,
+    loop_contexts: Vec<LoopContext>,
+}
+
+struct LoopContext {
+    continue_target: usize,
+    break_jumps: SmallVec<[usize; 4]>,
 }
 
 #[derive(Default)]
@@ -909,8 +933,10 @@ impl Compiler {
             pure_named_parallel_sets: Vec::new(),
             branch_sets: Vec::new(),
             named_branch_sets: Vec::new(),
+            assign_paths: Vec::new(),
             compile_stats,
             const_slots: Vec::new(),
+            loop_contexts: Vec::new(),
         }
     }
 
@@ -933,6 +959,7 @@ impl Compiler {
             pure_named_parallel_sets: self.pure_named_parallel_sets,
             branch_sets: self.branch_sets,
             named_branch_sets: self.named_branch_sets,
+            assign_paths: self.assign_paths,
         }
     }
 
@@ -984,6 +1011,29 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         self.key_lists.push(keys);
+        index
+    }
+
+    fn push_assign_path(&mut self, steps: &[AssignPathStep]) -> usize {
+        let index = self.assign_paths.len();
+        let mut dynamic_index_count = 0;
+        let steps = steps
+            .iter()
+            .map(|step| match step {
+                AssignPathStep::Field(field) => {
+                    CompiledAssignPathStep::Field(self.push_name(field))
+                }
+                AssignPathStep::Index(_) => {
+                    dynamic_index_count += 1;
+                    CompiledAssignPathStep::Index
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        self.assign_paths.push(CompiledAssignPath {
+            steps,
+            dynamic_index_count,
+        });
         index
     }
 
@@ -1116,7 +1166,8 @@ impl Compiler {
 
     fn compile_stmt(&mut self, statement: &Stmt) {
         match statement {
-            Stmt::Assign { name, expr } => {
+            Stmt::Assign { target, expr } if target.is_simple() => {
+                let name = &target.root;
                 let slot = self.push_slot(name);
                 let const_value = if contains_type_literal(expr) {
                     None
@@ -1154,6 +1205,18 @@ impl Compiler {
                 self.compile_expr(expr);
                 self.code.push(Instruction::StoreName(slot));
                 self.set_const_slot(slot, const_value);
+            }
+            Stmt::Assign { target, expr } => {
+                let slot = self.push_slot(&target.root);
+                for step in &target.steps {
+                    if let AssignPathStep::Index(index) = step {
+                        self.compile_expr(index);
+                    }
+                }
+                self.compile_expr(expr);
+                let path = self.push_assign_path(&target.steps);
+                self.code.push(Instruction::PathAssign { slot, path });
+                self.set_const_slot(slot, None);
             }
             Stmt::Expr(expr) => {
                 self.compile_expr(expr);
@@ -1204,11 +1267,40 @@ impl Compiler {
                 self.code.push(Instruction::IterNext {
                     jump_to: usize::MAX,
                 });
+                self.loop_contexts.push(LoopContext {
+                    continue_target: loop_start,
+                    break_jumps: SmallVec::new(),
+                });
                 self.compile_block(body);
+                let loop_context = self
+                    .loop_contexts
+                    .pop()
+                    .expect("loop context should exist while compiling `for`");
                 self.code.push(Instruction::Jump(loop_start));
                 let loop_end = self.code.len();
                 self.code.push(Instruction::EndIter);
                 self.patch_jump(iter_next, loop_end);
+                for break_jump in loop_context.break_jumps {
+                    self.patch_jump(break_jump, loop_end);
+                }
+                self.clear_const_slots();
+            }
+            Stmt::Break => {
+                let jump = self.emit_jump();
+                self.loop_contexts
+                    .last_mut()
+                    .expect("parser rejects `break` outside loops")
+                    .break_jumps
+                    .push(jump);
+                self.clear_const_slots();
+            }
+            Stmt::Continue => {
+                let continue_target = self
+                    .loop_contexts
+                    .last()
+                    .expect("parser rejects `continue` outside loops")
+                    .continue_target;
+                self.code.push(Instruction::Jump(continue_target));
                 self.clear_const_slots();
             }
             Stmt::Parallel { branches } => {
@@ -1229,9 +1321,12 @@ impl Compiler {
     fn compile_parallel_calls(&mut self, branches: &[Stmt]) -> Option<Vec<ParallelCallBranch>> {
         let mut compiled = Vec::with_capacity(branches.len());
         for branch in branches {
-            let Stmt::Assign { name, expr } = branch else {
+            let Stmt::Assign { target, expr } = branch else {
                 return None;
             };
+            if !target.is_simple() {
+                return None;
+            }
             let Expr::ToolCall(call) = expr else {
                 return None;
             };
@@ -1239,7 +1334,7 @@ impl Compiler {
                 return None;
             }
 
-            let slot = self.push_slot(name);
+            let slot = self.push_slot(&target.root);
             let args = PureExpr::Record(
                 call.args
                     .iter()
@@ -1987,6 +2082,10 @@ impl SlotState {
         self.values.get(slot).and_then(Option::as_ref)
     }
 
+    fn get_mut(&mut self, slot: usize) -> Option<&mut Value> {
+        self.values.get_mut(slot).and_then(Option::as_mut)
+    }
+
     fn assign(&mut self, slot: usize, value: Value) {
         self.values[slot] = Some(value);
     }
@@ -2229,6 +2328,24 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let index = self.pop_stack()?;
                 let target = self.pop_stack()?;
                 self.stack.push(read_index(target, index)?);
+            }
+            Instruction::PathAssign { slot, path } => {
+                let value = self.pop_stack()?;
+                let last_value = value.clone();
+                let path = &self.chunk.assign_paths[path];
+                let index_start = self.stack_drain_start(path.dynamic_index_count)?;
+                let indexes = &self.stack[index_start..];
+                let root_name = &self.chunk.slot_names[slot];
+                let root =
+                    self.slots
+                        .get_mut(slot)
+                        .ok_or_else(|| RuntimeError::UndefinedVariable {
+                            name: root_name.text.to_string(),
+                        })?;
+                assign_path(root, path, &indexes, value, &self.chunk.names)?;
+                self.stack.truncate(index_start);
+                self.record_assignment(slot);
+                self.last_value = Some(last_value);
             }
             Instruction::ResultUnwrap => {
                 let value = self.pop_stack()?;
@@ -3458,9 +3575,10 @@ fn contains_type_literal(expr: &Expr) -> bool {
 
 fn stmt_contains_type_literal(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Assign { expr, .. } | Stmt::Expr(expr) | Stmt::Cancel(expr) | Stmt::Print(expr) => {
-            contains_type_literal(expr)
+        Stmt::Assign { target, expr } => {
+            assign_target_contains_type_literal(target) || contains_type_literal(expr)
         }
+        Stmt::Expr(expr) | Stmt::Cancel(expr) | Stmt::Print(expr) => contains_type_literal(expr),
         Stmt::Call(call) => call
             .args
             .iter()
@@ -3477,6 +3595,7 @@ fn stmt_contains_type_literal(stmt: &Stmt) -> bool {
         Stmt::For { iterable, body, .. } => {
             contains_type_literal(iterable) || body.iter().any(stmt_contains_type_literal)
         }
+        Stmt::Break | Stmt::Continue => false,
         Stmt::Parallel { branches } => match branches {
             ParallelBranches::Positional(statements) => {
                 statements.iter().any(stmt_contains_type_literal)
@@ -3487,6 +3606,13 @@ fn stmt_contains_type_literal(stmt: &Stmt) -> bool {
         },
         Stmt::Submit(expr) => expr.as_ref().is_some_and(contains_type_literal),
     }
+}
+
+fn assign_target_contains_type_literal(target: &AssignTarget) -> bool {
+    target.steps.iter().any(|step| match step {
+        AssignPathStep::Field(_) => false,
+        AssignPathStep::Index(expr) => contains_type_literal(expr),
+    })
 }
 
 /// Best-effort compile-time construction of a JSON-Schema Value for a
@@ -4461,9 +4587,147 @@ fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
                 .map(|ch| Value::String(ch.to_string().into()))
                 .unwrap_or(Value::Null))
         }
+        Value::Record(record) => Ok(record
+            .get(coerce_string(&index)?.as_ref())
+            .cloned()
+            .unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!("can't index {}", value_type_name(&target)),
+        }),
+    }
+}
+
+fn assign_path(
+    root: &mut Value,
+    path: &CompiledAssignPath,
+    indexes: &[Value],
+    value: Value,
+    names: &[Name],
+) -> Result<(), RuntimeError> {
+    let mut index_cursor = 0;
+    assign_path_steps(root, &path.steps, indexes, &mut index_cursor, value, names)
+}
+
+fn assign_path_steps(
+    target: &mut Value,
+    steps: &[CompiledAssignPathStep],
+    indexes: &[Value],
+    index_cursor: &mut usize,
+    value: Value,
+    names: &[Name],
+) -> Result<(), RuntimeError> {
+    let Some((step, rest)) = steps.split_first() else {
+        *target = value;
+        return Ok(());
+    };
+
+    match *step {
+        CompiledAssignPathStep::Field(field) if rest.is_empty() => {
+            assign_record_field(target, &names[field], value)
+        }
+        CompiledAssignPathStep::Field(field) => {
+            let child = descend_record_field(target, &names[field])?;
+            assign_path_steps(child, rest, indexes, index_cursor, value, names)
+        }
+        CompiledAssignPathStep::Index if rest.is_empty() => {
+            let index = next_assign_index(indexes, index_cursor)?;
+            assign_index(target, index, value)
+        }
+        CompiledAssignPathStep::Index => {
+            let index = next_assign_index(indexes, index_cursor)?;
+            let child = descend_index(target, index)?;
+            assign_path_steps(child, rest, indexes, index_cursor, value, names)
+        }
+    }
+}
+
+fn next_assign_index<'a>(
+    indexes: &'a [Value],
+    index_cursor: &mut usize,
+) -> Result<&'a Value, RuntimeError> {
+    let index = indexes
+        .get(*index_cursor)
+        .ok_or_else(|| RuntimeError::ValueError {
+            message: "missing assignment index".to_string(),
+        })?;
+    *index_cursor += 1;
+    Ok(index)
+}
+
+fn assign_record_field(target: &mut Value, field: &Name, value: Value) -> Result<(), RuntimeError> {
+    match target {
+        Value::Record(record) => {
+            Arc::make_mut(record).insert_symbolized(field.symbol, field.text.clone(), value);
+            Ok(())
+        }
+        _ => Err(RuntimeError::TypeError {
+            message: format!(
+                "can't assign `.{}` on {}",
+                field.text,
+                value_type_name(target)
+            ),
+        }),
+    }
+}
+
+fn descend_record_field<'a>(
+    target: &'a mut Value,
+    field: &Name,
+) -> Result<&'a mut Value, RuntimeError> {
+    match target {
+        Value::Record(record) => Arc::make_mut(record)
+            .get_symbol_mut(field.symbol)
+            .ok_or_else(|| RuntimeError::ValueError {
+                message: format!("can't assign through missing field `.{}`", field.text),
+            }),
+        _ => Err(RuntimeError::TypeError {
+            message: format!(
+                "can't assign through `.{}` on {}",
+                field.text,
+                value_type_name(target)
+            ),
+        }),
+    }
+}
+
+fn assign_index(target: &mut Value, index: &Value, value: Value) -> Result<(), RuntimeError> {
+    match target {
+        Value::List(values) => {
+            let idx = resolve_existing_list_assignment_index(index, values.len())?;
+            Arc::make_mut(values)[idx] = value;
+            Ok(())
+        }
+        Value::Record(record) => {
+            let key = coerce_string(index)?;
+            Arc::make_mut(record).insert_str(key.as_ref(), value);
+            Ok(())
+        }
+        _ => Err(RuntimeError::TypeError {
+            message: format!("can't assign index on {}", value_type_name(target)),
+        }),
+    }
+}
+
+fn descend_index<'a>(target: &'a mut Value, index: &Value) -> Result<&'a mut Value, RuntimeError> {
+    match target {
+        Value::List(values) => {
+            let idx = resolve_existing_list_assignment_index(index, values.len())?;
+            Ok(&mut Arc::make_mut(values)[idx])
+        }
+        Value::Record(record) => {
+            let key = coerce_string(index)?;
+            let record = Arc::make_mut(record);
+            if let Some(value) = record.get_mut(key.as_ref()) {
+                Ok(value)
+            } else {
+                Err(RuntimeError::ValueError {
+                    message: format!("can't assign through missing key `{}`", key.as_ref()),
+                })
+            }
+        }
+        _ => Err(RuntimeError::TypeError {
+            message: format!("can't assign through index on {}", value_type_name(target)),
         }),
     }
 }
@@ -4691,6 +4955,31 @@ fn resolve_index(index: &Value, len: usize) -> Result<Option<usize>, RuntimeErro
         return Ok(None);
     }
     Ok(Some(normalized as usize))
+}
+
+fn resolve_existing_list_assignment_index(
+    index: &Value,
+    len: usize,
+) -> Result<usize, RuntimeError> {
+    let Value::Number(index) = index else {
+        return Err(RuntimeError::TypeError {
+            message: "list assignment index must be an integer".to_string(),
+        });
+    };
+    if !index.is_finite() || index.fract() != 0.0 {
+        return Err(RuntimeError::TypeError {
+            message: "list assignment index must be an integer".to_string(),
+        });
+    }
+    let index = *index as isize;
+    let len = len as isize;
+    let normalized = if index < 0 { len + index } else { index };
+    if normalized < 0 || normalized >= len {
+        return Err(RuntimeError::ValueError {
+            message: "list assignment index out of bounds".to_string(),
+        });
+    }
+    Ok(normalized as usize)
 }
 
 fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> {

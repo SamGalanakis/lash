@@ -36,24 +36,36 @@ fn mock_read_view(run_session_id: &str) -> SessionReadView {
     SessionReadView::from_persisted_state(&snapshot)
 }
 
+fn test_tool(
+    name: &str,
+    description: &str,
+    availability: lash::ToolAvailabilityConfig,
+    execution_mode: lash::ToolExecutionMode,
+) -> ToolDefinition {
+    ToolDefinition::new(
+        name,
+        description,
+        ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_availability(availability)
+    .with_execution_mode(execution_mode)
+}
+
 struct PlanModeDynamicTools;
 
 #[async_trait::async_trait]
 impl ToolProvider for PlanModeDynamicTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "plan_exit".to_string(),
-            description: "Ask whether to exit plan mode.".to_string(),
-            params: Vec::new(),
-            returns: "dict".to_string(),
-            examples: vec!["plan_exit()".to_string()],
-            availability: lash::ToolAvailabilityConfig::hidden(),
-            activation: lash::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: lash::ToolExecutionMode::Parallel,
-        }]
+        vec![
+            test_tool(
+                "plan_exit",
+                "Ask whether to exit plan mode.",
+                lash::ToolAvailabilityConfig::hidden(),
+                lash::ToolExecutionMode::Parallel,
+            )
+            .with_examples(vec!["plan_exit()".to_string()]),
+        ]
     }
 
     async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
@@ -352,84 +364,42 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             session_id: "root".to_string(),
             mode: ExecutionMode::standard(),
             tools: vec![
-                ToolDefinition {
-                    name: "discover_tools".to_string(),
-                    description: "Discover tools".to_string(),
-                    params: vec![],
-                    returns: "list".to_string(),
-                    examples: vec![],
-                    availability: lash::ToolAvailabilityConfig::callable(),
-                    activation: lash::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: lash::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "show_snippet_to_user".to_string(),
-                    description: "Show a snippet".to_string(),
-                    params: vec![],
-                    returns: "dict".to_string(),
-                    examples: vec![],
-                    availability: lash::ToolAvailabilityConfig::documented(),
-                    activation: lash::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: lash::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "read_file".to_string(),
-                    description: "Read files".to_string(),
-                    params: vec![],
-                    returns: "str".to_string(),
-                    examples: vec![],
-                    availability: lash::ToolAvailabilityConfig::documented(),
-                    activation: lash::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: lash::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "search_web".to_string(),
-                    description: "Search the web".to_string(),
-                    params: vec![],
-                    returns: "list".to_string(),
-                    examples: vec![],
-                    availability: lash::ToolAvailabilityConfig::documented(),
-                    activation: lash::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: lash::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "apply_patch".to_string(),
-                    description: "Apply patches".to_string(),
-                    params: vec![],
-                    returns: "dict".to_string(),
-                    examples: vec![],
-                    availability: lash::ToolAvailabilityConfig::documented(),
-                    activation: lash::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: lash::ToolExecutionMode::Serial,
-                },
-                ToolDefinition {
-                    name: "plan_exit".to_string(),
-                    description: "Exit plan mode".to_string(),
-                    params: vec![],
-                    returns: "dict".to_string(),
-                    examples: vec![],
-                    availability: lash::ToolAvailabilityConfig::hidden(),
-                    activation: lash::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: lash::ToolExecutionMode::Parallel,
-                },
+                test_tool(
+                    "search_tools",
+                    "Discover tools",
+                    lash::ToolAvailabilityConfig::callable(),
+                    lash::ToolExecutionMode::Parallel,
+                ),
+                test_tool(
+                    "show_snippet_to_user",
+                    "Show a snippet",
+                    lash::ToolAvailabilityConfig::documented(),
+                    lash::ToolExecutionMode::Parallel,
+                ),
+                test_tool(
+                    "read_file",
+                    "Read files",
+                    lash::ToolAvailabilityConfig::documented(),
+                    lash::ToolExecutionMode::Parallel,
+                ),
+                test_tool(
+                    "search_web",
+                    "Search the web",
+                    lash::ToolAvailabilityConfig::documented(),
+                    lash::ToolExecutionMode::Parallel,
+                ),
+                test_tool(
+                    "apply_patch",
+                    "Apply patches",
+                    lash::ToolAvailabilityConfig::documented(),
+                    lash::ToolExecutionMode::Serial,
+                ),
+                test_tool(
+                    "plan_exit",
+                    "Exit plan mode",
+                    lash::ToolAvailabilityConfig::hidden(),
+                    lash::ToolExecutionMode::Parallel,
+                ),
             ],
         })
         .expect("tool surface");

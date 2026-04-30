@@ -338,9 +338,9 @@ async fn handle_slash_command(
             let context_window = app.context_window;
             let cwd = app.cwd.clone();
             let session_name = app.session_name.clone();
-            let context_approach = runtime
+            let standard_context_approach = runtime
                 .as_ref()
-                .map(|rt| rt.export_state().policy.context_approach)
+                .map(|rt| rt.export_state().policy.standard_context_approach)
                 .unwrap_or_default();
             let session_db_path = logger.db_path().to_string_lossy().to_string();
             push_system_message(
@@ -350,7 +350,7 @@ async fn handle_slash_command(
                     &model,
                     current_model_variant.as_deref(),
                     current_execution_mode,
-                    &context_approach,
+                    standard_context_approach.as_ref(),
                     context_window,
                     dynamic_tools.definitions().len(),
                     toolset_hash,

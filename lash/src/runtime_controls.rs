@@ -1,114 +1,214 @@
 //! Mode-agnostic runtime-control tools (`monitor`, `tasks_list`,
 //! `tasks_stop`).
 //!
-//! These tool definitions + implementations are shared between
-//! `lash-mode-standard` and `lash-mode-rlm`: both modes expose them in
-//! their native-tools surface so the model can inspect and cancel
-//! background subagents and monitors regardless of how it drives the
-//! rest of its turn.
+//! Dedicated plugins register these tools into the native-tools surface
+//! for any execution mode, so mode crates do not own or duplicate
+//! runtime control behavior. Task controls are split from `monitor`
+//! because `monitor` starts a shell-backed background process.
+
+use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::plugin::{
+    ModeNativeToolsPlugin, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
+    SessionPlugin,
+};
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{
     MAX_MONITOR_TIMEOUT_MS, ManagedRunState, ManagedTaskKind, MonitorRunState, MonitorSpec,
-    ToolDefinition, ToolExecutionMode, ToolParam, ToolResult,
+    ProgressSender, ToolDefinition, ToolExecutionMode, ToolResult,
 };
 
-/// Build the `monitor` tool definition. Injected by mode plugins.
+/// Plugin factory for mode-agnostic task-control tools.
+#[derive(Default)]
+pub struct BuiltinTaskControlsPluginFactory;
+
+impl BuiltinTaskControlsPluginFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PluginFactory for BuiltinTaskControlsPluginFactory {
+    fn id(&self) -> &'static str {
+        "task_controls"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(TaskControlsPlugin))
+    }
+}
+
+struct TaskControlsPlugin;
+
+impl SessionPlugin for TaskControlsPlugin {
+    fn id(&self) -> &'static str {
+        "task_controls"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.mode().native_tools(Arc::new(TaskControlsNativeTools))
+    }
+}
+
+struct TaskControlsNativeTools;
+
+#[async_trait::async_trait]
+impl ModeNativeToolsPlugin for TaskControlsNativeTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![tasks_list_tool_definition(), tasks_stop_tool_definition()]
+    }
+
+    async fn execute(
+        &self,
+        context: &ToolDispatchContext,
+        name: &str,
+        args: &Value,
+        _progress: Option<&ProgressSender>,
+    ) -> Option<ToolResult> {
+        match name {
+            "tasks_list" => Some(execute_tasks_list_tool_call(context).await),
+            "tasks_stop" => Some(execute_tasks_stop_tool_call(context, args).await),
+            _ => None,
+        }
+    }
+}
+
+/// Plugin factory for the shell-backed `monitor` tool.
+#[derive(Default)]
+pub struct BuiltinMonitorToolPluginFactory;
+
+impl BuiltinMonitorToolPluginFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PluginFactory for BuiltinMonitorToolPluginFactory {
+    fn id(&self) -> &'static str {
+        "monitor_tool"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(MonitorToolPlugin))
+    }
+}
+
+struct MonitorToolPlugin;
+
+impl SessionPlugin for MonitorToolPlugin {
+    fn id(&self) -> &'static str {
+        "monitor_tool"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.mode().native_tools(Arc::new(MonitorNativeTool))
+    }
+}
+
+struct MonitorNativeTool;
+
+#[async_trait::async_trait]
+impl ModeNativeToolsPlugin for MonitorNativeTool {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![monitor_tool_definition()]
+    }
+
+    async fn execute(
+        &self,
+        context: &ToolDispatchContext,
+        name: &str,
+        args: &Value,
+        _progress: Option<&ProgressSender>,
+    ) -> Option<ToolResult> {
+        match name {
+            "monitor" => {
+                let spec = match MonitorToolSpec::from_args(args) {
+                    Ok(spec) => spec,
+                    Err(result) => return Some(result),
+                };
+                Some(execute_monitor_tool_call(context, spec).await)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Build the `monitor` tool definition.
 pub fn monitor_tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "monitor".into(),
-        description: "Run a background script that turns each stdout line into a new turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, just run the command synchronously instead. Returns a `task_id` that `tasks_stop` accepts.\n\nEvents arrive automatically as user-like input — do not call `wait_agent` or any other tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) — stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals ≥30s for remote APIs, 0.5–1s for local checks.\n\n**Coverage — silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit — and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nWrong: `tail -f run.log | grep --line-buffered \"elapsed_steps=\"`\nRight: `tail -f run.log | grep -E --line-buffered \"elapsed_steps=|Traceback|Error|FAILED|Killed|OOM\"`\n\nSet `persistent: true` for session-length watches. Timeout → killed; exit ends the watch (exit code is reported).".into(),
-        params: vec![
-            ToolParam {
-                name: "command".into(),
-                r#type: "string".into(),
-                description:
-                    "Shell command or script. Each stdout line is an event; exit ends the watch. Filter with `grep --line-buffered` (or equivalent) so only the lines you'd act on become events — including failure signatures, not just success."
-                        .into(),
-                default_value: None,
-                required: true,
+    ToolDefinition::new(
+        "monitor",
+        "Run a background script that turns each stdout line into a new turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, just run the command synchronously instead. Returns a `task_id` that `tasks_stop` accepts.\n\nEvents arrive automatically as user-like input — do not call `wait_agent` or any other tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) — stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals ≥30s for remote APIs, 0.5–1s for local checks.\n\n**Coverage — silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit — and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nWrong: `tail -f run.log | grep --line-buffered \"elapsed_steps=\"`\nRight: `tail -f run.log | grep -E --line-buffered \"elapsed_steps=|Traceback|Error|FAILED|Killed|OOM\"`\n\nSet `persistent: true` for session-length watches. Timeout → killed; exit ends the watch (exit code is reported).",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command or script. Each stdout line is an event; exit ends the watch. Filter with `grep --line-buffered` (or equivalent) so only the lines you'd act on become events — including failure signatures, not just success."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short human-readable description of what you are monitoring (shown in every notification). Be specific — \"errors in deploy.log\" beats \"watching logs\"."
+                },
+                "persistent": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Run for the lifetime of the session (no timeout). Use for session-length watches like PR monitoring or log tails."
+                },
+                "timeout_ms": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": MAX_MONITOR_TIMEOUT_MS,
+                    "default": 300000,
+                    "description": "Kill the monitor after this deadline. Default 300000ms, max 3600000ms. Ignored when persistent is true."
+                }
             },
-            ToolParam {
-                name: "description".into(),
-                r#type: "string".into(),
-                description: "Short human-readable description of what you are monitoring (shown in every notification). Be specific — \"errors in deploy.log\" beats \"watching logs\".".into(),
-                default_value: None,
-                required: true,
-            },
-            ToolParam {
-                name: "persistent".into(),
-                r#type: "bool".into(),
-                description:
-                    "Run for the lifetime of the session (no timeout). Use for session-length watches like PR monitoring or log tails."
-                        .into(),
-                default_value: Some(serde_json::json!(false)),
-                required: false,
-            },
-            ToolParam {
-                name: "timeout_ms".into(),
-                r#type: "number".into(),
-                description:
-                    "Kill the monitor after this deadline. Default 300000ms, max 3600000ms. Ignored when persistent is true."
-                        .into(),
-                default_value: Some(serde_json::json!(300000)),
-                required: false,
-            },
-        ],
-        returns: "json".into(),
-        examples: vec![
+            "required": ["command", "description"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_examples(vec![
             "monitor(command=\"tail -f /var/log/app.log | grep -E --line-buffered 'ERROR|Traceback|FAILED'\", description=\"errors in app.log\")".into(),
             "monitor(command=\"while true; do curl -sf http://localhost:3000/health && echo ready && break; sleep 2; done\", description=\"local server ready\", timeout_ms=300000)".into(),
-        ],
-        availability: crate::ToolAvailabilityConfig::documented(),
-        activation: crate::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: None,
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Parallel,
-    }
+        ])
+    .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 pub fn tasks_list_tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "tasks_list".into(),
-        description: "List every background task registered for this session — monitors and subagents — with their `task_id`, kind, label, and run_state. `run_state` is one of `running` (currently working), `idle` (live subagent waiting for a follow-up task), `completed`, `failed`, or `cancelled`. Use this to see what's still running (or idle and available for `followup_task`) before deciding whether to keep waiting, poll again, or stop something.".into(),
-        params: vec![],
-        returns: "json".into(),
-        examples: vec!["tasks_list()".into()],
-        availability: crate::ToolAvailabilityConfig::documented(),
-        activation: crate::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: None,
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Parallel,
-    }
+    ToolDefinition::new(
+        "tasks_list",
+        "List every background task registered for this session — monitors and subagents — with their `task_id`, kind, label, and run_state. `run_state` is one of `running` (currently working), `idle` (live subagent waiting for a follow-up task), `completed`, `failed`, or `cancelled`. Use this to see what's still running (or idle and available for `followup_task`) before deciding whether to keep waiting, poll again, or stop something.",
+        ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_examples(vec!["tasks_list()".into()])
+    .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 pub fn tasks_stop_tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "tasks_stop".into(),
-        description: "Cancel a background task by `task_id`. Monitors and subagents return this id when started; `tasks_list` can also rediscover it. For monitors this terminates the process tree; for subagents it closes the subtree (running turns are cancelled, idle sessions closed).".into(),
-        params: vec![ToolParam {
-            name: "task_id".into(),
-            r#type: "string".into(),
-            description: "Task id returned by `monitor`, `spawn_agent`, or `tasks_list`.".into(),
-            default_value: None,
-            required: true,
-        }],
-        returns: "json".into(),
-        examples: vec![
+    ToolDefinition::new(
+        "tasks_stop",
+        "Cancel a background task by `task_id`. Monitors and subagents return this id when started; `tasks_list` can also rediscover it. For monitors this terminates the process tree; for subagents it closes the subtree (running turns are cancelled, idle sessions closed).",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task id returned by `monitor`, `spawn_agent`, or `tasks_list`."
+                }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_examples(vec![
             "tasks_stop(task_id=\"monitor:app-errors\")".into(),
             "tasks_stop(task_id=\"subagent:/root/inspect_auth\")".into(),
-        ],
-        availability: crate::ToolAvailabilityConfig::documented(),
-        activation: crate::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: None,
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Parallel,
-    }
+        ])
+    .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 /// Parsed `monitor` arguments ready to hand to the session manager.

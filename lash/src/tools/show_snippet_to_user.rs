@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+
+use super::object_schema;
 
 use super::{require_str, run_blocking};
 
@@ -37,28 +39,31 @@ impl ShowSnippetToUser {
 #[async_trait::async_trait]
 impl ToolProvider for ShowSnippetToUser {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "show_snippet_to_user".into(),
-            description: "Show a specific line range from a file as a framed snippet to the user. Only for sharing a snippet with the user — not for your own viewing or model-context ingestion. On success the tool returns `{ displayed: true, path, start_line, end_line, ... }`; that `displayed: true` flag is the confirmation that the snippet card was dispatched to the UI. There is no separate user-acknowledgement signal."
-                .into(),
-            params: vec![
-                ToolParam::typed("path", "str"),
-                ToolParam::typed("start_line", "int"),
-                ToolParam::typed("end_line", "int"),
-                ToolParam::optional("title", "str"),
-            ],
-            returns: "dict".into(),
-            examples: vec![
+        vec![
+            ToolDefinition::new(
+                "show_snippet_to_user",
+                "Show a specific line range from a file as a framed snippet to the user. Only for sharing a snippet with the user — not for your own viewing or model-context ingestion. On success the tool returns `{ displayed: true, path, start_line, end_line, ... }`; that `displayed: true` flag is the confirmation that the snippet card was dispatched to the UI. There is no separate user-acknowledgement signal.",
+                object_schema(
+                    serde_json::json!({
+                        "path": { "type": "string" },
+                        "start_line": { "type": "integer", "minimum": 1 },
+                        "end_line": { "type": "integer", "minimum": 1 },
+                        "title": { "type": "string" }
+                    }),
+                    &["path", "start_line", "end_line"],
+                ),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_examples(vec![
                 "show_snippet_to_user(path=\"lash-cli/src/render/mod.rs\", start_line=120, end_line=180)"
                     .into(),
-            ],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+            ])
+            .with_discovery(crate::tools::discovery_metadata(
+                "user",
+                &["show_user", "display_snippet"],
+            ))
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

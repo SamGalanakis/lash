@@ -6,16 +6,11 @@
 //! - [`StandardDriver`] — the [`ProtocolDriverHandle`] that dispatches
 //!   native tool calls and weaves reasoning parts into the assistant
 //!   message timeline.
-//! - The [`BuiltinStandardModePluginFactory`] plugin that claims both
-//!   the protocol-driver and native-tools singleton slots so the
-//!   runtime can run Standard-mode sessions.
+//! - The [`BuiltinStandardModePluginFactory`] plugin that claims the
+//!   protocol-driver slot so the runtime can run Standard-mode
+//!   sessions.
 //! - The `batch` tool that composes parallel native tool calls (only
 //!   exposed in Standard mode).
-//!
-//! Mode-agnostic runtime-control tools (`monitor`, `tasks_list`,
-//! `tasks_stop`) are defined in [`lash::runtime_controls`] so this
-//! crate and `lash-mode-rlm` can both include them in their
-//! native-tools surface without duplicating bodies.
 
 use std::sync::Arc;
 
@@ -25,11 +20,6 @@ use lash::plugin::{
     AssistantResponseTransform, ModeNativeToolsPlugin, ModeProtocolDriverPlugin,
     ModeSessionContext, ModeSessionPlugin, PluginError, PluginFactory, PluginRegistrar,
     PluginSessionContext, SessionPlugin,
-};
-use lash::runtime_controls::{
-    MonitorToolSpec, execute_monitor_tool_call, execute_tasks_list_tool_call,
-    execute_tasks_stop_tool_call, monitor_tool_definition, tasks_list_tool_definition,
-    tasks_stop_tool_definition,
 };
 use lash::sansio::{
     CheckpointResumeAction, CompletedToolCall, PendingToolCall, ProtocolDriverHandle,
@@ -44,7 +34,6 @@ use lash::session_model::{
 use lash::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
 };
-use lash::tools::DiscoveryToolsProvider;
 use lash::tools::batch::batch_tool_definition;
 use lash::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
@@ -98,19 +87,8 @@ impl SessionPlugin for StandardModePlugin {
             reg.mode().session(Arc::new(StandardModeSession))?;
             reg.mode()
                 .protocol_driver(Arc::new(StandardProtocolDriver))?;
-            reg.tools()
-                .provider(Arc::new(DiscoveryToolsProvider::new()))?;
+            reg.mode().native_tools(Arc::new(StandardModeNativeTools))?;
         }
-        // This capability is a session-wide singleton, so one plugin
-        // owns the full native-tools surface regardless of execution
-        // mode. `StandardModeNativeTools` filters which tools it
-        // exposes based on `active`: in Standard it exposes all of
-        // them; in RLM it drops `batch` (which is redundant with
-        // `parallel { }`) and keeps the mode-agnostic control tools
-        // (`monitor`, `tasks_list`, `tasks_stop`).
-        reg.mode().native_tools(Arc::new(StandardModeNativeTools {
-            active: self.active,
-        }))?;
         Ok(())
     }
 }
@@ -143,24 +121,12 @@ impl ModeProtocolDriverPlugin for StandardProtocolDriver {
     }
 }
 
-struct StandardModeNativeTools {
-    active: bool,
-}
+struct StandardModeNativeTools;
 
 #[async_trait]
 impl ModeNativeToolsPlugin for StandardModeNativeTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut tools = vec![
-            monitor_tool_definition(),
-            tasks_list_tool_definition(),
-            tasks_stop_tool_definition(),
-        ];
-        if self.active {
-            // `batch` only makes sense in Standard mode; RLM has
-            // `parallel { }` for the same job.
-            tools.insert(0, batch_tool_definition());
-        }
-        tools
+        vec![batch_tool_definition()]
     }
 
     async fn execute(
@@ -171,23 +137,10 @@ impl ModeNativeToolsPlugin for StandardModeNativeTools {
         progress: Option<&ProgressSender>,
     ) -> Option<ToolResult> {
         match name {
-            "batch" if self.active => Some(execute_batch_tool_call(context, args, progress).await),
-            "monitor" => {
-                let spec = match parse_monitor_spec(args) {
-                    Ok(spec) => spec,
-                    Err(result) => return Some(result),
-                };
-                Some(execute_monitor_tool_call(context, spec).await)
-            }
-            "tasks_list" => Some(execute_tasks_list_tool_call(context).await),
-            "tasks_stop" => Some(execute_tasks_stop_tool_call(context, args).await),
+            "batch" => Some(execute_batch_tool_call(context, args, progress).await),
             _ => None,
         }
     }
-}
-
-fn parse_monitor_spec(args: &Value) -> Result<MonitorToolSpec, ToolResult> {
-    MonitorToolSpec::from_args(args)
 }
 
 #[derive(Debug)]

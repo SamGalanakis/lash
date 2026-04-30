@@ -141,20 +141,21 @@ pub(super) fn register_builtin_tool(
                     ToolResult::ok(serde_json::json!(text))
                 })
             });
-            let def = ToolDefinition {
-                name: tool_name.to_string(),
-                description: description_override
+            let def = ToolDefinition::new(
+                tool_name,
+                description_override
                     .unwrap_or_else(|| "Echoes back the `text` argument.".to_string()),
-                params: vec![ToolParam::typed("text", "str")],
-                returns: "str".to_string(),
-                examples: vec![format!("{tool_name}(text=\"hello\")")],
-                availability: lash::ToolAvailabilityConfig::callable(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            };
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({ "type": "string" }),
+            )
+            .with_examples(vec![format!("{tool_name}(text=\"hello\")")])
+            .with_availability(lash::ToolAvailabilityConfig::callable())
+            .with_execution_mode(ToolExecutionMode::Parallel);
             adapter.register_tool(def.clone(), handler);
             def
         }
@@ -164,20 +165,16 @@ pub(super) fn register_builtin_tool(
                     ToolResult::ok(serde_json::json!(chrono::Utc::now().to_rfc3339()))
                 })
             });
-            let def = ToolDefinition {
-                name: tool_name.to_string(),
-                description: description_override
+            let def = ToolDefinition::new(
+                tool_name,
+                description_override
                     .unwrap_or_else(|| "Returns the current UTC timestamp (RFC3339).".to_string()),
-                params: vec![],
-                returns: "str".to_string(),
-                examples: vec![format!("{tool_name}()")],
-                availability: lash::ToolAvailabilityConfig::callable(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            };
+                ToolDefinition::default_input_schema(),
+                serde_json::json!({ "type": "string" }),
+            )
+            .with_examples(vec![format!("{tool_name}()")])
+            .with_availability(lash::ToolAvailabilityConfig::callable())
+            .with_execution_mode(ToolExecutionMode::Parallel);
             adapter.register_tool(def.clone(), handler);
             def
         }
@@ -187,20 +184,16 @@ pub(super) fn register_builtin_tool(
                     ToolResult::ok(serde_json::json!(uuid::Uuid::new_v4().to_string()))
                 })
             });
-            let def = ToolDefinition {
-                name: tool_name.to_string(),
-                description: description_override
+            let def = ToolDefinition::new(
+                tool_name,
+                description_override
                     .unwrap_or_else(|| "Returns a random UUIDv4 string.".to_string()),
-                params: vec![],
-                returns: "str".to_string(),
-                examples: vec![format!("{tool_name}()")],
-                availability: lash::ToolAvailabilityConfig::callable(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            };
+                ToolDefinition::default_input_schema(),
+                serde_json::json!({ "type": "string" }),
+            )
+            .with_examples(vec![format!("{tool_name}()")])
+            .with_availability(lash::ToolAvailabilityConfig::callable())
+            .with_execution_mode(ToolExecutionMode::Parallel);
             adapter.register_tool(def.clone(), handler);
             def
         }

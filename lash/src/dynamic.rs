@@ -497,29 +497,33 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::ToolParam;
-
     struct MockTool;
     struct MixedEnabledTool;
     struct ExternalMockAdapter;
     struct DisabledExternalMockAdapter;
 
+    fn test_tool(
+        name: &str,
+        description: &str,
+        availability: crate::ToolAvailabilityConfig,
+    ) -> ToolDefinition {
+        ToolDefinition::new(
+            name,
+            description,
+            ToolDefinition::default_input_schema(),
+            json!({ "type": "string" }),
+        )
+        .with_availability(availability)
+    }
+
     #[async_trait::async_trait]
     impl ToolProvider for MockTool {
         fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: "mock_tool".to_string(),
-                description: "mock".to_string(),
-                params: vec![],
-                returns: "str".to_string(),
-                examples: vec![],
-                availability: crate::ToolAvailabilityConfig::callable(),
-                activation: crate::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: crate::ToolExecutionMode::Parallel,
-            }]
+            vec![test_tool(
+                "mock_tool",
+                "mock",
+                crate::ToolAvailabilityConfig::callable(),
+            )]
         }
 
         async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
@@ -531,32 +535,16 @@ mod tests {
     impl ToolProvider for MixedEnabledTool {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![
-                ToolDefinition {
-                    name: "enabled_tool".to_string(),
-                    description: "enabled".to_string(),
-                    params: vec![],
-                    returns: "str".to_string(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::callable(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
-                ToolDefinition {
-                    name: "disabled_tool".to_string(),
-                    description: "disabled".to_string(),
-                    params: vec![],
-                    returns: "str".to_string(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::hidden(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
+                test_tool(
+                    "enabled_tool",
+                    "enabled",
+                    crate::ToolAvailabilityConfig::callable(),
+                ),
+                test_tool(
+                    "disabled_tool",
+                    "disabled",
+                    crate::ToolAvailabilityConfig::hidden(),
+                ),
             ]
         }
 
@@ -572,26 +560,19 @@ mod tests {
         }
 
         fn advertised_tools(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: "mcp__demo__search".to_string(),
-                description: "search".to_string(),
-                params: vec![ToolParam::typed("query", "str")],
-                returns: "dict".to_string(),
-                examples: vec![],
-                availability: crate::ToolAvailabilityConfig::documented(),
-                activation: crate::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: Some(json!({
+            vec![ToolDefinition::new(
+                "mcp__demo__search",
+                "search",
+                json!({
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" }
                     },
                     "required": ["query"],
                     "additionalProperties": false
-                })),
-                output_schema_override: None,
-                execution_mode: crate::ToolExecutionMode::Parallel,
-            }]
+                }),
+                json!({ "type": "object", "additionalProperties": true }),
+            )]
         }
 
         async fn execute(
@@ -615,19 +596,11 @@ mod tests {
         }
 
         fn advertised_tools(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: "mcp__demo__disabled".to_string(),
-                description: "disabled".to_string(),
-                params: vec![],
-                returns: "dict".to_string(),
-                examples: vec![],
-                availability: crate::ToolAvailabilityConfig::hidden(),
-                activation: crate::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: crate::ToolExecutionMode::Parallel,
-            }]
+            vec![test_tool(
+                "mcp__demo__disabled",
+                "disabled",
+                crate::ToolAvailabilityConfig::hidden(),
+            )]
         }
 
         async fn execute(
@@ -684,19 +657,11 @@ mod tests {
         snapshot.tools.insert(
             "missing".to_string(),
             DynamicToolSpec {
-                definition: ToolDefinition {
-                    name: "missing".to_string(),
-                    description: "missing".to_string(),
-                    params: vec![],
-                    returns: "str".to_string(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::callable(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: crate::ToolExecutionMode::Parallel,
-                },
+                definition: test_tool(
+                    "missing",
+                    "missing",
+                    crate::ToolAvailabilityConfig::callable(),
+                ),
                 adapter_id: "inprocess".to_string(),
             },
         );

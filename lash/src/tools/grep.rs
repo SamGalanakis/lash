@@ -14,11 +14,9 @@ use fff_search::{
 };
 use serde_json::json;
 
-use crate::{
-    ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolParam, ToolProvider, ToolResult,
-};
+use crate::{ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult};
 
-use super::require_str;
+use super::{object_schema, require_str};
 
 const DEFAULT_MAX_RESULTS: usize = 20;
 const MAX_CURSORS: usize = 20;
@@ -276,50 +274,41 @@ impl Default for Grep {
 #[async_trait::async_trait]
 impl ToolProvider for Grep {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "grep".into(),
-            description: "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. By default searches the current workspace. Pass `path` to point the search at a specific file or directory anywhere on the filesystem (including outside the workspace). If `query` accidentally starts with an obvious filesystem path followed by search text, grep treats that prefix as `path`. Within a search root, use inline constraints in the query to further narrow (e.g. '*.rs query', 'src/ query'). See server instructions for constraint syntax and core rules.".into(),
-            params: vec![
-                ToolParam {
-                    name: "query".into(),
-                    r#type: "str".into(),
-                    description: "Search text or regex query with optional constraint prefixes. Pattern is matched within a single line (no cross-line matches). Use a literal token, a short phrase, or a regex — not a multi-clause natural-language query.".into(),
-                    default_value: None,
-                    required: true,
-                },
-                ToolParam {
-                    name: "path".into(),
-                    r#type: "str".into(),
-                    description: "Optional file or directory to search within. Accepts absolute paths or paths relative to the workspace root. A directory becomes the search root; a file searches that one file only. When omitted, searches the current workspace.".into(),
-                    default_value: None,
-                    required: false,
-                },
-                ToolParam {
-                    name: "maxResults".into(),
-                    r#type: "int".into(),
-                    description: "Max matching lines (default 20).".into(),
-                    default_value: Some(json!(20)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "cursor".into(),
-                    r#type: "str".into(),
-                    description:
-                        "Cursor from a previous grep result. Only use if previous results were not sufficient."
-                            .into(),
-                    default_value: None,
-                    required: false,
-                },
-            ],
-            returns: "dict".into(),
-            examples: vec![],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+        vec![
+            ToolDefinition::new(
+                "grep",
+                "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. By default searches the current workspace. Pass `path` to point the search at a specific file or directory anywhere on the filesystem (including outside the workspace). If `query` accidentally starts with an obvious filesystem path followed by search text, grep treats that prefix as `path`. Within a search root, use inline constraints in the query to further narrow (e.g. '*.rs query', 'src/ query'). See server instructions for constraint syntax and core rules.",
+                object_schema(
+                    json!({
+                        "query": {
+                            "type": "string",
+                            "description": "Search text or regex query with optional constraint prefixes. Pattern is matched within a single line (no cross-line matches). Use a literal token, a short phrase, or a regex — not a multi-clause natural-language query."
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional file or directory to search within. Accepts absolute paths or paths relative to the workspace root. A directory becomes the search root; a file searches that one file only. When omitted, searches the current workspace."
+                        },
+                        "maxResults": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": DEFAULT_MAX_RESULTS,
+                            "description": "Max matching lines (default 20)."
+                        },
+                        "cursor": {
+                            "type": "string",
+                            "description": "Cursor from a previous grep result. Only use if previous results were not sufficient."
+                        }
+                    }),
+                    &["query"],
+                ),
+                json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_discovery(crate::tools::discovery_metadata(
+                "filesystem",
+                &["search_files", "ripgrep"],
+            ))
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

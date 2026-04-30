@@ -2,7 +2,6 @@ mod apply_patch;
 mod ask;
 pub mod batch;
 mod composite;
-mod discovery;
 mod fetch_url;
 #[cfg(feature = "tool-impls")]
 mod glob;
@@ -22,7 +21,6 @@ pub use apply_patch::ApplyPatchTool;
 pub use apply_patch::{PatchAction, PatchFileOp, inspect_patch_ops};
 pub use ask::AskTool;
 pub(crate) use composite::CompositeToolProvider;
-pub use discovery::DiscoveryToolsProvider;
 pub use fetch_url::FetchUrl;
 #[cfg(feature = "tool-impls")]
 pub use glob::Glob;
@@ -178,11 +176,13 @@ where
             };
             serde_json::json!({
                 "name": definition.name,
-                "namespace": definition.namespace(),
+                "namespace": definition.discovery.namespace,
                 "description": definition.description,
-                "params": definition.params,
-                "returns": definition.returns,
+                "params": definition.parameter_metadata(),
+                "input_schema": definition.input_schema,
+                "output_schema": definition.output_schema,
                 "examples": definition.examples,
+                "aliases": definition.discovery.aliases,
                 "availability": availability,
                 "callable": availability.is_callable(),
                 "documented": availability.is_documented(),
@@ -193,6 +193,29 @@ where
             })
         })
         .collect()
+}
+
+pub(crate) fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+pub(crate) fn discovery_metadata(
+    namespace: &str,
+    aliases: &[&str],
+) -> crate::ToolDiscoveryMetadata {
+    crate::ToolDiscoveryMetadata {
+        namespace: if namespace.is_empty() {
+            None
+        } else {
+            Some(namespace.to_string())
+        },
+        aliases: aliases.iter().map(|value| value.to_string()).collect(),
+    }
 }
 
 /// Run blocking filesystem work off the async runtime.
@@ -375,19 +398,12 @@ mod tests {
     use super::*;
 
     fn dummy_tool(name: &str) -> crate::ToolDefinition {
-        crate::ToolDefinition {
-            name: name.to_string(),
-            description: format!("desc for {name}"),
-            params: Vec::new(),
-            returns: String::new(),
-            examples: Vec::new(),
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: crate::ToolExecutionMode::Parallel,
-        }
+        crate::ToolDefinition::new(
+            name,
+            format!("desc for {name}"),
+            crate::ToolDefinition::default_input_schema(),
+            serde_json::json!({}),
+        )
     }
 
     #[test]
@@ -398,7 +414,7 @@ mod tests {
                 availability: crate::ToolAvailability::Documented,
             },
             crate::ToolSurfaceEntry {
-                definition: dummy_tool("discover_tools"),
+                definition: dummy_tool("search_tools"),
                 availability: crate::ToolAvailability::Callable,
             },
         ]);

@@ -92,7 +92,8 @@ bench/longbench-v2/run.sh --dataset-preset qasper --limit 20
 bench/longbench-v2/run.sh --dataset-url https://example.com/longbench.jsonl --limit 20
 bench/longbench-v2/run.sh --dataset-path /path/to/longbench.jsonl --dataset-name narrativeqa
 bench/longbench-v2/run.sh --dataset-path /path/to/longbench.jsonl --model google/gemini-2.5-pro-preview
-bench/longbench-v2/run.sh --dataset-path /path/to/longbench.jsonl --execution-mode rlm --context-approach rolling_history
+bench/longbench-v2/run.sh --dataset-path /path/to/longbench.jsonl --execution-mode rlm
+bench/longbench-v2/run.sh --dataset-path /path/to/longbench.jsonl --execution-mode standard --context-approach rolling_history
 bench/longbench-v2/run.sh --dataset-path /path/to/longbench.jsonl --max-concurrency 4
 ```
 

@@ -11,10 +11,10 @@ use lash::plugin::{
 };
 use lash::session_model::context::PreparedContext;
 use lash::{
-    AppendSessionNodesRequest, AppendSessionNodesResult, ContextApproach, DirectMessage,
-    DirectOutputSpec, DirectPart, DirectRequest, DirectRole, Message, MessageOrigin, MessageRole,
+    AppendSessionNodesRequest, AppendSessionNodesResult, DirectMessage, DirectOutputSpec,
+    DirectPart, DirectRequest, DirectRole, Message, MessageOrigin, MessageRole,
     ObservationalMemoryConfig, Part, PartKind, SessionAppendNode, SessionGraph,
-    SessionStateChangedContext,
+    SessionStateChangedContext, StandardContextApproach,
 };
 
 const OBSERVATIONAL_MEMORY_PLUGIN_ID: &str = "observational_memory";
@@ -303,15 +303,19 @@ impl PluginFactory for ObservationalMemoryPluginFactory {
         OBSERVATIONAL_MEMORY_PLUGIN_ID
     }
 
-    fn supported_context_approaches(&self) -> &'static [lash::ContextApproachKind] {
-        &[lash::ContextApproachKind::ObservationalMemory]
+    fn supported_standard_context_approaches(
+        &self,
+    ) -> &'static [lash::StandardContextApproachKind] {
+        &[lash::StandardContextApproachKind::ObservationalMemory]
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         if ctx.execution_mode != lash::ExecutionMode::standard() {
             return Ok(Arc::new(DisabledObservationalMemoryPlugin));
         }
-        let ContextApproach::ObservationalMemory(config) = &ctx.context_approach else {
+        let Some(StandardContextApproach::ObservationalMemory(config)) =
+            &ctx.standard_context_approach
+        else {
             return Ok(Arc::new(DisabledObservationalMemoryPlugin));
         };
         Ok(Arc::new(ObservationalMemoryPlugin {

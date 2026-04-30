@@ -1,9 +1,9 @@
 #![cfg(feature = "sqlite-store")]
 
 use lash::{
-    BlobArtifactDescriptor, ContextApproach, DynamicStateSnapshot, ExecutionMode,
-    HydratedSessionCheckpoint, PersistedSessionConfig, PersistedSessionState, PersistedStateCommit,
-    PersistedTurnState, PluginSessionSnapshot, SessionGraph, SessionHead, Store, TokenUsage,
+    BlobArtifactDescriptor, DynamicStateSnapshot, ExecutionMode, HydratedSessionCheckpoint,
+    PersistedSessionConfig, PersistedSessionState, PersistedStateCommit, PersistedTurnState,
+    PluginSessionSnapshot, SessionGraph, SessionHead, StandardContextApproach, Store, TokenUsage,
 };
 
 #[test]
@@ -37,7 +37,7 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
             configured_model: "gpt-5.4-mini".into(),
             context_window: 200_000,
             execution_mode: ExecutionMode::standard(),
-            context_approach: ContextApproach::default(),
+            standard_context_approach: Some(StandardContextApproach::default()),
             model_variant: None,
         },
         checkpoint_ref: Some(stored.checkpoint_ref.clone()),

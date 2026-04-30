@@ -14,7 +14,7 @@ pub struct Program {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Stmt {
     Assign {
-        name: AstString,
+        target: AssignTarget,
         expr: Expr,
     },
     Expr(Expr),
@@ -31,10 +31,38 @@ pub enum Stmt {
         iterable: Expr,
         body: Vec<Stmt>,
     },
+    Break,
+    Continue,
     Parallel {
         branches: ParallelBranches,
     },
     Submit(Option<Expr>),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AssignTarget {
+    pub root: AstString,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<AssignPathStep>,
+}
+
+impl AssignTarget {
+    pub fn variable(root: AstString) -> Self {
+        Self {
+            root,
+            steps: Vec::new(),
+        }
+    }
+
+    pub fn is_simple(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AssignPathStep {
+    Field(AstString),
+    Index(Expr),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

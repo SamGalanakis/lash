@@ -1,7 +1,9 @@
 use crate::{
     PromptRequest, PromptSelectionMode, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
-    ToolParam, ToolProvider, ToolResult,
+    ToolProvider, ToolResult,
 };
+
+use super::object_schema;
 
 #[derive(Clone, Default)]
 pub struct AskTool;
@@ -134,59 +136,49 @@ fn parse_allow_note(args: &serde_json::Value, has_options: bool) -> Result<bool,
 #[async_trait::async_trait]
 impl ToolProvider for AskTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "ask".into(),
-            description: "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Provide `options` when there are roughly 2–6 discrete choices (pick/confirm/choose-between); omit it for open-ended responses where the user needs to type something. Returns structured JSON: free-form answers use `{ kind: \"text\", text }`, single-choice answers use `{ kind: \"single\", selection, note? }`, and multi-choice answers use `{ kind: \"multi\", selections, note? }`.".into(),
-            params: vec![
-                ToolParam {
-                    name: "question".into(),
-                    r#type: "str".into(),
-                    description: "Question to show the user.".into(),
-                    default_value: None,
-                    required: true,
-                },
-                ToolParam {
-                    name: "options".into(),
-                    r#type: "list".into(),
-                    description:
-                        "Optional list of short choices. Prefer passing `options` whenever the answer can be expressed as a short choice list; omit or pass null only for genuinely free-form input."
-                            .into(),
-                    default_value: None,
-                    required: false,
-                },
-                ToolParam {
-                    name: "selection_mode".into(),
-                    r#type: "str".into(),
-                    description:
-                        "Optional selection mode when `options` are provided: `single` (default) or `multi`."
-                            .into(),
-                    default_value: Some("single".into()),
-                    required: false,
-                },
-                ToolParam {
-                    name: "allow_note".into(),
-                    r#type: "bool".into(),
-                    description:
-                        "Optional. When true and `options` are provided, lets the user attach a free-form note alongside their selection."
-                            .into(),
-                    default_value: Some(serde_json::json!(false)),
-                    required: false,
-                },
-            ],
-            returns: "json".into(),
-            examples: vec![
+        vec![
+            ToolDefinition::new(
+                "ask",
+                "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Provide `options` when there are roughly 2–6 discrete choices (pick/confirm/choose-between); omit it for open-ended responses where the user needs to type something. Returns structured JSON: free-form answers use `{ kind: \"text\", text }`, single-choice answers use `{ kind: \"single\", selection, note? }`, and multi-choice answers use `{ kind: \"multi\", selections, note? }`.",
+                object_schema(
+                    serde_json::json!({
+                        "question": {
+                            "type": "string",
+                            "description": "Question to show the user."
+                        },
+                        "options": {
+                            "type": ["array", "null"],
+                            "items": { "type": "string" },
+                            "description": "Optional list of short choices. Prefer passing `options` whenever the answer can be expressed as a short choice list; omit or pass null only for genuinely free-form input."
+                        },
+                        "selection_mode": {
+                            "type": "string",
+                            "enum": ["single", "multi"],
+                            "default": "single",
+                            "description": "Optional selection mode when `options` are provided: `single` (default) or `multi`."
+                        },
+                        "allow_note": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Optional. When true and `options` are provided, lets the user attach a free-form note alongside their selection."
+                        }
+                    }),
+                    &["question"],
+                ),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_examples(vec![
                 "ask(question=\"Which environment should I use?\", options=[\"staging\", \"prod\"])"
                     .into(),
                 "ask(question=\"Which checks should I run?\", options=[\"unit\", \"lint\", \"e2e\"], selection_mode=\"multi\")".into(),
                 "ask(question=\"Which direction should I take?\", options=[\"minimal\", \"full\"], allow_note=true)".into(),
-            ],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+            ])
+            .with_discovery(crate::tools::discovery_metadata(
+                "user",
+                &["prompt_user", "request_input"],
+            ))
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
     async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
         ToolResult::err_fmt(format_args!(
@@ -346,9 +338,9 @@ mod tests {
         let tool = AskTool::new();
         let definition = tool.definitions().into_iter().next().expect("definition");
         let options = definition
-            .params
-            .iter()
-            .find(|param| param.name == "options")
+            .parameter_metadata()
+            .into_iter()
+            .find(|param| param["name"] == "options")
             .expect("options param");
 
         assert!(
@@ -358,10 +350,12 @@ mod tests {
             "description should bias the model toward structured choices with a concrete threshold"
         );
         assert!(
-            options.description.contains("Prefer passing `options`"),
+            options["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("Prefer passing `options`")),
             "options param should explain when to use structured choices"
         );
-        assert_eq!(definition.returns, "json");
+        assert_eq!(definition.output_schema["type"], "object");
     }
 
     #[tokio::test]

@@ -28,8 +28,10 @@ Options:
                                 (required for all benchmark runs)
   --execution-mode <mode>       Lash execution mode: rlm|rlmpure|standard
                                 (required for --agent lash; ignored for opencode)
-  --context-approach <name>     Lash context approach: rolling_history|observational_memory
-                                (optional for --agent lash; ignored for opencode)
+  --context-approach <name>     Lash standard-mode context approach:
+                                rolling_history|observational_memory
+                                (optional for --agent lash with --execution-mode standard;
+                                ignored for opencode)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
   --results-dir <path>          Persistent structured results dir (default: .benchmarks/terminalbench2)
   --job-name <name>             Harbor job name (optional)
@@ -474,6 +476,10 @@ if [[ "${AGENT}" == "lash" ]]; then
 
   if [[ -n "${CONTEXT_APPROACH}" && "${CONTEXT_APPROACH}" != "rolling_history" && "${CONTEXT_APPROACH}" != "observational_memory" ]]; then
     echo "error: unsupported --context-approach: ${CONTEXT_APPROACH} (expected rolling_history or observational_memory)" >&2
+    exit 2
+  fi
+  if [[ -n "${CONTEXT_APPROACH}" && "${EXECUTION_MODE}" != "standard" ]]; then
+    echo "error: --context-approach only applies to --execution-mode standard" >&2
     exit 2
   fi
 

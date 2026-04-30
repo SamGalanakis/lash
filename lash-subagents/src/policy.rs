@@ -1,4 +1,4 @@
-use lash::{PromptContribution, ToolDefinition, ToolExecutionMode, ToolParam};
+use lash::{PromptContribution, ToolDefinition, ToolExecutionMode};
 
 use crate::CapabilityRegistry;
 
@@ -118,22 +118,13 @@ fn capability_list_for_description(capability_names: &[String]) -> String {
 }
 
 fn pass_baton_definition(examples: Vec<String>) -> ToolDefinition {
-    ToolDefinition {
-        name: "pass_baton".into(),
-        description: "Hand off to a fresh successor session and end the current session immediately. Use when most of your trajectory has become irrelevant or when context budget is approaching the limit. The successor inherits only the values you put in `seed` as lashlang globals and the `task` string as its `user_input_1`. It does not inherit prior conversation, trajectory, or globals. The successor keeps the current session's output schema, and the successor's `submit` becomes the user-facing answer.".into(),
-        params: vec![
-            ToolParam::typed("task", "str"),
-            ToolParam::optional("seed", "dict"),
-        ],
-        returns: "dict".into(),
+    tool_definition(
+        "pass_baton",
+        "Hand off to a fresh successor session and end the current session immediately. Use when most of your trajectory has become irrelevant or when context budget is approaching the limit. The successor inherits only the values you put in `seed` as lashlang globals and the `task` string as its `user_input_1`. It does not inherit prior conversation, trajectory, or globals. The successor keeps the current session's output schema, and the successor's `submit` becomes the user-facing answer.",
+        pass_baton_input_schema(),
         examples,
-        availability: lash::ToolAvailabilityConfig::documented(),
-        activation: lash::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: Some(pass_baton_input_schema()),
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Parallel,
-    }
+        ToolExecutionMode::Parallel,
+    )
 }
 
 fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) -> ToolDefinition {
@@ -141,102 +132,76 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     let description = format!(
         "Spawn a subagent under the current agent target and start it in the background. Pick `capability` from {cap_list}. The response returns `target` for agent operations (`wait_agent`, `followup_task`, `send_message`) and `task_id` for task control (`tasks_stop`). Set `fork_turns` to `none`, `all`, or a positive integer string to control inherited context. If `output` is present, the subagent must return a value matching that shape — pass either a record of scalar type descriptors (`{{ line: \"str\", length: \"int\" }}`) or a `Type {{ ... }}` literal (supports nested objects, enums, `list[T]`, and `?` optional fields). `task_name` is auto-normalized (lowercased; spaces, hyphens, and other non-alphanumeric characters collapse to `_`); the response includes a `task_name_note` when normalization changed what you sent."
     );
-    ToolDefinition {
-        name: "spawn_agent".into(),
+    tool_definition(
+        "spawn_agent",
         description,
-        params: vec![
-            ToolParam::typed("task_name", "str"),
-            ToolParam::typed("task", "str"),
-            ToolParam::typed("capability", "str"),
-            ToolParam::optional("fork_turns", "str"),
-            ToolParam::optional("output", "dict"),
-        ],
-        returns: "dict".into(),
+        spawn_agent_input_schema(capability_names),
         examples,
-        availability: lash::ToolAvailabilityConfig::documented(),
-        activation: lash::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: Some(spawn_agent_input_schema(capability_names)),
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Parallel,
-    }
+        ToolExecutionMode::Parallel,
+    )
 }
 
 fn send_message_definition(examples: Vec<String>) -> ToolDefinition {
-    ToolDefinition {
-        name: "send_message".into(),
-        description: "Deliver a concise out-of-band message to another agent without assigning a task. `delivery` defaults to `next_possible`: inject into the current turn if the target is running, or wake an idle non-root target with this message. Use `next_turn` to queue it without waking the target. Use `interrupt` to cancel the current target turn and deliver the message next.".into(),
-        params: vec![
-            ToolParam::typed("target", "str"),
-            ToolParam::typed("message", "str"),
-            ToolParam::optional("delivery", "str"),
-        ],
-        returns: "dict".into(),
+    tool_definition(
+        "send_message",
+        "Deliver a concise out-of-band message to another agent without assigning a task. `delivery` defaults to `next_possible`: inject into the current turn if the target is running, or wake an idle non-root target with this message. Use `next_turn` to queue it without waking the target. Use `interrupt` to cancel the current target turn and deliver the message next.",
+        send_message_input_schema(),
         examples,
-        availability: lash::ToolAvailabilityConfig::documented(),
-        activation: lash::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: Some(send_message_input_schema()),
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Parallel,
-    }
+        ToolExecutionMode::Parallel,
+    )
 }
 
 fn followup_task_definition(examples: Vec<String>) -> ToolDefinition {
-    ToolDefinition {
-        name: "followup_task".into(),
-        description: "Give an existing non-root agent another task. `delivery` defaults to `next_possible`: start immediately if idle or queue after the current turn if busy. Use `interrupt` to cancel the target's current turn and run this task next. Use `next_turn` to queue without waking an idle target. Optional `output` supplies a per-follow-up output schema (same shape as `spawn_agent.output`) that retypes the subagent for this single follow-up — it overrides any schema baked in at spawn. Omit `output` to run the follow-up as free-form (no schema validation for that turn).".into(),
-        params: vec![
-            ToolParam::typed("target", "str"),
-            ToolParam::typed("task", "str"),
-            ToolParam::optional("delivery", "str"),
-            ToolParam::optional("output", "dict"),
-        ],
-        returns: "dict".into(),
+    tool_definition(
+        "followup_task",
+        "Give an existing non-root agent another task. `delivery` defaults to `next_possible`: start immediately if idle or queue after the current turn if busy. Use `interrupt` to cancel the target's current turn and run this task next. Use `next_turn` to queue without waking an idle target. Optional `output` supplies a per-follow-up output schema (same shape as `spawn_agent.output`) that retypes the subagent for this single follow-up — it overrides any schema baked in at spawn. Omit `output` to run the follow-up as free-form (no schema validation for that turn).",
+        followup_task_input_schema(),
         examples,
-        availability: lash::ToolAvailabilityConfig::documented(),
-        activation: lash::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: Some(followup_task_input_schema()),
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Serial,
-    }
+        ToolExecutionMode::Serial,
+    )
 }
 
 fn wait_agent_definition(examples: Vec<String>) -> ToolDefinition {
-    ToolDefinition {
-        name: "wait_agent".into(),
-        description: "Wait for **subagent** lifecycle events. By default `until` is `task_completed`, so messages and `task_started` events do not complete the wait. Default responses contain only completion events plus a stable `completion.result`; do not read `events[0].result` unless you explicitly requested `any_event`. Use `until=\"message\"`, `\"terminal\"`, `\"any_result\"`, or `\"any_event\"` only when that exact behavior is needed. With no `targets`, waits on the current agent and descendants. This tool only receives subagent events — it does **not** collect `monitor` tool output, shell process events, or any other background stream. Monitor events are delivered automatically as new turn input, so never call `wait_agent` hoping to drain a monitor.".into(),
-        params: vec![
-            ToolParam::optional("targets", "list"),
-            ToolParam::optional("until", "str"),
-            ToolParam::optional("timeout_ms", "int"),
-        ],
-        returns: "dict".into(),
+    tool_definition(
+        "wait_agent",
+        "Wait for **subagent** lifecycle events. By default `until` is `task_completed`, so messages and `task_started` events do not complete the wait. Default responses contain only completion events plus a stable `completion.result`; do not read `events[0].result` unless you explicitly requested `any_event`. Use `until=\"message\"`, `\"terminal\"`, `\"any_result\"`, or `\"any_event\"` only when that exact behavior is needed. With no `targets`, waits on the current agent and descendants. This tool only receives subagent events — it does **not** collect `monitor` tool output, shell process events, or any other background stream. Monitor events are delivered automatically as new turn input, so never call `wait_agent` hoping to drain a monitor.",
+        wait_agent_input_schema(),
         examples,
-        availability: lash::ToolAvailabilityConfig::documented(),
-        activation: lash::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: Some(wait_agent_input_schema()),
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Parallel,
-    }
+        ToolExecutionMode::Parallel,
+    )
 }
 
 fn list_agents_definition(examples: Vec<String>) -> ToolDefinition {
-    ToolDefinition {
-        name: "list_agents".into(),
-        description: "List the live agent tree under the current agent path or an optional `path_prefix` subtree.".into(),
-        params: vec![ToolParam::optional("path_prefix", "str")],
-        returns: "dict".into(),
+    tool_definition(
+        "list_agents",
+        "List the live agent tree under the current agent path or an optional `path_prefix` subtree.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path_prefix": { "type": "string" }
+            },
+            "additionalProperties": false
+        }),
         examples,
-        availability: lash::ToolAvailabilityConfig::documented(),
-        activation: lash::ToolActivation::Always,
-        availability_override: None,
-        input_schema_override: None,
-        output_schema_override: None,
-        execution_mode: ToolExecutionMode::Parallel,
-    }
+        ToolExecutionMode::Parallel,
+    )
+}
+
+fn tool_definition(
+    name: &str,
+    description: impl Into<String>,
+    input_schema: serde_json::Value,
+    examples: Vec<String>,
+    execution_mode: ToolExecutionMode,
+) -> ToolDefinition {
+    ToolDefinition::new(
+        name,
+        description,
+        input_schema,
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_examples(examples)
+    .with_execution_mode(execution_mode)
 }
 
 fn pass_baton_input_schema() -> serde_json::Value {

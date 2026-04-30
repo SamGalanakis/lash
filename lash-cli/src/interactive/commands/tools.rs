@@ -34,6 +34,34 @@ fn update_documentation_state(availability: ToolAvailability, injected: bool) ->
     }
 }
 
+fn output_schema_label(schema: &serde_json::Value) -> String {
+    match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("string") => "str".to_string(),
+        Some("integer") => "int".to_string(),
+        Some("number") => "float".to_string(),
+        Some("boolean") => "bool".to_string(),
+        Some("object") => "record".to_string(),
+        Some("array") => "list".to_string(),
+        Some("null") => "null".to_string(),
+        _ => "any".to_string(),
+    }
+}
+
+fn output_schema_from_hint(hint: &str) -> serde_json::Value {
+    match hint.trim() {
+        "str" | "string" => serde_json::json!({ "type": "string" }),
+        "int" | "integer" => serde_json::json!({ "type": "integer" }),
+        "float" | "number" => serde_json::json!({ "type": "number" }),
+        "bool" | "boolean" => serde_json::json!({ "type": "boolean" }),
+        "dict" | "record" | "json" => {
+            serde_json::json!({ "type": "object", "additionalProperties": true })
+        }
+        "list" | "array" => serde_json::json!({ "type": "array", "items": {} }),
+        "null" | "None" => serde_json::json!({ "type": "null" }),
+        _ => serde_json::json!({}),
+    }
+}
+
 pub(super) fn handle_tools(
     raw: Option<String>,
     app: &mut App,
@@ -60,7 +88,7 @@ pub(super) fn handle_tools(
             lines.push(format!(
                 "  - {} [{}] adapter={} availability={}",
                 name,
-                spec.definition.returns,
+                output_schema_label(&spec.definition.output_schema),
                 spec.adapter_id,
                 availability_label(availability)
             ));
@@ -143,7 +171,7 @@ pub(super) fn handle_tools(
                 spec.definition.description = desc.clone();
             }
             if let Some(returns) = kv.get("returns") {
-                spec.definition.returns = returns.clone();
+                spec.definition.output_schema = output_schema_from_hint(returns);
             }
             if let Some(raw) = kv.get("availability") {
                 let Some(availability) = parse_availability(raw) else {

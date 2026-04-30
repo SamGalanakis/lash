@@ -71,6 +71,45 @@ impl PreparedExecutionSurface {
 }
 
 impl RuntimeTurnDriver {
+    fn emit_trace(&self, iteration: usize, event: lash_trace::TraceEvent) {
+        crate::trace::emit_trace(
+            &self.host.core.trace_sink,
+            &self.host.core.trace_context,
+            lash_trace::TraceContext::default()
+                .for_session(self.session_id.clone())
+                .for_iteration(iteration),
+            event,
+        );
+    }
+
+    fn emit_tool_call_trace(&self, iteration: usize, record: &crate::ToolCallRecord) {
+        self.emit_trace(
+            iteration,
+            lash_trace::TraceEvent::ToolCallCompleted {
+                call_id: record.call_id.clone(),
+                name: record.tool.clone(),
+                args: record.args.clone(),
+                result: record.result.clone(),
+                success: record.success,
+                duration_ms: record.duration_ms,
+            },
+        );
+    }
+
+    fn emit_rlm_exec_step(&self, iteration: usize, phase: &str, payload: serde_json::Value) {
+        let mut payload = payload;
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("phase".to_string(), serde_json::json!(phase));
+        }
+        self.emit_trace(
+            iteration,
+            lash_trace::TraceEvent::ModeStep {
+                mode: "rlm".to_string(),
+                payload,
+            },
+        );
+    }
+
     async fn persist_progress_boundary(
         &mut self,
         messages: crate::MessageSequence,
@@ -263,21 +302,15 @@ impl RuntimeTurnDriver {
                         let results = self.run_tool_calls(calls, &event_tx, &cancel).await;
                         if self.host.core.trace_sink.is_some() {
                             for outcome in &results {
-                                crate::trace::emit_trace(
-                                    &self.host.core.trace_sink,
-                                    &self.host.core.trace_context,
-                                    lash_trace::TraceContext::default()
-                                        .for_session(self.session_id.clone())
-                                        .for_iteration(machine.iteration()),
-                                    lash_trace::TraceEvent::ToolCallCompleted {
-                                        call_id: Some(outcome.call_id.clone()),
-                                        name: outcome.tool_name.clone(),
-                                        args: outcome.args.clone(),
-                                        result: outcome.state_result.result.clone(),
-                                        success: outcome.state_result.success,
-                                        duration_ms: outcome.duration_ms,
-                                    },
-                                );
+                                let record = ToolCallRecord {
+                                    call_id: Some(outcome.call_id.clone()),
+                                    tool: outcome.tool_name.clone(),
+                                    args: outcome.args.clone(),
+                                    result: outcome.state_result.result.clone(),
+                                    success: outcome.state_result.success,
+                                    duration_ms: outcome.duration_ms,
+                                };
+                                self.emit_tool_call_trace(machine.iteration(), &record);
                             }
                         }
                         self.progress_graph
@@ -298,10 +331,49 @@ impl RuntimeTurnDriver {
                     Effect::Log { event } => self.handle_log_event(event),
                     Effect::CancelLlm { .. } => {}
                     Effect::ExecCode { id, code } => {
+                        let iteration = machine.iteration();
+                        if self.host.core.trace_sink.is_some() {
+                            self.emit_rlm_exec_step(
+                                iteration,
+                                "exec_code_started",
+                                serde_json::json!({
+                                    "code": code,
+                                    "code_chars": code.chars().count(),
+                                }),
+                            );
+                        }
                         let result = self.run_exec_code(&code, &event_tx).await;
                         if let Ok(output) = &result {
+                            if self.host.core.trace_sink.is_some() {
+                                self.emit_rlm_exec_step(
+                                    iteration,
+                                    "exec_code_completed",
+                                    serde_json::json!({
+                                        "duration_ms": output.duration_ms,
+                                        "output": output.output,
+                                        "output_chars": output.output.chars().count(),
+                                        "observations": output.observations,
+                                        "observation_count": output.observations.len(),
+                                        "error": output.error,
+                                        "terminal_finish": output.terminal_finish,
+                                        "terminal_finish_present": output.terminal_finish.is_some(),
+                                        "tool_call_count": output.tool_calls.len(),
+                                    }),
+                                );
+                                for record in &output.tool_calls {
+                                    self.emit_tool_call_trace(iteration, record);
+                                }
+                            }
                             self.progress_graph
                                 .record_tool_calls(output.tool_calls.iter().cloned());
+                        } else if let Err(error) = &result
+                            && self.host.core.trace_sink.is_some()
+                        {
+                            self.emit_rlm_exec_step(
+                                iteration,
+                                "exec_code_failed",
+                                serde_json::json!({ "error": error }),
+                            );
                         }
                         let response = match result {
                             Ok(output) => Response::ExecResult {

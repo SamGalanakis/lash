@@ -409,7 +409,7 @@ mod tests {
                 configured_model: "gpt-5".to_string(),
                 context_window: 200_000,
                 execution_mode: ExecutionMode::standard(),
-                context_approach: lash::ContextApproach::default(),
+                standard_context_approach: Some(lash::StandardContextApproach::default()),
                 model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
@@ -472,6 +472,8 @@ mod tests {
             CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
                 .expect("catalog");
         let plugins = PluginHost::new(vec![
+            Arc::new(lash::BuiltinTaskControlsPluginFactory::new()),
+            Arc::new(lash::BuiltinMonitorToolPluginFactory::new()) as Arc<dyn PluginFactory>,
             Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory)
                 as Arc<dyn PluginFactory>,
             Arc::new(PluginSpecFactory::new(

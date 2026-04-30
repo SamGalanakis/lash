@@ -16,10 +16,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ProgressSender, PromptContribution, SandboxMessage, ToolDefinition, ToolExecutionContext,
-    ToolExecutionMode, ToolParam, ToolProvider, ToolResult,
+    ToolExecutionMode, ToolProvider, ToolResult,
 };
 
-use super::require_str;
+use super::{object_schema, require_str};
 
 struct ShellProcess {
     _master: Box<dyn MasterPty + Send>,
@@ -938,198 +938,120 @@ impl Default for StandardShell {
 #[async_trait::async_trait]
 impl ToolProvider for StandardShell {
     fn definitions(&self) -> Vec<ToolDefinition> {
+        let command_common = |command_description: &str| {
+            json!({
+                "cmd": {
+                    "type": "string",
+                    "description": command_description
+                },
+                "workdir": {
+                    "type": "string",
+                    "description": "Optional working directory to run the command in; defaults to the turn cwd."
+                },
+                "shell": {
+                    "type": "string",
+                    "description": "Shell binary to launch. Defaults to the user's default shell."
+                },
+                "login": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether to run the shell with -l semantics. Defaults to false to avoid startup prompts and shell init noise."
+                },
+                "allow_failure": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, nonzero exit codes are returned as successful tool results instead of failed tool calls. Defaults to false."
+                },
+                "max_output_tokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of tokens to return. Excess output will be truncated."
+                }
+            })
+        };
+        let output_schema = json!({ "type": "object", "additionalProperties": true });
         vec![
-            ToolDefinition {
-                name: "exec_command".into(),
-                description: "Run a one-shot command in a PTY and wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Use `timeout_ms` as a hard timeout; timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.".into(),
-                params: vec![
-                    ToolParam {
-                        name: "cmd".into(),
-                        r#type: "str".into(),
-                        description: "Shell command to execute.".into(),
-                        default_value: None,
-                        required: true,
-                    },
-                    ToolParam {
-                        name: "workdir".into(),
-                        r#type: "str".into(),
-                        description:
-                            "Optional working directory to run the command in; defaults to the turn cwd.".into(),
-                        default_value: None,
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "shell".into(),
-                        r#type: "str".into(),
-                        description: "Shell binary to launch. Defaults to the user's default shell.".into(),
-                        default_value: None,
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "login".into(),
-                        r#type: "bool".into(),
-                        description: "Whether to run the shell with -l semantics. Defaults to false to avoid startup prompts and shell init noise.".into(),
-                        default_value: Some(serde_json::json!(false)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "allow_failure".into(),
-                        r#type: "bool".into(),
-                        description: "When true, nonzero exit codes are returned as successful tool results instead of failed tool calls. Defaults to false.".into(),
-                        default_value: Some(serde_json::json!(false)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "timeout_ms".into(),
-                        r#type: "int".into(),
-                        description: "Hard timeout in milliseconds. If reached before the command exits, the process is killed and the tool call fails with `status: \"timed_out\"`. Omit for no tool-level timeout.".into(),
-                        default_value: None,
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "max_output_tokens".into(),
-                        r#type: "int".into(),
-                        description: "Maximum number of tokens to return. Excess output will be truncated.".into(),
-                        default_value: None,
-                        required: false,
-                    },
-                ],
-                returns: "dict".into(),
-                examples: vec![],
-                availability: crate::ToolAvailabilityConfig::documented(),
-                activation: crate::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                // exec_command can fork/move/delete files and mutate shell
-                // state (cwd, env, background processes); serialize it so
-                // concurrent commands don't race.
-                execution_mode: ToolExecutionMode::Serial,
-            },
-            ToolDefinition {
-                name: "start_command".into(),
-                description: "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. Continue the session with `write_stdin`. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.".into(),
-                params: vec![
-                    ToolParam {
-                        name: "cmd".into(),
-                        r#type: "str".into(),
-                        description: "Shell command to start.".into(),
-                        default_value: None,
-                        required: true,
-                    },
-                    ToolParam {
-                        name: "workdir".into(),
-                        r#type: "str".into(),
-                        description:
-                            "Optional working directory to run the command in; defaults to the turn cwd.".into(),
-                        default_value: None,
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "shell".into(),
-                        r#type: "str".into(),
-                        description: "Shell binary to launch. Defaults to the user's default shell.".into(),
-                        default_value: None,
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "login".into(),
-                        r#type: "bool".into(),
-                        description: "Whether to run the shell with -l semantics. Defaults to false to avoid startup prompts and shell init noise.".into(),
-                        default_value: Some(serde_json::json!(false)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "allow_failure".into(),
-                        r#type: "bool".into(),
-                        description: "When true, nonzero process exit codes are returned as successful completed results instead of failed tool calls. Defaults to false.".into(),
-                        default_value: Some(serde_json::json!(false)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "poll_ms".into(),
-                        r#type: "int".into(),
-                        description: "Initial poll window in milliseconds before returning a running `session_id` if the process has not exited. Defaults to 250.".into(),
-                        default_value: Some(serde_json::json!(DEFAULT_START_COMMAND_POLL_MS)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "max_output_tokens".into(),
-                        r#type: "int".into(),
-                        description: "Maximum number of tokens to return. Excess output will be truncated.".into(),
-                        default_value: None,
-                        required: false,
-                    },
-                ],
-                returns: "dict".into(),
-                examples: vec![],
-                availability: crate::ToolAvailabilityConfig::documented(),
-                activation: crate::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                // start_command creates a stateful shell handle; serialize it
-                // with the other shell tools.
-                execution_mode: ToolExecutionMode::Serial,
-            },
-            ToolDefinition {
-                name: "write_stdin".into(),
-                description: "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.".into(),
-                params: vec![
-                    ToolParam {
-                        name: "session_id".into(),
-                        r#type: "int".into(),
-                        description: "Identifier of the running command handle.".into(),
-                        default_value: None,
-                        required: true,
-                    },
-                    ToolParam {
-                        name: "chars".into(),
-                        r#type: "str".into(),
-                        description: "Bytes to write to stdin (may be empty to poll).".into(),
-                        default_value: Some(serde_json::json!("")),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "poll_ms".into(),
-                        r#type: "int".into(),
-                        description: "Poll window in milliseconds before returning another running result if the process has not exited. Defaults to 250.".into(),
-                        default_value: Some(serde_json::json!(DEFAULT_WRITE_STDIN_POLL_MS)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "close_stdin".into(),
-                        r#type: "bool".into(),
-                        description: "Close stdin after writing to send EOF to the process.".into(),
-                        default_value: Some(serde_json::json!(false)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "allow_failure".into(),
-                        r#type: "bool".into(),
-                        description: "When true, nonzero process exit codes are returned as successful tool results instead of failed tool calls. Defaults to false.".into(),
-                        default_value: Some(serde_json::json!(false)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "max_output_tokens".into(),
-                        r#type: "int".into(),
-                        description: "Maximum number of tokens to return. Excess output will be truncated.".into(),
-                        default_value: None,
-                        required: false,
-                    },
-                ],
-                returns: "dict".into(),
-                examples: vec![],
-                availability: crate::ToolAvailabilityConfig::documented(),
-                activation: crate::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                // write_stdin targets a specific running command session and
-                // mutates its state; serialize it alongside exec_command.
-                execution_mode: ToolExecutionMode::Serial,
-            },
+            ToolDefinition::new(
+                "exec_command",
+                "Run a one-shot command in a PTY and wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Use `timeout_ms` as a hard timeout; timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                {
+                    let mut properties = command_common("Shell command to execute.");
+                    properties["timeout_ms"] = json!({
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Hard timeout in milliseconds. If reached before the command exits, the process is killed and the tool call fails with `status: \"timed_out\"`. Omit for no tool-level timeout."
+                    });
+                    object_schema(properties, &["cmd"])
+                },
+                output_schema.clone(),
+            )
+            .with_discovery(crate::tools::discovery_metadata("shell", &["shell", "bash"]))
+            .with_execution_mode(ToolExecutionMode::Serial),
+            ToolDefinition::new(
+                "start_command",
+                "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. Continue the session with `write_stdin`. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.",
+                {
+                    let mut properties = command_common("Shell command to start.");
+                    properties["poll_ms"] = json!({
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": DEFAULT_START_COMMAND_POLL_MS,
+                        "description": "Initial poll window in milliseconds before returning a running `session_id` if the process has not exited. Defaults to 250."
+                    });
+                    object_schema(properties, &["cmd"])
+                },
+                output_schema.clone(),
+            )
+            .with_discovery(crate::tools::discovery_metadata(
+                "shell",
+                &["long_running_command", "pty"],
+            ))
+            .with_execution_mode(ToolExecutionMode::Serial),
+            ToolDefinition::new(
+                "write_stdin",
+                "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                object_schema(
+                    json!({
+                        "session_id": {
+                            "type": "integer",
+                            "description": "Identifier of the running command handle."
+                        },
+                        "chars": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Bytes to write to stdin (may be empty to poll)."
+                        },
+                        "poll_ms": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": DEFAULT_WRITE_STDIN_POLL_MS,
+                            "description": "Poll window in milliseconds before returning another running result if the process has not exited. Defaults to 250."
+                        },
+                        "close_stdin": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Close stdin after writing to send EOF to the process."
+                        },
+                        "allow_failure": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "When true, nonzero process exit codes are returned as successful tool results instead of failed tool calls. Defaults to false."
+                        },
+                        "max_output_tokens": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Maximum number of tokens to return. Excess output will be truncated."
+                        }
+                    }),
+                    &["session_id"],
+                ),
+                output_schema,
+            )
+            .with_discovery(crate::tools::discovery_metadata(
+                "shell",
+                &["send_stdin", "poll_command"],
+            ))
+            .with_execution_mode(ToolExecutionMode::Serial),
         ]
     }
 

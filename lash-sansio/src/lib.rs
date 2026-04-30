@@ -102,51 +102,6 @@ pub fn default_execution_mode() -> ExecutionMode {
     ExecutionMode::default()
 }
 
-/// A typed parameter for a tool definition.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct ToolParam {
-    pub name: String,
-    /// Type hint: "str", "int", "float", "bool", "list", "dict", "any"
-    #[serde(default = "ToolParam::default_type")]
-    pub r#type: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_value: Option<serde_json::Value>,
-    #[serde(default = "ToolParam::default_required")]
-    pub required: bool,
-}
-
-impl ToolParam {
-    fn default_type() -> String {
-        "any".into()
-    }
-
-    fn default_required() -> bool {
-        true
-    }
-
-    pub fn typed(name: &str, ty: &str) -> Self {
-        Self {
-            name: name.into(),
-            r#type: ty.into(),
-            description: String::new(),
-            default_value: None,
-            required: true,
-        }
-    }
-
-    pub fn optional(name: &str, ty: &str) -> Self {
-        Self {
-            name: name.into(),
-            r#type: ty.into(),
-            description: String::new(),
-            default_value: None,
-            required: false,
-        }
-    }
-}
-
 /// How a tool's invocations should be scheduled relative to other tools in
 /// the same batch of model-produced tool calls.
 ///
@@ -271,19 +226,30 @@ fn is_default_tool_activation(activation: &ToolActivation) -> bool {
     *activation == ToolActivation::default()
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolDiscoveryMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+}
+
+impl ToolDiscoveryMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.namespace.is_none() && self.aliases.is_empty()
+    }
+}
+
 /// A tool definition exposed to the runtime.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub params: Vec<ToolParam>,
-    #[serde(
-        default = "ToolDefinition::default_returns",
-        skip_serializing_if = "String::is_empty"
-    )]
-    pub returns: String,
+    #[serde(default = "ToolDefinition::default_input_schema")]
+    pub input_schema: serde_json::Value,
+    #[serde(default)]
+    pub output_schema: serde_json::Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<String>,
     #[serde(default, skip_serializing_if = "is_default_tool_availability_config")]
@@ -292,10 +258,8 @@ pub struct ToolDefinition {
     pub activation: ToolActivation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_override: Option<ToolAvailability>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_schema_override: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema_override: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "ToolDiscoveryMetadata::is_empty")]
+    pub discovery: ToolDiscoveryMetadata,
     /// How this tool should be scheduled relative to peers when the model
     /// emits a batch of tool calls. Defaults to [`ToolExecutionMode::Parallel`].
     #[serde(
@@ -314,32 +278,93 @@ pub struct ModelTool {
 }
 
 impl ToolDefinition {
-    fn default_returns() -> String {
-        "any".into()
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+        output_schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+            output_schema,
+            examples: Vec::new(),
+            availability: ToolAvailabilityConfig::documented(),
+            activation: ToolActivation::Always,
+            availability_override: None,
+            discovery: ToolDiscoveryMetadata::default(),
+            execution_mode: ToolExecutionMode::Parallel,
+        }
+    }
+
+    pub fn native<Args>(name: impl Into<String>, description: impl Into<String>) -> Self
+    where
+        Args: schemars::JsonSchema,
+    {
+        Self::new(
+            name,
+            description,
+            schema_for::<Args>(),
+            serde_json::json!({}),
+        )
+    }
+
+    pub fn native_with_output<Args, Output>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self
+    where
+        Args: schemars::JsonSchema,
+        Output: schemars::JsonSchema,
+    {
+        Self::new(
+            name,
+            description,
+            schema_for::<Args>(),
+            schema_for::<Output>(),
+        )
+    }
+
+    pub fn with_examples(mut self, examples: Vec<String>) -> Self {
+        self.examples = examples;
+        self
+    }
+
+    pub fn with_availability(mut self, availability: ToolAvailabilityConfig) -> Self {
+        self.availability = availability;
+        self
+    }
+
+    pub fn with_activation(mut self, activation: ToolActivation) -> Self {
+        self.activation = activation;
+        self
+    }
+
+    pub fn with_discovery(mut self, discovery: ToolDiscoveryMetadata) -> Self {
+        self.discovery = discovery;
+        self
+    }
+
+    pub fn with_execution_mode(mut self, execution_mode: ToolExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
+        self
+    }
+
+    pub fn default_input_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+        })
     }
 
     pub fn signature(&self) -> String {
-        let params: Vec<String> = self
-            .params
-            .iter()
-            .map(|p| {
-                let mut s = if p.default_value.is_none() && !p.required {
-                    format!("{}?: {}", p.name, display_prompt_type(&p.r#type))
-                } else {
-                    format!("{}: {}", p.name, display_prompt_type(&p.r#type))
-                };
-                if let Some(default) = &p.default_value {
-                    s.push_str(" = ");
-                    s.push_str(&display_default_value(default));
-                }
-                s
-            })
-            .collect();
-        let ret = if self.returns.is_empty() {
-            "any".to_string()
-        } else {
-            display_prompt_type(&self.returns)
-        };
+        let params = schema_parameter_docs(&self.input_schema)
+            .into_iter()
+            .map(|p| p.signature_fragment())
+            .collect::<Vec<_>>();
+        let ret = schema_type_label(&self.output_schema);
         format!("{}({}) -> {}", self.name, params.join(", "), ret)
     }
 
@@ -348,19 +373,12 @@ impl ToolDefinition {
             .unwrap_or_else(|| self.availability.for_mode(mode))
     }
 
-    pub fn namespace(&self) -> Option<&str> {
-        self.name
-            .split_once("__")
-            .map(|(namespace, _)| namespace)
-            .filter(|namespace| !namespace.is_empty())
-    }
-
     pub fn model_tool(&self) -> ModelTool {
         ModelTool {
             name: self.name.clone(),
             description: self.description.clone(),
-            input_schema: self.input_schema(),
-            output_schema: self.output_schema(),
+            input_schema: self.input_schema.clone(),
+            output_schema: self.output_schema.clone(),
         }
     }
 
@@ -384,69 +402,189 @@ impl ToolDefinition {
             .join("\n\n")
     }
 
-    pub fn input_schema(&self) -> serde_json::Value {
-        if let Some(schema) = &self.input_schema_override {
-            return schema.clone();
+    pub fn parameter_metadata(&self) -> Vec<serde_json::Value> {
+        schema_parameter_docs(&self.input_schema)
+            .into_iter()
+            .map(|param| param.to_value())
+            .collect()
+    }
+}
+
+pub fn schema_for<T>() -> serde_json::Value
+where
+    T: schemars::JsonSchema,
+{
+    serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ParameterDoc {
+    name: String,
+    type_label: String,
+    required: bool,
+    nullable: bool,
+    description: Option<String>,
+    default_value: Option<serde_json::Value>,
+    enum_values: Vec<serde_json::Value>,
+    minimum: Option<serde_json::Value>,
+    maximum: Option<serde_json::Value>,
+    min_length: Option<u64>,
+    max_length: Option<u64>,
+    min_items: Option<u64>,
+    max_items: Option<u64>,
+    item_type: Option<String>,
+}
+
+impl ParameterDoc {
+    fn signature_fragment(&self) -> String {
+        let mut out = if self.required {
+            format!("{}: {}", self.name, self.type_label)
+        } else {
+            format!("{}?: {}", self.name, self.type_label)
+        };
+        let constraints = self.constraint_fragments();
+        if !constraints.is_empty() {
+            out.push(' ');
+            out.push_str(&constraints.join(" "));
         }
-
-        let mut properties = serde_json::Map::new();
-        let mut required = Vec::new();
-
-        for param in &self.params {
-            let schema = match param.r#type.as_str() {
-                "str" | "string" => serde_json::json!({ "type": "string" }),
-                "int" => serde_json::json!({ "type": "integer" }),
-                "float" => serde_json::json!({ "type": "number" }),
-                "bool" => serde_json::json!({ "type": "boolean" }),
-                "list" => serde_json::json!({ "type": "array", "items": {} }),
-                "dict" => serde_json::json!({ "type": "object", "additionalProperties": true }),
-                _ => serde_json::json!({}),
-            };
-            let mut schema_obj = match schema {
-                serde_json::Value::Object(obj) => obj,
-                _ => serde_json::Map::new(),
-            };
-            if !param.description.is_empty() {
-                schema_obj.insert(
-                    "description".to_string(),
-                    serde_json::Value::String(param.description.clone()),
-                );
-            }
-            if let Some(default) = &param.default_value {
-                schema_obj.insert("default".to_string(), default.clone());
-            }
-            properties.insert(param.name.clone(), serde_json::Value::Object(schema_obj));
-            if param.required {
-                required.push(param.name.clone());
-            }
+        if let Some(default) = &self.default_value {
+            out.push_str(" = ");
+            out.push_str(&display_default_value(default));
         }
-
-        serde_json::json!({
-            "type": "object",
-            "properties": properties,
-            "required": required,
-        })
+        out
     }
 
-    pub fn output_schema(&self) -> serde_json::Value {
-        if let Some(schema) = &self.output_schema_override {
-            return schema.clone();
+    fn constraint_fragments(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.enum_values.is_empty() {
+            out.push(format!(
+                "in {}",
+                self.enum_values
+                    .iter()
+                    .map(display_default_value)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ));
         }
+        if let Some(minimum) = &self.minimum {
+            out.push(format!(">= {}", display_default_value(minimum)));
+        }
+        if let Some(maximum) = &self.maximum {
+            out.push(format!("<= {}", display_default_value(maximum)));
+        }
+        if let Some(min_length) = self.min_length {
+            out.push(format!("min_len {min_length}"));
+        }
+        if let Some(max_length) = self.max_length {
+            out.push(format!("max_len {max_length}"));
+        }
+        if let Some(min_items) = self.min_items {
+            out.push(format!("min_items {min_items}"));
+        }
+        if let Some(max_items) = self.max_items {
+            out.push(format!("max_items {max_items}"));
+        }
+        out
+    }
 
-        let ty = self.returns.trim();
-        match ty {
-            "" | "any" => serde_json::json!({}),
-            "str" | "string" => serde_json::json!({ "type": "string" }),
-            "int" | "integer" => serde_json::json!({ "type": "integer" }),
-            "float" | "number" => serde_json::json!({ "type": "number" }),
-            "bool" | "boolean" => serde_json::json!({ "type": "boolean" }),
-            "dict" | "json" => {
-                serde_json::json!({ "type": "object", "additionalProperties": true })
-            }
-            "None" | "null" => serde_json::json!({ "type": "null" }),
-            _ if ty.starts_with("list") => serde_json::json!({ "type": "array", "items": {} }),
-            _ => serde_json::json!({}),
+    fn to_value(self) -> serde_json::Value {
+        let mut out = serde_json::Map::new();
+        out.insert("name".to_string(), serde_json::json!(self.name));
+        out.insert("type".to_string(), serde_json::json!(self.type_label));
+        out.insert("required".to_string(), serde_json::json!(self.required));
+        if self.nullable {
+            out.insert("nullable".to_string(), serde_json::json!(true));
         }
+        if let Some(description) = self.description.filter(|value| !value.trim().is_empty()) {
+            out.insert("description".to_string(), serde_json::json!(description));
+        }
+        if let Some(default_value) = self.default_value {
+            out.insert("default".to_string(), default_value);
+        }
+        if !self.enum_values.is_empty() {
+            out.insert("enum".to_string(), serde_json::json!(self.enum_values));
+        }
+        if let Some(value) = self.minimum {
+            out.insert("minimum".to_string(), value);
+        }
+        if let Some(value) = self.maximum {
+            out.insert("maximum".to_string(), value);
+        }
+        if let Some(value) = self.min_length {
+            out.insert("min_length".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.max_length {
+            out.insert("max_length".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.min_items {
+            out.insert("min_items".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.max_items {
+            out.insert("max_items".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.item_type {
+            out.insert("items".to_string(), serde_json::json!(value));
+        }
+        serde_json::Value::Object(out)
+    }
+}
+
+fn schema_parameter_docs(schema: &serde_json::Value) -> Vec<ParameterDoc> {
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    properties
+        .iter()
+        .map(|(name, schema)| parameter_doc(name, schema, required.contains(name.as_str())))
+        .collect()
+}
+
+fn parameter_doc(name: &str, schema: &serde_json::Value, required: bool) -> ParameterDoc {
+    let (type_label, nullable) = schema_type_label_and_nullability(schema);
+    ParameterDoc {
+        name: name.to_string(),
+        type_label,
+        required,
+        nullable,
+        description: schema
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        default_value: schema.get("default").cloned(),
+        enum_values: schema
+            .get("enum")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|value| !value.is_null())
+            .collect(),
+        minimum: schema
+            .get("minimum")
+            .or_else(|| schema.get("exclusiveMinimum"))
+            .cloned(),
+        maximum: schema
+            .get("maximum")
+            .or_else(|| schema.get("exclusiveMaximum"))
+            .cloned(),
+        min_length: schema.get("minLength").and_then(serde_json::Value::as_u64),
+        max_length: schema.get("maxLength").and_then(serde_json::Value::as_u64),
+        min_items: schema.get("minItems").and_then(serde_json::Value::as_u64),
+        max_items: schema.get("maxItems").and_then(serde_json::Value::as_u64),
+        item_type: schema
+            .get("items")
+            .map(schema_type_label)
+            .filter(|value| value != "any"),
     }
 }
 
@@ -456,17 +594,11 @@ mod tests {
     use serde::ser::{Error as _, Serializer};
 
     #[test]
-    fn tool_definition_uses_schema_overrides_for_model_tools() {
-        let tool = ToolDefinition {
-            name: "mcp__demo__search".to_string(),
-            description: "Search demo server".to_string(),
-            params: vec![ToolParam::typed("query", "str")],
-            returns: "str".to_string(),
-            examples: vec![],
-            availability: ToolAvailabilityConfig::documented(),
-            activation: ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: Some(serde_json::json!({
+    fn tool_definition_uses_canonical_schemas_for_model_tools() {
+        let tool = ToolDefinition::new(
+            "mcp__demo__search",
+            "Search demo server",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
@@ -474,17 +606,16 @@ mod tests {
                 },
                 "required": ["query"],
                 "additionalProperties": false
-            })),
-            output_schema_override: Some(serde_json::json!({
+            }),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "hits": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["hits"],
                 "additionalProperties": false
-            })),
-            execution_mode: ToolExecutionMode::Parallel,
-        };
+            }),
+        );
 
         let model_tool = tool.model_tool();
         assert_eq!(
@@ -494,6 +625,46 @@ mod tests {
         assert_eq!(
             model_tool.output_schema["properties"]["hits"]["type"],
             serde_json::json!("array")
+        );
+    }
+
+    #[test]
+    fn native_tool_definition_generates_schema_from_typed_args() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        enum Mode {
+            Fast,
+            Slow,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Args {
+            query: String,
+            #[schemars(range(max = 20))]
+            page_limit: u8,
+            #[schemars(length(min = 1, max = 3))]
+            tags: Vec<String>,
+            mode: Option<Mode>,
+        }
+
+        let tool = ToolDefinition::native::<Args>("demo", "Demo");
+        let metadata = tool.parameter_metadata();
+        assert!(metadata.iter().any(|param| {
+            param["name"] == "page_limit"
+                && param["type"] == "int"
+                && param["maximum"].as_f64() == Some(20.0)
+        }));
+        assert!(metadata.iter().any(|param| {
+            param["name"] == "tags"
+                && param["type"] == "list[str]"
+                && param["min_items"] == 1
+                && param["max_items"] == 3
+        }));
+        assert!(
+            metadata
+                .iter()
+                .any(|param| { param["name"] == "mode" && param["nullable"] == true })
         );
     }
 
@@ -533,24 +704,129 @@ mod tests {
             serde_json::json!("Failed to serialize tool result: boom")
         );
     }
+
+    #[test]
+    fn tool_discovery_metadata_serde_defaults_are_empty() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "read_file",
+            "description": "Read a file"
+        }))
+        .unwrap();
+        assert!(tool.discovery.is_empty());
+    }
+
+    #[test]
+    fn tool_discovery_metadata_does_not_render_prompt_docs() {
+        let mut with_metadata = ToolDefinition::new(
+            "read_file",
+            "Read a file",
+            ToolDefinition::default_input_schema(),
+            serde_json::json!({"type": "string"}),
+        );
+        with_metadata.discovery = ToolDiscoveryMetadata {
+            namespace: Some("filesystem".to_string()),
+            aliases: vec!["cat".to_string()],
+        };
+        let mut without_metadata = with_metadata.clone();
+        without_metadata.discovery = Default::default();
+        assert_eq!(
+            ToolDefinition::format_tool_docs(&[with_metadata]),
+            ToolDefinition::format_tool_docs(&[without_metadata])
+        );
+    }
 }
 
-fn display_prompt_type(ty: &str) -> String {
-    let trimmed = ty.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix("list[")
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return format!("list[{}]", display_prompt_type(inner));
+fn schema_type_label(schema: &serde_json::Value) -> String {
+    schema_type_label_and_nullability(schema).0
+}
+
+fn schema_type_label_and_nullability(schema: &serde_json::Value) -> (String, bool) {
+    if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
+        let variants = values
+            .iter()
+            .filter(|value| !value.is_null())
+            .map(display_default_value)
+            .collect::<Vec<_>>();
+        let nullable = values.iter().any(serde_json::Value::is_null);
+        if !variants.is_empty() {
+            let mut label = format!("enum[{}]", variants.join(", "));
+            if nullable {
+                label.push_str(" | null");
+            }
+            return (label, nullable);
+        }
     }
-    match trimmed {
+
+    if let Some(types) = schema.get("type").and_then(serde_json::Value::as_array) {
+        let nullable = types.iter().any(|value| value.as_str() == Some("null"));
+        let non_null = types
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|ty| *ty != "null")
+            .map(schema_type_name)
+            .collect::<Vec<_>>();
+        let mut label = if non_null.is_empty() {
+            "any".to_string()
+        } else {
+            non_null.join(" | ")
+        };
+        if nullable {
+            label.push_str(" | null");
+        }
+        return (label, nullable);
+    }
+
+    if let Some(any_of) = schema
+        .get("anyOf")
+        .or_else(|| schema.get("oneOf"))
+        .and_then(serde_json::Value::as_array)
+    {
+        let mut nullable = false;
+        let mut labels = Vec::new();
+        for subschema in any_of {
+            let (label, is_nullable) = schema_type_label_and_nullability(subschema);
+            nullable |= is_nullable || label == "null";
+            if label != "null" && !labels.iter().any(|existing| existing == &label) {
+                labels.push(label);
+            }
+        }
+        let mut label = if labels.is_empty() {
+            "any".to_string()
+        } else {
+            labels.join(" | ")
+        };
+        if nullable {
+            label.push_str(" | null");
+        }
+        return (label, nullable);
+    }
+
+    let nullable = schema.get("type").and_then(serde_json::Value::as_str) == Some("null");
+    let label = match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("array") => {
+            let item = schema
+                .get("items")
+                .map(schema_type_label)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "any".to_string());
+            format!("list[{item}]")
+        }
+        Some(ty) => schema_type_name(ty),
+        None => "any".to_string(),
+    };
+    (label, nullable)
+}
+
+fn schema_type_name(ty: &str) -> String {
+    match ty {
         "string" => "str".to_string(),
         "integer" => "int".to_string(),
         "number" => "float".to_string(),
         "boolean" => "bool".to_string(),
-        "dict" | "json" => "record".to_string(),
-        "None" | "null" => "null".to_string(),
-        other => other.to_string(),
+        "object" => "record".to_string(),
+        "array" => "list".to_string(),
+        "null" => "null".to_string(),
+        _ => "any".to_string(),
     }
 }
 

@@ -328,7 +328,7 @@ pub(super) fn apply_persisted_session_config(
         policy.max_context_tokens = Some(config.context_window as usize);
     }
     policy.execution_mode = config.execution_mode.clone();
-    policy.context_approach = config.context_approach.clone();
+    policy.standard_context_approach = config.standard_context_approach.clone();
     policy.model_variant = config.model_variant.clone();
 }
 

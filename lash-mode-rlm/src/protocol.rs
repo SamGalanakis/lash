@@ -23,7 +23,7 @@ use lash::{
 use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
 
-pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Every tool listed under **Available Tools** is callable as `call tool_name { ... }` from inside a fenced `lashlang` block. Emit a block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value. Plain prose is for direct conversational replies that need no action.
+pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Tools listed under **Showcased Tools** and catalogued tools found with `search_tools` are invoked as `call tool_name { ... }` from inside a fenced `lashlang` block. Emit a block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value. Plain prose is for direct conversational replies that need no action.
 
 ### `print` vs `submit`
 
@@ -64,11 +64,11 @@ submit "The bound version is 0.2.61."
 pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
 
 - Values: null, booleans, numbers, strings, lists, records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
-- Assign with `name = expr`. Variables persist across fenced blocks within the turn.
+- Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
 - Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Resolve it with `await handle` — that returns the same `{ ok, value }` wrapper as a synchronous `call`. Use `(await handle)?` for the common happy path. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort).
 - Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
-- Control flow: statement `if`/`for`; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`.
+- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
 - If the prompt includes a **Bound Variables** section, those names are already in scope — use them, don't rebuild them from prose.
 
@@ -263,7 +263,13 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     if !assistant_text.trim().is_empty() {
                         events.push(conversation_event(assistant_prose_message(assistant_text)));
                     }
-                    events.push(conversation_event(submit_required_reminder_message()));
+                    let requires_schema = matches!(
+                        ctx.termination().rlm_termination(),
+                        RlmTermination::Finish { schema: Some(_) }
+                    );
+                    events.push(conversation_event(submit_required_reminder_message(
+                        requires_schema,
+                    )));
                     actions.push(DriverAction::AppendEvents(events));
                     actions.push(DriverAction::AdvanceIteration);
                     actions.push(DriverAction::StartCheckpoint {
@@ -591,15 +597,20 @@ fn assistant_prose_message(content: String) -> Message {
     }
 }
 
-fn submit_required_reminder_message() -> Message {
+fn submit_required_reminder_message(requires_schema: bool) -> Message {
     let id = fresh_message_id();
+    let content = if requires_schema {
+        "[runtime] The final answer must be delivered from a fenced ```lashlang block by calling `submit <value>` with a value matching the required output schema. Plain text outside a fence is not delivered."
+    } else {
+        "[runtime] The final answer must be delivered from a fenced ```lashlang block by calling `submit <value>`. Plain text outside a fence is not delivered."
+    };
     Message {
         id: id.clone(),
         role: MessageRole::User,
         parts: shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
-            content: "[runtime] An output schema is required for the final answer. Wrap your reply in a fenced ```lashlang block and call `submit <value>` with a value matching the schema. Plain text outside a fence is not delivered.".to_string(),
+            content: content.to_string(),
             attachment: None,
             tool_call_id: None,
             tool_name: None,

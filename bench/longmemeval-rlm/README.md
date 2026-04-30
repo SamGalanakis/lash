@@ -46,7 +46,6 @@ bench/longmemeval-rlm/evaluate.sh .benchmarks/longmemeval-rlm/runs/<run-id>/hypo
 - model: `google/gemini-3-flash-preview`
 - provider: `openai-compatible`
 - execution mode: `rlm`
-- context approach: `rolling_history`
 - benchmark-local session tools: enabled
 - batch size: `10`
 - per-question context-token budget: `3,000,000`
@@ -60,7 +59,7 @@ bench/longmemeval-rlm/run.sh --question-id e47becba
 bench/longmemeval-rlm/run.sh --batch-size 10
 bench/longmemeval-rlm/run.sh --max-question-context-tokens 3000000
 bench/longmemeval-rlm/run.sh --prompt-profile temporal-observations
-bench/longmemeval-rlm/run.sh --context-approach observational_memory --await-background-work
+bench/longmemeval-rlm/run.sh --execution-mode standard --context-approach observational_memory --await-background-work
 bench/longmemeval-rlm/run.sh --no-session-tools
 bench/longmemeval-rlm/run.sh --resume
 ```

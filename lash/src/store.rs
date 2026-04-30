@@ -379,7 +379,7 @@ fn persisted_session_config_from_state(
         configured_model: state.policy.model.clone(),
         context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
         execution_mode: state.policy.execution_mode.clone(),
-        context_approach: state.policy.context_approach.clone(),
+        standard_context_approach: state.policy.standard_context_approach.clone(),
         model_variant: state.policy.model_variant.clone(),
     }
 }
@@ -537,7 +537,7 @@ fn persisted_session_state_from_head(
         state.policy.max_context_tokens = Some(head.config.context_window as usize);
     }
     state.policy.execution_mode = head.config.execution_mode;
-    state.policy.context_approach = head.config.context_approach.clone();
+    state.policy.standard_context_approach = head.config.standard_context_approach.clone();
     state.policy.model_variant = head.config.model_variant.clone();
     if let Some(checkpoint) = checkpoint {
         state.iteration = checkpoint.turn_state.iteration;

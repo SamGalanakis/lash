@@ -13,7 +13,7 @@ use tokio::time::timeout;
 
 use crate::{
     DynamicToolProvider, ReconfigureError, ToolDefinition, ToolExecutionAdapter, ToolExecutionMode,
-    ToolImage, ToolParam, ToolResult,
+    ToolImage, ToolResult,
 };
 
 const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 10_000;
@@ -521,34 +521,34 @@ fn import_tools(
                     "additionalProperties": true
                 })
             });
+        let output_schema = tool
+            .get("outputSchema")
+            .or_else(|| tool.get("output_schema"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         let normalized_tool = normalize_identifier(&original_name);
         let prefixed_name = unique_prefixed_name(
             &format!("mcp__{server_prefix}__{normalized_tool}"),
             &mut used_names,
         );
-        let params = schema_to_params(&input_schema);
+        let discovery = mcp_discovery_metadata(server_name, &original_name, &normalized_tool);
 
         imported.insert(
             prefixed_name.clone(),
             ImportedTool {
                 original_name,
-                definition: ToolDefinition {
-                    name: prefixed_name,
-                    description: if description.is_empty() {
+                definition: ToolDefinition::new(
+                    prefixed_name,
+                    if description.is_empty() {
                         format!("MCP tool from server `{server_name}`")
                     } else {
                         format!("[MCP {server_name}] {description}")
                     },
-                    params,
-                    returns: "any".to_string(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: Some(input_schema),
-                    output_schema_override: None,
-                    execution_mode: ToolExecutionMode::Parallel,
-                },
+                    input_schema,
+                    output_schema,
+                )
+                .with_discovery(discovery)
+                .with_execution_mode(ToolExecutionMode::Parallel),
             },
         );
     }
@@ -556,88 +556,14 @@ fn import_tools(
     Ok(imported)
 }
 
-fn schema_to_params(schema: &Value) -> Vec<ToolParam> {
-    let required_names: BTreeSet<String> = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect();
-
-    let mut params = schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .map(|properties| {
-            let mut items = properties
-                .iter()
-                .map(|(name, prop)| ToolParam {
-                    name: name.clone(),
-                    r#type: lash_type_for_schema(prop),
-                    description: prop
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    default_value: prop.get("default").cloned(),
-                    required: required_names.contains(name),
-                })
-                .collect::<Vec<_>>();
-            items.sort_by(|a, b| a.name.cmp(&b.name));
-            items
-        })
-        .unwrap_or_default();
-
-    if params.is_empty()
-        && schema
-            .get("type")
-            .and_then(Value::as_str)
-            .map(|ty| ty == "object")
-            .unwrap_or(false)
-    {
-        params.shrink_to_fit();
-    }
-
-    params
-}
-
-fn lash_type_for_schema(schema: &Value) -> String {
-    let resolved = schema
-        .get("type")
-        .map(resolve_json_schema_type)
-        .unwrap_or_else(|| "any".to_string());
-    if resolved == "array" {
-        if let Some(items) = schema.get("items") {
-            let item_ty = match lash_type_for_schema(items).as_str() {
-                "str" | "int" | "float" | "bool" | "dict" | "any" => lash_type_for_schema(items),
-                _ => "any".to_string(),
-            };
-            return format!("list[{item_ty}]");
-        }
-        return "list".to_string();
-    }
-    match resolved.as_str() {
-        "string" => "str".to_string(),
-        "integer" => "int".to_string(),
-        "number" => "float".to_string(),
-        "boolean" => "bool".to_string(),
-        "object" => "dict".to_string(),
-        "array" => "list".to_string(),
-        _ => "any".to_string(),
-    }
-}
-
-fn resolve_json_schema_type(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .find(|ty| *ty != "null")
-            .unwrap_or("any")
-            .to_string(),
-        _ => "any".to_string(),
+fn mcp_discovery_metadata(
+    server_name: &str,
+    original_name: &str,
+    _normalized_tool: &str,
+) -> crate::ToolDiscoveryMetadata {
+    crate::ToolDiscoveryMetadata {
+        namespace: Some(server_name.to_string()),
+        aliases: vec![original_name.to_string()],
     }
 }
 
@@ -747,19 +673,7 @@ fn tool_result_from_value(value: Value) -> Result<ToolResult, McpError> {
     }
 
     let result = if let Some(structured) = structured {
-        if text_parts.is_empty() && passthrough_items.is_empty() {
-            structured
-        } else {
-            let mut object = serde_json::Map::new();
-            object.insert("structured_content".to_string(), structured);
-            if !text_parts.is_empty() {
-                object.insert("text".to_string(), json!(text_parts.join("\n\n")));
-            }
-            if !passthrough_items.is_empty() {
-                object.insert("content".to_string(), Value::Array(passthrough_items));
-            }
-            Value::Object(object)
-        }
+        structured
     } else if passthrough_items.is_empty() {
         match text_parts.len() {
             0 => Value::Null,
@@ -783,8 +697,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_to_params_extracts_top_level_fields() {
-        let params = schema_to_params(&json!({
+    fn mcp_definition_preserves_server_schema_as_canonical_input_contract() {
+        let schema = json!({
             "type": "object",
             "properties": {
                 "query": {
@@ -801,17 +715,11 @@ mod tests {
                 }
             },
             "required": ["query", "filters"]
-        }));
-
-        assert_eq!(params.len(), 3);
-        assert_eq!(params[0].name, "filters");
-        assert_eq!(params[0].r#type, "list[str]");
-        assert_eq!(params[1].name, "query");
-        assert_eq!(params[1].r#type, "str");
-        assert!(params[1].required);
-        assert_eq!(params[2].name, "strict");
-        assert_eq!(params[2].r#type, "bool");
-        assert_eq!(params[2].default_value, Some(json!(false)));
+        });
+        let definition =
+            ToolDefinition::new("mcp__demo__search", "Search", schema.clone(), json!({}));
+        assert_eq!(definition.input_schema, schema);
+        assert_eq!(definition.parameter_metadata().len(), 3);
     }
 
     #[tokio::test]
@@ -839,6 +747,13 @@ mod tests {
                         },
                         "required": ["query"],
                         "additionalProperties": false
+                    },
+                    "outputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "matches": { "type": "array" }
+                        },
+                        "required": ["matches"]
                     }
                 }]
             }
@@ -847,9 +762,12 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 3,
             "result": {
+                "structuredContent": {
+                    "matches": ["matched"]
+                },
                 "content": [{
                     "type": "text",
-                    "text": "matched"
+                    "text": "{\n  \"matches\": [\"matched\"]\n}"
                 }]
             }
         });
@@ -867,16 +785,27 @@ mod tests {
         let defs = adapter.advertised_tools();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "mcp__docs__search_docs");
+        assert_eq!(defs[0].discovery.namespace.as_deref(), Some("docs"));
+        assert_eq!(defs[0].discovery.aliases, vec!["search-docs".to_string()]);
         assert_eq!(
             defs[0]
-                .input_schema_override
-                .as_ref()
-                .and_then(|schema| schema.get("properties"))
+                .input_schema
+                .get("properties")
                 .and_then(Value::as_object)
                 .and_then(|props| props.get("query"))
                 .and_then(|query| query.get("type"))
                 .cloned(),
             Some(json!("string"))
+        );
+        assert_eq!(
+            defs[0].output_schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "matches": { "type": "array" }
+                },
+                "required": ["matches"]
+            })
         );
 
         let result = adapter
@@ -888,7 +817,15 @@ mod tests {
             )
             .await;
         assert!(result.success, "{result:?}");
-        assert_eq!(result.result, json!("matched"));
+        assert_eq!(result.result, json!({"matches": ["matched"]}));
+    }
+
+    #[test]
+    fn mcp_discovery_metadata_keeps_server_namespace_and_original_name_alias() {
+        let spotify =
+            mcp_discovery_metadata("appworld", "spotify_search_songs", "spotify_search_songs");
+        assert_eq!(spotify.namespace.as_deref(), Some("appworld"));
+        assert_eq!(spotify.aliases, vec!["spotify_search_songs".to_string()]);
     }
 
     fn shell_single_quote(text: &str) -> String {

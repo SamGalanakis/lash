@@ -13,7 +13,7 @@ use lash::plugin::{
 };
 use lash::{
     MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolDefinition,
-    ToolExecutionContext, ToolExecutionMode, ToolParam, ToolProvider, ToolResult, TurnStatus,
+    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult, TurnStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -337,113 +337,107 @@ struct AutoresearchTools {
     state: Arc<Mutex<RuntimeState>>,
 }
 
+fn autoresearch_tool(
+    name: &str,
+    description: impl Into<String>,
+    input_schema: Value,
+) -> ToolDefinition {
+    ToolDefinition::new(
+        name,
+        description,
+        input_schema,
+        json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_availability(lash::ToolAvailabilityConfig::hidden())
+    .with_execution_mode(ToolExecutionMode::Parallel)
+}
+
 #[async_trait]
 impl ToolProvider for AutoresearchTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition {
-                name: "init_experiment".into(),
-                description: format!(
+            autoresearch_tool(
+                "init_experiment",
+                format!(
                     "Initialize an autoresearch segment in `{}` / `{}` with the primary metric and direction.",
                     JOURNAL_FILE, MARKDOWN_FILE
                 ),
-                params: vec![
-                    ToolParam::typed("name", "str"),
-                    ToolParam::typed("metric_name", "str"),
-                    ToolParam {
-                        name: "metric_unit".into(),
-                        r#type: "str".into(),
-                        description: "Display unit for the metric, e.g. ms, s, kb, or empty.".into(),
-                        default_value: Some(json!("")),
-                        required: false,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "metric_name": { "type": "string" },
+                        "metric_unit": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Display unit for the metric, e.g. ms, s, kb, or empty."
+                        },
+                        "direction": {
+                            "type": "string",
+                            "enum": ["lower", "higher"],
+                            "default": "lower",
+                            "description": "Whether lower or higher values are better."
+                        }
                     },
-                    ToolParam {
-                        name: "direction".into(),
-                        r#type: "str".into(),
-                        description: "Whether lower or higher values are better.".into(),
-                        default_value: Some(json!("lower")),
-                        required: false,
+                    "required": ["name", "metric_name"],
+                    "additionalProperties": false
+                }),
+            ),
+            autoresearch_tool(
+                "run_experiment",
+                "Run a benchmark command, capture wall-clock timing, parse `METRIC name=value` lines, and optionally run `autoresearch.checks.sh`.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": DEFAULT_TIMEOUT_SECONDS,
+                            "description": "Kill the benchmark after this many seconds."
+                        },
+                        "checks_timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": DEFAULT_CHECKS_TIMEOUT_SECONDS,
+                            "description": "Kill autoresearch.checks.sh after this many seconds."
+                        }
                     },
-                ],
-                returns: "json".into(),
-                examples: vec![],
-                availability: lash::ToolAvailabilityConfig::hidden(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            },
-            ToolDefinition {
-                name: "run_experiment".into(),
-                description:
-                    "Run a benchmark command, capture wall-clock timing, parse `METRIC name=value` lines, and optionally run `autoresearch.checks.sh`.".into(),
-                params: vec![
-                    ToolParam::typed("command", "str"),
-                    ToolParam {
-                        name: "timeout_seconds".into(),
-                        r#type: "int".into(),
-                        description: "Kill the benchmark after this many seconds.".into(),
-                        default_value: Some(json!(DEFAULT_TIMEOUT_SECONDS)),
-                        required: false,
-                    },
-                    ToolParam {
-                        name: "checks_timeout_seconds".into(),
-                        r#type: "int".into(),
-                        description: "Kill autoresearch.checks.sh after this many seconds.".into(),
-                        default_value: Some(json!(DEFAULT_CHECKS_TIMEOUT_SECONDS)),
-                        required: false,
-                    },
-                ],
-                returns: "json".into(),
-                examples: vec![],
-                availability: lash::ToolAvailabilityConfig::hidden(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            },
-            ToolDefinition {
-                name: "log_experiment".into(),
-                description: format!(
+                    "required": ["command"],
+                    "additionalProperties": false
+                }),
+            ),
+            autoresearch_tool(
+                "log_experiment",
+                format!(
                     "Append a result to `{}` and refresh `{}`.",
                     JOURNAL_FILE, MARKDOWN_FILE
                 ),
-                params: vec![
-                    ToolParam::typed("commit", "str"),
-                    ToolParam {
-                        name: "metric".into(),
-                        r#type: "float".into(),
-                        description: "Primary metric value for this iteration.".into(),
-                        default_value: None,
-                        required: true,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "commit": { "type": "string" },
+                        "metric": {
+                            "type": "number",
+                            "description": "Primary metric value for this iteration."
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["keep", "discard", "crash", "checks_failed"],
+                            "description": "keep, discard, crash, or checks_failed."
+                        },
+                        "description": { "type": "string" },
+                        "metrics": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "default": {},
+                            "description": "Additional named metrics to track."
+                        }
                     },
-                    ToolParam {
-                        name: "status".into(),
-                        r#type: "str".into(),
-                        description: "keep, discard, crash, or checks_failed.".into(),
-                        default_value: None,
-                        required: true,
-                    },
-                    ToolParam::typed("description", "str"),
-                    ToolParam {
-                        name: "metrics".into(),
-                        r#type: "json".into(),
-                        description: "Additional named metrics to track.".into(),
-                        default_value: Some(json!({})),
-                        required: false,
-                    },
-                ],
-                returns: "json".into(),
-                examples: vec![],
-                availability: lash::ToolAvailabilityConfig::hidden(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            },
+                    "required": ["commit", "metric", "status", "description"],
+                    "additionalProperties": false
+                }),
+            ),
         ]
     }
 

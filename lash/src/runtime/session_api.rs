@@ -53,7 +53,7 @@ impl LashRuntime {
         Ok(dynamic_tools.export_state())
     }
     /// Override mode-owned turn options for this session.
-    pub(crate) fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
+    pub fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
         self.state.mode_turn_options = options.clone();
         self.mode_turn_options = options;
     }

@@ -44,6 +44,9 @@ pub type PromptRequestHook =
     Arc<dyn Fn(PromptRequestHookContext) -> PluginFuture<Vec<PluginSurfaceEvent>> + Send + Sync>;
 pub type ToolSurfaceContributor =
     Arc<dyn Fn(ToolSurfaceContext) -> Result<ToolSurfaceContribution, PluginError> + Send + Sync>;
+pub type ToolDiscoveryContributor = Arc<
+    dyn Fn(ToolDiscoveryContext) -> Result<ToolDiscoveryContribution, PluginError> + Send + Sync,
+>;
 pub type AssistantStreamHook =
     Arc<dyn Fn(AssistantStreamHookContext) -> PluginFuture<AssistantStreamTransform> + Send + Sync>;
 pub type AssistantResponseHook = Arc<
@@ -219,6 +222,27 @@ pub struct ToolSurfaceContext {
     pub session_id: String,
     pub mode: ExecutionMode,
     pub tools: Vec<ToolDefinition>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolDiscoveryContext {
+    pub session_id: String,
+    pub mode: ExecutionMode,
+    pub catalog: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToolDiscoveryContribution {
+    pub tools: Vec<ToolDiscoveryToolContribution>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToolDiscoveryToolContribution {
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -936,26 +960,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{ExecutionMode, SessionStateEnvelope, ToolDefinition, ToolParam};
+    use crate::{ExecutionMode, SessionStateEnvelope, ToolDefinition};
 
     struct MockToolProvider;
 
     #[async_trait::async_trait]
     impl ToolProvider for MockToolProvider {
         fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: "mock_tool".to_string(),
-                description: String::new(),
-                params: vec![ToolParam::typed("value", "str")],
-                returns: "str".to_string(),
-                examples: vec![],
-                availability: crate::ToolAvailabilityConfig::callable(),
-                activation: crate::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: crate::ToolExecutionMode::Parallel,
-            }]
+            vec![
+                ToolDefinition::new(
+                    "mock_tool",
+                    "",
+                    json!({
+                        "type": "object",
+                        "properties": { "value": { "type": "string" } },
+                        "required": ["value"],
+                        "additionalProperties": false
+                    }),
+                    json!({ "type": "string" }),
+                )
+                .with_availability(crate::ToolAvailabilityConfig::callable()),
+            ]
         }
 
         async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
@@ -1116,7 +1141,7 @@ mod tests {
             .fork_for_session(
                 "child",
                 ExecutionMode::standard(),
-                crate::ContextApproach::default(),
+                Some(crate::StandardContextApproach::default()),
             )
             .expect("child");
 

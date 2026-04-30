@@ -1,6 +1,8 @@
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+
+use super::object_schema;
 
 /// Web search via Tavily API.
 pub struct WebSearch {
@@ -20,28 +22,34 @@ impl WebSearch {
 #[async_trait::async_trait]
 impl ToolProvider for WebSearch {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "search_web".into(),
-            description: "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.".into(),
-            params: vec![
-                ToolParam::typed("query", "str"),
-                ToolParam {
-                    name: "max_results".into(),
-                    r#type: "int".into(),
-                    description: "Maximum results to return (default 5)".into(),
-                    default_value: Some(serde_json::json!(5)),
-                    required: false,
-                },
-            ],
-            returns: "dict".into(),
-            examples: vec!["search_web(query=\"latest Rust release notes\", max_results=5)".into()],
-            availability: crate::ToolAvailabilityConfig::same(crate::ToolAvailability::Discoverable),
-            activation: crate::ToolActivation::Loadable,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+        vec![
+            ToolDefinition::new(
+                "search_web",
+                "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.",
+                object_schema(
+                    serde_json::json!({
+                        "query": { "type": "string" },
+                        "max_results": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 5,
+                            "description": "Maximum results to return (default 5)"
+                        }
+                    }),
+                    &["query"],
+                ),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_examples(vec![
+                "search_web(query=\"latest Rust release notes\", max_results=5)".into(),
+            ])
+            .with_availability(crate::ToolAvailabilityConfig::same(
+                crate::ToolAvailability::Discoverable,
+            ))
+            .with_activation(crate::ToolActivation::Loadable)
+            .with_discovery(crate::tools::discovery_metadata("web", &["web_search"]))
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

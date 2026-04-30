@@ -380,7 +380,7 @@ mod tests {
                 configured_model: "gpt-test".to_string(),
                 context_window: 200_000,
                 execution_mode: lash::ExecutionMode::standard(),
-                context_approach: lash::ContextApproach::default(),
+                standard_context_approach: Some(lash::StandardContextApproach::default()),
                 model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),

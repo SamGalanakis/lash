@@ -127,6 +127,11 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_trace_stream_events(mut self, enabled: bool) -> Self {
+        self.core = self.core.with_trace_stream_events(enabled);
+        self
+    }
+
     pub fn with_trace_context(mut self, context: lash_trace::TraceContext) -> Self {
         self.core = self.core.with_trace_context(context);
         self
@@ -224,7 +229,7 @@ impl EmbeddedRuntimeBuilder {
                 .build_session(
                     state.session_id.clone(),
                     state.policy.execution_mode.clone(),
-                    state.policy.context_approach.clone(),
+                    state.policy.standard_context_approach.clone(),
                     None,
                 )
                 .map_err(|err| SessionError::Protocol(err.to_string())),

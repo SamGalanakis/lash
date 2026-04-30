@@ -176,9 +176,13 @@ struct Args {
     #[arg(long = "execution-mode")]
     execution_mode: Option<String>,
 
-    /// Context approach (`rolling_history` or `observational_memory`)
+    /// Standard-mode context approach (`rolling_history` or `observational_memory`)
     #[arg(short = 'c', long = "context-approach", value_name = "APPROACH")]
-    context_approach: Option<String>,
+    standard_context_approach: Option<String>,
+
+    /// Tool surface for specialized harnesses (`default` or `appworld`)
+    #[arg(long = "tool-surface", default_value = "default", hide = true)]
+    tool_surface: String,
 
     /// OM: observe once recent raw history reaches this many tokens
     #[arg(long = "om-observation-message-tokens", value_name = "TOKENS")]
@@ -227,6 +231,10 @@ struct Args {
     #[arg(long = "rlm-unset", value_name = "NAME")]
     rlm_unset: Vec<String>,
 
+    /// RLM modes only: require final answers to use `submit` from a lashlang block
+    #[arg(long = "rlm-require-submit")]
+    rlm_require_submit: bool,
+
     /// Base URL for the LLM API
     #[arg(long, default_value = "")]
     base_url: String,
@@ -234,6 +242,10 @@ struct Args {
     /// Enable detailed lifecycle/debug logs and per-session LLM traces
     #[arg(long)]
     debug: bool,
+
+    /// Include raw per-token LLM stream events in debug traces
+    #[arg(long = "debug-trace-stream-events", hide = true)]
+    debug_trace_stream_events: bool,
 
     /// Record the live TUI session as a replayable UI trace JSON plus final .snap
     #[arg(long, value_name = "TRACE.json")]

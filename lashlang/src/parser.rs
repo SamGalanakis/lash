@@ -1,6 +1,6 @@
 use crate::ast::{
-    AstString, BinaryOp, CallExpr, Expr, NamedParallelBranch, ParallelBranches, Program, Stmt,
-    TypeExpr, TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, AstString, BinaryOp, CallExpr, Expr, NamedParallelBranch,
+    ParallelBranches, Program, Stmt, TypeExpr, TypeField, UnaryOp,
 };
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
@@ -17,25 +17,35 @@ pub enum ParseError {
     },
     #[error("unexpected {found}")]
     Unexpected { found: String, span: Span },
+    #[error("`{keyword}` can only be used inside a `for` loop")]
+    LoopControlOutsideLoop { keyword: &'static str, span: Span },
 }
 
 impl ParseError {
     pub fn offset(&self) -> usize {
         match self {
             Self::Lex(err) => err.offset(),
-            Self::Expected { span, .. } | Self::Unexpected { span, .. } => span.start,
+            Self::Expected { span, .. }
+            | Self::Unexpected { span, .. }
+            | Self::LoopControlOutsideLoop { span, .. } => span.start,
         }
     }
 }
 
 pub fn parse(source: &str) -> Result<Program, ParseError> {
     let tokens = lex(source)?;
-    Parser { tokens, index: 0 }.parse_program()
+    Parser {
+        tokens,
+        index: 0,
+        loop_depth: 0,
+    }
+    .parse_program()
 }
 
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
+    loop_depth: usize,
 }
 
 impl Parser {
@@ -65,16 +75,43 @@ impl Parser {
             TokenKind::Cancel => self.parse_cancel(),
             TokenKind::Print => self.parse_print(),
             TokenKind::Call => Ok(Stmt::Call(self.parse_call_expr()?)),
-            TokenKind::Ident(_) if self.peek_assign() => self.parse_assign(),
+            TokenKind::Ident(name) if name == "break" && !self.peek_assignment_target() => {
+                self.parse_loop_control("break")
+            }
+            TokenKind::Ident(name) if name == "continue" && !self.peek_assignment_target() => {
+                self.parse_loop_control("continue")
+            }
+            TokenKind::Ident(_) if self.peek_assignment_target() => self.parse_assign(),
             _ => Ok(Stmt::Expr(self.parse_expr()?)),
         }
     }
 
     fn parse_assign(&mut self) -> Result<Stmt, ParseError> {
-        let name = self.expect_ident()?;
+        let target = self.parse_assignment_target()?;
         self.expect_exact(TokenKind::Equal, "`=`")?;
         let expr = self.parse_expr()?;
-        Ok(Stmt::Assign { name, expr })
+        Ok(Stmt::Assign { target, expr })
+    }
+
+    fn parse_assignment_target(&mut self) -> Result<AssignTarget, ParseError> {
+        let root = self.expect_ident()?;
+        let mut steps = Vec::new();
+        loop {
+            match self.peek_kind() {
+                TokenKind::Dot => {
+                    self.bump();
+                    steps.push(AssignPathStep::Field(self.expect_key_name()?));
+                }
+                TokenKind::LBracket => {
+                    self.bump();
+                    let index = self.parse_expr()?;
+                    self.expect_exact(TokenKind::RBracket, "`]`")?;
+                    steps.push(AssignPathStep::Index(index));
+                }
+                _ => break,
+            }
+        }
+        Ok(AssignTarget { root, steps })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
@@ -103,11 +140,25 @@ impl Parser {
         let binding = self.expect_ident()?;
         self.expect_exact(TokenKind::In, "`in`")?;
         let iterable = self.parse_expr()?;
+        self.loop_depth += 1;
         let body = self.parse_block()?;
+        self.loop_depth -= 1;
         Ok(Stmt::For {
             binding,
             iterable,
             body,
+        })
+    }
+
+    fn parse_loop_control(&mut self, keyword: &'static str) -> Result<Stmt, ParseError> {
+        let span = self.bump().span;
+        if self.loop_depth == 0 {
+            return Err(ParseError::LoopControlOutsideLoop { keyword, span });
+        }
+        Ok(match keyword {
+            "break" => Stmt::Break,
+            "continue" => Stmt::Continue,
+            _ => unreachable!("unknown loop control keyword"),
         })
     }
 
@@ -124,6 +175,7 @@ impl Parser {
             return Ok(ParallelBranches::Positional(Vec::new()));
         }
 
+        let outer_loop_depth = std::mem::take(&mut self.loop_depth);
         let named = self.peek_named_parallel_branch();
         if named {
             let mut branches = Vec::new();
@@ -147,6 +199,7 @@ impl Parser {
                 }
             }
             self.expect_exact(TokenKind::RBrace, "`}`")?;
+            self.loop_depth = outer_loop_depth;
             return Ok(ParallelBranches::Named(branches));
         }
 
@@ -162,6 +215,7 @@ impl Parser {
             }
         }
         self.expect_exact(TokenKind::RBrace, "`}`")?;
+        self.loop_depth = outer_loop_depth;
         Ok(ParallelBranches::Positional(statements))
     }
 
@@ -665,12 +719,62 @@ impl Parser {
         }
     }
 
-    fn peek_assign(&self) -> bool {
-        matches!(self.peek_kind(), TokenKind::Ident(_))
-            && self
-                .tokens
-                .get(self.index + 1)
-                .is_some_and(|token| matches!(token.kind, TokenKind::Equal))
+    fn peek_assignment_target(&self) -> bool {
+        if !matches!(self.peek_kind(), TokenKind::Ident(_)) {
+            return false;
+        }
+
+        let mut index = self.index + 1;
+        loop {
+            match self.tokens.get(index).map(|token| &token.kind) {
+                Some(TokenKind::Dot) => {
+                    if !self
+                        .tokens
+                        .get(index + 1)
+                        .is_some_and(|token| token_can_be_key(&token.kind))
+                    {
+                        return false;
+                    }
+                    index += 2;
+                }
+                Some(TokenKind::LBracket) => {
+                    let Some(after_index) = self.skip_bracketed_index(index) else {
+                        return false;
+                    };
+                    index = after_index;
+                }
+                Some(TokenKind::Equal) => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    fn skip_bracketed_index(&self, start: usize) -> Option<usize> {
+        debug_assert!(matches!(
+            self.tokens.get(start).map(|token| &token.kind),
+            Some(TokenKind::LBracket)
+        ));
+        let mut parens = 0usize;
+        let mut brackets = 1usize;
+        let mut braces = 0usize;
+        for (offset, token) in self.tokens.iter().enumerate().skip(start + 1) {
+            match &token.kind {
+                TokenKind::LParen => parens += 1,
+                TokenKind::RParen => parens = parens.checked_sub(1)?,
+                TokenKind::LBracket => brackets += 1,
+                TokenKind::RBracket => {
+                    brackets = brackets.checked_sub(1)?;
+                    if brackets == 0 && parens == 0 && braces == 0 {
+                        return Some(offset + 1);
+                    }
+                }
+                TokenKind::LBrace => braces += 1,
+                TokenKind::RBrace => braces = braces.checked_sub(1)?,
+                TokenKind::Eof => return None,
+                _ => {}
+            }
+        }
+        None
     }
 
     fn peek_named_parallel_branch(&self) -> bool {
@@ -994,6 +1098,64 @@ mod tests {
     }
 
     #[test]
+    fn parses_variable_rooted_assignment_targets() {
+        let program = parse(
+            r#"
+            x = 1
+            rec.a = 1
+            rec[k] = 1
+            items[0] = 1
+            a[b].c[0] = 1
+            submit x
+            "#,
+        )
+        .expect("program should parse");
+
+        assert!(matches!(
+            &program.statements[0],
+            Stmt::Assign { target, .. } if target.root == "x" && target.steps.is_empty()
+        ));
+        assert!(matches!(
+            &program.statements[1],
+            Stmt::Assign { target, .. }
+                if target.root == "rec"
+                    && matches!(target.steps.as_slice(), [AssignPathStep::Field(field)] if field == "a")
+        ));
+        assert!(matches!(
+            &program.statements[2],
+            Stmt::Assign { target, .. }
+                if target.root == "rec"
+                    && matches!(target.steps.as_slice(), [AssignPathStep::Index(Expr::Variable(key))] if key == "k")
+        ));
+        assert!(matches!(
+            &program.statements[3],
+            Stmt::Assign { target, .. }
+                if target.root == "items"
+                    && matches!(target.steps.as_slice(), [AssignPathStep::Index(Expr::Number(0.0))])
+        ));
+        assert!(matches!(
+            &program.statements[4],
+            Stmt::Assign { target, .. }
+                if target.root == "a"
+                    && matches!(
+                        target.steps.as_slice(),
+                        [
+                            AssignPathStep::Index(Expr::Variable(b)),
+                            AssignPathStep::Field(c),
+                            AssignPathStep::Index(Expr::Number(0.0)),
+                        ] if b == "b" && c == "c"
+                    )
+        ));
+    }
+
+    #[test]
+    fn rejects_non_variable_rooted_assignment_targets() {
+        for source in ["(x)[0] = 1", "{a: 1}.a = 2", "(call f {})[0] = 1"] {
+            parse(source).expect_err("non-variable-rooted target should not parse as assignment");
+        }
+    }
+
+    #[test]
     fn parses_symbolic_boolean_operator_aliases() {
         let program = parse(
             r#"
@@ -1174,6 +1336,100 @@ mod tests {
     }
 
     #[test]
+    fn parses_loop_control_inside_for() {
+        let program = parse(
+            r#"
+            for item in [1, 2, 3] {
+              if item == 1 {
+                continue
+              }
+              break
+            }
+            "#,
+        )
+        .expect("program should parse");
+
+        let [Stmt::For { body, .. }] = program.statements.as_slice() else {
+            panic!("expected for statement");
+        };
+        assert!(matches!(
+            body.as_slice(),
+            [Stmt::If { then_block, .. }, Stmt::Break]
+                if matches!(then_block.as_slice(), [Stmt::Continue])
+        ));
+    }
+
+    #[test]
+    fn rejects_loop_control_outside_for() {
+        for (source, keyword) in [("break", "break"), ("continue", "continue")] {
+            let err = parse(source).expect_err("loop control outside loop should fail");
+            assert_eq!(
+                err,
+                ParseError::LoopControlOutsideLoop {
+                    keyword,
+                    span: Span {
+                        start: 0,
+                        end: keyword.len()
+                    }
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn loop_control_does_not_cross_parallel_branch_boundaries() {
+        let err = parse(
+            r#"
+            for item in [1] {
+              parallel {
+                break
+              }
+            }
+            "#,
+        )
+        .expect_err("parallel branch should not break outer loop");
+        assert!(matches!(
+            err,
+            ParseError::LoopControlOutsideLoop {
+                keyword: "break",
+                ..
+            }
+        ));
+
+        parse(
+            r#"
+            parallel {
+              for item in [1] {
+                continue
+              }
+            }
+            "#,
+        )
+        .expect("loops inside parallel branches may use loop control");
+    }
+
+    #[test]
+    fn loop_control_words_remain_contextual_identifiers() {
+        let program = parse(
+            r#"
+            break = 1
+            continue = break + 1
+            submit break
+            "#,
+        )
+        .expect("contextual identifiers should parse");
+
+        assert!(matches!(
+            program.statements.as_slice(),
+            [
+                Stmt::Assign { target: first, .. },
+                Stmt::Assign { target: second, .. },
+                Stmt::Submit(Some(Expr::Variable(submitted)))
+            ] if first.root == "break" && second.root == "continue" && submitted == "break"
+        ));
+    }
+
+    #[test]
     fn parses_async_tool_syntax() {
         let program = parse(
             r#"
@@ -1272,13 +1528,21 @@ mod tests {
     }
 
     #[test]
-    fn peek_assign_and_prev_span_are_exercised() {
-        let tokens = lex("x = 1").expect("lexing should succeed");
-        let parser = Parser { tokens, index: 0 };
-        assert!(parser.peek_assign());
+    fn peek_assignment_target_and_prev_span_are_exercised() {
+        let tokens = lex("x[0].field = 1").expect("lexing should succeed");
+        let parser = Parser {
+            tokens,
+            index: 0,
+            loop_depth: 0,
+        };
+        assert!(parser.peek_assignment_target());
 
         let tokens = lex("x").expect("lexing should succeed");
-        let parser = Parser { tokens, index: 1 };
+        let parser = Parser {
+            tokens,
+            index: 1,
+            loop_depth: 0,
+        };
         assert_eq!(parser.prev_span(), Span { start: 0, end: 1 });
     }
 

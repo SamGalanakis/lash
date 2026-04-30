@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use super::{
-    build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
-    require_str, rg_file_list, run_blocking,
+    build_path_entry, filesystem_entries_result, object_schema, parse_optional_bool,
+    parse_optional_usize_arg, require_str, rg_file_list, run_blocking,
 };
 
 /// Find files by glob pattern.
@@ -17,63 +17,50 @@ const MAX_RESULTS: usize = 100;
 #[async_trait::async_trait]
 impl ToolProvider for Glob {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "glob".into(),
-            description: format!(
+        vec![
+            ToolDefinition::new(
+                "glob",
+                format!(
                 "Find filesystem entries by glob. By default this includes hidden files and respects `.gitignore` only inside Git repos. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false, include_hidden=true, respect_gitignore=true.",
                 MAX_RESULTS
             ),
-            params: vec![
-                ToolParam::typed("pattern", "str"),
-                ToolParam {
-                    name: "path".into(),
-                    r#type: "str".into(),
-                    description: "Base directory to search in (default: current directory)".into(),
-                    default_value: Some(serde_json::json!(".")),
-                    required: false,
-                },
-                ToolParam {
-                    name: "limit".into(),
-                    r#type: "int".into(),
-                    description: format!(
-                        "Maximum results to return (default: {}). Use null or \"none\" for no cap.",
-                        MAX_RESULTS
-                    ),
-                    default_value: Some(serde_json::json!(MAX_RESULTS)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "with_lines".into(),
-                    r#type: "bool".into(),
-                    description: "Count text lines for file entries (`lines`). Default: false."
-                        .into(),
-                    default_value: Some(serde_json::json!(false)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "include_hidden".into(),
-                    r#type: "bool".into(),
-                    description: "Include dotfiles and dot-directories. Default: true.".into(),
-                    default_value: Some(serde_json::json!(true)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "respect_gitignore".into(),
-                    r#type: "bool".into(),
-                    description: "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled.".into(),
-                    default_value: Some(serde_json::json!(true)),
-                    required: false,
-                },
-            ],
-            returns: "dict".into(),
-            examples: vec![],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+                object_schema(
+                    serde_json::json!({
+                        "pattern": { "type": "string" },
+                        "path": {
+                            "type": "string",
+                            "default": ".",
+                            "description": "Base directory to search in (default: current directory)"
+                        },
+                        "limit": {
+                            "type": ["integer", "null", "string"],
+                            "minimum": 1,
+                            "default": MAX_RESULTS,
+                            "description": format!("Maximum results to return (default: {}). Use null or \"none\" for no cap.", MAX_RESULTS)
+                        },
+                        "with_lines": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Count text lines for file entries (`lines`). Default: false."
+                        },
+                        "include_hidden": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Include dotfiles and dot-directories. Default: true."
+                        },
+                        "respect_gitignore": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled."
+                        }
+                    }),
+                    &["pattern"],
+                ),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_discovery(crate::tools::discovery_metadata("filesystem", &["find_files"]))
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         let pattern = match require_str(args, "pattern") {

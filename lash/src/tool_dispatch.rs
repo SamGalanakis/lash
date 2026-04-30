@@ -8,6 +8,7 @@ use crate::plugin::{
     PluginDirective, PluginSession, SessionManager, ToolCallHookContext, ToolResultHookContext,
     emit_plugin_surface_events,
 };
+use crate::tool_schema::validate_tool_input;
 use crate::{
     ProgressSender, SessionEvent, ToolCallRecord, ToolExecutionContext, ToolExecutionMode,
     ToolImage, ToolProvider, ToolResult, ToolSurface, TurnInjectionBridge,
@@ -157,13 +158,27 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
         return outcome(tool_name, args, result, 0);
     }
 
-    let tool_start = Instant::now();
-    let result = if let Some(result) = context
-        .plugins
-        .mode_native_tools()
-        .execute(context, &tool_name, &args, progress)
-        .await
+    if let Some(tool) = context
+        .surface
+        .tools
+        .iter()
+        .find(|entry| entry.availability.is_callable() && entry.definition.name == tool_name)
+        .map(|entry| &entry.definition)
+        && let Err(err) = validate_tool_input(tool, &args)
     {
+        return outcome(tool_name, args, ToolResult::err_fmt(err), 0);
+    }
+
+    let tool_start = Instant::now();
+    let native_tools = context.plugins.mode_native_tools().to_vec();
+    let mut native_result = None;
+    for provider in native_tools {
+        if let Some(result) = provider.execute(context, &tool_name, &args, progress).await {
+            native_result = Some(result);
+            break;
+        }
+    }
+    let result = if let Some(result) = native_result {
         result
     } else {
         context
@@ -375,39 +390,39 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio::time::{Duration, timeout};
 
+    fn test_tool(name: &str, execution_mode: ToolExecutionMode) -> crate::ToolDefinition {
+        crate::ToolDefinition::new(
+            name,
+            "",
+            crate::ToolDefinition::default_input_schema(),
+            json!({ "type": "string" }),
+        )
+        .with_execution_mode(execution_mode)
+    }
+
+    fn beta_tool() -> crate::ToolDefinition {
+        crate::ToolDefinition::new(
+            "beta",
+            "",
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                },
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+            json!({ "type": "string" }),
+        )
+        .with_execution_mode(ToolExecutionMode::Parallel)
+    }
+
     struct MockTools;
 
     #[async_trait::async_trait]
     impl ToolProvider for MockTools {
         fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            vec![
-                crate::ToolDefinition {
-                    name: "alpha".into(),
-                    description: String::new(),
-                    params: vec![],
-                    returns: "str".into(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: ToolExecutionMode::Parallel,
-                },
-                crate::ToolDefinition {
-                    name: "beta".into(),
-                    description: String::new(),
-                    params: vec![crate::ToolParam::typed("value", "str")],
-                    returns: "str".into(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: ToolExecutionMode::Parallel,
-                },
-            ]
+            vec![test_tool("alpha", ToolExecutionMode::Parallel), beta_tool()]
         }
 
         async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
@@ -434,32 +449,8 @@ mod tests {
     impl ToolProvider for ParallelProbeTools {
         fn definitions(&self) -> Vec<crate::ToolDefinition> {
             vec![
-                crate::ToolDefinition {
-                    name: "probe_a".into(),
-                    description: String::new(),
-                    params: vec![],
-                    returns: "str".into(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: ToolExecutionMode::Parallel,
-                },
-                crate::ToolDefinition {
-                    name: "probe_b".into(),
-                    description: String::new(),
-                    params: vec![],
-                    returns: "str".into(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: ToolExecutionMode::Parallel,
-                },
+                test_tool("probe_a", ToolExecutionMode::Parallel),
+                test_tool("probe_b", ToolExecutionMode::Parallel),
             ]
         }
 
@@ -517,6 +508,18 @@ mod tests {
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_invalid_args_before_provider_execution() {
+        let outcome =
+            dispatch_tool_call(&dispatch_context(), "beta".to_string(), json!({}), None).await;
+
+        assert!(!outcome.record.success);
+        assert_eq!(
+            outcome.record.result,
+            json!("value: required property missing")
+        );
     }
 
     #[tokio::test]
@@ -662,32 +665,8 @@ mod tests {
     impl ToolProvider for SerialProbeTools {
         fn definitions(&self) -> Vec<crate::ToolDefinition> {
             vec![
-                crate::ToolDefinition {
-                    name: "serial_a".into(),
-                    description: String::new(),
-                    params: vec![],
-                    returns: "str".into(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: ToolExecutionMode::Serial,
-                },
-                crate::ToolDefinition {
-                    name: "serial_b".into(),
-                    description: String::new(),
-                    params: vec![],
-                    returns: "str".into(),
-                    examples: vec![],
-                    availability: crate::ToolAvailabilityConfig::documented(),
-                    activation: crate::ToolActivation::Always,
-                    availability_override: None,
-                    input_schema_override: None,
-                    output_schema_override: None,
-                    execution_mode: ToolExecutionMode::Serial,
-                },
+                test_tool("serial_a", ToolExecutionMode::Serial),
+                test_tool("serial_b", ToolExecutionMode::Serial),
             ]
         }
 
@@ -789,45 +768,9 @@ mod tests {
         impl ToolProvider for MixedTools {
             fn definitions(&self) -> Vec<crate::ToolDefinition> {
                 vec![
-                    crate::ToolDefinition {
-                        name: "par_a".into(),
-                        description: String::new(),
-                        params: vec![],
-                        returns: "str".into(),
-                        examples: vec![],
-                        availability: crate::ToolAvailabilityConfig::documented(),
-                        activation: crate::ToolActivation::Always,
-                        availability_override: None,
-                        input_schema_override: None,
-                        output_schema_override: None,
-                        execution_mode: ToolExecutionMode::Parallel,
-                    },
-                    crate::ToolDefinition {
-                        name: "par_b".into(),
-                        description: String::new(),
-                        params: vec![],
-                        returns: "str".into(),
-                        examples: vec![],
-                        availability: crate::ToolAvailabilityConfig::documented(),
-                        activation: crate::ToolActivation::Always,
-                        availability_override: None,
-                        input_schema_override: None,
-                        output_schema_override: None,
-                        execution_mode: ToolExecutionMode::Parallel,
-                    },
-                    crate::ToolDefinition {
-                        name: "ser".into(),
-                        description: String::new(),
-                        params: vec![],
-                        returns: "str".into(),
-                        examples: vec![],
-                        availability: crate::ToolAvailabilityConfig::documented(),
-                        activation: crate::ToolActivation::Always,
-                        availability_override: None,
-                        input_schema_override: None,
-                        output_schema_override: None,
-                        execution_mode: ToolExecutionMode::Serial,
-                    },
+                    test_tool("par_a", ToolExecutionMode::Parallel),
+                    test_tool("par_b", ToolExecutionMode::Parallel),
+                    test_tool("ser", ToolExecutionMode::Serial),
                 ]
             }
 

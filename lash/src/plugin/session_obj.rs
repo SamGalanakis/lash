@@ -47,6 +47,60 @@ where
     Ok(out)
 }
 
+fn merge_string_array(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    values: Vec<String>,
+) {
+    let mut existing = obj
+        .remove(key)
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect::<BTreeSet<_>>();
+    existing.extend(
+        values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    );
+    if !existing.is_empty() {
+        obj.insert(key.to_string(), serde_json::json!(existing));
+    }
+}
+
+fn apply_tool_discovery_contributions(
+    catalog: &mut [serde_json::Value],
+    contributions: impl IntoIterator<Item = ToolDiscoveryContribution>,
+) {
+    let mut by_name = BTreeMap::new();
+    for (idx, tool) in catalog.iter().enumerate() {
+        if let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) {
+            by_name.insert(name.to_string(), idx);
+        }
+    }
+
+    for contribution in contributions {
+        for patch in contribution.tools {
+            let Some(idx) = by_name.get(&patch.tool_name).copied() else {
+                continue;
+            };
+            let Some(obj) = catalog[idx].as_object_mut() else {
+                continue;
+            };
+            if let Some(namespace) = patch
+                .namespace
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                obj.insert("namespace".to_string(), serde_json::json!(namespace));
+            }
+            merge_string_array(obj, "aliases", patch.aliases);
+        }
+    }
+}
+
 fn append_plugin_messages(
     messages: &mut crate::MessageSequence,
     plugin_messages: &[PluginMessage],
@@ -80,6 +134,7 @@ pub struct PluginSession {
     pub(super) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(super) prompt_request_hooks: Vec<RegisteredHook<PromptRequestHook>>,
     pub(super) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
+    pub(super) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
     pub(super) before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     pub(super) before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
     pub(super) after_tool_call_hooks: Vec<RegisteredHook<AfterToolCallHook>>,
@@ -97,7 +152,7 @@ pub struct PluginSession {
     pub(super) turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
     pub(super) history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
     pub(super) mode_session: Arc<dyn ModeSessionPlugin>,
-    pub(super) mode_native_tools: Arc<dyn ModeNativeToolsPlugin>,
+    pub(super) mode_native_tools: Vec<Arc<dyn ModeNativeToolsPlugin>>,
     pub(super) mode_protocol_driver: Option<Arc<dyn ModeProtocolDriverPlugin>>,
 }
 impl PluginSession {
@@ -125,8 +180,15 @@ impl PluginSession {
         &self.mode_session
     }
 
-    pub(crate) fn mode_native_tools(&self) -> &Arc<dyn ModeNativeToolsPlugin> {
+    pub(crate) fn mode_native_tools(&self) -> &[Arc<dyn ModeNativeToolsPlugin>] {
         &self.mode_native_tools
+    }
+
+    pub(crate) fn mode_native_tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.mode_native_tools
+            .iter()
+            .flat_map(|provider| provider.definitions())
+            .collect()
     }
 
     /// Plugin-registered protocol driver for this session, if any plugin
@@ -139,7 +201,7 @@ impl PluginSession {
     pub fn tool_surface(&self, session_id: &str, mode: ExecutionMode) -> Arc<crate::ToolSurface> {
         let mut tools = self.tools.definitions();
         if mode == self.execution_mode {
-            tools.extend(self.mode_native_tools.definitions());
+            tools.extend(self.mode_native_tool_definitions());
         }
         Arc::new(
             self.resolve_tool_surface(ToolSurfaceContext {
@@ -155,8 +217,27 @@ impl PluginSession {
     }
 
     pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
-        let surface = self.tool_surface(session_id, mode);
-        crate::tools::project_tool_catalog(surface.discoverable_tools_iter().cloned())
+        let surface = self.tool_surface(session_id, mode.clone());
+        let mut catalog =
+            crate::tools::project_tool_catalog(surface.discoverable_tools_iter().cloned());
+        let contributions = collect_owned_sync(
+            &self.tool_discovery_contributors,
+            ToolDiscoveryContext {
+                session_id: session_id.to_string(),
+                mode,
+                catalog: catalog.clone(),
+            },
+            |hook, ctx| hook(ctx),
+        )
+        .unwrap_or_else(|err| {
+            tracing::warn!("failed to resolve tool discovery metadata: {err}");
+            Vec::new()
+        });
+        apply_tool_discovery_contributions(
+            &mut catalog,
+            contributions.into_iter().map(|owned| owned.value),
+        );
+        catalog
     }
 
     pub fn resolve_tool_surface(
@@ -764,13 +845,13 @@ impl PluginSession {
         &self,
         session_id: impl Into<String>,
         execution_mode: ExecutionMode,
-        context_approach: crate::ContextApproach,
+        standard_context_approach: Option<crate::StandardContextApproach>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_surface(
             session_id,
             execution_mode,
-            context_approach,
+            standard_context_approach,
             Some(&snapshot),
             self.tool_surface_overlay.clone(),
             self.tools.dynamic_snapshot(),
@@ -781,14 +862,14 @@ impl PluginSession {
         &self,
         session_id: impl Into<String>,
         execution_mode: ExecutionMode,
-        context_approach: crate::ContextApproach,
+        standard_context_approach: Option<crate::StandardContextApproach>,
         tool_surface_overlay: ToolSurfaceContribution,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_surface(
             session_id,
             execution_mode,
-            context_approach,
+            standard_context_approach,
             Some(&snapshot),
             tool_surface_overlay,
             self.tools.dynamic_snapshot(),

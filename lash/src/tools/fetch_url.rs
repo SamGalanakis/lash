@@ -1,8 +1,8 @@
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
-use super::require_str;
+use super::{object_schema, require_str};
 
 /// Fetch a URL and return its content as text.
 pub struct FetchUrl {
@@ -31,21 +31,29 @@ impl Default for FetchUrl {
 #[async_trait::async_trait]
 impl ToolProvider for FetchUrl {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "fetch_url".into(),
-            description: "Fetch one known URL and extract readable page text.".into(),
-            params: vec![ToolParam::typed("url", "str")],
-            returns: "str".into(),
-            examples: vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()],
-            availability: crate::ToolAvailabilityConfig::same(
+        vec![
+            ToolDefinition::new(
+                "fetch_url",
+                "Fetch one known URL and extract readable page text.",
+                object_schema(
+                    serde_json::json!({
+                        "url": { "type": "string", "format": "uri" }
+                    }),
+                    &["url"],
+                ),
+                serde_json::json!({ "type": "string" }),
+            )
+            .with_examples(vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()])
+            .with_availability(crate::ToolAvailabilityConfig::same(
                 crate::ToolAvailability::Discoverable,
-            ),
-            activation: crate::ToolActivation::Loadable,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+            ))
+            .with_activation(crate::ToolActivation::Loadable)
+            .with_discovery(crate::tools::discovery_metadata(
+                "web",
+                &["fetch", "open_url"],
+            ))
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

@@ -7,11 +7,12 @@ use lash::tools::{
     StandardShell, WebSearch, shell_prompt_contributions,
 };
 use lash::{
-    BuiltinToolResultProjectionPluginFactory, ContextApproach, ExecutionMode, FsInstructionSource,
-    PluginHost, ToolProvider,
+    BuiltinToolResultProjectionPluginFactory, ExecutionMode, FsInstructionSource, PluginHost,
+    StandardContextApproach, ToolProvider,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
+use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefaultToolBundle {
@@ -34,23 +35,27 @@ pub struct DefaultToolSurfaceProfile {
 
 impl DefaultToolSurfaceProfile {
     pub fn for_runtime(
-        context_approach: &ContextApproach,
+        standard_context_approach: Option<&StandardContextApproach>,
         interactive: bool,
         web_enabled: bool,
     ) -> Self {
-        let mut bundles = vec![
-            DefaultToolBundle::CoreRuntime,
-            match context_approach.kind() {
-                lash::ContextApproachKind::RollingHistory => DefaultToolBundle::RollingHistory,
-                lash::ContextApproachKind::ObservationalMemory => {
+        let mut bundles = vec![DefaultToolBundle::CoreRuntime];
+        if let Some(standard_context_approach) = standard_context_approach {
+            bundles.push(match standard_context_approach.kind() {
+                lash::StandardContextApproachKind::RollingHistory => {
+                    DefaultToolBundle::RollingHistory
+                }
+                lash::StandardContextApproachKind::ObservationalMemory => {
                     DefaultToolBundle::ObservationalMemory
                 }
-            },
+            });
+        }
+        bundles.extend([
             DefaultToolBundle::Shell,
             DefaultToolBundle::Editing,
             DefaultToolBundle::Files,
             DefaultToolBundle::Search,
-        ];
+        ]);
         if interactive {
             bundles.push(DefaultToolBundle::UserPrompts);
         }
@@ -67,7 +72,7 @@ impl DefaultToolSurfaceProfile {
 #[derive(Default)]
 pub struct DefaultToolPluginOptions {
     pub execution_mode: ExecutionMode,
-    pub context_approach: ContextApproach,
+    pub standard_context_approach: Option<StandardContextApproach>,
     pub bundles: Vec<DefaultToolBundle>,
     pub tavily_api_key: Option<String>,
     pub instruction_source: Option<Arc<dyn InstructionSource>>,
@@ -80,7 +85,7 @@ fn shell_provider() -> Arc<dyn ToolProvider> {
 pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<dyn PluginFactory>> {
     if options.bundles.is_empty() {
         options.bundles = DefaultToolSurfaceProfile::for_runtime(
-            &options.context_approach,
+            options.standard_context_approach.as_ref(),
             true,
             options.tavily_api_key.is_some(),
         )
@@ -90,6 +95,7 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
     for bundle in options.bundles {
         match bundle {
             DefaultToolBundle::CoreRuntime => {
+                factories.push(Arc::new(ToolDiscoveryPluginFactory::new()));
                 factories.push(Arc::new(BuiltinToolResultProjectionPluginFactory::default()));
             }
             DefaultToolBundle::RollingHistory => {
@@ -195,7 +201,7 @@ impl EmbeddedRuntimeBuilderExt for lash::EmbeddedRuntimeBuilder {
             && let Some(policy) = self.policy()
         {
             options.execution_mode = policy.execution_mode.clone();
-            options.context_approach = policy.context_approach.clone();
+            options.standard_context_approach = policy.standard_context_approach.clone();
         }
         self.with_plugin_host(plugin_host_with_bundles(options).with_dynamic_tools())
     }
@@ -209,13 +215,13 @@ impl EmbeddedRuntimeBuilderExt for lash::EmbeddedRuntimeBuilder {
     ) -> Self {
         let policy = self.policy().cloned().unwrap_or_default();
         let profile = DefaultToolSurfaceProfile::for_runtime(
-            &policy.context_approach,
+            policy.standard_context_approach.as_ref(),
             interactive,
             web_enabled,
         );
         self.with_default_tool_bundles(DefaultToolPluginOptions {
             execution_mode: policy.execution_mode,
-            context_approach: policy.context_approach,
+            standard_context_approach: policy.standard_context_approach,
             bundles: profile.bundles,
             tavily_api_key,
             instruction_source,
@@ -228,9 +234,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rolling_history_profile_for_interactive_rlm_includes_prompt_tools() {
+    fn rolling_history_profile_for_interactive_standard_includes_prompt_tools() {
         let profile = DefaultToolSurfaceProfile::for_runtime(
-            &ContextApproach::RollingHistory(Default::default()),
+            Some(&StandardContextApproach::RollingHistory(Default::default())),
             true,
             false,
         );
@@ -246,7 +252,9 @@ mod tests {
     #[test]
     fn observational_memory_profile_selects_om_bundle() {
         let profile = DefaultToolSurfaceProfile::for_runtime(
-            &ContextApproach::ObservationalMemory(Default::default()),
+            Some(&StandardContextApproach::ObservationalMemory(
+                Default::default(),
+            )),
             false,
             false,
         );
@@ -264,10 +272,10 @@ mod tests {
             Arc::new(RollingHistoryPluginFactory::default()) as Arc<dyn lash::PluginFactory>,
             Arc::new(ObservationalMemoryPluginFactory) as Arc<dyn lash::PluginFactory>,
         ]);
-        assert!(
-            host.supports_context_approach(&lash::ContextApproach::ObservationalMemory(
+        assert!(host.supports_standard_context_approach(
+            &lash::StandardContextApproach::ObservationalMemory(
                 lash::ObservationalMemoryConfig::default(),
-            ))
-        );
+            )
+        ));
     }
 }

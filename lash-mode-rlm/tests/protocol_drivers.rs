@@ -425,8 +425,9 @@ fn typed_rlm_prose_only_response_requests_submit() {
     assert!(machine.messages().iter().any(|message| {
         message.role == MessageRole::User
             && message.parts.iter().any(|part| {
-                part.content.contains("output schema is required")
+                part.content.contains("final answer must be delivered")
                     && part.content.contains("submit")
+                    && !part.content.contains("required output schema")
             })
     }));
     machine.handle_response(Response::Checkpoint {

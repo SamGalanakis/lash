@@ -1,4 +1,8 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    sync::{Arc, Mutex},
+};
 
 use lash::llm::types::{LlmMessage, LlmRole, LlmToolChoice};
 use lash::sansio::ContextProjector;
@@ -28,12 +32,12 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
 
     let tool_docs = input.tool_surface.prompt_tool_docs();
     if !tool_docs.trim().is_empty() {
-        prompt_contributions.push(PromptContribution::execution("Available Tools", tool_docs));
+        prompt_contributions.push(PromptContribution::execution("Showcased Tools", tool_docs));
     }
-    if omitted_tool_count > 0 {
+    if let Some(catalogue_prompt) = tool_catalogue_prompt(&input.tool_surface) {
         prompt_contributions.push(PromptContribution::guidance(
-            "Tool Discovery",
-            "Use `discover_tools` to inspect additional discoverable tools omitted from Available Tools. If a result is marked loadable but not callable, call `load_tools(names=[...])`; the runtime refreshes the surface for the next REPL step.",
+            "Tool Catalogue",
+            catalogue_prompt,
         ));
     }
     prompt_contributions.extend(input.extra_prompt_contributions);
@@ -55,6 +59,152 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
     }
 }
 
+const CATALOGUE_NAMESPACE_LIMIT: usize = 100;
+const CATALOGUE_TOOL_NAME_LIMIT: usize = 50;
+
+fn tool_catalogue_prompt(surface: &lash::ToolSurface) -> Option<String> {
+    let omitted_tool_count = surface.omitted_tool_count();
+    if omitted_tool_count == 0 {
+        return None;
+    }
+
+    let mut by_namespace: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for tool in surface.omitted_tools_iter() {
+        let namespace = tool
+            .definition
+            .discovery
+            .namespace
+            .as_deref()
+            .filter(|namespace| !namespace.trim().is_empty())
+            .unwrap_or("default");
+        by_namespace
+            .entry(namespace)
+            .or_default()
+            .push(tool.definition.name.as_str());
+    }
+    for names in by_namespace.values_mut() {
+        names.sort_unstable();
+    }
+
+    let mut rendered = format!(
+        "Catalogued tools: {omitted_tool_count} not showcased here; searchable with `search_tools`.\n\
+         When a task needs a tool not showcased here, run `search_tools(query=...)` and call the relevant result by name."
+    );
+
+    if by_namespace.len() <= CATALOGUE_NAMESPACE_LIMIT {
+        rendered.push_str("\n\nNamespaces: ");
+        for (index, (namespace, names)) in by_namespace.iter().enumerate() {
+            if index > 0 {
+                rendered.push_str(", ");
+            }
+            let _ = write!(rendered, "{namespace}({})", names.len());
+        }
+    } else {
+        let _ = write!(
+            rendered,
+            "\n\nNamespaces: {} total; use `search_tools` to narrow them.",
+            by_namespace.len()
+        );
+    }
+
+    if omitted_tool_count <= CATALOGUE_TOOL_NAME_LIMIT {
+        rendered.push_str("\n\nCatalogued names:");
+        for (namespace, names) in by_namespace {
+            rendered.push('\n');
+            let _ = write!(rendered, "{namespace}: {}", names.join(", "));
+        }
+    }
+
+    Some(rendered)
+}
+
+#[cfg(test)]
+mod catalogue_tests {
+    use super::*;
+    use lash::{
+        ExecutionMode, ToolActivation, ToolAvailability, ToolAvailabilityConfig,
+        ToolDiscoveryMetadata, ToolExecutionMode, build_tool_surface,
+    };
+
+    fn tool(
+        name: &str,
+        availability: ToolAvailability,
+        namespace: Option<&str>,
+    ) -> lash::ToolDefinition {
+        lash::ToolDefinition::new(
+            name,
+            format!("Tool {name}"),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+            serde_json::json!({ "type": "string" }),
+        )
+        .with_availability(ToolAvailabilityConfig::same(availability))
+        .with_activation(ToolActivation::Always)
+        .with_discovery(ToolDiscoveryMetadata {
+            namespace: namespace.map(str::to_string),
+            aliases: Vec::new(),
+        })
+        .with_execution_mode(ToolExecutionMode::Parallel)
+    }
+
+    #[test]
+    fn catalogue_prompt_lists_namespace_counts_and_small_catalogue_names() {
+        let surface = build_tool_surface(lash::ToolSurfaceBuildInput {
+            tools: vec![
+                tool(
+                    "search_tools",
+                    ToolAvailability::Documented,
+                    Some("runtime"),
+                ),
+                tool("grep", ToolAvailability::Callable, Some("filesystem")),
+                tool("read_file", ToolAvailability::Callable, Some("filesystem")),
+                tool(
+                    "spotify_search_songs",
+                    ToolAvailability::Callable,
+                    Some("appworld"),
+                ),
+            ],
+            mode: ExecutionMode::new("test"),
+            contributions: Vec::new(),
+        });
+
+        let prompt = tool_catalogue_prompt(&surface).expect("catalogue prompt");
+        assert!(prompt.contains("Catalogued tools: 3 not showcased here"));
+        assert!(prompt.contains("appworld(1)"));
+        assert!(prompt.contains("filesystem(2)"));
+        assert!(prompt.contains("filesystem: grep, read_file"));
+        assert!(prompt.contains("appworld: spotify_search_songs"));
+    }
+
+    #[test]
+    fn catalogue_prompt_omits_names_for_large_catalogues() {
+        let mut tools = vec![tool(
+            "search_tools",
+            ToolAvailability::Documented,
+            Some("runtime"),
+        )];
+        for index in 0..=CATALOGUE_TOOL_NAME_LIMIT {
+            tools.push(tool(
+                &format!("tool_{index}"),
+                ToolAvailability::Callable,
+                Some("bulk"),
+            ));
+        }
+        let surface = build_tool_surface(lash::ToolSurfaceBuildInput {
+            tools,
+            mode: ExecutionMode::new("test"),
+            contributions: Vec::new(),
+        });
+
+        let prompt = tool_catalogue_prompt(&surface).expect("catalogue prompt");
+        assert!(prompt.contains("bulk(51)"));
+        assert!(!prompt.contains("Catalogued names:"));
+    }
+}
+
 struct RlmContextProjector {
     max_output_chars: usize,
     /// Memoizes the rendered REPL-history string across LLM iterations
@@ -66,7 +216,6 @@ struct RlmContextProjector {
     /// without explicit invalidation.
     cache: Mutex<Option<TrajectoryCache>>,
 }
-
 #[derive(Default)]
 struct TrajectoryCache {
     rendered: String,

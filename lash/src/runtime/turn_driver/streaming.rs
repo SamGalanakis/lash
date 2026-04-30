@@ -403,6 +403,10 @@ impl RuntimeTurnDriver {
                 .record_text_chunk(log.text.visible, elapsed_ms);
         }
 
+        if !self.host.core.trace_stream_events {
+            return;
+        }
+
         let mut entry = serde_json::json!({
             "kind": "stream_event",
             "turn": log.iteration,

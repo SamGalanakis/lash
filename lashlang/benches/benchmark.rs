@@ -1,31 +1,55 @@
+#[path = "../examples/bench_support/mod.rs"]
+mod bench_support;
+
+use bench_support::{BenchHost, Scenario, benchmark_program, seeded_state};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lashlang::{
-    CompiledProgramCache, ExecutionOutcome, Record, State, ToolHost, ToolHostError, Value,
-    compile_program, execute, execute_compiled, parse,
+    CompiledProgramCache, ExecutionOutcome, State, Value, compile_program, execute,
+    execute_compiled, parse,
 };
 use std::hint::black_box;
 use std::time::Duration;
 
 fn lashlang_benchmarks(c: &mut Criterion) {
-    let source = benchmark_program();
     let host = BenchHost;
-    let program = parse(source).expect("benchmark program should parse");
-    let compiled = compile_program(&program);
 
     let mut group = c.benchmark_group("lashlang");
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(60);
 
-    group.bench_function(BenchmarkId::new("parse_execute", source.len()), |b| {
+    benchmark_full_block_modes(&mut group, &host, Scenario::Baseline);
+    for scenario in [
+        Scenario::AsyncAwait,
+        Scenario::DirectUnwrap,
+        Scenario::GeneralParallel,
+        Scenario::LoopControl,
+        Scenario::IndexedAssignment,
+    ] {
+        benchmark_execute_only(&mut group, &host, scenario);
+    }
+
+    group.finish();
+}
+
+fn benchmark_full_block_modes(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    host: &BenchHost,
+    scenario: Scenario,
+) {
+    let source = benchmark_program(scenario);
+    let program = parse(source).expect("benchmark program should parse");
+    let compiled = compile_program(&program);
+
+    group.bench_function(BenchmarkId::new("parse_execute", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state();
             let outcome =
-                execute(black_box(source), &mut state, &host).expect("benchmark execution");
+                execute(black_box(source), &mut state, host).expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
     });
 
-    group.bench_function(BenchmarkId::new("cached_block", source.len()), |b| {
+    group.bench_function(BenchmarkId::new("cached_block", scenario), |b| {
         let mut cache = CompiledProgramCache::default();
         cache
             .get_or_compile(source)
@@ -35,148 +59,74 @@ fn lashlang_benchmarks(c: &mut Criterion) {
             let compiled = cache
                 .get_or_compile(black_box(source))
                 .expect("benchmark cache lookup");
-            let outcome = execute_compiled(black_box(&compiled), &mut state, &host)
+            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
     });
 
-    group.bench_function(
-        BenchmarkId::new("cached_session_block", source.len()),
-        |b| {
-            let mut cache = CompiledProgramCache::default();
-            cache
-                .get_or_compile(source)
-                .expect("benchmark program should compile");
-            let mut state = seeded_state();
-            b.iter(|| {
-                let compiled = cache
-                    .get_or_compile(black_box(source))
-                    .expect("benchmark cache lookup");
-                let outcome = execute_compiled(black_box(&compiled), &mut state, &host)
-                    .expect("benchmark execution");
-                black_box(expect_finished(outcome));
-            });
-        },
-    );
+    group.bench_function(BenchmarkId::new("cached_session_block", scenario), |b| {
+        let mut cache = CompiledProgramCache::default();
+        cache
+            .get_or_compile(source)
+            .expect("benchmark program should compile");
+        let mut state = seeded_state();
+        b.iter(|| {
+            let compiled = cache
+                .get_or_compile(black_box(source))
+                .expect("benchmark cache lookup");
+            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
+                .expect("benchmark execution");
+            black_box(expect_finished(outcome));
+        });
+    });
 
-    group.bench_function(BenchmarkId::new("execute_only", source.len()), |b| {
+    group.bench_function(BenchmarkId::new("execute_only", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state();
-            let outcome = execute_compiled(black_box(&compiled), &mut state, &host)
+            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
     });
 
-    group.bench_function(BenchmarkId::new("snapshot_execute", source.len()), |b| {
+    group.bench_function(BenchmarkId::new("snapshot_execute", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state();
             let snapshot = state.snapshot();
             let encoded = serde_json::to_vec(&snapshot).expect("snapshot encode");
             let decoded = serde_json::from_slice(&encoded).expect("snapshot decode");
             state = State::from_snapshot(decoded);
-            let outcome = execute_compiled(black_box(&compiled), &mut state, &host)
+            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
     });
+}
 
-    group.finish();
+fn benchmark_execute_only(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    host: &BenchHost,
+    scenario: Scenario,
+) {
+    let source = benchmark_program(scenario);
+    let program = parse(source).expect("benchmark program should parse");
+    let compiled = compile_program(&program);
+
+    group.bench_function(BenchmarkId::new("execute_only", scenario), |b| {
+        b.iter(|| {
+            let mut state = seeded_state();
+            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
+                .expect("benchmark execution");
+            black_box(expect_finished(outcome));
+        });
+    });
 }
 
 fn expect_finished(outcome: ExecutionOutcome) -> Value {
     match outcome {
         ExecutionOutcome::Finished(value) => value,
         ExecutionOutcome::Continued => panic!("benchmark program must finish"),
-    }
-}
-
-fn seeded_state() -> State {
-    let mut globals = Record::default();
-    globals.insert(
-        "history".to_string(),
-        Value::List(
-            vec![
-                Value::String("alpha".to_string().into()),
-                Value::String("beta".to_string().into()),
-                Value::String("gamma".to_string().into()),
-            ]
-            .into(),
-        ),
-    );
-    globals.insert(
-        "ctx".to_string(),
-        Value::Record({
-            let mut record = Record::default();
-            record.insert("user".to_string(), Value::String("sam".to_string().into()));
-            record.insert("attempt".to_string(), Value::Number(3.0));
-            record.into()
-        }),
-    );
-    State::from_snapshot(lashlang::Snapshot { globals })
-}
-
-fn benchmark_program() -> &'static str {
-    r#"
-items = [
-  { label: "alpha", weight: 1, active: true },
-  { label: "beta", weight: 2, active: false },
-  { label: "gamma", weight: 3, active: true }
-]
-indexes = range(0, len(items))
-all_indexes = push(indexes, len(items))
-total = 0
-labels = []
-for item in items {
-  total = total + item.weight
-  if item.active {
-    labels = labels + [format("{0}:{1}", item.label, item.weight)]
-  }
-}
-fanout = parallel {
-  lookup: call echo { value: join(labels, ",") }
-  stats: call echo { value: { total: total, count: len(items), seen: len(history), index_count: len(all_indexes) } }
-}
-lookup_value = fanout.lookup?
-stats_value = validate(fanout.stats?, Type { total: int, count: int, seen: int, index_count: int })
-summary = format(
-  "user={0};attempt={1};active={2};total={3};count={4};seen={5};indexes={6}",
-  ctx.user,
-  ctx.attempt,
-  lookup_value,
-  stats_value.total,
-  stats_value.count,
-  stats_value.seen,
-  stats_value.index_count
-)
-submit summary
-"#
-}
-
-struct BenchHost;
-
-impl ToolHost for BenchHost {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        bench_call(name, args)
-    }
-
-    fn call_batch(
-        &self,
-        calls: &[(&str, &Record)],
-        push_result: &mut dyn FnMut(Result<Value, ToolHostError>),
-    ) -> bool {
-        for (name, args) in calls {
-            push_result(bench_call(name, args));
-        }
-        true
-    }
-}
-
-fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
-    match name {
-        "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
-        _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
     }
 }
 

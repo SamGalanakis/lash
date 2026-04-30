@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lash::{ToolDefinition, ToolExecutionMode, ToolParam, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 use regex::RegexBuilder;
 use serde_json::json;
 
@@ -194,68 +194,62 @@ impl LongMemEvalSessionTools {
     }
 }
 
+fn bench_tool(name: &str, description: &str, input_schema: serde_json::Value) -> ToolDefinition {
+    ToolDefinition::new(
+        name,
+        description,
+        input_schema,
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_availability(lash::ToolAvailabilityConfig::callable())
+    .with_execution_mode(ToolExecutionMode::Parallel)
+}
+
 #[async_trait::async_trait]
 impl ToolProvider for LongMemEvalSessionTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition {
-                name: "list_sessions".to_string(),
-                description: "List benchmark sessions in chronological order with dates and previews.".to_string(),
-                params: vec![],
-                returns: "dict".to_string(),
-                examples: vec![],
-                availability: lash::ToolAvailabilityConfig::callable(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            },
-            ToolDefinition {
-                name: "get_session".to_string(),
-                description: "Fetch a full benchmark session by 1-based session number.".to_string(),
-                params: vec![ToolParam::typed("session_number", "int")],
-                returns: "dict".to_string(),
-                examples: vec![],
-                availability: lash::ToolAvailabilityConfig::callable(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            },
-            ToolDefinition {
-                name: "search_sessions".to_string(),
-                description: "Search sessions by plain-text query and return the best-matching session previews.".to_string(),
-                params: vec![
-                    ToolParam::typed("query", "str"),
-                    ToolParam::optional("limit", "int"),
-                ],
-                returns: "dict".to_string(),
-                examples: vec![],
-                availability: lash::ToolAvailabilityConfig::callable(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            },
-            ToolDefinition {
-                name: "grep_sessions".to_string(),
-                description: "Search session contents with a regular expression and return matching snippets.".to_string(),
-                params: vec![
-                    ToolParam::typed("pattern", "str"),
-                    ToolParam::optional("limit", "int"),
-                ],
-                returns: "dict".to_string(),
-                examples: vec![],
-                availability: lash::ToolAvailabilityConfig::callable(),
-                activation: lash::ToolActivation::Always,
-                availability_override: None,
-                input_schema_override: None,
-                output_schema_override: None,
-                execution_mode: ToolExecutionMode::Parallel,
-            },
+            bench_tool(
+                "list_sessions",
+                "List benchmark sessions in chronological order with dates and previews.",
+                ToolDefinition::default_input_schema(),
+            ),
+            bench_tool(
+                "get_session",
+                "Fetch a full benchmark session by 1-based session number.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "session_number": { "type": "integer", "minimum": 1 } },
+                    "required": ["session_number"],
+                    "additionalProperties": false
+                }),
+            ),
+            bench_tool(
+                "search_sessions",
+                "Search sessions by plain-text query and return the best-matching session previews.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+            ),
+            bench_tool(
+                "grep_sessions",
+                "Search session contents with a regular expression and return matching snippets.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["pattern"],
+                    "additionalProperties": false
+                }),
+            ),
         ]
     }
 

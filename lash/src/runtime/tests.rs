@@ -216,6 +216,14 @@ fn test_host_config_with_trace_path(path: PathBuf) -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_trace_jsonl_path(Some(path)))
 }
 
+fn test_host_config_with_trace_path_and_stream_events(path: PathBuf) -> EmbeddedRuntimeHost {
+    EmbeddedRuntimeHost::new(
+        RuntimeCoreConfig::default()
+            .with_trace_jsonl_path(Some(path))
+            .with_trace_stream_events(true),
+    )
+}
+
 #[cfg(feature = "sqlite-store")]
 #[derive(Clone, Default)]
 struct RecordingSessionStoreFactory {
@@ -262,7 +270,13 @@ fn plugin_session_with_tools(
         crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
     );
     crate::PluginHost::new(vec![Arc::new(tool_factory)])
-        .build_session(session_id, mode, crate::ContextApproach::default(), None)
+        .build_session(
+            session_id,
+            mode.clone(),
+            (mode == crate::ExecutionMode::standard())
+                .then(crate::StandardContextApproach::default),
+            None,
+        )
         .expect("plugins")
 }
 
@@ -274,8 +288,8 @@ fn default_tool_session(
 ) -> Arc<crate::PluginSession> {
     let mut factories: Vec<Arc<dyn crate::PluginFactory>> = vec![
         Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(crate::testing::FakeContextApproachPluginFactory::rolling_history()),
-        Arc::new(crate::testing::FakeContextApproachPluginFactory::observational_memory()),
+        Arc::new(crate::testing::FakeStandardContextApproachPluginFactory::rolling_history()),
+        Arc::new(crate::testing::FakeStandardContextApproachPluginFactory::observational_memory()),
         Arc::new(StaticPluginFactory::new(
             "shell",
             crate::PluginSpec::new()
@@ -314,7 +328,13 @@ fn default_tool_session(
         )));
     }
     crate::PluginHost::new(factories)
-        .build_session(session_id, mode, crate::ContextApproach::default(), None)
+        .build_session(
+            session_id,
+            mode.clone(),
+            (mode == crate::ExecutionMode::standard())
+                .then(crate::StandardContextApproach::default),
+            None,
+        )
         .expect("plugins")
 }
 
@@ -352,12 +372,14 @@ async fn standard_runtime_with_transport(transport: TestProvider) -> LashRuntime
 #[test]
 fn plugin_host_rejects_observational_memory_without_supporting_plugin() {
     let host = crate::PluginHost::new(vec![Arc::new(
-        crate::testing::FakeContextApproachPluginFactory::rolling_history(),
+        crate::testing::FakeStandardContextApproachPluginFactory::rolling_history(),
     )]);
     let result = host.build_session(
         "root",
         ExecutionMode::standard(),
-        crate::ContextApproach::ObservationalMemory(crate::ObservationalMemoryConfig::default()),
+        Some(crate::StandardContextApproach::ObservationalMemory(
+            crate::ObservationalMemoryConfig::default(),
+        )),
         None,
     );
     let err = match result {
@@ -366,8 +388,30 @@ fn plugin_host_rejects_observational_memory_without_supporting_plugin() {
     };
     assert!(
         err.to_string().contains(
-            "context approach `observational_memory` requires a supporting plugin factory"
+            "standard context approach `observational_memory` requires a supporting plugin factory"
         ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn plugin_host_rejects_standard_context_for_rlm_sessions() {
+    let host = crate::PluginHost::new(vec![Arc::new(
+        crate::testing::FakeStandardContextApproachPluginFactory::rolling_history(),
+    )]);
+    let result = host.build_session(
+        "root",
+        ExecutionMode::new("rlm"),
+        Some(crate::StandardContextApproach::default()),
+        None,
+    );
+    let err = match result {
+        Ok(_) => panic!("RLM sessions should not accept a standard context approach"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("standard context approach only applies to standard execution mode"),
         "unexpected error: {err}"
     );
 }
@@ -473,6 +517,7 @@ fn rlm_test_policy() -> SessionPolicy {
         provider: mock_provider(Vec::new()).into_handle(),
         model: "mock-model".to_string(),
         max_context_tokens: Some(200_000),
+        standard_context_approach: None,
         ..SessionPolicy::default()
     }
 }
@@ -491,6 +536,7 @@ async fn rlm_runtime_with_transport(transport: TestProvider) -> LashRuntime {
         PersistedSessionState::from_state(SessionStateEnvelope {
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::new("rlm"),
+                standard_context_approach: None,
                 ..Default::default()
             },
             ..SessionStateEnvelope::default()
@@ -520,6 +566,7 @@ async fn rlm_runtime_with_transport_and_store(
         PersistedSessionState::from_state(SessionStateEnvelope {
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::new("rlm"),
+                standard_context_approach: None,
                 ..Default::default()
             },
             ..SessionStateEnvelope::default()
@@ -545,6 +592,7 @@ async fn active_tool_catalog_uses_runtime_execution_mode() {
         PersistedSessionState::from_state(SessionStateEnvelope {
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::new("rlm"),
+                standard_context_approach: None,
                 ..Default::default()
             },
             ..SessionStateEnvelope::default()
@@ -719,19 +767,17 @@ struct EchoTool;
 #[async_trait::async_trait]
 impl crate::ToolProvider for EchoTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition {
-            name: "echo_tool".to_string(),
-            description: "Return a tool payload".to_string(),
-            params: vec![crate::ToolParam::typed("value", "str")],
-            returns: "json".to_string(),
-            examples: vec![],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: crate::ToolExecutionMode::Parallel,
-        }]
+        vec![crate::ToolDefinition::new(
+            "echo_tool",
+            "Return a tool payload",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )]
     }
 
     async fn execute(&self, tool_name: &str, args: &serde_json::Value) -> crate::ToolResult {
@@ -756,19 +802,12 @@ struct SlowTool {
 #[async_trait::async_trait]
 impl crate::ToolProvider for SlowTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition {
-            name: "slow_tool".to_string(),
-            description: "Sleep for a long time; respects cancellation.".to_string(),
-            params: vec![],
-            returns: "json".to_string(),
-            examples: vec![],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            execution_mode: crate::ToolExecutionMode::Parallel,
-            input_schema_override: None,
-            output_schema_override: None,
-        }]
+        vec![crate::ToolDefinition::new(
+            "slow_tool",
+            "Sleep for a long time; respects cancellation.",
+            crate::ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )]
     }
 
     async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
@@ -1744,19 +1783,12 @@ struct MemoryProbeTool;
 #[async_trait::async_trait]
 impl crate::ToolProvider for MemoryProbeTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition {
-            name: "memory_probe".to_string(),
-            description: "probe".to_string(),
-            params: Vec::new(),
-            returns: "str".to_string(),
-            examples: Vec::new(),
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: crate::ToolExecutionMode::Parallel,
-        }]
+        vec![crate::ToolDefinition::new(
+            "memory_probe",
+            "probe",
+            crate::ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "string" }),
+        )]
     }
 
     async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
@@ -1769,19 +1801,12 @@ struct ChildSessionTool;
 #[async_trait::async_trait]
 impl crate::ToolProvider for ChildSessionTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition {
-            name: "spawn_child".to_string(),
-            description: "spawn a child session".to_string(),
-            params: Vec::new(),
-            returns: "record".to_string(),
-            examples: Vec::new(),
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: crate::ToolExecutionMode::Parallel,
-        }]
+        vec![crate::ToolDefinition::new(
+            "spawn_child",
+            "spawn a child session",
+            crate::ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )]
     }
 
     async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
@@ -2994,7 +3019,7 @@ async fn standard_runtime_trace_records_stream_event_entries() {
     ));
     let mut runtime = standard_runtime_with_transport_and_host(
         transport,
-        test_host_config_with_trace_path(trace_path.clone()),
+        test_host_config_with_trace_path_and_stream_events(trace_path.clone()),
     )
     .await;
 
@@ -3102,6 +3127,84 @@ async fn standard_runtime_trace_records_stream_event_entries() {
         stream_summary
             .get("stream_duration_ms")
             .is_some_and(|value| !value.is_null())
+    );
+
+    let _ = std::fs::remove_file(&trace_path);
+}
+
+#[tokio::test]
+async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: vec![
+            LlmStreamEvent::Delta("Hello ".to_string()),
+            LlmStreamEvent::Part(LlmOutputPart::Text {
+                text: "world".to_string(),
+                response_meta: None,
+            }),
+        ],
+        response: Ok(LlmResponse {
+            full_text: "Hello world".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "Hello world".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let trace_path = std::env::temp_dir().join(format!(
+        "lash-standard-trace-summary-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let mut runtime = standard_runtime_with_transport_and_host(
+        transport,
+        test_host_config_with_trace_path(trace_path.clone()),
+    )
+    .await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+                mode_turn_options: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert_eq!(turn.status, TurnStatus::Completed);
+
+    let logged = std::fs::read_to_string(&trace_path).expect("read trace");
+    let entries = logged
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json log entry"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        !entries.iter().any(
+            |entry| entry.get("type").and_then(|v| v.as_str()) == Some("custom")
+                && entry.get("name").and_then(|v| v.as_str()) == Some("runtime.stream_event")
+        ),
+        "stream event entries should be opt-in: {entries:?}"
+    );
+    let response_entry = entries
+        .iter()
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("llm_call_completed"))
+        .expect("completed llm call entry");
+    assert!(
+        response_entry
+            .get("stream_summary")
+            .is_some_and(|value| !value.is_null()),
+        "stream summary should remain in completed LLM trace: {response_entry:?}"
     );
 
     let _ = std::fs::remove_file(&trace_path);
@@ -3591,6 +3694,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
         PersistedSessionState {
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::new("rlm"),
+                standard_context_approach: None,
                 ..Default::default()
             },
             session_graph: resumed_head.graph,
@@ -3806,7 +3910,7 @@ async fn environment_park_resume_preserves_active_path() {
     // Residency::ActivePathOnly (webserver pattern; host owns disk).
     let factories: Vec<Arc<dyn crate::PluginFactory>> = vec![
         Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(crate::testing::FakeContextApproachPluginFactory::rolling_history()),
+        Arc::new(crate::testing::FakeStandardContextApproachPluginFactory::rolling_history()),
         Arc::new(StaticPluginFactory::new(
             "shell",
             crate::PluginSpec::new()

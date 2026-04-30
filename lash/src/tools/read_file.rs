@@ -9,11 +9,11 @@ use crate::plugin::{
     SessionPlugin,
 };
 use crate::{
-    MessageRole, PluginMessage, ToolDefinition, ToolExecutionMode, ToolImage, ToolParam,
-    ToolProvider, ToolResult,
+    MessageRole, PluginMessage, ToolDefinition, ToolExecutionMode, ToolImage, ToolProvider,
+    ToolResult,
 };
 
-use super::{parse_optional_usize_arg, require_str, run_blocking};
+use super::{object_schema, parse_optional_usize_arg, require_str, run_blocking};
 
 /// Read files with line-number-prefixed output. Supports images natively.
 #[derive(Default)]
@@ -104,38 +104,35 @@ const MAX_OUTPUT_BYTES_LABEL: &str = "50 KB";
 #[async_trait::async_trait]
 impl ToolProvider for ReadFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "read_file".into(),
-            description: format!(
+        vec![
+            ToolDefinition::new(
+                "read_file",
+                format!(
                 "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: {} lines. Use `ls` for directories.",
                 DEFAULT_LIMIT
             ),
-            params: vec![
-                ToolParam::typed("path", "str"),
-                ToolParam {
-                    name: "offset".into(),
-                    r#type: "int".into(),
-                    description: "Line offset to start reading from (1-based)".into(),
-                    default_value: None,
-                    required: false,
-                },
-                ToolParam {
-                    name: "limit".into(),
-                    r#type: "int".into(),
-                    description: format!("Maximum lines to read (default: {}).", DEFAULT_LIMIT),
-                    default_value: Some(serde_json::json!(DEFAULT_LIMIT)),
-                    required: false,
-                },
-            ],
-            returns: "str".into(),
-            examples: vec![],
-            availability: crate::ToolAvailabilityConfig::documented(),
-            activation: crate::ToolActivation::Always,
-            availability_override: None,
-            input_schema_override: None,
-            output_schema_override: None,
-            execution_mode: ToolExecutionMode::Parallel,
-        }]
+                object_schema(
+                    serde_json::json!({
+                        "path": { "type": "string" },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Line offset to start reading from (1-based)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": DEFAULT_LIMIT,
+                            "description": format!("Maximum lines to read (default: {}).", DEFAULT_LIMIT)
+                        }
+                    }),
+                    &["path"],
+                ),
+                serde_json::json!({ "type": "string" }),
+            )
+            .with_discovery(crate::tools::discovery_metadata("filesystem", &["cat", "view_file"]))
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
