@@ -549,6 +549,8 @@ mod test_mode_fakes {
     /// `lash-mode-rlm` crates instead.
     pub fn test_mode_factories() -> Vec<Arc<dyn PluginFactory>> {
         vec![
+            Arc::new(crate::BuiltinTaskControlsPluginFactory::new()),
+            Arc::new(crate::BuiltinMonitorToolPluginFactory::new()),
             Arc::new(TestModeFactory {
                 id: "mode_standard",
                 mode: ExecutionMode::standard(),
@@ -597,9 +599,9 @@ mod test_mode_fakes {
             reg.mode().session(Arc::new(TestModeSession {
                 mode: self.mode.clone(),
             }))?;
-            reg.mode().native_tools(Arc::new(TestModeNativeTools {
-                mode: self.mode.clone(),
-            }))?;
+            if self.mode == ExecutionMode::standard() {
+                reg.mode().native_tools(Arc::new(TestModeNativeTools))?;
+            }
             reg.mode().protocol_driver(Arc::new(TestProtocolDriver {
                 mode: self.mode.clone(),
             }))?;
@@ -638,26 +640,13 @@ mod test_mode_fakes {
         }
     }
 
-    struct TestModeNativeTools {
-        mode: ExecutionMode,
-    }
+    struct TestModeNativeTools;
 
     #[async_trait]
     impl crate::plugin::ModeNativeToolsPlugin for TestModeNativeTools {
         fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            use crate::runtime_controls::{
-                monitor_tool_definition, tasks_list_tool_definition, tasks_stop_tool_definition,
-            };
             use crate::tools::batch::batch_tool_definition;
-            let mut tools = vec![
-                monitor_tool_definition(),
-                tasks_list_tool_definition(),
-                tasks_stop_tool_definition(),
-            ];
-            if self.mode == ExecutionMode::standard() {
-                tools.insert(0, batch_tool_definition());
-            }
-            tools
+            vec![batch_tool_definition()]
         }
 
         async fn execute(
@@ -667,23 +656,8 @@ mod test_mode_fakes {
             args: &serde_json::Value,
             progress: Option<&crate::ProgressSender>,
         ) -> Option<crate::ToolResult> {
-            use crate::runtime_controls::{
-                MonitorToolSpec, execute_monitor_tool_call, execute_tasks_list_tool_call,
-                execute_tasks_stop_tool_call,
-            };
             match name {
-                "batch" if self.mode == ExecutionMode::standard() => {
-                    Some(execute_test_batch(context, args, progress).await)
-                }
-                "monitor" => {
-                    let spec = match MonitorToolSpec::from_args(args) {
-                        Ok(spec) => spec,
-                        Err(result) => return Some(result),
-                    };
-                    Some(execute_monitor_tool_call(context, spec).await)
-                }
-                "tasks_list" => Some(execute_tasks_list_tool_call(context).await),
-                "tasks_stop" => Some(execute_tasks_stop_tool_call(context, args).await),
+                "batch" => Some(execute_test_batch(context, args, progress).await),
                 _ => None,
             }
         }

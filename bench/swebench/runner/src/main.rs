@@ -912,6 +912,8 @@ fn build_plugin_session(
             factories.push(Arc::new(ObservationalMemoryPluginFactory));
         }
     }
+    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
+    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
     factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));

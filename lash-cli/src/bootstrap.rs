@@ -3,13 +3,16 @@ use std::sync::Arc;
 use lash::provider::{LashConfig, ProviderHandle};
 use lash::*;
 use lash_default_tools::{
-    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+    DefaultToolBundle, DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_plugin_ui_activity::UiActivityPluginFactory;
 use lash_provider_openai::OpenAiGenericProvider;
-use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
+use lash_subagents::{
+    CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
+    TierExecutionMode, default_registry,
+};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -25,15 +28,84 @@ use crate::{
     resolve_model_selection, resolve_model_variant, validate_model_selection,
 };
 
-fn plugin_factories_for_surface(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CliToolSurface {
+    Default,
+    AppWorld,
+}
+
+fn parse_tool_surface(raw: &str) -> Result<CliToolSurface, String> {
+    match raw {
+        "default" => Ok(CliToolSurface::Default),
+        "appworld" => Ok(CliToolSurface::AppWorld),
+        other => Err(format!(
+            "unsupported --tool-surface `{other}`; expected `default` or `appworld`"
+        )),
+    }
+}
+
+struct PluginFactorySurfaceInput<'a> {
+    tool_surface: CliToolSurface,
     autonomous: bool,
     execution_mode: ExecutionMode,
     tavily_key: String,
     instruction_source: Arc<dyn InstructionSource>,
     session_policy: SessionPolicy,
-    lash_config: &LashConfig,
+    lash_config: &'a LashConfig,
     host_docs_dir: std::path::PathBuf,
+}
+
+fn plugin_factories_for_surface(
+    input: PluginFactorySurfaceInput<'_>,
 ) -> Vec<Arc<dyn PluginFactory>> {
+    let PluginFactorySurfaceInput {
+        tool_surface,
+        autonomous,
+        execution_mode,
+        tavily_key,
+        instruction_source,
+        session_policy,
+        lash_config,
+        host_docs_dir,
+    } = input;
+    let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
+
+    if tool_surface == CliToolSurface::AppWorld {
+        let mut bundles = vec![DefaultToolBundle::CoreRuntime];
+        match session_policy.context_approach.kind() {
+            ContextApproachKind::RollingHistory => bundles.push(DefaultToolBundle::RollingHistory),
+            ContextApproachKind::ObservationalMemory => {
+                bundles.push(DefaultToolBundle::ObservationalMemory);
+            }
+        }
+        let mut capability_registry = CapabilityRegistry::new();
+        for name in ["low", "medium", "high"] {
+            capability_registry.add(Arc::new(TierCapability::new(
+                name,
+                None,
+                Vec::<String>::new(),
+                TierExecutionMode::Inherit,
+            )));
+        }
+        let mut plugin_factories = tool_plugin_factories(DefaultToolPluginOptions {
+            execution_mode,
+            context_approach: session_policy.context_approach.clone(),
+            bundles,
+            tavily_api_key: None,
+            instruction_source: None,
+        });
+        plugin_factories.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+        plugin_factories.push(Arc::new(
+            lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
+        ));
+        plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
+            session_policy,
+            Arc::new(capability_registry),
+            subagent_host,
+        )));
+        return plugin_factories;
+    }
+
     let low_tier_execution_mode = lash_config
         .runtime
         .low_tier_subagent_execution_mode
@@ -43,7 +115,6 @@ fn plugin_factories_for_surface(
         &lash_config.agent_models,
         low_tier_execution_mode,
     ));
-    let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
 
     let profile = DefaultToolSurfaceProfile::for_runtime(
         &session_policy.context_approach,
@@ -79,6 +150,8 @@ fn plugin_factories_for_surface(
         plugin_factories.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_factories.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
+    plugin_factories.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+    plugin_factories.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
     plugin_factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));
@@ -106,6 +179,16 @@ fn apply_autonomous_tool_policy(
     snapshot
         .tools
         .retain(|name, _| autonomous_tool_allowed(name));
+    dynamic_tools.apply_state(snapshot).map(|_| ())
+}
+
+fn apply_appworld_tool_policy(dynamic_tools: &DynamicToolProvider) -> Result<(), ReconfigureError> {
+    let mut snapshot = dynamic_tools.export_state();
+    for (name, spec) in &mut snapshot.tools {
+        if name.starts_with("mcp__appworld__") {
+            spec.definition.availability_override = Some(ToolAvailability::Callable);
+        }
+    }
     dynamic_tools.apply_state(snapshot).map(|_| ())
 }
 
@@ -400,6 +483,13 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
             .unwrap_or(ExecutionMode::standard()),
     };
+    let tool_surface =
+        parse_tool_surface(args.tool_surface.as_str()).map_err(anyhow::Error::msg)?;
+    if tool_surface == CliToolSurface::AppWorld && execution_mode != ExecutionMode::new("rlm") {
+        return Err(anyhow::anyhow!(
+            "`--tool-surface appworld` requires `--execution-mode rlm`."
+        ));
+    }
 
     let configured_context_approach = match args.context_approach.as_deref() {
         Some(raw) => parse_context_approach(raw).map_err(anyhow::Error::msg)?,
@@ -453,15 +543,16 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     let turn_injection_bridge = TurnInjectionBridge::new();
     let turn_input_injection_bridge = TurnInputInjectionBridge::new();
 
-    let plugin_factories = plugin_factories_for_surface(
+    let plugin_factories = plugin_factories_for_surface(PluginFactorySurfaceInput {
+        tool_surface,
         autonomous,
-        execution_mode.clone(),
+        execution_mode: execution_mode.clone(),
         tavily_key,
-        Arc::clone(&instruction_source),
-        session_policy.clone(),
-        &lash_config,
-        host_docs.dir().to_path_buf(),
-    );
+        instruction_source: Arc::clone(&instruction_source),
+        session_policy: session_policy.clone(),
+        lash_config: &lash_config,
+        host_docs_dir: host_docs.dir().to_path_buf(),
+    });
     let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
     let resolved_session_id = run_session_id
         .clone()
@@ -475,9 +566,30 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     let dynamic_tools = root_plugins
         .dynamic_tools()
         .ok_or_else(|| anyhow::anyhow!("root dynamic tool provider was not initialized"))?;
-    attach_mcp_servers(&dynamic_tools, lash_config.mcp_servers())
+    let appworld_mcp_servers;
+    let mcp_servers = if tool_surface == CliToolSurface::AppWorld {
+        appworld_mcp_servers = lash_config
+            .mcp_servers()
+            .iter()
+            .filter(|(name, _)| name.as_str() == "appworld")
+            .map(|(name, config)| (name.clone(), config.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if appworld_mcp_servers.is_empty() {
+            return Err(anyhow::anyhow!(
+                "`--tool-surface appworld` requires an `appworld` MCP server in config."
+            ));
+        }
+        &appworld_mcp_servers
+    } else {
+        lash_config.mcp_servers()
+    };
+    attach_mcp_servers(&dynamic_tools, mcp_servers)
         .await
         .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
+    if tool_surface == CliToolSurface::AppWorld {
+        apply_appworld_tool_policy(&dynamic_tools)
+            .map_err(|err| anyhow::anyhow!("failed to apply AppWorld tool policy: {err}"))?;
+    }
     if autonomous {
         apply_autonomous_tool_policy(&dynamic_tools)
             .map_err(|err| anyhow::anyhow!("failed to apply autonomous tool policy: {err}"))?;
@@ -648,5 +760,46 @@ mod tests {
         assert!(!tools.contains_key("ask"));
         assert!(!tools.contains_key("plan_exit"));
         assert!(!tools.contains_key("showcase"));
+    }
+
+    #[test]
+    fn appworld_policy_keeps_mcp_callable_but_undocumented() {
+        struct AppWorldToolProvider;
+
+        #[async_trait::async_trait]
+        impl ToolProvider for AppWorldToolProvider {
+            fn definitions(&self) -> Vec<ToolDefinition> {
+                vec![
+                    dummy_tool("discover_tools"),
+                    dummy_tool("mcp__appworld__spotify_search_songs"),
+                    dummy_tool("mcp__other__search"),
+                ]
+            }
+
+            async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
+                ToolResult::err_fmt(format_args!("unexpected tool call: {name}"))
+            }
+        }
+
+        let dynamic_tools =
+            DynamicToolProvider::from_tool_provider(Arc::new(AppWorldToolProvider)).unwrap();
+
+        apply_appworld_tool_policy(&dynamic_tools).unwrap();
+
+        let tools = dynamic_tools.export_state().tools;
+        assert_eq!(
+            tools["mcp__appworld__spotify_search_songs"]
+                .definition
+                .availability_override,
+            Some(ToolAvailability::Callable)
+        );
+        assert_eq!(
+            tools["mcp__other__search"].definition.availability_override,
+            None
+        );
+        assert_eq!(
+            tools["discover_tools"].definition.availability_override,
+            None
+        );
     }
 }

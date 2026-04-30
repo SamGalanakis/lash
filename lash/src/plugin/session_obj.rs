@@ -97,7 +97,7 @@ pub struct PluginSession {
     pub(super) turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
     pub(super) history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
     pub(super) mode_session: Arc<dyn ModeSessionPlugin>,
-    pub(super) mode_native_tools: Arc<dyn ModeNativeToolsPlugin>,
+    pub(super) mode_native_tools: Vec<Arc<dyn ModeNativeToolsPlugin>>,
     pub(super) mode_protocol_driver: Option<Arc<dyn ModeProtocolDriverPlugin>>,
 }
 impl PluginSession {
@@ -125,8 +125,15 @@ impl PluginSession {
         &self.mode_session
     }
 
-    pub(crate) fn mode_native_tools(&self) -> &Arc<dyn ModeNativeToolsPlugin> {
+    pub(crate) fn mode_native_tools(&self) -> &[Arc<dyn ModeNativeToolsPlugin>] {
         &self.mode_native_tools
+    }
+
+    pub(crate) fn mode_native_tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.mode_native_tools
+            .iter()
+            .flat_map(|provider| provider.definitions())
+            .collect()
     }
 
     /// Plugin-registered protocol driver for this session, if any plugin
@@ -139,7 +146,7 @@ impl PluginSession {
     pub fn tool_surface(&self, session_id: &str, mode: ExecutionMode) -> Arc<crate::ToolSurface> {
         let mut tools = self.tools.definitions();
         if mode == self.execution_mode {
-            tools.extend(self.mode_native_tools.definitions());
+            tools.extend(self.mode_native_tool_definitions());
         }
         Arc::new(
             self.resolve_tool_surface(ToolSurfaceContext {

@@ -190,21 +190,18 @@ impl PluginHost {
             .hook;
         let mode_native_tools = reg
             .mode_native_tools
-            .take()
-            .ok_or_else(|| {
-                PluginError::Registration(format!(
-                    "missing mode native tool capability for {:?}",
-                    execution_mode
-                ))
-            })?
-            .hook;
+            .into_iter()
+            .map(|entry| entry.hook)
+            .collect::<Vec<_>>();
         let mode_protocol_driver = reg.mode_protocol_driver.take().map(|entry| entry.hook);
-        for def in mode_native_tools.definitions() {
-            if !reg.tool_names.insert(def.name.clone()) {
-                return Err(PluginError::Registration(format!(
-                    "duplicate mode native tool name `{}`",
-                    def.name
-                )));
+        for provider in &mode_native_tools {
+            for def in provider.definitions() {
+                if !reg.tool_names.insert(def.name.clone()) {
+                    return Err(PluginError::Registration(format!(
+                        "duplicate mode native tool name `{}`",
+                        def.name
+                    )));
+                }
             }
         }
         let base_tools: Arc<dyn ToolProvider> = Arc::new(

@@ -386,7 +386,7 @@ impl Session {
     ) -> ToolSurfaceHandle {
         let mut tools = self.tools().definitions();
         if self.include_base_tools && mode == self.plugins().execution_mode() {
-            tools.extend(self.plugins().mode_native_tools().definitions());
+            tools.extend(self.plugins().mode_native_tool_definitions());
         }
         let fallback_tools = tools.clone();
         let surface = Arc::new(

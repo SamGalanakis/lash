@@ -1,21 +1,141 @@
 //! Mode-agnostic runtime-control tools (`monitor`, `tasks_list`,
 //! `tasks_stop`).
 //!
-//! These tool definitions + implementations are shared between
-//! `lash-mode-standard` and `lash-mode-rlm`: both modes expose them in
-//! their native-tools surface so the model can inspect and cancel
-//! background subagents and monitors regardless of how it drives the
-//! rest of its turn.
+//! Dedicated plugins register these tools into the native-tools surface
+//! for any execution mode, so mode crates do not own or duplicate
+//! runtime control behavior. Task controls are split from `monitor`
+//! because `monitor` starts a shell-backed background process.
+
+use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::plugin::{
+    ModeNativeToolsPlugin, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
+    SessionPlugin,
+};
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{
     MAX_MONITOR_TIMEOUT_MS, ManagedRunState, ManagedTaskKind, MonitorRunState, MonitorSpec,
-    ToolDefinition, ToolExecutionMode, ToolParam, ToolResult,
+    ProgressSender, ToolDefinition, ToolExecutionMode, ToolParam, ToolResult,
 };
 
-/// Build the `monitor` tool definition. Injected by mode plugins.
+/// Plugin factory for mode-agnostic task-control tools.
+#[derive(Default)]
+pub struct BuiltinTaskControlsPluginFactory;
+
+impl BuiltinTaskControlsPluginFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PluginFactory for BuiltinTaskControlsPluginFactory {
+    fn id(&self) -> &'static str {
+        "task_controls"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(TaskControlsPlugin))
+    }
+}
+
+struct TaskControlsPlugin;
+
+impl SessionPlugin for TaskControlsPlugin {
+    fn id(&self) -> &'static str {
+        "task_controls"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.mode().native_tools(Arc::new(TaskControlsNativeTools))
+    }
+}
+
+struct TaskControlsNativeTools;
+
+#[async_trait::async_trait]
+impl ModeNativeToolsPlugin for TaskControlsNativeTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![tasks_list_tool_definition(), tasks_stop_tool_definition()]
+    }
+
+    async fn execute(
+        &self,
+        context: &ToolDispatchContext,
+        name: &str,
+        args: &Value,
+        _progress: Option<&ProgressSender>,
+    ) -> Option<ToolResult> {
+        match name {
+            "tasks_list" => Some(execute_tasks_list_tool_call(context).await),
+            "tasks_stop" => Some(execute_tasks_stop_tool_call(context, args).await),
+            _ => None,
+        }
+    }
+}
+
+/// Plugin factory for the shell-backed `monitor` tool.
+#[derive(Default)]
+pub struct BuiltinMonitorToolPluginFactory;
+
+impl BuiltinMonitorToolPluginFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PluginFactory for BuiltinMonitorToolPluginFactory {
+    fn id(&self) -> &'static str {
+        "monitor_tool"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(MonitorToolPlugin))
+    }
+}
+
+struct MonitorToolPlugin;
+
+impl SessionPlugin for MonitorToolPlugin {
+    fn id(&self) -> &'static str {
+        "monitor_tool"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.mode().native_tools(Arc::new(MonitorNativeTool))
+    }
+}
+
+struct MonitorNativeTool;
+
+#[async_trait::async_trait]
+impl ModeNativeToolsPlugin for MonitorNativeTool {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![monitor_tool_definition()]
+    }
+
+    async fn execute(
+        &self,
+        context: &ToolDispatchContext,
+        name: &str,
+        args: &Value,
+        _progress: Option<&ProgressSender>,
+    ) -> Option<ToolResult> {
+        match name {
+            "monitor" => {
+                let spec = match MonitorToolSpec::from_args(args) {
+                    Ok(spec) => spec,
+                    Err(result) => return Some(result),
+                };
+                Some(execute_monitor_tool_call(context, spec).await)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Build the `monitor` tool definition.
 pub fn monitor_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "monitor".into(),

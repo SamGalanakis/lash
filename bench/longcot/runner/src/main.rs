@@ -835,6 +835,8 @@ fn build_plugin_session(
     }
     // The RLM runtime refuses to start without mode-session plugins
     // registered, so wire up both built-ins the same way lash-cli does.
+    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
+    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
     factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));

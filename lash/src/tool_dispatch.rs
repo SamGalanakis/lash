@@ -158,12 +158,15 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     }
 
     let tool_start = Instant::now();
-    let result = if let Some(result) = context
-        .plugins
-        .mode_native_tools()
-        .execute(context, &tool_name, &args, progress)
-        .await
-    {
+    let native_tools = context.plugins.mode_native_tools().to_vec();
+    let mut native_result = None;
+    for provider in native_tools {
+        if let Some(result) = provider.execute(context, &tool_name, &args, progress).await {
+            native_result = Some(result);
+            break;
+        }
+    }
+    let result = if let Some(result) = native_result {
         result
     } else {
         context

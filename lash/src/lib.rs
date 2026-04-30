@@ -153,6 +153,7 @@ pub use runtime::{
     TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
     TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
+pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use session::{
     InjectedTurnInput, Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,
 };

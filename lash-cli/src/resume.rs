@@ -472,6 +472,8 @@ mod tests {
             CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
                 .expect("catalog");
         let plugins = PluginHost::new(vec![
+            Arc::new(lash::BuiltinTaskControlsPluginFactory::new()),
+            Arc::new(lash::BuiltinMonitorToolPluginFactory::new()) as Arc<dyn PluginFactory>,
             Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory)
                 as Arc<dyn PluginFactory>,
             Arc::new(PluginSpecFactory::new(

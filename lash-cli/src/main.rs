@@ -180,6 +180,10 @@ struct Args {
     #[arg(short = 'c', long = "context-approach", value_name = "APPROACH")]
     context_approach: Option<String>,
 
+    /// Tool surface for specialized harnesses (`default` or `appworld`)
+    #[arg(long = "tool-surface", default_value = "default", hide = true)]
+    tool_surface: String,
+
     /// OM: observe once recent raw history reaches this many tokens
     #[arg(long = "om-observation-message-tokens", value_name = "TOKENS")]
     om_observation_message_tokens: Option<usize>,

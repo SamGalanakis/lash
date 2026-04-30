@@ -876,6 +876,8 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         tavily_api_key: None,
         instruction_source: None,
     });
+    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
+    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
     factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));

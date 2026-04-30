@@ -234,6 +234,8 @@ mod tests {
     async fn plugin_contributes_docs_prompt() {
         let docs_dir = PathBuf::from("/tmp/lash-home/docs/lash-cli");
         let plugin_host = lash::PluginHost::new(vec![
+            Arc::new(lash::BuiltinTaskControlsPluginFactory::new()),
+            Arc::new(lash::BuiltinMonitorToolPluginFactory::new()),
             Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory),
             Arc::new(HostDocsPluginFactory::new(docs_dir.clone())),
         ]);

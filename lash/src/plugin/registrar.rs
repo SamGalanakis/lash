@@ -120,7 +120,7 @@ pub struct PluginRegistrar {
     pub(crate) turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     pub(crate) history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
     pub(crate) mode_session: Option<RegisteredExclusiveHook<Arc<dyn ModeSessionPlugin>>>,
-    pub(crate) mode_native_tools: Option<RegisteredExclusiveHook<Arc<dyn ModeNativeToolsPlugin>>>,
+    pub(crate) mode_native_tools: Vec<RegisteredHook<Arc<dyn ModeNativeToolsPlugin>>>,
     pub(crate) mode_protocol_driver:
         Option<RegisteredExclusiveHook<Arc<dyn ModeProtocolDriverPlugin>>>,
     pub(crate) registering_plugin_id: Option<String>,
@@ -329,7 +329,7 @@ impl PluginRegistrar {
             turn_context_transforms: Vec::new(),
             history_rewriters: Vec::new(),
             mode_session: None,
-            mode_native_tools: None,
+            mode_native_tools: Vec::new(),
             mode_protocol_driver: None,
             registering_plugin_id: None,
         }
@@ -557,13 +557,12 @@ impl PluginRegistrar {
         &mut self,
         provider: Arc<dyn ModeNativeToolsPlugin>,
     ) -> Result<(), PluginError> {
-        register_singleton_hook(
+        push_registered_hook(
             &mut self.mode_native_tools,
             &self.registering_plugin_id,
-            "mode native tool capability",
-            "mode_native_tools",
             provider,
-        )
+        );
+        Ok(())
     }
 
     fn add_mode_protocol_driver(
