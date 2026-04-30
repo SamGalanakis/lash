@@ -83,12 +83,15 @@ impl RuntimePerfScenario {
         }
     }
 
-    fn standard_context_approach(self) -> StandardContextApproach {
-        match self {
-            Self::ObservationalMemory => {
-                StandardContextApproach::ObservationalMemory(ObservationalMemoryConfig::default())
-            }
-            _ => StandardContextApproach::RollingHistory(RollingHistoryConfig),
+    fn standard_context_approach(self) -> Option<StandardContextApproach> {
+        match self.execution_mode() {
+            mode if mode != ExecutionMode::standard() => None,
+            _ => Some(match self {
+                Self::ObservationalMemory => StandardContextApproach::ObservationalMemory(
+                    ObservationalMemoryConfig::default(),
+                ),
+                _ => StandardContextApproach::RollingHistory(RollingHistoryConfig),
+            }),
         }
     }
 }
@@ -863,16 +866,16 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         provider,
         max_context_tokens: Some(200_000),
         execution_mode: execution_mode.clone(),
-        standard_context_approach: Some(standard_context_approach.clone()),
+        standard_context_approach: standard_context_approach.clone(),
         ..SessionPolicy::default()
     };
 
     let profile =
-        DefaultToolSurfaceProfile::for_runtime(Some(&standard_context_approach), false, false);
+        DefaultToolSurfaceProfile::for_runtime(standard_context_approach.as_ref(), false, false);
     let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimePersistence>;
     let mut factories = tool_plugin_factories(DefaultToolPluginOptions {
         execution_mode,
-        standard_context_approach: Some(standard_context_approach.clone()),
+        standard_context_approach: standard_context_approach.clone(),
         bundles: profile.bundles,
         tavily_api_key: None,
         instruction_source: None,
