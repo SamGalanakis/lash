@@ -81,6 +81,11 @@ impl ToolSurface {
             .filter(|tool| tool.availability.is_discoverable())
     }
 
+    pub fn omitted_tools_iter(&self) -> impl Iterator<Item = &ToolSurfaceEntry> {
+        self.discoverable_tools_iter()
+            .filter(|tool| !tool.availability.is_documented())
+    }
+
     pub fn has_callable_tool(&self, tool_name: &str) -> bool {
         self.tools
             .iter()
@@ -101,11 +106,7 @@ impl ToolSurface {
     }
 
     pub fn omitted_tool_count(&self) -> usize {
-        self.tools
-            .iter()
-            .filter(|tool| tool.availability.is_discoverable())
-            .filter(|tool| !tool.availability.is_documented())
-            .count()
+        self.omitted_tools_iter().count()
     }
 
     pub fn model_tool_specs(&self) -> Vec<LlmToolSpec> {
@@ -153,12 +154,6 @@ pub fn build_tool_surface(input: ToolSurfaceBuildInput) -> ToolSurface {
     for contribution in input.contributions {
         apply_contribution(&mut surface, contribution);
     }
-    if surface.omitted_tool_count() > 0 {
-        surface.tool_list_notes.push(format!(
-            "- **Note:** {} additional discoverable tool(s) are available but omitted from Available Tools for brevity.",
-            surface.omitted_tool_count()
-        ));
-    }
     surface
 }
 
@@ -200,6 +195,7 @@ mod tests {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
             execution_mode: ToolExecutionMode::Parallel,
         }
     }
@@ -208,7 +204,7 @@ mod tests {
     fn surface_splits_callable_and_documented_tools() {
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: vec![
-                tool("discover_tools", ToolAvailability::Documented),
+                tool("search_tools", ToolAvailability::Documented),
                 tool("read_file", ToolAvailability::Documented),
                 tool("grep", ToolAvailability::Callable),
                 tool("privileged_tool", ToolAvailability::Discoverable),
@@ -220,7 +216,7 @@ mod tests {
         assert_eq!(surface.callable_tools().len(), 3);
         assert_eq!(surface.documented_tools().len(), 2);
         assert_eq!(surface.omitted_tool_count(), 2);
-        assert!(surface.prompt_tool_docs().contains("discoverable tool(s)"));
+        assert!(!surface.prompt_tool_docs().contains("Catalogued tools"));
     }
 
     #[test]
@@ -257,7 +253,7 @@ mod tests {
     #[test]
     fn prompt_gate_requires_matching_tool_availability() {
         let surface = build_tool_surface(ToolSurfaceBuildInput {
-            tools: vec![tool("discover_tools", ToolAvailability::Documented)],
+            tools: vec![tool("search_tools", ToolAvailability::Documented)],
             mode: crate::ExecutionMode::standard(),
             contributions: Vec::new(),
         });
@@ -265,7 +261,7 @@ mod tests {
         let kept = surface.filter_prompt_contributions(vec![
             PromptContribution::guidance("Plain", "always"),
             PromptContribution::guidance("Discovery", "discover")
-                .requires_tool("discover_tools", ToolAvailability::Documented),
+                .requires_tool("search_tools", ToolAvailability::Documented),
             PromptContribution::guidance("Hidden", "hidden")
                 .requires_tool("load_tools", ToolAvailability::Callable),
         ]);

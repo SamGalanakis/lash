@@ -57,6 +57,7 @@ impl ToolProvider for ShowSnippetToUser {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: crate::tools::discovery_metadata("user", &["show_user", "display_snippet"]),
             execution_mode: ToolExecutionMode::Parallel,
         }]
     }

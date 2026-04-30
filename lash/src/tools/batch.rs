@@ -20,6 +20,7 @@ pub fn batch_tool_definition() -> ToolDefinition {
         availability_override: None,
         input_schema_override: None,
         output_schema_override: None,
+        discovery: crate::tools::discovery_metadata("runtime", &["parallel_tools"]),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }

@@ -1961,6 +1961,7 @@ dependencies = [
  "lash",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
+ "lash-plugin-tool-discovery",
 ]
 
 [[package]]
@@ -2067,6 +2068,17 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "lash-plugin-tool-discovery"
+version = "0.2.76"
+dependencies = [
+ "async-trait",
+ "lash",
+ "serde_json",
+ "strsim",
  "tokio",
 ]
 

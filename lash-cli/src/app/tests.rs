@@ -2712,7 +2712,7 @@ fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: None,
-        name: "discover_tools".into(),
+        name: "search_tools".into(),
         args: serde_json::json!({ "query": "queue" }),
         result: serde_json::json!([]),
         success: true,

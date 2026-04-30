@@ -132,6 +132,7 @@ fn pass_baton_definition(examples: Vec<String>) -> ToolDefinition {
         availability_override: None,
         input_schema_override: Some(pass_baton_input_schema()),
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }
@@ -158,6 +159,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
         availability_override: None,
         input_schema_override: Some(spawn_agent_input_schema(capability_names)),
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }
@@ -178,6 +180,7 @@ fn send_message_definition(examples: Vec<String>) -> ToolDefinition {
         availability_override: None,
         input_schema_override: Some(send_message_input_schema()),
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }
@@ -199,6 +202,7 @@ fn followup_task_definition(examples: Vec<String>) -> ToolDefinition {
         availability_override: None,
         input_schema_override: Some(followup_task_input_schema()),
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Serial,
     }
 }
@@ -219,6 +223,7 @@ fn wait_agent_definition(examples: Vec<String>) -> ToolDefinition {
         availability_override: None,
         input_schema_override: Some(wait_agent_input_schema()),
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }
@@ -235,6 +240,7 @@ fn list_agents_definition(examples: Vec<String>) -> ToolDefinition {
         availability_override: None,
         input_schema_override: None,
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }

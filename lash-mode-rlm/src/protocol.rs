@@ -23,7 +23,7 @@ use lash::{
 use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
 
-pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Every tool listed under **Available Tools** is callable as `call tool_name { ... }` from inside a fenced `lashlang` block. Emit a block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value. Plain prose is for direct conversational replies that need no action.
+pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Tools listed under **Showcased Tools** and catalogued tools found with `search_tools` are invoked as `call tool_name { ... }` from inside a fenced `lashlang` block. Emit a block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value. Plain prose is for direct conversational replies that need no action.
 
 ### `print` vs `submit`
 

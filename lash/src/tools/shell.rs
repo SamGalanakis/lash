@@ -1001,6 +1001,7 @@ impl ToolProvider for StandardShell {
                 availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
+                discovery: crate::tools::discovery_metadata("shell", &["shell", "bash"]),
                 // exec_command can fork/move/delete files and mutate shell
                 // state (cwd, env, background processes); serialize it so
                 // concurrent commands don't race.
@@ -1068,6 +1069,7 @@ impl ToolProvider for StandardShell {
                 availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
+                discovery: crate::tools::discovery_metadata("shell", &["long_running_command", "pty"]),
                 // start_command creates a stateful shell handle; serialize it
                 // with the other shell tools.
                 execution_mode: ToolExecutionMode::Serial,
@@ -1126,6 +1128,7 @@ impl ToolProvider for StandardShell {
                 availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
+                discovery: crate::tools::discovery_metadata("shell", &["send_stdin", "poll_command"]),
                 // write_stdin targets a specific running command session and
                 // mutates its state; serialize it alongside exec_command.
                 execution_mode: ToolExecutionMode::Serial,

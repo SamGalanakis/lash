@@ -103,6 +103,7 @@ impl ToolProvider for ApplyPatchTool {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: crate::tools::discovery_metadata("filesystem", &["patch", "edit_file"]),
             // apply_patch mutates the working tree; it must not run in
             // parallel with other mutating tools in the same batch.
             execution_mode: ToolExecutionMode::Serial,

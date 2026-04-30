@@ -44,6 +44,9 @@ pub type PromptRequestHook =
     Arc<dyn Fn(PromptRequestHookContext) -> PluginFuture<Vec<PluginSurfaceEvent>> + Send + Sync>;
 pub type ToolSurfaceContributor =
     Arc<dyn Fn(ToolSurfaceContext) -> Result<ToolSurfaceContribution, PluginError> + Send + Sync>;
+pub type ToolDiscoveryContributor = Arc<
+    dyn Fn(ToolDiscoveryContext) -> Result<ToolDiscoveryContribution, PluginError> + Send + Sync,
+>;
 pub type AssistantStreamHook =
     Arc<dyn Fn(AssistantStreamHookContext) -> PluginFuture<AssistantStreamTransform> + Send + Sync>;
 pub type AssistantResponseHook = Arc<
@@ -219,6 +222,27 @@ pub struct ToolSurfaceContext {
     pub session_id: String,
     pub mode: ExecutionMode,
     pub tools: Vec<ToolDefinition>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolDiscoveryContext {
+    pub session_id: String,
+    pub mode: ExecutionMode,
+    pub catalog: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToolDiscoveryContribution {
+    pub tools: Vec<ToolDiscoveryToolContribution>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToolDiscoveryToolContribution {
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -954,6 +978,7 @@ mod tests {
                 availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
+                discovery: Default::default(),
                 execution_mode: crate::ToolExecutionMode::Parallel,
             }]
         }

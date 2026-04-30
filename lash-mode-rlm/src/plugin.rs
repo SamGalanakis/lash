@@ -5,7 +5,6 @@ use lash::plugin::{
     ModeSessionPlugin, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
     PluginSessionContext, SessionPlugin,
 };
-use lash::tools::DiscoveryToolsProvider;
 use lash::{
     CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, PromptContribution, SessionError,
     ToolResultProjectionPluginConfig,
@@ -73,7 +72,6 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(RlmModePlugin {
             active: ctx.execution_mode == ExecutionMode::new("rlm"),
-            provider: Arc::new(DiscoveryToolsProvider::new()),
             config: self.config.clone(),
         }))
     }
@@ -81,7 +79,6 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
 
 struct RlmModePlugin {
     active: bool,
-    provider: Arc<DiscoveryToolsProvider>,
     config: RlmModePluginConfig,
 }
 
@@ -99,8 +96,6 @@ impl SessionPlugin for RlmModePlugin {
         reg.mode().protocol_driver(Arc::new(RlmProtocolDriver {
             config: self.config.clone(),
         }))?;
-        reg.tools()
-            .provider(Arc::clone(&self.provider) as Arc<dyn lash::ToolProvider>)?;
 
         let bound_vars_cache = Arc::new(BoundVariablesCache::new());
         let bound_vars_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {

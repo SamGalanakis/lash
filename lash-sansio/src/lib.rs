@@ -271,6 +271,20 @@ fn is_default_tool_activation(activation: &ToolActivation) -> bool {
     *activation == ToolActivation::default()
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolDiscoveryMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+}
+
+impl ToolDiscoveryMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.namespace.is_none() && self.aliases.is_empty()
+    }
+}
+
 /// A tool definition exposed to the runtime.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
@@ -296,6 +310,8 @@ pub struct ToolDefinition {
     pub input_schema_override: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema_override: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "ToolDiscoveryMetadata::is_empty")]
+    pub discovery: ToolDiscoveryMetadata,
     /// How this tool should be scheduled relative to peers when the model
     /// emits a batch of tool calls. Defaults to [`ToolExecutionMode::Parallel`].
     #[serde(
@@ -346,13 +362,6 @@ impl ToolDefinition {
     pub fn effective_availability(&self, mode: &ExecutionMode) -> ToolAvailability {
         self.availability_override
             .unwrap_or_else(|| self.availability.for_mode(mode))
-    }
-
-    pub fn namespace(&self) -> Option<&str> {
-        self.name
-            .split_once("__")
-            .map(|(namespace, _)| namespace)
-            .filter(|namespace| !namespace.is_empty())
     }
 
     pub fn model_tool(&self) -> ModelTool {
@@ -483,6 +492,7 @@ mod tests {
                 "required": ["hits"],
                 "additionalProperties": false
             })),
+            discovery: Default::default(),
             execution_mode: ToolExecutionMode::Parallel,
         };
 
@@ -531,6 +541,43 @@ mod tests {
         assert_eq!(
             result.result,
             serde_json::json!("Failed to serialize tool result: boom")
+        );
+    }
+
+    #[test]
+    fn tool_discovery_metadata_serde_defaults_are_empty() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "read_file",
+            "description": "Read a file"
+        }))
+        .unwrap();
+        assert!(tool.discovery.is_empty());
+    }
+
+    #[test]
+    fn tool_discovery_metadata_does_not_render_prompt_docs() {
+        let with_metadata = ToolDefinition {
+            name: "read_file".to_string(),
+            description: "Read a file".to_string(),
+            params: Vec::new(),
+            returns: "str".to_string(),
+            examples: Vec::new(),
+            availability: ToolAvailabilityConfig::documented(),
+            activation: ToolActivation::Always,
+            availability_override: None,
+            input_schema_override: None,
+            output_schema_override: None,
+            discovery: ToolDiscoveryMetadata {
+                namespace: Some("filesystem".to_string()),
+                aliases: vec!["cat".to_string()],
+            },
+            execution_mode: ToolExecutionMode::Parallel,
+        };
+        let mut without_metadata = with_metadata.clone();
+        without_metadata.discovery = Default::default();
+        assert_eq!(
+            ToolDefinition::format_tool_docs(&[with_metadata]),
+            ToolDefinition::format_tool_docs(&[without_metadata])
         );
     }
 }

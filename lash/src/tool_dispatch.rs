@@ -395,6 +395,7 @@ mod tests {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: ToolExecutionMode::Parallel,
                 },
                 crate::ToolDefinition {
@@ -408,6 +409,7 @@ mod tests {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: ToolExecutionMode::Parallel,
                 },
             ]
@@ -448,6 +450,7 @@ mod tests {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: ToolExecutionMode::Parallel,
                 },
                 crate::ToolDefinition {
@@ -461,6 +464,7 @@ mod tests {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: ToolExecutionMode::Parallel,
                 },
             ]
@@ -676,6 +680,7 @@ mod tests {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: ToolExecutionMode::Serial,
                 },
                 crate::ToolDefinition {
@@ -689,6 +694,7 @@ mod tests {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: ToolExecutionMode::Serial,
                 },
             ]
@@ -803,6 +809,7 @@ mod tests {
                         availability_override: None,
                         input_schema_override: None,
                         output_schema_override: None,
+                        discovery: Default::default(),
                         execution_mode: ToolExecutionMode::Parallel,
                     },
                     crate::ToolDefinition {
@@ -816,6 +823,7 @@ mod tests {
                         availability_override: None,
                         input_schema_override: None,
                         output_schema_override: None,
+                        discovery: Default::default(),
                         execution_mode: ToolExecutionMode::Parallel,
                     },
                     crate::ToolDefinition {
@@ -829,6 +837,7 @@ mod tests {
                         availability_override: None,
                         input_schema_override: None,
                         output_schema_override: None,
+                        discovery: Default::default(),
                         execution_mode: ToolExecutionMode::Serial,
                     },
                 ]

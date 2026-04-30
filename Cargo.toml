@@ -11,6 +11,7 @@ members = [
     "lash-plugin-plan-mode",
     "lash-plugin-prompt-context",
     "lash-plugin-rolling-history",
+    "lash-plugin-tool-discovery",
     "lash-plugin-ui-activity",
     "lash-provider-anthropic",
     "lash-provider-codex",

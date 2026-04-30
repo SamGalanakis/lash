@@ -2,7 +2,6 @@ mod apply_patch;
 mod ask;
 pub mod batch;
 mod composite;
-mod discovery;
 mod fetch_url;
 #[cfg(feature = "tool-impls")]
 mod glob;
@@ -22,7 +21,6 @@ pub use apply_patch::ApplyPatchTool;
 pub use apply_patch::{PatchAction, PatchFileOp, inspect_patch_ops};
 pub use ask::AskTool;
 pub(crate) use composite::CompositeToolProvider;
-pub use discovery::DiscoveryToolsProvider;
 pub use fetch_url::FetchUrl;
 #[cfg(feature = "tool-impls")]
 pub use glob::Glob;
@@ -178,11 +176,12 @@ where
             };
             serde_json::json!({
                 "name": definition.name,
-                "namespace": definition.namespace(),
+                "namespace": definition.discovery.namespace,
                 "description": definition.description,
                 "params": definition.params,
                 "returns": definition.returns,
                 "examples": definition.examples,
+                "aliases": definition.discovery.aliases,
                 "availability": availability,
                 "callable": availability.is_callable(),
                 "documented": availability.is_documented(),
@@ -193,6 +192,20 @@ where
             })
         })
         .collect()
+}
+
+pub(crate) fn discovery_metadata(
+    namespace: &str,
+    aliases: &[&str],
+) -> crate::ToolDiscoveryMetadata {
+    crate::ToolDiscoveryMetadata {
+        namespace: if namespace.is_empty() {
+            None
+        } else {
+            Some(namespace.to_string())
+        },
+        aliases: aliases.iter().map(|value| value.to_string()).collect(),
+    }
 }
 
 /// Run blocking filesystem work off the async runtime.
@@ -386,6 +399,7 @@ mod tests {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
             execution_mode: crate::ToolExecutionMode::Parallel,
         }
     }
@@ -398,7 +412,7 @@ mod tests {
                 availability: crate::ToolAvailability::Documented,
             },
             crate::ToolSurfaceEntry {
-                definition: dummy_tool("discover_tools"),
+                definition: dummy_tool("search_tools"),
                 availability: crate::ToolAvailability::Callable,
             },
         ]);

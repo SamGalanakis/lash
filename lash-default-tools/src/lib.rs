@@ -12,6 +12,7 @@ use lash::{
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
+use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefaultToolBundle {
@@ -90,6 +91,7 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
     for bundle in options.bundles {
         match bundle {
             DefaultToolBundle::CoreRuntime => {
+                factories.push(Arc::new(ToolDiscoveryPluginFactory::new()));
                 factories.push(Arc::new(BuiltinToolResultProjectionPluginFactory::default()));
             }
             DefaultToolBundle::RollingHistory => {

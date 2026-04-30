@@ -44,6 +44,7 @@ impl ToolProvider for FetchUrl {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: crate::tools::discovery_metadata("web", &["fetch", "open_url"]),
             execution_mode: ToolExecutionMode::Parallel,
         }]
     }

@@ -185,6 +185,7 @@ impl ToolProvider for AskTool {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: crate::tools::discovery_metadata("user", &["prompt_user", "request_input"]),
             execution_mode: ToolExecutionMode::Parallel,
         }]
     }

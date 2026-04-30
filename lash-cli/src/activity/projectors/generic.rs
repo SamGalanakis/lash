@@ -1,8 +1,8 @@
-//! Generic projector: `discover_tools` and the fallback for any unknown
+//! Generic projector: `search_tools` and the fallback for any unknown
 //! tool name.
 //!
 //! The generic projector is special because it acts as both a
-//! registered projector (for `discover_tools`, which wants rich detail
+//! registered projector (for `search_tools`, which wants rich detail
 //! lines) and as the fallback path in `ActivityState::blocks_for_tool_call`
 //! for names with no dedicated projector. Anything the fallback
 //! produces is an `ActivityKind::GenericTool` with a semantic summary
@@ -22,7 +22,7 @@ pub(crate) struct GenericProjector;
 
 impl ToolProjector for GenericProjector {
     fn tool_names(&self) -> &'static [&'static str] {
-        &["discover_tools"]
+        &["search_tools"]
     }
 
     fn project(&self, ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
@@ -32,7 +32,7 @@ impl ToolProjector for GenericProjector {
             ActivityStatus::Failed
         };
         match ctx.name {
-            "discover_tools" => {
+            "search_tools" => {
                 let summary = tool_search_summary(&ctx.args);
                 let detail_lines = tool_search_detail_lines(&ctx.result);
                 let args = std::mem::replace(&mut ctx.args, Value::Null);

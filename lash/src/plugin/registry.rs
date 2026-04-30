@@ -16,7 +16,8 @@ use super::{
     ExternalInvokeHandler, ExternalOpDef, HistoryRewriter, PluginError, PluginHost,
     PluginRegistrar, PluginRuntimeEventHook, PluginSnapshotMeta, PromptContributor,
     PromptRequestHook, SessionConfigMutator, SnapshotReader, SnapshotWriter,
-    ToolResultProjectionHook, ToolResultProjector, ToolSurfaceContributor, TurnContextTransform,
+    ToolDiscoveryContributor, ToolResultProjectionHook, ToolResultProjector,
+    ToolSurfaceContributor, TurnContextTransform,
 };
 use crate::{ContextApproachKind, ExecutionMode, ToolProvider};
 
@@ -26,6 +27,7 @@ pub struct PluginSpec {
     pub prompt_contributors: Vec<PromptContributor>,
     pub prompt_request_hooks: Vec<PromptRequestHook>,
     pub tool_surface_contributors: Vec<ToolSurfaceContributor>,
+    pub tool_discovery_contributors: Vec<ToolDiscoveryContributor>,
     pub before_turn_hooks: Vec<BeforeTurnHook>,
     pub before_tool_call_hooks: Vec<BeforeToolCallHook>,
     pub after_tool_call_hooks: Vec<AfterToolCallHook>,
@@ -64,6 +66,14 @@ impl PluginSpec {
 
     pub fn with_tool_surface_contributor(mut self, contributor: ToolSurfaceContributor) -> Self {
         self.tool_surface_contributors.push(contributor);
+        self
+    }
+
+    pub fn with_tool_discovery_contributor(
+        mut self,
+        contributor: ToolDiscoveryContributor,
+    ) -> Self {
+        self.tool_discovery_contributors.push(contributor);
         self
     }
 
@@ -348,6 +358,9 @@ impl SessionPlugin for SpecPlugin {
         }
         for contributor in &self.spec.tool_surface_contributors {
             reg.surface().contribute(Arc::clone(contributor));
+        }
+        for contributor in &self.spec.tool_discovery_contributors {
+            reg.discovery().contribute(Arc::clone(contributor));
         }
         for hook in &self.spec.before_turn_hooks {
             reg.turn().before(Arc::clone(hook));

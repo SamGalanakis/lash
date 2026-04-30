@@ -1,0 +1,14 @@
+[package]
+name = "lash-plugin-tool-discovery"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash" }
+async-trait = "0.1"
+serde_json = "1"
+strsim = "0.11"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

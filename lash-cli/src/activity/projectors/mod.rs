@@ -26,7 +26,7 @@ pub(crate) mod web;
 
 /// Register every built-in projector with the given `ActivityState`.
 /// Called from `ActivityState::new`. The generic projector is also
-/// registered under its primary tool name (`discover_tools`), and
+/// registered under its primary tool name (`search_tools`), and
 /// additionally used as the fallback path in
 /// `ActivityState::blocks_for_tool_call` for names with no dedicated
 /// projector.

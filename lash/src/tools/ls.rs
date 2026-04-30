@@ -88,6 +88,7 @@ impl ToolProvider for Ls {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: crate::tools::discovery_metadata("filesystem", &["list_files", "list_directory"]),
             execution_mode: ToolExecutionMode::Parallel,
         }]
     }

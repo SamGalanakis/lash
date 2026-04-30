@@ -186,6 +186,7 @@ pub fn monitor_tool_definition() -> ToolDefinition {
         availability_override: None,
         input_schema_override: None,
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }
@@ -202,6 +203,7 @@ pub fn tasks_list_tool_definition() -> ToolDefinition {
         availability_override: None,
         input_schema_override: None,
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }
@@ -227,6 +229,7 @@ pub fn tasks_stop_tool_definition() -> ToolDefinition {
         availability_override: None,
         input_schema_override: None,
         output_schema_override: None,
+        discovery: Default::default(),
         execution_mode: ToolExecutionMode::Parallel,
     }
 }

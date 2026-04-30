@@ -103,6 +103,7 @@ pub struct PluginRegistrar {
     pub(crate) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(crate) prompt_request_hooks: Vec<RegisteredHook<PromptRequestHook>>,
     pub(crate) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
+    pub(crate) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
     pub(crate) before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     pub(crate) before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
     pub(crate) after_tool_call_hooks: Vec<RegisteredHook<AfterToolCallHook>>,
@@ -157,6 +158,16 @@ pub struct SurfaceRegistrations<'a> {
 impl SurfaceRegistrations<'_> {
     pub fn contribute(self, contributor: ToolSurfaceContributor) {
         self.reg.add_tool_surface_contributor(contributor);
+    }
+}
+
+pub struct DiscoveryRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl DiscoveryRegistrations<'_> {
+    pub fn contribute(self, contributor: ToolDiscoveryContributor) {
+        self.reg.add_tool_discovery_contributor(contributor);
     }
 }
 
@@ -313,6 +324,7 @@ impl PluginRegistrar {
             prompt_contributors: Vec::new(),
             prompt_request_hooks: Vec::new(),
             tool_surface_contributors: Vec::new(),
+            tool_discovery_contributors: Vec::new(),
             before_turn_hooks: Vec::new(),
             before_tool_call_hooks: Vec::new(),
             after_tool_call_hooks: Vec::new(),
@@ -345,6 +357,10 @@ impl PluginRegistrar {
 
     pub fn surface(&mut self) -> SurfaceRegistrations<'_> {
         SurfaceRegistrations { reg: self }
+    }
+
+    pub fn discovery(&mut self) -> DiscoveryRegistrations<'_> {
+        DiscoveryRegistrations { reg: self }
     }
 
     pub fn turn(&mut self) -> TurnRegistrations<'_> {
@@ -419,6 +435,14 @@ impl PluginRegistrar {
     fn add_tool_surface_contributor(&mut self, contributor: ToolSurfaceContributor) {
         push_registered_hook(
             &mut self.tool_surface_contributors,
+            &self.registering_plugin_id,
+            contributor,
+        );
+    }
+
+    fn add_tool_discovery_contributor(&mut self, contributor: ToolDiscoveryContributor) {
+        push_registered_hook(
+            &mut self.tool_discovery_contributors,
             &self.registering_plugin_id,
             contributor,
         );

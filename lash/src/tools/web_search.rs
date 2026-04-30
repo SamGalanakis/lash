@@ -40,6 +40,7 @@ impl ToolProvider for WebSearch {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: crate::tools::discovery_metadata("web", &["web_search"]),
             execution_mode: ToolExecutionMode::Parallel,
         }]
     }

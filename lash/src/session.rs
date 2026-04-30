@@ -1460,6 +1460,7 @@ mod tests {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: crate::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
@@ -1473,6 +1474,7 @@ mod tests {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: crate::ToolExecutionMode::Parallel,
                 },
             ]

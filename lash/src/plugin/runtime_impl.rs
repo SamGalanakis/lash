@@ -251,6 +251,7 @@ impl PluginHost {
             prompt_contributors: reg.prompt_contributors,
             prompt_request_hooks: reg.prompt_request_hooks,
             tool_surface_contributors: reg.tool_surface_contributors,
+            tool_discovery_contributors: reg.tool_discovery_contributors,
             before_turn_hooks: reg.before_turn_hooks,
             before_tool_call_hooks: reg.before_tool_call_hooks,
             after_tool_call_hooks: reg.after_tool_call_hooks,

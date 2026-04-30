@@ -52,6 +52,7 @@ impl ToolProvider for PlanModeDynamicTools {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
             execution_mode: lash::ToolExecutionMode::Parallel,
         }]
     }
@@ -353,7 +354,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             mode: ExecutionMode::standard(),
             tools: vec![
                 ToolDefinition {
-                    name: "discover_tools".to_string(),
+                    name: "search_tools".to_string(),
                     description: "Discover tools".to_string(),
                     params: vec![],
                     returns: "list".to_string(),
@@ -363,6 +364,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: lash::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
@@ -376,6 +378,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: lash::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
@@ -389,6 +392,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: lash::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
@@ -402,6 +406,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: lash::ToolExecutionMode::Parallel,
                 },
                 ToolDefinition {
@@ -415,6 +420,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: lash::ToolExecutionMode::Serial,
                 },
                 ToolDefinition {
@@ -428,6 +434,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     availability_override: None,
                     input_schema_override: None,
                     output_schema_override: None,
+                    discovery: Default::default(),
                     execution_mode: lash::ToolExecutionMode::Parallel,
                 },
             ],

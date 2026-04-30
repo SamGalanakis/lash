@@ -527,6 +527,7 @@ fn import_tools(
             &mut used_names,
         );
         let params = schema_to_params(&input_schema);
+        let discovery = mcp_discovery_metadata(server_name, &original_name, &normalized_tool);
 
         imported.insert(
             prefixed_name.clone(),
@@ -547,6 +548,7 @@ fn import_tools(
                     availability_override: None,
                     input_schema_override: Some(input_schema),
                     output_schema_override: None,
+                    discovery,
                     execution_mode: ToolExecutionMode::Parallel,
                 },
             },
@@ -554,6 +556,17 @@ fn import_tools(
     }
 
     Ok(imported)
+}
+
+fn mcp_discovery_metadata(
+    server_name: &str,
+    original_name: &str,
+    _normalized_tool: &str,
+) -> crate::ToolDiscoveryMetadata {
+    crate::ToolDiscoveryMetadata {
+        namespace: Some(server_name.to_string()),
+        aliases: vec![original_name.to_string()],
+    }
 }
 
 fn schema_to_params(schema: &Value) -> Vec<ToolParam> {
@@ -867,6 +880,8 @@ mod tests {
         let defs = adapter.advertised_tools();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "mcp__docs__search_docs");
+        assert_eq!(defs[0].discovery.namespace.as_deref(), Some("docs"));
+        assert_eq!(defs[0].discovery.aliases, vec!["search-docs".to_string()]);
         assert_eq!(
             defs[0]
                 .input_schema_override
@@ -889,6 +904,14 @@ mod tests {
             .await;
         assert!(result.success, "{result:?}");
         assert_eq!(result.result, json!("matched"));
+    }
+
+    #[test]
+    fn mcp_discovery_metadata_keeps_server_namespace_and_original_name_alias() {
+        let spotify =
+            mcp_discovery_metadata("appworld", "spotify_search_songs", "spotify_search_songs");
+        assert_eq!(spotify.namespace.as_deref(), Some("appworld"));
+        assert_eq!(spotify.aliases, vec!["spotify_search_songs".to_string()]);
     }
 
     fn shell_single_quote(text: &str) -> String {

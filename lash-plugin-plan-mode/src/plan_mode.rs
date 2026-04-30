@@ -47,7 +47,7 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "grep",
         "ls",
         "read_file",
-        "discover_tools",
+        "search_tools",
         "load_tools",
         "search_web",
         "apply_patch",
@@ -574,6 +574,7 @@ impl ToolProvider for PlanModeTools {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
             execution_mode: ToolExecutionMode::Parallel,
         }]
     }

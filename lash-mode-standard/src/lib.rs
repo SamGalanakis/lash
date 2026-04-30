@@ -34,7 +34,6 @@ use lash::session_model::{
 use lash::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
 };
-use lash::tools::DiscoveryToolsProvider;
 use lash::tools::batch::batch_tool_definition;
 use lash::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
@@ -88,8 +87,6 @@ impl SessionPlugin for StandardModePlugin {
             reg.mode().session(Arc::new(StandardModeSession))?;
             reg.mode()
                 .protocol_driver(Arc::new(StandardProtocolDriver))?;
-            reg.tools()
-                .provider(Arc::new(DiscoveryToolsProvider::new()))?;
             reg.mode().native_tools(Arc::new(StandardModeNativeTools))?;
         }
         Ok(())

@@ -54,12 +54,13 @@ pub use lash_sansio::{
     PromptContext, PromptContribution, PromptPanel, PromptRequest, PromptResponse,
     PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
     PruneState, RenderedPrompt, Response, SessionEvent, TokenUsage, ToolActivation,
-    ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition, ToolExecutionMode,
-    ToolImage, ToolParam, ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
-    UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
-    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
-    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, reasoning_part, shared_parts, turn_limit_exhausted_message,
+    ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition,
+    ToolDiscoveryMetadata, ToolExecutionMode, ToolImage, ToolParam, ToolResult, ToolSurface,
+    ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, UserInputProvenance,
+    UserInputTransform, append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
+    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
+    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part, shared_parts,
+    turn_limit_exhausted_message,
 };
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", content = "options", rename_all = "snake_case")]
@@ -131,11 +132,12 @@ pub use plugin::{
     SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
     SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
     SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionTurnHandle,
-    SnapshotReader, SnapshotWriter, StandardCreateExtras, ToolResultProjectionContext,
-    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
-    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
-    TurnResultHookContext, TurnResultSummary, TurnTransformContext,
-    plugin_surface_event_renders_visible_output,
+    SnapshotReader, SnapshotWriter, StandardCreateExtras, ToolDiscoveryContext,
+    ToolDiscoveryContribution, ToolDiscoveryContributor, ToolDiscoveryToolContribution,
+    ToolResultProjectionContext, ToolResultProjectionHook, ToolResultProjectionMode,
+    ToolResultProjectionPluginConfig, ToolResultProjector, ToolSurfaceContribution,
+    TurnContextTransform, TurnHookContext, TurnResultHookContext, TurnResultSummary,
+    TurnTransformContext, plugin_surface_event_renders_visible_output,
 };
 pub use provider::{
     AgentModelSelection, LashConfig, Provider, ProviderFactory, ProviderHandle, ProviderOptions,

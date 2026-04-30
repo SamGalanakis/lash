@@ -730,6 +730,7 @@ impl crate::ToolProvider for EchoTool {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
             execution_mode: crate::ToolExecutionMode::Parallel,
         }]
     }
@@ -768,6 +769,7 @@ impl crate::ToolProvider for SlowTool {
             execution_mode: crate::ToolExecutionMode::Parallel,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
         }]
     }
 
@@ -1755,6 +1757,7 @@ impl crate::ToolProvider for MemoryProbeTool {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
             execution_mode: crate::ToolExecutionMode::Parallel,
         }]
     }
@@ -1780,6 +1783,7 @@ impl crate::ToolProvider for ChildSessionTool {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
             execution_mode: crate::ToolExecutionMode::Parallel,
         }]
     }

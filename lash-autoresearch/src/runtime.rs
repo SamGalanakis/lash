@@ -372,6 +372,7 @@ impl ToolProvider for AutoresearchTools {
                 availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
+                discovery: Default::default(),
                 execution_mode: ToolExecutionMode::Parallel,
             },
             ToolDefinition {
@@ -402,6 +403,7 @@ impl ToolProvider for AutoresearchTools {
                 availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
+                discovery: Default::default(),
                 execution_mode: ToolExecutionMode::Parallel,
             },
             ToolDefinition {
@@ -442,6 +444,7 @@ impl ToolProvider for AutoresearchTools {
                 availability_override: None,
                 input_schema_override: None,
                 output_schema_override: None,
+                discovery: Default::default(),
                 execution_mode: ToolExecutionMode::Parallel,
             },
         ]

@@ -728,6 +728,7 @@ mod tests {
             availability_override: None,
             input_schema_override: None,
             output_schema_override: None,
+            discovery: Default::default(),
             execution_mode: ToolExecutionMode::Parallel,
         }
     }
@@ -770,7 +771,7 @@ mod tests {
         impl ToolProvider for AppWorldToolProvider {
             fn definitions(&self) -> Vec<ToolDefinition> {
                 vec![
-                    dummy_tool("discover_tools"),
+                    dummy_tool("search_tools"),
                     dummy_tool("mcp__appworld__spotify_search_songs"),
                     dummy_tool("mcp__other__search"),
                 ]
@@ -797,9 +798,6 @@ mod tests {
             tools["mcp__other__search"].definition.availability_override,
             None
         );
-        assert_eq!(
-            tools["discover_tools"].definition.availability_override,
-            None
-        );
+        assert_eq!(tools["search_tools"].definition.availability_override, None);
     }
 }
