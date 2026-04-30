@@ -266,6 +266,7 @@ pub(super) struct TurnAssembler {
     pub(super) saw_tool_failure: bool,
     pub(super) has_plugin_visible_output: bool,
     pub(super) typed_finish: Option<serde_json::Value>,
+    pub(super) handoff_successor_session_id: Option<String>,
 }
 
 impl Default for TurnAssembler {
@@ -288,6 +289,7 @@ impl TurnAssembler {
             saw_tool_failure: false,
             has_plugin_visible_output: false,
             typed_finish: None,
+            handoff_successor_session_id: None,
         }
     }
 
@@ -347,6 +349,9 @@ impl TurnAssembler {
             }
             SessionEvent::TypedFinish { value } => {
                 self.typed_finish = Some(value.clone());
+            }
+            SessionEvent::SessionHandoff { session_id } => {
+                self.handoff_successor_session_id = Some(session_id.clone());
             }
             SessionEvent::PluginEvent { event, .. }
                 if plugin_surface_event_renders_visible_output(event) =>
@@ -431,6 +436,7 @@ impl TurnAssembler {
             tool_calls: self.tool_calls,
             errors: issues,
             typed_finish: self.typed_finish.take(),
+            handoff_successor_session_id: self.handoff_successor_session_id.take(),
         }
     }
 

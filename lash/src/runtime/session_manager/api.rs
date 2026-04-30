@@ -133,8 +133,9 @@ impl SessionManager for RuntimeSessionManager {
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
             crate::SessionPluginMode::InheritCurrent => self
                 .current_plugins
-                .fork_for_session(
+                .fork_for_child_session(
                     &session_id,
+                    request.parent_session_id.clone(),
                     policy.execution_mode.clone(),
                     policy.standard_context_approach.clone(),
                 )

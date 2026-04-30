@@ -838,6 +838,11 @@ impl LashRuntime {
                         status: format!("{:?}", returned_turn.status).to_ascii_lowercase(),
                         done_reason: format!("{:?}", returned_turn.done_reason)
                             .to_ascii_lowercase(),
+                        handoff: returned_turn.handoff_successor_session_id.as_ref().map(
+                            |session_id| lash_trace::TraceHandoff {
+                                successor_session_id: session_id.clone(),
+                            },
+                        ),
                     },
                 );
             }
@@ -854,6 +859,11 @@ impl LashRuntime {
                     lash_trace::TraceEvent::TurnCompleted {
                         status: format!("{:?}", assembled.status).to_ascii_lowercase(),
                         done_reason: format!("{:?}", assembled.done_reason).to_ascii_lowercase(),
+                        handoff: assembled.handoff_successor_session_id.as_ref().map(
+                            |session_id| lash_trace::TraceHandoff {
+                                successor_session_id: session_id.clone(),
+                            },
+                        ),
                     },
                 );
             }

@@ -604,6 +604,18 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_renderer_reports_session_handoff() {
+        let mut renderer = AutonomousRenderer::new();
+        let handoff = renderer
+            .handle(SessionEvent::SessionHandoff {
+                session_id: "next".to_string(),
+            })
+            .expect("handle handoff");
+
+        assert_eq!(handoff.as_deref(), Some("next"));
+    }
+
+    #[test]
     fn turn_has_visible_output_accepts_plugin_rendered_turns() {
         let turn = AssembledTurn {
             state: SessionStateEnvelope::default(),
@@ -624,6 +636,7 @@ mod tests {
             tool_calls: Vec::new(),
             errors: Vec::new(),
             typed_finish: None,
+            handoff_successor_session_id: None,
         };
 
         assert!(turn_has_visible_output(&turn));

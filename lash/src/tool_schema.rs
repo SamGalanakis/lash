@@ -149,13 +149,29 @@ fn validate_schema(path: &str, schema: &Value, value: &Value) -> Result<(), Stri
                     validate_schema(&join_path(path, name), property_schema, property_value)?;
                 }
             }
-            if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
-                for name in object.keys() {
-                    if name.starts_with("__") {
-                        continue;
+            match schema.get("additionalProperties") {
+                Some(Value::Bool(true)) => {}
+                Some(Value::Object(additional_schema)) => {
+                    let additional_schema = Value::Object(additional_schema.clone());
+                    for (name, property_value) in object {
+                        if is_internal_argument(name) || properties.contains_key(name) {
+                            continue;
+                        }
+                        validate_schema(
+                            &join_path(path, name),
+                            &additional_schema,
+                            property_value,
+                        )?;
                     }
-                    if !properties.contains_key(name) {
-                        return Err(format!("{}: unexpected property", join_path(path, name)));
+                }
+                _ => {
+                    for name in object.keys() {
+                        if is_internal_argument(name) {
+                            continue;
+                        }
+                        if !properties.contains_key(name) {
+                            return Err(format!("{}: unexpected property", join_path(path, name)));
+                        }
                     }
                 }
             }
@@ -258,6 +274,10 @@ fn join_path(base: &str, key: &str) -> String {
     }
 }
 
+fn is_internal_argument(name: &str) -> bool {
+    name == "__session_id__"
+}
+
 fn display_value(value: &Value) -> String {
     match value {
         Value::String(text) => format!("{text:?}"),
@@ -308,5 +328,82 @@ mod tests {
         let error =
             validate_tool_input(&tool, &serde_json::json!({ "page_limit": 100 })).unwrap_err();
         assert_eq!(error, "page_limit: expected integer <= 20, got 100");
+    }
+
+    #[test]
+    fn validation_rejects_unknown_property_when_additional_properties_is_omitted() {
+        let tool = ToolDefinition::new(
+            "mcp__appworld__venmo_show_transactions",
+            "",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "min_created_at": { "type": "string" },
+                    "max_created_at": { "type": "string" },
+                    "limit": { "type": "integer", "maximum": 100 }
+                },
+                "required": ["limit"]
+            }),
+            serde_json::json!({}),
+        );
+
+        let error = validate_tool_input(
+            &tool,
+            &serde_json::json!({
+                "min_datetime": "2024-01-01T00:00:00Z",
+                "limit": 20
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error, "min_datetime: unexpected property");
+    }
+
+    #[test]
+    fn validation_allows_unknown_property_when_additional_properties_is_true() {
+        let tool = ToolDefinition::new(
+            "open",
+            "",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "additionalProperties": true
+            }),
+            serde_json::json!({}),
+        );
+
+        validate_tool_input(
+            &tool,
+            &serde_json::json!({
+                "path": "README.md",
+                "unknown": "preserved"
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validation_preserves_internal_session_id_argument() {
+        let tool = ToolDefinition::new(
+            "lashlang_tool",
+            "",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                }
+            }),
+            serde_json::json!({}),
+        );
+
+        validate_tool_input(
+            &tool,
+            &serde_json::json!({
+                "query": "hello",
+                "__session_id__": "session"
+            }),
+        )
+        .unwrap();
     }
 }

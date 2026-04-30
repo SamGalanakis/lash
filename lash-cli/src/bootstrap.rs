@@ -543,7 +543,10 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         && (args.rlm_require_submit || tool_surface == CliToolSurface::AppWorld)
     {
         Some(lash::ModeTurnOptions::rlm(
-            lash_rlm_types::RlmTermination::Finish { schema: None },
+            lash_rlm_types::RlmTermination::Finish {
+                schema: None,
+                include_submit_prompt: args.rlm_require_submit,
+            },
         ))
     } else {
         None

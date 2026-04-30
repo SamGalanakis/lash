@@ -113,14 +113,35 @@ impl PluginHost {
         standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
+        self.build_session_with_parent_and_surface(
+            session_id,
+            parent_session_id,
+            execution_mode,
+            standard_context_approach,
+            snapshot,
+            ToolSurfaceContribution::default(),
+            None,
+        )
+    }
+
+    pub fn build_session_with_parent_and_surface(
+        &self,
+        session_id: impl Into<String>,
+        parent_session_id: Option<String>,
+        execution_mode: ExecutionMode,
+        standard_context_approach: Option<crate::StandardContextApproach>,
+        snapshot: Option<&PluginSessionSnapshot>,
+        tool_surface_overlay: ToolSurfaceContribution,
+        tool_snapshot: Option<crate::DynamicStateSnapshot>,
+    ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_inner(BuildPluginSessionRequest {
             session_id: session_id.into(),
             parent_session_id,
             execution_mode,
             standard_context_approach,
             snapshot,
-            tool_surface_overlay: ToolSurfaceContribution::default(),
-            tool_snapshot: None,
+            tool_surface_overlay,
+            tool_snapshot,
         })
     }
 

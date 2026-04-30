@@ -220,9 +220,10 @@ Rules:
 - References to a file system mean the AppWorld file system app, not this machine's OS filesystem.
 - For paginated APIs, inspect all pages instead of stopping after the first page.
 - Avoid collateral damage. Only perform operations needed for the requested task.
+- After mutating app calls, inspect the returned message or record; only call mcp__appworld__supervisor_complete_task once the app confirms the requested change was actually performed.
 
 Completion:
-- Do not end with a plain-text answer. The benchmark is only complete after you call the Supervisor app's complete_task API from a lashlang block.
+- Do not end with a plain-text answer. The benchmark is only complete after you call mcp__appworld__supervisor_complete_task from a lashlang block.
 - If the task asks a question, pass the minimal answer value to complete_task: only the entity, number, or direct value requested, not a full sentence.
 - Numbers should be numeric, not words.
 - If no answer is required, call complete_task without an answer, or with a null answer if the tool requires one.
@@ -248,7 +249,6 @@ def lash_command(args: argparse.Namespace, prompt: str, root: Path) -> list[str]
         cmd.extend(["--variant", args.variant])
     cmd.extend(["--execution-mode", args.execution_mode])
     cmd.extend(["--tool-surface", "appworld"])
-    cmd.append("--rlm-require-submit")
     cmd.extend(["--print", prompt])
     return cmd
 

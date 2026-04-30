@@ -464,6 +464,51 @@ mod tests {
         }
     }
 
+    struct StrictMcpTools {
+        executed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolProvider for StrictMcpTools {
+        fn definitions(&self) -> Vec<crate::ToolDefinition> {
+            vec![crate::ToolDefinition::new(
+                "mcp__appworld__venmo_show_transactions",
+                "Show Venmo transactions",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "min_created_at": { "type": "string" },
+                        "max_created_at": { "type": "string" },
+                        "limit": { "type": "integer", "maximum": 100 }
+                    },
+                    "required": ["limit"]
+                }),
+                json!({ "type": "object", "additionalProperties": true }),
+            )]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            ToolResult::ok(json!({ "executed": true }))
+        }
+    }
+
+    fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContext {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let plugins = test_plugins(Arc::new(StrictMcpTools { executed }));
+        let tools = plugins.tools();
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        ToolDispatchContext {
+            plugins,
+            tools,
+            surface,
+            host: Arc::new(MockSessionManager::default()),
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        }
+    }
+
     fn test_plugins(provider: Arc<dyn ToolProvider>) -> Arc<PluginSession> {
         PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
             "test_tools",
@@ -520,6 +565,28 @@ mod tests {
             outcome.record.result,
             json!("value: required property missing")
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_unknown_mcp_args_before_provider_execution() {
+        let executed = Arc::new(AtomicUsize::new(0));
+        let outcome = dispatch_tool_call(
+            &strict_mcp_dispatch_context(Arc::clone(&executed)),
+            "mcp__appworld__venmo_show_transactions".to_string(),
+            json!({
+                "min_datetime": "2024-01-01T00:00:00Z",
+                "limit": 20
+            }),
+            None,
+        )
+        .await;
+
+        assert!(!outcome.record.success);
+        assert_eq!(
+            outcome.record.result,
+            json!("min_datetime: unexpected property")
+        );
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

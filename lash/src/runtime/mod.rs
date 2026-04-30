@@ -223,6 +223,8 @@ pub struct AssembledTurn {
     /// timed out without finishing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_finish: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_successor_session_id: Option<String>,
 }
 
 /// Runtime error for unexpected failures.

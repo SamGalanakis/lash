@@ -265,6 +265,36 @@ pub fn truncate_observation_text(text: &str, config: &ToolResultProjectionPlugin
     )
 }
 
+pub fn project_observation_text(
+    text: &str,
+    config: &ToolResultProjectionPluginConfig,
+) -> (String, crate::TextProjectionMetadata) {
+    let projected = truncate_observation_text(text, config);
+    let metadata = observation_projection_metadata(text, &projected, config);
+    (projected, metadata)
+}
+
+pub fn observation_projection_metadata(
+    original: &str,
+    projected: &str,
+    config: &ToolResultProjectionPluginConfig,
+) -> crate::TextProjectionMetadata {
+    let limit_mode = match config.mode {
+        ToolResultProjectionMode::Bytes => "bytes",
+        ToolResultProjectionMode::Tokens => "tokens",
+    };
+    crate::TextProjectionMetadata {
+        truncated: original != projected,
+        original_chars: original.chars().count(),
+        projected_chars: projected.chars().count(),
+        original_lines: original.lines().count(),
+        projected_lines: projected.lines().count(),
+        limit: config.limit,
+        limit_mode: limit_mode.to_string(),
+        max_lines: config.max_lines,
+    }
+}
+
 fn truncate_text(
     text: &str,
     config: &ToolResultProjectionPluginConfig,
@@ -867,5 +897,12 @@ mod tests {
         assert!(projected.contains("truncated"));
         assert!(projected.contains("print output was capped at 12 bytes and 2 lines max"));
         assert!(projected.contains("Use a narrower `print` expression"));
+
+        let (_projected, metadata) =
+            project_observation_text("line one\nline two\nline three", &config);
+        assert!(metadata.truncated);
+        assert_eq!(metadata.original_lines, 3);
+        assert_eq!(metadata.limit, 12);
+        assert_eq!(metadata.limit_mode, "bytes");
     }
 }

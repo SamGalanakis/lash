@@ -46,19 +46,19 @@ pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 pub use lash_sansio::{
-    BaseRenderCache, CheckpointKind, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode,
-    LlmCallError, Message, MessageOrigin, MessageRole, MessageSequence, ModeBuildInput, Part,
-    PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin,
-    PromptContext, PromptContribution, PromptPanel, PromptRequest, PromptResponse,
-    PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
-    PruneState, RenderedPrompt, Response, SessionEvent, TokenUsage, ToolActivation,
-    ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition,
-    ToolDiscoveryMetadata, ToolExecutionMode, ToolImage, ToolResult, ToolSurface,
-    ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, UserInputProvenance,
-    UserInputTransform, append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
-    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
-    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part, shared_parts,
-    turn_limit_exhausted_message,
+    BaseRenderCache, CheckpointKind, CompactToolContract, EffectId, ErrorEnvelope, ExecResponse,
+    ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole, MessageSequence,
+    ModeBuildInput, Part, PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt,
+    PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptPanel, PromptRequest,
+    PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, PruneState, RenderedPrompt, Response, SessionEvent,
+    TextProjectionMetadata, TokenUsage, ToolActivation, ToolAvailability, ToolAvailabilityConfig,
+    ToolCallRecord, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolImage,
+    ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride,
+    UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
+    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
+    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
+    normalized_response_parts, reasoning_part, shared_parts, turn_limit_exhausted_message,
 };
 pub use standard_context_approach::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,

@@ -858,6 +858,25 @@ impl PluginSession {
         )
     }
 
+    pub fn fork_for_child_session(
+        &self,
+        session_id: impl Into<String>,
+        parent_session_id: Option<String>,
+        execution_mode: ExecutionMode,
+        standard_context_approach: Option<crate::StandardContextApproach>,
+    ) -> Result<Arc<PluginSession>, PluginError> {
+        let snapshot = self.snapshot()?;
+        self.host.build_session_with_parent_and_surface(
+            session_id,
+            parent_session_id,
+            execution_mode,
+            standard_context_approach,
+            Some(&snapshot),
+            self.tool_surface_overlay.clone(),
+            self.tools.dynamic_snapshot(),
+        )
+    }
+
     pub fn fork_for_session_with_tool_surface(
         &self,
         session_id: impl Into<String>,

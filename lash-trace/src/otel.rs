@@ -218,8 +218,24 @@ where
                     self.emit_instant(record, "lash.llm", None);
                 }
             }
-            TraceEvent::ToolCallCompleted { duration_ms, .. } => {
-                self.emit_instant(record, "lash.tool", Some(*duration_ms));
+            TraceEvent::ToolCallStarted { .. } => {
+                if let Some(key) = tool_key(&record.event) {
+                    self.start_active(key, record, "lash.tool");
+                } else {
+                    self.emit_instant(record, "lash.tool.started", None);
+                }
+            }
+            TraceEvent::ToolCallCompleted {
+                duration_ms,
+                success,
+                ..
+            } => {
+                let ended = tool_key(&record.event)
+                    .as_deref()
+                    .is_some_and(|key| self.end_active(key, record, *success));
+                if !ended {
+                    self.emit_instant(record, "lash.tool", Some(*duration_ms));
+                }
             }
             TraceEvent::SessionStarted { .. } => self.emit_instant(record, "lash.session", None),
             TraceEvent::PromptBuilt { .. } => self.emit_instant(record, "lash.prompt", None),
@@ -401,6 +417,15 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
             );
             push_payload_json(&mut attrs, options, "lash.error.raw", &error.raw);
         }
+        TraceEvent::ToolCallStarted {
+            call_id,
+            name,
+            args,
+        } => {
+            push_opt(&mut attrs, "lash.tool.call_id", call_id);
+            attrs.push(KeyValue::new("lash.tool.name", name.clone()));
+            push_payload_json(&mut attrs, options, "lash.tool.args_json", args);
+        }
         TraceEvent::ToolCallCompleted {
             call_id,
             name,
@@ -429,9 +454,16 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
         TraceEvent::TurnCompleted {
             status,
             done_reason,
+            handoff,
         } => {
             attrs.push(KeyValue::new("lash.turn.status", status.clone()));
             attrs.push(KeyValue::new("lash.turn.done_reason", done_reason.clone()));
+            if let Some(handoff) = handoff {
+                attrs.push(KeyValue::new(
+                    "lash.turn.handoff.successor_session_id",
+                    handoff.successor_session_id.clone(),
+                ));
+            }
         }
         TraceEvent::Custom { name, payload } => {
             attrs.push(KeyValue::new("lash.custom.name", name.clone()));
@@ -529,6 +561,20 @@ fn llm_key(context: &TraceContext) -> Option<String> {
         .map(|llm_call_id| format!("llm:{llm_call_id}"))
 }
 
+fn tool_key(event: &TraceEvent) -> Option<String> {
+    match event {
+        TraceEvent::ToolCallStarted {
+            call_id: Some(call_id),
+            ..
+        }
+        | TraceEvent::ToolCallCompleted {
+            call_id: Some(call_id),
+            ..
+        } => Some(format!("tool:{call_id}")),
+        _ => None,
+    }
+}
+
 fn record_time(record: &TraceRecord) -> SystemTime {
     DateTime::parse_from_rfc3339(&record.timestamp)
         .map(|time| time.with_timezone(&Utc).into())
@@ -543,6 +589,7 @@ fn event_type(event: &TraceEvent) -> &'static str {
         TraceEvent::LlmCallStarted { .. } => "llm_call_started",
         TraceEvent::LlmCallCompleted { .. } => "llm_call_completed",
         TraceEvent::LlmCallFailed { .. } => "llm_call_failed",
+        TraceEvent::ToolCallStarted { .. } => "tool_call_started",
         TraceEvent::ToolCallCompleted { .. } => "tool_call_completed",
         TraceEvent::ModeStep { .. } => "mode_step",
         TraceEvent::TokenUsage { .. } => "token_usage",
@@ -554,6 +601,7 @@ fn event_type(event: &TraceEvent) -> &'static str {
 fn is_error_event(event: &TraceEvent) -> bool {
     match event {
         TraceEvent::LlmCallFailed { .. } => true,
+        TraceEvent::ToolCallStarted { .. } => false,
         TraceEvent::ToolCallCompleted { success, .. } => !success,
         TraceEvent::TurnCompleted { status, .. } => status == "failed",
         _ => false,
@@ -628,6 +676,7 @@ mod tests {
             TraceEvent::TurnCompleted {
                 status: "failed".to_string(),
                 done_reason: "error".to_string(),
+                handoff: None,
             },
         ));
 

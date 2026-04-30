@@ -140,6 +140,7 @@ impl SubagentToolsProvider {
         if let Some(schema) = output_schema.clone() {
             let termination = RlmTermination::Finish {
                 schema: Some(schema),
+                include_submit_prompt: true,
             };
             policy.execution_mode = lash::ExecutionMode::new("rlm");
             mode_extras = Self::finish_mode_extras(&policy.execution_mode, termination)?;
@@ -252,6 +253,7 @@ impl SubagentToolsProvider {
             mode_extras,
             "baton",
         );
+        request.plugin_mode = SessionPluginMode::InheritCurrent;
         let successor_session_id = request
             .session_id
             .clone()
@@ -305,6 +307,7 @@ impl SubagentToolsProvider {
         let mode_turn_options = Some(lash::ModeTurnOptions::rlm(match output_schema.clone() {
             Some(schema) => RlmTermination::Finish {
                 schema: Some(schema),
+                include_submit_prompt: true,
             },
             None => RlmTermination::ProseWithoutFence,
         }));
@@ -1098,6 +1101,7 @@ mod tests {
                         "properties": { "answer": { "type": "string" } },
                         "required": ["answer"]
                     })),
+                    include_submit_prompt: true,
                 }),
                 ..PersistedSessionState::default()
             },
@@ -1142,6 +1146,7 @@ mod tests {
         assert_eq!(created.len(), 1);
         let request = &created[0];
         assert!(matches!(request.start, SessionStartPoint::Empty));
+        assert_eq!(request.plugin_mode, SessionPluginMode::InheritCurrent);
         assert_eq!(request.parent_session_id.as_deref(), Some("parent"));
         assert_eq!(
             request
@@ -1169,7 +1174,10 @@ mod tests {
             .expect("rlm extras");
         assert!(matches!(
             extras.termination,
-            RlmTermination::Finish { schema: Some(_) }
+            RlmTermination::Finish {
+                schema: Some(_),
+                ..
+            }
         ));
     }
 }
