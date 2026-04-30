@@ -148,7 +148,7 @@ impl ModeProtocolDriverPlugin for RlmProtocolDriver {
 fn print_output_prompt_contribution() -> PromptContribution {
     PromptContribution::execution(
         "Print Output",
-        "`print` output is capped. If you see truncation, print narrower slices or specific fields instead of dumping the whole value.",
+        "`print` output is capped. Keep full tool results in variables; print only lengths, selected fields, samples, or slices. Do not print large objects just to hand-copy IDs back into code.",
     )
 }
 

@@ -280,13 +280,16 @@ pub struct ModelTool {
 
 const COMPACT_TOOL_EXAMPLE_LIMIT: usize = 2;
 const COMPACT_TOOL_EXAMPLE_CHAR_LIMIT: usize = 240;
-const COMPACT_SCHEMA_FIELD_LIMIT: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompactToolContract {
     pub name: String,
     pub signature: String,
     pub returns: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub return_fields: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -301,6 +304,26 @@ impl CompactToolContract {
         }
         if !self.description.trim().is_empty() {
             sections.push(self.description.trim().to_string());
+        }
+        if !self.parameters.is_empty() {
+            sections.push(format!(
+                "Parameters:\n{}",
+                self.parameters
+                    .iter()
+                    .filter_map(compact_doc_line)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        if !self.return_fields.is_empty() {
+            sections.push(format!(
+                "Return fields:\n{}",
+                self.return_fields
+                    .iter()
+                    .filter_map(compact_doc_line)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
         }
         if !self.examples.is_empty() {
             sections.push(format!("Examples: {}", self.examples.join("; ")));
@@ -416,6 +439,8 @@ impl ToolDefinition {
             name: self.name.clone(),
             signature: self.input_signature(),
             returns: self.output_summary(),
+            parameters: self.parameter_metadata(),
+            return_fields: return_field_metadata(&self.output_schema),
             description: self.description.trim().to_string(),
             examples: compact_examples(&self.examples, example_limit),
         }
@@ -572,6 +597,109 @@ impl ParameterDoc {
         if let Some(value) = self.item_type {
             out.insert("items".to_string(), serde_json::json!(value));
         }
+        out.insert(
+            "signature".to_string(),
+            serde_json::json!(parameter_signature_from_value(&out)),
+        );
+        serde_json::Value::Object(out)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct FieldDoc {
+    path: String,
+    type_label: String,
+    required: bool,
+    nullable: bool,
+    description: Option<String>,
+    enum_values: Vec<serde_json::Value>,
+    minimum: Option<serde_json::Value>,
+    maximum: Option<serde_json::Value>,
+    min_length: Option<u64>,
+    max_length: Option<u64>,
+    min_items: Option<u64>,
+    max_items: Option<u64>,
+    item_type: Option<String>,
+}
+
+impl FieldDoc {
+    fn from_schema(path: String, schema: &serde_json::Value, required: bool) -> Self {
+        let (type_label, nullable) = schema_type_label_and_nullability(schema);
+        Self {
+            path,
+            type_label,
+            required,
+            nullable,
+            description: schema
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            enum_values: schema
+                .get("enum")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|value| !value.is_null())
+                .collect(),
+            minimum: schema
+                .get("minimum")
+                .or_else(|| schema.get("exclusiveMinimum"))
+                .cloned(),
+            maximum: schema
+                .get("maximum")
+                .or_else(|| schema.get("exclusiveMaximum"))
+                .cloned(),
+            min_length: schema.get("minLength").and_then(serde_json::Value::as_u64),
+            max_length: schema.get("maxLength").and_then(serde_json::Value::as_u64),
+            min_items: schema.get("minItems").and_then(serde_json::Value::as_u64),
+            max_items: schema.get("maxItems").and_then(serde_json::Value::as_u64),
+            item_type: schema
+                .get("items")
+                .map(schema_type_label)
+                .filter(|value| value != "any"),
+        }
+    }
+
+    fn to_value(self) -> serde_json::Value {
+        let mut out = serde_json::Map::new();
+        out.insert("path".to_string(), serde_json::json!(self.path));
+        out.insert("type".to_string(), serde_json::json!(self.type_label));
+        out.insert("required".to_string(), serde_json::json!(self.required));
+        if self.nullable {
+            out.insert("nullable".to_string(), serde_json::json!(true));
+        }
+        if let Some(description) = self.description.filter(|value| !value.trim().is_empty()) {
+            out.insert("description".to_string(), serde_json::json!(description));
+        }
+        if !self.enum_values.is_empty() {
+            out.insert("enum".to_string(), serde_json::json!(self.enum_values));
+        }
+        if let Some(value) = self.minimum {
+            out.insert("minimum".to_string(), value);
+        }
+        if let Some(value) = self.maximum {
+            out.insert("maximum".to_string(), value);
+        }
+        if let Some(value) = self.min_length {
+            out.insert("min_length".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.max_length {
+            out.insert("max_length".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.min_items {
+            out.insert("min_items".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.max_items {
+            out.insert("max_items".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.item_type {
+            out.insert("items".to_string(), serde_json::json!(value));
+        }
+        out.insert(
+            "signature".to_string(),
+            serde_json::json!(field_signature_from_value(&out)),
+        );
         serde_json::Value::Object(out)
     }
 }
@@ -594,6 +722,207 @@ fn schema_parameter_docs(schema: &serde_json::Value) -> Vec<ParameterDoc> {
         .iter()
         .map(|(name, schema)| parameter_doc(name, schema, required.contains(name.as_str())))
         .collect()
+}
+
+fn return_field_metadata(schema: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut fields = Vec::new();
+    collect_return_fields("", schema, true, &mut fields);
+    merge_return_fields(fields)
+        .into_iter()
+        .map(FieldDoc::to_value)
+        .collect()
+}
+
+fn collect_return_fields(
+    path: &str,
+    schema: &serde_json::Value,
+    required: bool,
+    fields: &mut Vec<FieldDoc>,
+) {
+    if let Some(any_of) = schema
+        .get("anyOf")
+        .or_else(|| schema.get("oneOf"))
+        .and_then(serde_json::Value::as_array)
+    {
+        if should_emit_return_field(path, schema) {
+            fields.push(FieldDoc::from_schema(path.to_string(), schema, required));
+        }
+        for subschema in any_of {
+            collect_return_fields(path, subschema, required, fields);
+        }
+        return;
+    }
+
+    let schema_type = schema
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            schema
+                .get("type")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|types| {
+                    let non_null = types
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .filter(|ty| *ty != "null")
+                        .collect::<Vec<_>>();
+                    if non_null.len() == 1 {
+                        Some(non_null[0].to_string())
+                    } else {
+                        None
+                    }
+                })
+        });
+
+    match schema_type.as_deref() {
+        Some("object") => {
+            if should_emit_return_field(path, schema) {
+                fields.push(FieldDoc::from_schema(path.to_string(), schema, required));
+            }
+            let required_properties = schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            if let Some(properties) = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                for (name, property_schema) in properties {
+                    collect_return_fields(
+                        &join_compact_path(path, name),
+                        property_schema,
+                        required_properties.contains(name.as_str()),
+                        fields,
+                    );
+                }
+            }
+        }
+        Some("array") => {
+            if should_emit_return_field(path, schema) {
+                fields.push(FieldDoc::from_schema(path.to_string(), schema, required));
+            }
+            if let Some(items) = schema.get("items") {
+                collect_return_fields(&format!("{path}[]"), items, true, fields);
+            }
+        }
+        _ => {
+            if !path.is_empty() {
+                fields.push(FieldDoc::from_schema(path.to_string(), schema, required));
+            }
+        }
+    }
+}
+
+fn should_emit_return_field(path: &str, schema: &serde_json::Value) -> bool {
+    !path.is_empty()
+        && (schema
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+            || schema.get("enum").is_some()
+            || schema.get("minimum").is_some()
+            || schema.get("maximum").is_some()
+            || schema.get("minLength").is_some()
+            || schema.get("maxLength").is_some()
+            || schema.get("minItems").is_some()
+            || schema.get("maxItems").is_some())
+}
+
+fn join_compact_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}.{child}")
+    }
+}
+
+fn merge_return_fields(fields: Vec<FieldDoc>) -> Vec<FieldDoc> {
+    let mut merged = Vec::<FieldDoc>::new();
+    for field in fields {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.path == field.path)
+        {
+            existing.merge(field);
+        } else {
+            merged.push(field);
+        }
+    }
+    merged
+}
+
+impl FieldDoc {
+    fn merge(&mut self, other: FieldDoc) {
+        self.type_label = merge_type_labels(&self.type_label, &other.type_label);
+        self.required |= other.required;
+        self.nullable |= other.nullable || type_label_is_nullable(&other.type_label);
+        if self.nullable && !type_label_is_nullable(&self.type_label) {
+            self.type_label = merge_type_labels(&self.type_label, "null");
+        }
+        if self
+            .description
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            self.description = other.description;
+        }
+        for value in other.enum_values {
+            if !self.enum_values.iter().any(|existing| existing == &value) {
+                self.enum_values.push(value);
+            }
+        }
+        if self.minimum.is_none() {
+            self.minimum = other.minimum;
+        }
+        if self.maximum.is_none() {
+            self.maximum = other.maximum;
+        }
+        if self.min_length.is_none() {
+            self.min_length = other.min_length;
+        }
+        if self.max_length.is_none() {
+            self.max_length = other.max_length;
+        }
+        if self.min_items.is_none() {
+            self.min_items = other.min_items;
+        }
+        if self.max_items.is_none() {
+            self.max_items = other.max_items;
+        }
+        if self.item_type.is_none() {
+            self.item_type = other.item_type;
+        }
+    }
+}
+
+fn merge_type_labels(left: &str, right: &str) -> String {
+    let mut labels = Vec::<String>::new();
+    for label in left.split(" | ").chain(right.split(" | ")) {
+        let label = label.trim();
+        if label.is_empty() || label == "any" && (!left.is_empty() || !right.is_empty()) {
+            continue;
+        }
+        if !labels.iter().any(|existing| existing == label) {
+            labels.push(label.to_string());
+        }
+    }
+    if labels.is_empty() {
+        return "any".to_string();
+    }
+    labels.sort_by(|left, right| match (*left == "null", *right == "null") {
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => std::cmp::Ordering::Equal,
+    });
+    labels.join(" | ")
+}
+
+fn type_label_is_nullable(label: &str) -> bool {
+    label.split(" | ").any(|part| part.trim() == "null")
 }
 
 fn parameter_doc(name: &str, schema: &serde_json::Value, required: bool) -> ParameterDoc {
@@ -633,6 +962,96 @@ fn parameter_doc(name: &str, schema: &serde_json::Value, required: bool) -> Para
             .map(schema_type_label)
             .filter(|value| value != "any"),
     }
+}
+
+fn compact_doc_line(value: &serde_json::Value) -> Option<String> {
+    let signature = value.get("signature")?.as_str()?.trim();
+    if signature.is_empty() {
+        return None;
+    }
+    let description = value
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some(match description {
+        Some(description) => format!("- `{signature}` — {description}"),
+        None => format!("- `{signature}`"),
+    })
+}
+
+fn parameter_signature_from_value(map: &serde_json::Map<String, serde_json::Value>) -> String {
+    let name = map
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    doc_signature_from_value(name, map)
+}
+
+fn field_signature_from_value(map: &serde_json::Map<String, serde_json::Value>) -> String {
+    let path = map
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    doc_signature_from_value(path, map)
+}
+
+fn doc_signature_from_value(
+    name: &str,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let ty = map
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("any");
+    let required = map
+        .get("required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut out = if required {
+        format!("{name}: {ty}")
+    } else {
+        format!("{name}?: {ty}")
+    };
+
+    let mut constraints = Vec::new();
+    if let Some(values) = map.get("enum").and_then(serde_json::Value::as_array) {
+        constraints.push(format!(
+            "in {}",
+            values
+                .iter()
+                .map(display_default_value)
+                .collect::<Vec<_>>()
+                .join("|")
+        ));
+    }
+    if let Some(value) = map.get("minimum") {
+        constraints.push(format!(">= {}", display_default_value(value)));
+    }
+    if let Some(value) = map.get("maximum") {
+        constraints.push(format!("<= {}", display_default_value(value)));
+    }
+    if let Some(value) = map.get("min_length").and_then(serde_json::Value::as_u64) {
+        constraints.push(format!("min_len {value}"));
+    }
+    if let Some(value) = map.get("max_length").and_then(serde_json::Value::as_u64) {
+        constraints.push(format!("max_len {value}"));
+    }
+    if let Some(value) = map.get("min_items").and_then(serde_json::Value::as_u64) {
+        constraints.push(format!("min_items {value}"));
+    }
+    if let Some(value) = map.get("max_items").and_then(serde_json::Value::as_u64) {
+        constraints.push(format!("max_items {value}"));
+    }
+    if !constraints.is_empty() {
+        out.push(' ');
+        out.push_str(&constraints.join(" "));
+    }
+    if let Some(default) = map.get("default") {
+        out.push_str(" = ");
+        out.push_str(&display_default_value(default));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -755,14 +1174,488 @@ mod tests {
             contract.returns,
             "record{matches: list[str], next_page?: str | null}"
         );
+        assert_eq!(
+            contract.parameters,
+            vec![
+                serde_json::json!({
+                    "name": "limit",
+                    "type": "int",
+                    "required": false,
+                    "default": 5,
+                    "maximum": 10,
+                    "signature": "limit?: int <= 10 = 5"
+                }),
+                serde_json::json!({
+                    "name": "query",
+                    "type": "str",
+                    "required": true,
+                    "signature": "query: str"
+                }),
+            ]
+        );
         assert_eq!(contract.examples.len(), 2);
 
         let docs = ToolDefinition::format_tool_docs(&[tool]);
         assert!(docs.contains("### `search_docs(limit?: int <= 10 = 5, query: str)`"));
         assert!(docs.contains("Returns: record{matches: list[str], next_page?: str | null}"));
+        assert!(docs.contains("Parameters:\n- `limit?: int <= 10 = 5`\n- `query: str`"));
         assert!(docs.contains(
             "Examples: search_docs(query=\"rust\"); search_docs(query=\"rust\", limit=3)"
         ));
+    }
+
+    #[test]
+    fn json_schema_loaded_contract_matches_hardcoded_renderer() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "mcp__appworld__spotify_search_songs",
+            "description": "[MCP appworld] Search for songs with a query.",
+            "examples": ["search songs by genre"],
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "access_token": {
+                        "type": "string",
+                        "description": "Access token obtained from spotify app login."
+                    },
+                    "genre": {
+                        "type": ["string", "null"],
+                        "description": "Only include songs from this genre.",
+                        "default": null
+                    },
+                    "page_limit": {
+                        "type": "integer",
+                        "description": "Maximum number of songs to return.",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 5
+                    },
+                    "sort_by": {
+                        "type": ["string", "null"],
+                        "description": "Field to sort by. Prefix with '-' for descending order.",
+                        "default": null
+                    }
+                },
+                "required": ["access_token"],
+                "additionalProperties": false
+            },
+            "output_schema": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "response": {
+                                "type": "array",
+                                "description": "Matched songs.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "album_id": {
+                                            "type": ["integer", "null"],
+                                            "description": "Album identifier when the song belongs to an album."
+                                        },
+                                        "album_title": { "type": ["string", "null"] },
+                                        "artists": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "id": { "type": "integer" },
+                                                    "name": { "type": "string" }
+                                                },
+                                                "required": ["id", "name"]
+                                            }
+                                        },
+                                        "duration": { "type": "integer" },
+                                        "genre": { "type": "string" },
+                                        "like_count": { "type": "integer" },
+                                        "play_count": {
+                                            "type": "integer",
+                                            "description": "Number of times the song was played.",
+                                            "minimum": 0
+                                        },
+                                        "rating": { "type": "number" },
+                                        "release_date": {
+                                            "type": "string",
+                                            "description": "Song release date in YYYY-MM-DD format."
+                                        },
+                                        "song_id": {
+                                            "type": "integer",
+                                            "description": "Stable song identifier."
+                                        },
+                                        "title": {
+                                            "type": "string",
+                                            "description": "Song title."
+                                        }
+                                    },
+                                    "required": [
+                                        "album_id",
+                                        "album_title",
+                                        "artists",
+                                        "duration",
+                                        "genre",
+                                        "like_count",
+                                        "play_count",
+                                        "rating",
+                                        "release_date",
+                                        "song_id",
+                                        "title"
+                                    ]
+                                }
+                            }
+                        },
+                        "required": ["response"]
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "response": {
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string",
+                                        "description": "Failure or status message."
+                                    }
+                                },
+                                "required": ["message"]
+                            }
+                        },
+                        "required": ["response"]
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let contract = tool.compact_contract();
+        assert_eq!(
+            serde_json::to_value(&contract).unwrap(),
+            serde_json::json!({
+                "name": "mcp__appworld__spotify_search_songs",
+                "signature": "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null)",
+                "returns": "record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}",
+                "parameters": [
+                    {
+                        "name": "access_token",
+                        "type": "str",
+                        "required": true,
+                        "description": "Access token obtained from spotify app login.",
+                        "signature": "access_token: str"
+                    },
+                    {
+                        "name": "genre",
+                        "type": "str | null",
+                        "required": false,
+                        "nullable": true,
+                        "description": "Only include songs from this genre.",
+                        "default": null,
+                        "signature": "genre?: str | null = null"
+                    },
+                    {
+                        "name": "page_limit",
+                        "type": "int",
+                        "required": false,
+                        "description": "Maximum number of songs to return.",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 20,
+                        "signature": "page_limit?: int >= 1 <= 20 = 5"
+                    },
+                    {
+                        "name": "sort_by",
+                        "type": "str | null",
+                        "required": false,
+                        "nullable": true,
+                        "description": "Field to sort by. Prefix with '-' for descending order.",
+                        "default": null,
+                        "signature": "sort_by?: str | null = null"
+                    }
+                ],
+                "return_fields": [
+                    {
+                        "path": "response",
+                        "type": "list[record]",
+                        "required": true,
+                        "description": "Matched songs.",
+                        "items": "record",
+                        "signature": "response: list[record]"
+                    },
+                    {
+                        "path": "response[].album_id",
+                        "type": "int | null",
+                        "required": true,
+                        "nullable": true,
+                        "description": "Album identifier when the song belongs to an album.",
+                        "signature": "response[].album_id: int | null"
+                    },
+                    {
+                        "path": "response[].album_title",
+                        "type": "str | null",
+                        "required": true,
+                        "nullable": true,
+                        "signature": "response[].album_title: str | null"
+                    },
+                    {
+                        "path": "response[].artists[].id",
+                        "type": "int",
+                        "required": true,
+                        "signature": "response[].artists[].id: int"
+                    },
+                    {
+                        "path": "response[].artists[].name",
+                        "type": "str",
+                        "required": true,
+                        "signature": "response[].artists[].name: str"
+                    },
+                    {
+                        "path": "response[].duration",
+                        "type": "int",
+                        "required": true,
+                        "signature": "response[].duration: int"
+                    },
+                    {
+                        "path": "response[].genre",
+                        "type": "str",
+                        "required": true,
+                        "signature": "response[].genre: str"
+                    },
+                    {
+                        "path": "response[].like_count",
+                        "type": "int",
+                        "required": true,
+                        "signature": "response[].like_count: int"
+                    },
+                    {
+                        "path": "response[].play_count",
+                        "type": "int",
+                        "required": true,
+                        "description": "Number of times the song was played.",
+                        "minimum": 0,
+                        "signature": "response[].play_count: int >= 0"
+                    },
+                    {
+                        "path": "response[].rating",
+                        "type": "float",
+                        "required": true,
+                        "signature": "response[].rating: float"
+                    },
+                    {
+                        "path": "response[].release_date",
+                        "type": "str",
+                        "required": true,
+                        "description": "Song release date in YYYY-MM-DD format.",
+                        "signature": "response[].release_date: str"
+                    },
+                    {
+                        "path": "response[].song_id",
+                        "type": "int",
+                        "required": true,
+                        "description": "Stable song identifier.",
+                        "signature": "response[].song_id: int"
+                    },
+                    {
+                        "path": "response[].title",
+                        "type": "str",
+                        "required": true,
+                        "description": "Song title.",
+                        "signature": "response[].title: str"
+                    },
+                    {
+                        "path": "response.message",
+                        "type": "str",
+                        "required": true,
+                        "description": "Failure or status message.",
+                        "signature": "response.message: str"
+                    }
+                ],
+                "description": "[MCP appworld] Search for songs with a query.",
+                "examples": ["search songs by genre"]
+            })
+        );
+
+        assert_eq!(
+            contract.render_markdown(),
+            "### `mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null)`\nReturns: record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\n[MCP appworld] Search for songs with a query.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message.\nExamples: search songs by genre"
+        );
+    }
+
+    #[test]
+    fn json_schema_loaded_contract_merges_nullable_anyof_return_fields() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "mcp__appworld__spotify_show_album_library",
+            "description": "[MCP appworld] Search or show a list of albums in your album library.",
+            "examples": ["show album library"],
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "access_token": {
+                        "type": "string",
+                        "description": "Access token obtained from spotify app login."
+                    },
+                    "page_index": {
+                        "type": "integer",
+                        "description": "The index of the page to return.",
+                        "minimum": 0,
+                        "default": 0
+                    },
+                    "page_limit": {
+                        "type": "integer",
+                        "description": "The maximum number of results to return per page.",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 5
+                    }
+                },
+                "required": ["access_token"]
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "anyOf": [
+                            {
+                                "type": "array",
+                                "description": "Albums in the user's library.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "added_at": {
+                                            "description": "When the album was added to the library.",
+                                            "anyOf": [
+                                                { "type": "string" },
+                                                { "type": "null" }
+                                            ]
+                                        },
+                                        "album_id": { "type": "integer" },
+                                        "genre": {
+                                            "type": "string",
+                                            "description": "Album genre.",
+                                            "minLength": 1
+                                        },
+                                        "song_ids": {
+                                            "type": "array",
+                                            "items": { "type": "integer" }
+                                        },
+                                        "title": {
+                                            "type": "string",
+                                            "minLength": 1
+                                        }
+                                    },
+                                    "required": ["added_at", "album_id", "genre", "song_ids", "title"]
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string",
+                                        "description": "Failure or status message."
+                                    }
+                                },
+                                "required": ["message"]
+                            }
+                        ]
+                    }
+                },
+                "required": ["response"]
+            }
+        }))
+        .unwrap();
+
+        let contract = tool.compact_contract();
+        assert_eq!(
+            serde_json::to_value(&contract).unwrap(),
+            serde_json::json!({
+                "name": "mcp__appworld__spotify_show_album_library",
+                "signature": "mcp__appworld__spotify_show_album_library(access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5)",
+                "returns": "record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}",
+                "parameters": [
+                    {
+                        "name": "access_token",
+                        "type": "str",
+                        "required": true,
+                        "description": "Access token obtained from spotify app login.",
+                        "signature": "access_token: str"
+                    },
+                    {
+                        "name": "page_index",
+                        "type": "int",
+                        "required": false,
+                        "description": "The index of the page to return.",
+                        "default": 0,
+                        "minimum": 0,
+                        "signature": "page_index?: int >= 0 = 0"
+                    },
+                    {
+                        "name": "page_limit",
+                        "type": "int",
+                        "required": false,
+                        "description": "The maximum number of results to return per page.",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 20,
+                        "signature": "page_limit?: int >= 1 <= 20 = 5"
+                    }
+                ],
+                "return_fields": [
+                    {
+                        "path": "response",
+                        "type": "list[record]",
+                        "required": true,
+                        "description": "Albums in the user's library.",
+                        "items": "record",
+                        "signature": "response: list[record]"
+                    },
+                    {
+                        "path": "response[].added_at",
+                        "type": "str | null",
+                        "required": true,
+                        "nullable": true,
+                        "description": "When the album was added to the library.",
+                        "signature": "response[].added_at: str | null"
+                    },
+                    {
+                        "path": "response[].album_id",
+                        "type": "int",
+                        "required": true,
+                        "signature": "response[].album_id: int"
+                    },
+                    {
+                        "path": "response[].genre",
+                        "type": "str",
+                        "required": true,
+                        "description": "Album genre.",
+                        "min_length": 1,
+                        "signature": "response[].genre: str min_len 1"
+                    },
+                    {
+                        "path": "response[].song_ids[]",
+                        "type": "int",
+                        "required": true,
+                        "signature": "response[].song_ids[]: int"
+                    },
+                    {
+                        "path": "response[].title",
+                        "type": "str",
+                        "required": true,
+                        "min_length": 1,
+                        "signature": "response[].title: str min_len 1"
+                    },
+                    {
+                        "path": "response.message",
+                        "type": "str",
+                        "required": true,
+                        "description": "Failure or status message.",
+                        "signature": "response.message: str"
+                    }
+                ],
+                "description": "[MCP appworld] Search or show a list of albums in your album library.",
+                "examples": ["show album library"]
+            })
+        );
+        assert_eq!(
+            contract.render_markdown(),
+            "### `mcp__appworld__spotify_show_album_library(access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5)`\nReturns: record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}\n[MCP appworld] Search or show a list of albums in your album library.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `page_index?: int >= 0 = 0` — The index of the page to return.\n- `page_limit?: int >= 1 <= 20 = 5` — The maximum number of results to return per page.\nReturn fields:\n- `response: list[record]` — Albums in the user's library.\n- `response[].added_at: str | null` — When the album was added to the library.\n- `response[].album_id: int`\n- `response[].genre: str min_len 1` — Album genre.\n- `response[].song_ids[]: int`\n- `response[].title: str min_len 1`\n- `response.message: str` — Failure or status message.\nExamples: show album library"
+        );
     }
 
     #[test]
@@ -903,9 +1796,8 @@ fn compact_record_label(schema: &serde_json::Value) -> String {
         .flatten()
         .filter_map(serde_json::Value::as_str)
         .collect::<std::collections::BTreeSet<_>>();
-    let mut fields = properties
+    let fields = properties
         .iter()
-        .take(COMPACT_SCHEMA_FIELD_LIMIT)
         .map(|(name, field_schema)| {
             let suffix = if required.contains(name.as_str()) {
                 ""
@@ -915,9 +1807,6 @@ fn compact_record_label(schema: &serde_json::Value) -> String {
             format!("{name}{suffix}: {}", compact_schema_label(field_schema))
         })
         .collect::<Vec<_>>();
-    if properties.len() > COMPACT_SCHEMA_FIELD_LIMIT {
-        fields.push("...".to_string());
-    }
     format!("record{{{}}}", fields.join(", "))
 }
 

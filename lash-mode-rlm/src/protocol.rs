@@ -105,6 +105,8 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 const RLM_DECOMPOSITION_SECTION: &str = r#"### Decomposition
 
 - Break big tasks into small steps. Prefer narrow `print`-then-continue checks over brute-force scans.
+- Keep full results in variables and compute over them in lashlang. Do not `print` a large result just to copy IDs or fields back into code; filter, map, count, and pass variables directly into later tool calls.
+- Print decision-sized views: lengths, keys, selected fields, a few records, or a slice. If you need many IDs, print a count and small sample, not the whole list.
 - Use `print` to verify a subquestion before acting on it. Use `submit` only when you are ready to deliver the final answer.
 - Use `start`/`await` when a long-running tool can progress in the background while you do other work — especially `wait_agent`. Prefer record-shaped fanout (`await { a: h1, b: h2 }`) so resolved results are named.
 

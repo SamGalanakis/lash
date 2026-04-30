@@ -327,6 +327,12 @@ impl CatalogTool {
         out.insert("name".to_string(), json!(contract.name));
         out.insert("signature".to_string(), json!(contract.signature));
         out.insert("returns".to_string(), json!(contract.returns));
+        if !contract.parameters.is_empty() {
+            out.insert("parameters".to_string(), json!(contract.parameters));
+        }
+        if !contract.return_fields.is_empty() {
+            out.insert("return_fields".to_string(), json!(contract.return_fields));
+        }
         if !contract.description.is_empty() {
             out.insert("description".to_string(), json!(contract.description));
         }
@@ -379,18 +385,21 @@ impl DiscoveryDoc {
             &mut fields,
             "params",
             vec![json_field(&tool.raw, "params")],
-            0.45,
+            0.3,
             false,
         );
         push_field(
             &mut fields,
-            "schema",
-            vec![
-                json_field(&tool.raw, "params"),
-                json_field(&tool.raw, "input_schema"),
-                json_field(&tool.raw, "output_schema"),
-            ],
-            0.15,
+            "input_fields",
+            vec![schema_index_text(tool.raw.get("input_schema"))],
+            0.9,
+            false,
+        );
+        push_field(
+            &mut fields,
+            "output_fields",
+            vec![schema_index_text(tool.raw.get("output_schema"))],
+            2.4,
             false,
         );
         push_field(
@@ -511,24 +520,89 @@ fn adjusted_score(
     let name_hits = exact_field_token_hits(query_tokens, doc, "name");
     let alias_hits = exact_field_token_hits(query_tokens, doc, "aliases");
     let description_hits = exact_field_token_hits(query_tokens, doc, "description");
+    let output_hits = exact_field_token_hits(query_tokens, doc, "output_fields");
     let primary_hits = name_hits + alias_hits + description_hits;
 
     let mut score = base_score;
     score += name_hits as f64 * 1.5;
     score += alias_hits as f64 * 1.2;
+    score += output_hits.min(query_tokens.len()) as f64 * 0.45;
+    score = adjust_for_payment_action_intent(score, query_tokens, doc);
     if name_hits + alias_hits == query_tokens.len() {
         score += 4.0;
     }
 
-    let param_only = primary_hits == 0
+    let input_only = primary_hits == 0
+        && output_hits == 0
         && matched_fields
             .iter()
-            .any(|field| field == "params" || field == "schema");
-    if param_only {
+            .any(|field| field == "params" || field == "input_fields");
+    if input_only {
         score *= 0.35;
     }
 
     score
+}
+
+fn adjust_for_payment_action_intent(
+    score: f64,
+    query_tokens: &[String],
+    doc: &DiscoveryDoc,
+) -> f64 {
+    if !has_payment_action_intent(query_tokens) || has_query_token(query_tokens, "request") {
+        return score;
+    }
+
+    let mut adjusted = score;
+    if doc_has_any_token(doc, &["transaction"])
+        || doc_has_phrase(doc, "send money")
+        || doc_has_phrase(doc, "pay user")
+    {
+        adjusted += 6.0;
+    }
+    if doc_has_any_token(doc, &["remind", "reminder"]) {
+        adjusted *= 0.05;
+    } else if doc_has_any_token(doc, &["request"]) {
+        adjusted *= 0.8;
+    }
+    if doc_has_phrase(doc, "venmo balance") || doc_has_phrase(doc, "bank transfer") {
+        adjusted *= 0.65;
+    }
+    adjusted
+}
+
+fn has_payment_action_intent(query_tokens: &[String]) -> bool {
+    let has_send = has_query_token(query_tokens, "send");
+    let has_payment = has_query_token(query_tokens, "payment");
+    let has_money = has_query_token(query_tokens, "money");
+    let has_make = has_query_token(query_tokens, "make");
+    let has_pay = has_query_token(query_tokens, "pay");
+    let has_transfer = has_query_token(query_tokens, "transfer");
+
+    (has_send && (has_payment || has_money))
+        || (has_make && has_payment)
+        || has_pay
+        || (has_transfer && has_money)
+}
+
+fn has_query_token(query_tokens: &[String], needle: &str) -> bool {
+    query_tokens.iter().any(|token| token == needle)
+}
+
+fn doc_has_any_token(doc: &DiscoveryDoc, needles: &[&str]) -> bool {
+    doc.fields.iter().any(|field| {
+        field
+            .tokens
+            .iter()
+            .any(|token| needles.iter().any(|needle| token == needle))
+    })
+}
+
+fn doc_has_phrase(doc: &DiscoveryDoc, phrase: &str) -> bool {
+    let phrase = phrase.to_ascii_lowercase();
+    doc.fields
+        .iter()
+        .any(|field| field.raw.to_ascii_lowercase().contains(&phrase))
 }
 
 fn exact_field_token_hits(query_tokens: &[String], doc: &DiscoveryDoc, field_name: &str) -> usize {
@@ -610,6 +684,75 @@ fn json_field(value: &Value, key: &str) -> String {
     value.get(key).map(Value::to_string).unwrap_or_default()
 }
 
+fn schema_index_text(schema: Option<&Value>) -> String {
+    let mut parts = Vec::new();
+    if let Some(schema) = schema {
+        collect_schema_index_text("", schema, &mut parts);
+    }
+    parts.join("\n")
+}
+
+fn collect_schema_index_text(path: &str, schema: &Value, parts: &mut Vec<String>) {
+    if let Some(any_of) = schema
+        .get("anyOf")
+        .or_else(|| schema.get("oneOf"))
+        .or_else(|| schema.get("allOf"))
+        .and_then(Value::as_array)
+    {
+        for subschema in any_of {
+            collect_schema_index_text(path, subschema, parts);
+        }
+    }
+
+    if !path.is_empty() {
+        parts.push(path.to_string());
+    }
+    if let Some(description) = schema
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    {
+        parts.push(description.to_string());
+    }
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        parts.extend(values.iter().filter_map(enum_index_value));
+    }
+
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (name, property_schema) in properties {
+            let field_path = join_schema_path(path, name);
+            collect_schema_index_text(&field_path, property_schema, parts);
+        }
+    }
+
+    if let Some(items) = schema.get("items") {
+        let item_path = if path.is_empty() {
+            "[]".to_string()
+        } else {
+            format!("{path}[]")
+        };
+        collect_schema_index_text(&item_path, items, parts);
+    }
+}
+
+fn join_schema_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}.{child}")
+    }
+}
+
+fn enum_index_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 fn round_score(score: f64) -> f64 {
     (score * 100.0).round() / 100.0
 }
@@ -658,11 +801,11 @@ fn search_tools_definition() -> ToolDefinition {
 
     ToolDefinition::native::<SearchToolsArgs>(
         "search_tools",
-        "Search catalogued tool names, namespaces, aliases, descriptions, parameters, and examples. Use this when the tool you need is not showcased in the prompt.",
+        "Search catalogued tool names, namespaces, aliases, descriptions, parameters, and examples. Use this when the tool you need is not showcased in the prompt. Query with concise keywords and intent phrases, not a full sentence: include the app/domain, action, object, and important fields or constraints.",
     )
         .with_examples(vec![
-            "search_tools(query=\"read files\")".into(),
-            "search_tools(query=\"songs\", namespace=\"appworld\")".into(),
+            "search_tools(query=\"spotify song details play_count genre title song_id\", namespace=\"appworld\")".into(),
+            "search_tools(query=\"venmo send money private payment_card receiver_email\", namespace=\"appworld\")".into(),
         ])
         .with_availability(ToolAvailabilityConfig::documented())
         .with_activation(ToolActivation::Always)
@@ -918,6 +1061,116 @@ mod tests {
         tool
     }
 
+    fn ranked_names(results: &[Value]) -> Vec<String> {
+        results
+            .iter()
+            .map(|result| {
+                result
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .expect("ranked result name")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn venmo_payment_tools() -> Vec<Value> {
+        let mut create_transaction = catalog_tool_with_metadata(
+            "mcp__appworld__venmo_create_transaction",
+            "Create a Venmo transaction to send money to another user.",
+            Some("appworld"),
+            vec!["venmo_send_money", "pay_user"],
+        );
+        create_transaction.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "receiver_email": {
+                        "type": "string",
+                        "description": "Email of the person receiving the money."
+                    },
+                    "payment_card_id": {
+                        "type": "integer",
+                        "description": "Payment card to fund the transaction."
+                    },
+                    "private": {
+                        "type": "boolean",
+                        "description": "Whether the transaction is private."
+                    }
+                },
+                "required": ["access_token", "receiver_email", "payment_card_id"]
+            }),
+        );
+
+        let mut create_request = catalog_tool_with_metadata(
+            "mcp__appworld__venmo_create_payment_request",
+            "Create a Venmo payment request asking another user to pay you.",
+            Some("appworld"),
+            vec!["venmo_request_payment"],
+        );
+        create_request.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "payer_email": {
+                        "type": "string",
+                        "description": "Email of the person who should pay the request."
+                    },
+                    "amount": {"type": "number"}
+                },
+                "required": ["access_token", "payer_email", "amount"]
+            }),
+        );
+
+        let mut remind_request = catalog_tool_with_metadata(
+            "mcp__appworld__venmo_remind_payment_request",
+            "Send a reminder for a pending Venmo payment request.",
+            Some("appworld"),
+            vec!["venmo_remind_request"],
+        );
+        remind_request.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "request_id": {"type": "integer"}
+                },
+                "required": ["access_token", "request_id"]
+            }),
+        );
+
+        let mut add_balance = catalog_tool_with_metadata(
+            "mcp__appworld__venmo_add_to_venmo_balance",
+            "Add money from a funding source to your Venmo balance.",
+            Some("appworld"),
+            vec!["venmo_balance_transfer"],
+        );
+        add_balance.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "amount": {"type": "number"},
+                    "payment_card_id": {"type": "integer"}
+                },
+                "required": ["access_token", "amount", "payment_card_id"]
+            }),
+        );
+
+        vec![
+            create_request,
+            remind_request,
+            add_balance,
+            create_transaction,
+        ]
+    }
+
     #[test]
     fn exact_name_beats_fuzzy_typo() {
         let index = ToolDiscoveryIndex::build(
@@ -1047,6 +1300,277 @@ mod tests {
     }
 
     #[test]
+    fn ranking_prefers_output_fields_over_input_filter_matches() {
+        let mut filter_songs = catalog_tool_with_metadata(
+            "mcp__appworld__spotify_filter_songs",
+            "Search Spotify songs by filters.",
+            Some("appworld"),
+            vec!["spotify_filter_songs"],
+        );
+        filter_songs.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "genre": {
+                        "type": "string",
+                        "description": "Genre filter."
+                    },
+                    "play_count": {
+                        "type": "integer",
+                        "description": "Minimum play count filter."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Title filter."
+                    }
+                },
+                "required": ["access_token"]
+            }),
+        );
+        filter_songs.as_object_mut().unwrap().insert(
+            "output_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "song_id": {"type": "integer"}
+                            },
+                            "required": ["song_id"]
+                        }
+                    }
+                },
+                "required": ["response"]
+            }),
+        );
+
+        let mut show_song = catalog_tool_with_metadata(
+            "mcp__appworld__spotify_show_song",
+            "Get a Spotify song record.",
+            Some("appworld"),
+            vec!["spotify_show_song", "song_details"],
+        );
+        show_song.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "song_id": {"type": "integer"}
+                },
+                "required": ["access_token", "song_id"]
+            }),
+        );
+        show_song.as_object_mut().unwrap().insert(
+            "output_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "object",
+                        "description": "Detailed song record.",
+                        "properties": {
+                            "genre": {
+                                "type": "string",
+                                "description": "Song genre."
+                            },
+                            "play_count": {
+                                "type": "integer",
+                                "description": "Number of times the song was played."
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Song title."
+                            }
+                        },
+                        "required": ["genre", "play_count", "title"]
+                    }
+                },
+                "required": ["response"]
+            }),
+        );
+
+        let index = ToolDiscoveryIndex::build(1, vec![filter_songs, show_song]);
+        let results = index.search(&json!({
+            "query": "play_count genre title",
+            "namespace": "appworld"
+        }));
+
+        assert_eq!(
+            results[0]["name"],
+            json!("mcp__appworld__spotify_show_song")
+        );
+    }
+
+    #[test]
+    fn ranking_orders_tools_by_expected_spotify_field_utility() {
+        let mut search_songs = catalog_tool_with_metadata(
+            "mcp__appworld__spotify_search_songs",
+            "Search Spotify songs by filters.",
+            Some("appworld"),
+            vec!["spotify_search_songs"],
+        );
+        search_songs.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "genre": {"type": "string"},
+                    "play_count": {"type": "integer"},
+                    "title": {"type": "string"}
+                },
+                "required": ["access_token"]
+            }),
+        );
+        search_songs.as_object_mut().unwrap().insert(
+            "output_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "song_id": {"type": "integer"}
+                            },
+                            "required": ["song_id"]
+                        }
+                    }
+                },
+                "required": ["response"]
+            }),
+        );
+
+        let mut show_song = catalog_tool_with_metadata(
+            "mcp__appworld__spotify_show_song",
+            "Get a Spotify song record.",
+            Some("appworld"),
+            vec!["spotify_show_song", "song_details"],
+        );
+        show_song.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "song_id": {"type": "integer"}
+                },
+                "required": ["access_token", "song_id"]
+            }),
+        );
+        show_song.as_object_mut().unwrap().insert(
+            "output_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "object",
+                        "description": "Detailed song record.",
+                        "properties": {
+                            "genre": {"type": "string"},
+                            "play_count": {"type": "integer"},
+                            "title": {"type": "string"}
+                        },
+                        "required": ["genre", "play_count", "title"]
+                    }
+                },
+                "required": ["response"]
+            }),
+        );
+
+        let mut list_albums = catalog_tool_with_metadata(
+            "mcp__appworld__spotify_list_albums",
+            "List Spotify albums.",
+            Some("appworld"),
+            vec!["spotify_albums"],
+        );
+        list_albums.as_object_mut().unwrap().insert(
+            "output_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "album_id": {"type": "integer"},
+                                "title": {"type": "string"}
+                            },
+                            "required": ["album_id", "title"]
+                        }
+                    }
+                },
+                "required": ["response"]
+            }),
+        );
+
+        let index = ToolDiscoveryIndex::build(1, vec![search_songs, show_song, list_albums]);
+        let results = index.search(&json!({
+            "query": "spotify song details play_count genre title",
+            "namespace": "appworld",
+            "limit": 3
+        }));
+
+        assert_eq!(
+            ranked_names(&results),
+            vec![
+                "mcp__appworld__spotify_show_song",
+                "mcp__appworld__spotify_search_songs",
+                "mcp__appworld__spotify_list_albums",
+            ]
+        );
+    }
+
+    #[test]
+    fn ranking_orders_venmo_tools_by_send_money_intent() {
+        let index = ToolDiscoveryIndex::build(1, venmo_payment_tools());
+        let results = index.search(&json!({
+            "query": "venmo send money private payment_card receiver_email",
+            "namespace": "appworld",
+            "limit": 3
+        }));
+
+        assert_eq!(
+            ranked_names(&results),
+            vec![
+                "mcp__appworld__venmo_create_transaction",
+                "mcp__appworld__venmo_create_payment_request",
+                "mcp__appworld__venmo_add_to_venmo_balance",
+            ]
+        );
+    }
+
+    #[test]
+    fn ranking_orders_venmo_short_payment_queries_by_action_intent() {
+        for query in [
+            "venmo send payment",
+            "venmo send payment to user",
+            "venmo make payment transfer money",
+        ] {
+            let index = ToolDiscoveryIndex::build(1, venmo_payment_tools());
+            let results = index.search(&json!({
+                "query": query,
+                "namespace": "appworld",
+                "limit": 4
+            }));
+
+            assert_eq!(
+                results[0]["name"],
+                json!("mcp__appworld__venmo_create_transaction"),
+                "unexpected ranking for query {query:?}"
+            );
+        }
+    }
+
+    #[test]
     fn search_results_include_compact_schema_parameter_restrictions() {
         let mut spotify = catalog_tool("mcp__appworld__spotify_search_songs", "Find songs");
         spotify.as_object_mut().unwrap().insert(
@@ -1054,9 +1578,19 @@ mod tests {
             json!({
                 "type": "object",
                 "properties": {
-                    "access_token": {"type": "string"},
+                    "access_token": {
+                        "type": "string",
+                        "description": "Access token obtained from spotify app login."
+                    },
+                    "genre": {
+                        "type": ["string", "null"],
+                        "description": "Only include songs from this genre.",
+                        "default": null
+                    },
                     "page_limit": {
                         "type": "integer",
+                        "description": "Maximum number of results to return.",
+                        "minimum": 1,
                         "maximum": 20,
                         "default": 20
                     }
@@ -1069,8 +1603,49 @@ mod tests {
             json!({
                 "type": "object",
                 "properties": {
-                    "response": {"type": "array"},
-                    "error": {"type": "string"}
+                    "response": {
+                        "type": "array",
+                        "description": "Matched songs.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "album_id": {"type": ["integer", "null"]},
+                                "duration": {"type": "integer"},
+                                "genre": {"type": "string"},
+                                "like_count": {"type": "integer"},
+                                "play_count": {
+                                    "type": "integer",
+                                    "description": "Number of times the song was played.",
+                                    "minimum": 0
+                                },
+                                "rating": {"type": "number"},
+                                "release_date": {"type": "string"},
+                                "song_id": {
+                                    "type": "integer",
+                                    "description": "Stable song identifier."
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "description": "Song title."
+                                }
+                            },
+                            "required": [
+                                "album_id",
+                                "duration",
+                                "genre",
+                                "like_count",
+                                "play_count",
+                                "rating",
+                                "release_date",
+                                "song_id",
+                                "title"
+                            ]
+                        }
+                    },
+                    "error": {
+                        "type": "string",
+                        "description": "Error message when search fails."
+                    }
                 },
                 "required": ["response"]
             }),
@@ -1081,12 +1656,124 @@ mod tests {
         assert_eq!(
             results[0]["signature"],
             json!(
-                "mcp__appworld__spotify_search_songs(access_token: str, page_limit?: int <= 20 = 20)"
+                "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 20)"
             )
         );
         assert_eq!(
             results[0]["returns"],
-            json!("record{error?: str, response: list[any]}")
+            json!(
+                "record{error?: str, response: list[record{album_id: int | null, duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]}"
+            )
+        );
+        assert_eq!(
+            results[0]["parameters"],
+            json!([
+                {
+                    "name": "access_token",
+                    "type": "str",
+                    "required": true,
+                    "description": "Access token obtained from spotify app login.",
+                    "signature": "access_token: str"
+                },
+                {
+                    "name": "genre",
+                    "type": "str | null",
+                    "required": false,
+                    "nullable": true,
+                    "description": "Only include songs from this genre.",
+                    "default": null,
+                    "signature": "genre?: str | null = null"
+                },
+                {
+                    "name": "page_limit",
+                    "type": "int",
+                    "required": false,
+                    "description": "Maximum number of results to return.",
+                    "default": 20,
+                    "minimum": 1,
+                    "maximum": 20,
+                    "signature": "page_limit?: int >= 1 <= 20 = 20"
+                }
+            ])
+        );
+        assert_eq!(
+            results[0]["return_fields"],
+            json!([
+                {
+                    "path": "error",
+                    "type": "str",
+                    "required": false,
+                    "description": "Error message when search fails.",
+                    "signature": "error?: str"
+                },
+                {
+                    "path": "response",
+                    "type": "list[record]",
+                    "required": true,
+                    "description": "Matched songs.",
+                    "items": "record",
+                    "signature": "response: list[record]"
+                },
+                {
+                    "path": "response[].album_id",
+                    "type": "int | null",
+                    "required": true,
+                    "nullable": true,
+                    "signature": "response[].album_id: int | null"
+                },
+                {
+                    "path": "response[].duration",
+                    "type": "int",
+                    "required": true,
+                    "signature": "response[].duration: int"
+                },
+                {
+                    "path": "response[].genre",
+                    "type": "str",
+                    "required": true,
+                    "signature": "response[].genre: str"
+                },
+                {
+                    "path": "response[].like_count",
+                    "type": "int",
+                    "required": true,
+                    "signature": "response[].like_count: int"
+                },
+                {
+                    "path": "response[].play_count",
+                    "type": "int",
+                    "required": true,
+                    "description": "Number of times the song was played.",
+                    "minimum": 0,
+                    "signature": "response[].play_count: int >= 0"
+                },
+                {
+                    "path": "response[].rating",
+                    "type": "float",
+                    "required": true,
+                    "signature": "response[].rating: float"
+                },
+                {
+                    "path": "response[].release_date",
+                    "type": "str",
+                    "required": true,
+                    "signature": "response[].release_date: str"
+                },
+                {
+                    "path": "response[].song_id",
+                    "type": "int",
+                    "required": true,
+                    "description": "Stable song identifier.",
+                    "signature": "response[].song_id: int"
+                },
+                {
+                    "path": "response[].title",
+                    "type": "str",
+                    "required": true,
+                    "description": "Song title.",
+                    "signature": "response[].title: str"
+                }
+            ])
         );
         assert!(results[0].get("params").is_none());
         assert!(results[0].get("input_schema").is_none());
