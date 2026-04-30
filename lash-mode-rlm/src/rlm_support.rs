@@ -171,15 +171,12 @@ pub fn budget_prompt_contributions(
         format!(
             "Used: {used} / {max} tokens ({pct}%)\n\
 You are over the configured context-budget handoff threshold. Do not continue ordinary work in this session.\n\
-Choose exactly one:\n\
-1. Hand off now: preserve the required state in named lashlang variables and call `pass_baton(task=..., seed={{...}})`.\n\
-2. If completion is one small bounded step away, finish that step, summarize the result, then call `pass_baton(task=..., seed={{...}})`.\n\
-3. If required state is not captured yet, capture only the minimal state needed for the next session, then call `pass_baton(task=..., seed={{...}})`."
+Call `pass_baton(task=..., seed={{...}})` with the directly relevant context, facts, IDs, partial results, and next steps. The next agent keeps the same tool access; do not carry irrelevant history."
         )
     } else {
         format!(
             "Used: {used} / {max} tokens ({pct}%)\n\
-Prepare to hand off via `pass_baton(task=..., seed={{...}})` as soon as carrying the current context becomes inefficient. The next agent starts fresh."
+Prepare to hand off via `pass_baton(task=..., seed={{...}})` when carrying this context becomes inefficient. Include only directly relevant context; the next agent keeps the same tool access."
         )
     };
     vec![PromptContribution::execution("Context Budget", content)]

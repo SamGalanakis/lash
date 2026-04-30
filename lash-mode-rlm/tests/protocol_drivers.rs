@@ -403,7 +403,10 @@ fn rlm_prose_only_response_emits_done() {
 fn typed_rlm_prose_only_response_requests_submit() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
-        RlmTermination::Finish { schema: None },
+        RlmTermination::Finish {
+            schema: None,
+            include_submit_prompt: true,
+        },
     );
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -438,6 +441,41 @@ fn typed_rlm_prose_only_response_requests_submit() {
 
     let effects = drain_effects(&mut machine);
     assert!(find_llm_call(&effects).is_some());
+}
+
+#[test]
+fn typed_rlm_prose_only_response_can_suppress_submit_reminder() {
+    let config = test_config_with_termination(
+        ExecutionMode::new("rlm"),
+        RlmTermination::Finish {
+            schema: None,
+            include_submit_prompt: false,
+        },
+    );
+    let msgs = vec![user_message("hello")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "Hello there!".to_string(),
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (_checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::AfterWork);
+    assert!(machine.messages().iter().any(|message| {
+        message.role == MessageRole::User
+            && message.parts.iter().any(|part| {
+                part.content.contains("task-specific completion path")
+                    && !part.content.contains("submit")
+            })
+    }));
 }
 
 #[test]
@@ -479,6 +517,7 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
         result: Ok(lash_sansio::ExecResponse {
             output: "hi\n".to_string(),
             observations: Vec::new(),
+            observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
             error: None,
@@ -507,10 +546,71 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
 }
 
 #[test]
+fn rlm_exec_tool_call_events_keep_call_id() {
+    let config = test_config(ExecutionMode::new("rlm"));
+    let msgs = vec![user_message("run a tool")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "```lashlang\nx = (call read_file { path: \"foo\" })?\n```".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "```lashlang\nx = (call read_file { path: \"foo\" })?\n```".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let exec_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("exec effect");
+    machine.handle_response(Response::ExecResult {
+        id: exec_id,
+        result: Ok(lash_sansio::ExecResponse {
+            output: String::new(),
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: vec![lash::ToolCallRecord {
+                call_id: Some("rlm-call-1".to_string()),
+                tool: "read_file".to_string(),
+                args: serde_json::json!({"path": "foo"}),
+                result: serde_json::json!("contents"),
+                success: true,
+                duration_ms: 7,
+            }],
+            images: Vec::new(),
+            error: None,
+            duration_ms: 7,
+            terminal_finish: None,
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Emit(SessionEvent::ToolCall { call_id: Some(call_id), name, .. })
+            if call_id == "rlm-call-1" && name == "read_file"
+    )));
+}
+
+#[test]
 fn typed_rlm_finish_emits_typed_finish_and_done() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
-        RlmTermination::Finish { schema: None },
+        RlmTermination::Finish {
+            schema: None,
+            include_submit_prompt: true,
+        },
     );
     let msgs = vec![user_message("return typed data")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -543,6 +643,7 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
         result: Ok(lash_sansio::ExecResponse {
             output: String::new(),
             observations: Vec::new(),
+            observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
             error: None,
@@ -578,7 +679,10 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
 fn rlm_reasoning_part_is_preserved_in_trajectory() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
-        RlmTermination::Finish { schema: None },
+        RlmTermination::Finish {
+            schema: None,
+            include_submit_prompt: true,
+        },
     );
     let msgs = vec![user_message("say hi")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -621,6 +725,7 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
         result: Ok(lash_sansio::ExecResponse {
             output: String::new(),
             observations: Vec::new(),
+            observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
             error: None,
@@ -656,6 +761,7 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
                 },
                 "required": ["ok"]
             })),
+            include_submit_prompt: true,
         },
     );
     let msgs = vec![user_message("return typed data")];
@@ -689,6 +795,7 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
         result: Ok(lash_sansio::ExecResponse {
             output: String::new(),
             observations: Vec::new(),
+            observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
             error: None,

@@ -449,10 +449,10 @@ mod tests {
         let content = &contributions[0].content;
         assert!(content.contains("120292 / 100000"));
         assert!(content.contains("Do not continue ordinary work"));
-        assert!(content.contains("Choose exactly one:"));
-        assert!(content.contains("1. Hand off now"));
-        assert!(content.contains("2. If completion is one small bounded step away"));
-        assert!(content.contains("3. If required state is not captured yet"));
+        assert!(content.contains("Call `pass_baton(task=..., seed={...})`"));
+        assert!(content.contains("directly relevant context"));
+        assert!(content.contains("The next agent keeps the same tool access"));
+        assert!(content.contains("do not carry irrelevant history"));
         assert!(!content.contains("Otherwise"));
         assert!(!content.contains("otherwise"));
     }

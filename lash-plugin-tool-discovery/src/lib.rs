@@ -230,6 +230,7 @@ impl ToolDiscoveryIndex {
             .unwrap_or_default()
             .trim();
         let limit = limit_from_args(args);
+        let debug = args.get("debug").and_then(Value::as_bool).unwrap_or(false);
         let query_tokens = tokenize(query);
 
         let mut ranked = Vec::new();
@@ -275,7 +276,7 @@ impl ToolDiscoveryIndex {
         ranked
             .into_iter()
             .take(limit)
-            .map(|(idx, score, matched_fields)| self.docs[idx].tool.project(score, matched_fields))
+            .map(|(idx, score, _matched_fields)| self.docs[idx].tool.project(score, debug))
             .collect()
     }
 }
@@ -319,39 +320,39 @@ impl CatalogTool {
         })
     }
 
-    fn project(&self, score: f64, matched_fields: Vec<String>) -> Value {
+    fn project(&self, score: f64, debug: bool) -> Value {
+        let definition = self.compact_definition();
+        let contract = definition.compact_contract();
         let mut out = serde_json::Map::new();
-        out.insert("name".to_string(), json!(self.name));
-        if let Some(namespace) = &self.namespace {
-            out.insert("namespace".to_string(), json!(namespace));
+        out.insert("name".to_string(), json!(contract.name));
+        out.insert("signature".to_string(), json!(contract.signature));
+        out.insert("returns".to_string(), json!(contract.returns));
+        if !contract.description.is_empty() {
+            out.insert("description".to_string(), json!(contract.description));
         }
-        out.insert(
-            "description".to_string(),
-            json!(string_field(&self.raw, "description")),
-        );
-        out.insert(
-            "params".to_string(),
-            self.raw.get("params").cloned().unwrap_or_else(|| json!([])),
-        );
-        if let Some(output_schema) = self.raw.get("output_schema")
-            && !is_empty_schema(output_schema)
-        {
-            out.insert("returns".to_string(), compact_schema_summary(output_schema));
+        if !contract.examples.is_empty() {
+            out.insert("examples".to_string(), json!(contract.examples));
         }
-        out.insert(
-            "examples".to_string(),
-            self.raw
-                .get("examples")
-                .cloned()
-                .unwrap_or_else(|| json!([])),
-        );
-        let activation_hint = string_field(&self.raw, "activation_hint");
-        if !activation_hint.is_empty() {
-            out.insert("activation_hint".to_string(), json!(activation_hint));
+        if debug {
+            out.insert("score".to_string(), json!(round_score(score)));
         }
-        out.insert("score".to_string(), json!(score));
-        out.insert("matched_fields".to_string(), json!(matched_fields));
         Value::Object(out)
+    }
+
+    fn compact_definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            self.name.clone(),
+            string_field(&self.raw, "description"),
+            self.raw
+                .get("input_schema")
+                .cloned()
+                .unwrap_or_else(ToolDefinition::default_input_schema),
+            self.raw
+                .get("output_schema")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )
+        .with_examples(string_vec(self.raw.get("examples")))
     }
 }
 
@@ -609,85 +610,8 @@ fn json_field(value: &Value, key: &str) -> String {
     value.get(key).map(Value::to_string).unwrap_or_default()
 }
 
-fn is_empty_schema(schema: &Value) -> bool {
-    matches!(schema, Value::Null) || schema.as_object().is_some_and(|object| object.is_empty())
-}
-
-fn compact_schema_summary(schema: &Value) -> Value {
-    let mut out = serde_json::Map::new();
-    out.insert("type".to_string(), json!(schema_type_label(schema)));
-    if let Some(fields) = compact_object_fields(schema)
-        && !fields.is_empty()
-    {
-        out.insert("fields".to_string(), Value::Array(fields));
-    }
-    Value::Object(out)
-}
-
-fn compact_object_fields(schema: &Value) -> Option<Vec<Value>> {
-    if schema.get("type").and_then(Value::as_str) != Some("object") {
-        return None;
-    }
-    let properties = schema.get("properties").and_then(Value::as_object)?;
-    let required = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    Some(
-        properties
-            .iter()
-            .take(8)
-            .map(|(name, prop)| {
-                json!({
-                    "name": name,
-                    "type": schema_type_label(prop),
-                    "required": required.contains(name.as_str()),
-                })
-            })
-            .collect(),
-    )
-}
-
-fn schema_type_label(schema: &Value) -> String {
-    if let Some(any_of) = schema.get("anyOf").or_else(|| schema.get("oneOf"))
-        && let Some(options) = any_of.as_array()
-    {
-        let labels = options
-            .iter()
-            .map(schema_type_label)
-            .collect::<BTreeSet<_>>();
-        return labels.into_iter().collect::<Vec<_>>().join(" | ");
-    }
-    match schema.get("type") {
-        Some(Value::String(kind)) => json_schema_type_label(kind).to_string(),
-        Some(Value::Array(kinds)) => kinds
-            .iter()
-            .filter_map(Value::as_str)
-            .map(json_schema_type_label)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join(" | "),
-        _ => "any".to_string(),
-    }
-}
-
-fn json_schema_type_label(kind: &str) -> &str {
-    match kind {
-        "string" => "str",
-        "integer" => "int",
-        "number" => "float",
-        "boolean" => "bool",
-        "array" => "list",
-        "object" => "record",
-        other => other,
-    }
+fn round_score(score: f64) -> f64 {
+    (score * 100.0).round() / 100.0
 }
 
 fn string_vec(value: Option<&Value>) -> Vec<String> {
@@ -721,6 +645,7 @@ fn search_tools_definition() -> ToolDefinition {
         namespace: Option<NamespaceFilter>,
         #[schemars(range(min = 1, max = 100))]
         limit: Option<usize>,
+        debug: Option<bool>,
     }
 
     #[derive(schemars::JsonSchema)]
@@ -886,6 +811,12 @@ mod tests {
             "name": name,
             "description": description,
             "params": [],
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            },
+            "output_schema": {},
             "returns": "any",
             "examples": [],
             "aliases": [],
@@ -1119,21 +1050,19 @@ mod tests {
     fn search_results_include_compact_schema_parameter_restrictions() {
         let mut spotify = catalog_tool("mcp__appworld__spotify_search_songs", "Find songs");
         spotify.as_object_mut().unwrap().insert(
-            "params".to_string(),
-            json!([
-                {
-                    "name": "access_token",
-                    "type": "str",
-                    "required": true
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "page_limit": {
+                        "type": "integer",
+                        "maximum": 20,
+                        "default": 20
+                    }
                 },
-                {
-                    "name": "page_limit",
-                    "type": "int",
-                    "required": false,
-                    "maximum": 20,
-                    "default": 20
-                }
-            ]),
+                "required": ["access_token"]
+            }),
         );
         spotify.as_object_mut().unwrap().insert(
             "output_schema".to_string(),
@@ -1149,23 +1078,25 @@ mod tests {
         let index = ToolDiscoveryIndex::build(1, vec![spotify]);
 
         let results = index.search(&json!({ "query": "spotify" }));
-        assert_eq!(results[0]["params"][0]["name"], json!("access_token"));
-        assert_eq!(results[0]["params"][1]["maximum"], json!(20));
-        assert_eq!(results[0]["returns"]["type"], json!("record"));
-        let fields = results[0]["returns"]["fields"]
-            .as_array()
-            .expect("return fields");
-        assert!(
-            fields
-                .iter()
-                .any(|field| field["name"] == json!("response"))
+        assert_eq!(
+            results[0]["signature"],
+            json!(
+                "mcp__appworld__spotify_search_songs(access_token: str, page_limit?: int <= 20 = 20)"
+            )
         );
+        assert_eq!(
+            results[0]["returns"],
+            json!("record{error?: str, response: list[any]}")
+        );
+        assert!(results[0].get("params").is_none());
         assert!(results[0].get("input_schema").is_none());
         assert!(results[0].get("output_schema").is_none());
+        assert!(results[0].get("matched_fields").is_none());
+        assert!(results[0].get("score").is_none());
     }
 
     #[tokio::test]
-    async fn search_tools_uses_host_catalog_and_projects_search_metadata() {
+    async fn search_tools_uses_host_catalog_and_projects_compact_contract() {
         let host = Arc::new(FakeSessionManager {
             catalog: vec![
                 catalog_tool_with_metadata(
@@ -1208,9 +1139,22 @@ mod tests {
         let results = result.result.as_array().expect("search result list");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["name"], json!("read_file"));
-        assert_eq!(results[0]["namespace"], json!("filesystem"));
-        assert_eq!(results[0]["matched_fields"], json!(["aliases"]));
-        assert!(results[0]["score"].as_f64().expect("numeric score") > 0.0);
+        assert_eq!(results[0]["signature"], json!("read_file()"));
+        assert_eq!(results[0]["returns"], json!("any"));
+        assert_eq!(results[0]["description"], json!("Read file contents"));
+        assert!(results[0].get("namespace").is_none());
+        assert!(results[0].get("matched_fields").is_none());
+        assert!(results[0].get("score").is_none());
+    }
+
+    #[test]
+    fn debug_search_includes_minimal_score() {
+        let index = ToolDiscoveryIndex::build(1, vec![catalog_tool("read_file", "Read files")]);
+
+        let results = index.search(&json!({ "query": "read", "debug": true }));
+
+        assert!(results[0]["score"].as_f64().is_some());
+        assert!(results[0].get("matched_fields").is_none());
     }
 
     #[tokio::test]

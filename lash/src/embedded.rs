@@ -10,7 +10,7 @@ use lashlang::{
 };
 use serde_json::Value;
 
-use crate::plugin::{ToolResultProjectionPluginConfig, truncate_observation_text};
+use crate::plugin::{ToolResultProjectionPluginConfig, project_observation_text};
 
 #[derive(Debug)]
 pub enum LashlangRequest {
@@ -87,6 +87,7 @@ pub enum LashlangResponse {
         id: String,
         output: String,
         observations: Vec<String>,
+        observation_truncation: Vec<crate::TextProjectionMetadata>,
         error: Option<String>,
         /// `Some(value)` only when the surrounding session was started
         /// with `accept_finish: true` AND the lashlang program ended
@@ -262,6 +263,7 @@ fn runtime_thread_main(
                     id,
                     output: result.output,
                     observations: result.observations,
+                    observation_truncation: result.observation_truncation,
                     error: result.error,
                     terminal_finish: result.terminal_finish,
                 });
@@ -284,6 +286,7 @@ fn runtime_thread_main(
                     id,
                     output: String::new(),
                     observations: Vec::new(),
+                    observation_truncation: Vec::new(),
                     error,
                     terminal_finish: None,
                 });
@@ -324,6 +327,7 @@ fn runtime_thread_main(
 struct ExecOutcome {
     output: String,
     observations: Vec<String>,
+    observation_truncation: Vec<crate::TextProjectionMetadata>,
     error: Option<String>,
     terminal_finish: Option<Value>,
 }
@@ -340,6 +344,7 @@ fn execute_code(
             return ExecOutcome {
                 output: String::new(),
                 observations: Vec::new(),
+                observation_truncation: Vec::new(),
                 error: Some(format_parse_error(code, &err)),
                 terminal_finish: None,
             };
@@ -347,11 +352,13 @@ fn execute_code(
     };
 
     let observations = Mutex::new(Vec::new());
+    let observation_truncation = Mutex::new(Vec::new());
     let host = HostBridge {
         response_tx,
         session_id: state.config.session_id.clone(),
         observe_projection: &state.config.observe_projection,
         observations: &observations,
+        observation_truncation: &observation_truncation,
     };
 
     let _ = accept_finish; // schema validation lives upstream in mode.rs
@@ -364,18 +371,21 @@ fn execute_code(
         Ok(ExecutionOutcome::Finished(value)) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
+            observation_truncation: observation_truncation.into_inner().unwrap_or_default(),
             error: None,
             terminal_finish: Some(flow_to_json_value(&value)),
         },
         Ok(ExecutionOutcome::Continued) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
+            observation_truncation: observation_truncation.into_inner().unwrap_or_default(),
             error: None,
             terminal_finish: None,
         },
         Err(failure) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
+            observation_truncation: observation_truncation.into_inner().unwrap_or_default(),
             error: Some(lashlang::format_runtime_diagnostic(
                 code,
                 &failure.error,
@@ -391,6 +401,7 @@ struct HostBridge<'a> {
     session_id: String,
     observe_projection: &'a ToolResultProjectionPluginConfig,
     observations: &'a Mutex<Vec<String>>,
+    observation_truncation: &'a Mutex<Vec<crate::TextProjectionMetadata>>,
 }
 
 impl ToolHost for HostBridge<'_> {
@@ -458,11 +469,16 @@ impl ToolHost for HostBridge<'_> {
     }
 
     fn print(&self, value: &FlowValue) -> Result<(), ToolHostError> {
-        let text = truncate_observation_text(&format_output_value(value), self.observe_projection);
+        let (text, metadata) =
+            project_observation_text(&format_output_value(value), self.observe_projection);
         self.observations
             .lock()
             .map_err(|_| ToolHostError::new("observation buffer poisoned"))?
             .push(text);
+        self.observation_truncation
+            .lock()
+            .map_err(|_| ToolHostError::new("observation metadata buffer poisoned"))?
+            .push(metadata);
         Ok(())
     }
 }

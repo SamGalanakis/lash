@@ -104,7 +104,17 @@ pub enum RlmTermination {
     ProseWithoutFence,
     Finish {
         schema: Option<serde_json::Value>,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        include_submit_prompt: bool,
     },
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// RLM-mode session config. Carries the choice of how the model

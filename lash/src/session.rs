@@ -854,7 +854,7 @@ impl Session {
                 .map_err(|_| SessionError::RuntimeExited)?;
             match response {
                 LashlangResponse::ToolCall {
-                    id: _call_id,
+                    id: call_id,
                     name,
                     args,
                     result_tx,
@@ -875,7 +875,7 @@ impl Session {
                             "PARALLEL: task #{tc_num} '{name}' executing at t+{:.3}s",
                             run_start.elapsed().as_secs_f64()
                         );
-                        let outcome = dispatch_parallel_tool_call(
+                        let mut outcome = dispatch_parallel_tool_call(
                             Arc::clone(&dispatch),
                             ParallelToolCallSpec {
                                 index: tc_num,
@@ -885,6 +885,7 @@ impl Session {
                             msg_tx,
                         )
                         .await;
+                        outcome.record.call_id = Some(call_id);
 
                         // Send the tool result back to the embedded lashlang runtime.
                         let reply = if outcome.record.success {
@@ -922,13 +923,14 @@ impl Session {
                             let msg_tx = msg_tx.clone();
                             pending.push(async move {
                                 let tc_num = base_index + offset;
+                                let call_id = call.id;
                                 let tool_name_for_log = call.name.clone();
                                 tracing::info!(
                                     "PARALLEL: batch task #{tc_num} '{}' executing at t+{:.3}s",
                                     call.name,
                                     run_start.elapsed().as_secs_f64()
                                 );
-                                let outcome = dispatch_parallel_tool_call(
+                                let mut outcome = dispatch_parallel_tool_call(
                                     Arc::clone(&dispatch),
                                     ParallelToolCallSpec {
                                         index: tc_num,
@@ -938,6 +940,7 @@ impl Session {
                                     msg_tx,
                                 )
                                 .await;
+                                outcome.record.call_id = Some(call_id);
                                 tracing::info!(
                                     "PARALLEL: batch task #{tc_num} '{tool_name_for_log}' done at t+{:.3}s",
                                     run_start.elapsed().as_secs_f64()
@@ -1002,6 +1005,7 @@ impl Session {
                     id: _,
                     output,
                     observations,
+                    observation_truncation,
                     error,
                     terminal_finish,
                 } => {
@@ -1023,7 +1027,7 @@ impl Session {
                             }
                             Err(e) => {
                                 self.tool_calls.push(ToolCallRecord {
-                                    call_id: None,
+                                    call_id: Some(uuid::Uuid::new_v4().to_string()),
                                     tool: "unknown".into(),
                                     args: json!({}),
                                     result: json!({"error": format!("task panicked: {e}")}),
@@ -1037,6 +1041,7 @@ impl Session {
                     return Ok(ExecResponse {
                         output,
                         observations,
+                        observation_truncation,
                         tool_calls: self.tool_calls.clone(),
                         images: std::mem::take(&mut self.tool_images),
                         error,

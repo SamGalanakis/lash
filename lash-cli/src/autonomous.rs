@@ -41,7 +41,11 @@ impl AutonomousRenderer {
         }
     }
 
-    pub(crate) fn handle(&mut self, event: SessionEvent) -> Result<(), String> {
+    pub(crate) fn handle(&mut self, event: SessionEvent) -> Result<Option<String>, String> {
+        let handoff_session_id = match &event {
+            SessionEvent::SessionHandoff { session_id } => Some(session_id.clone()),
+            _ => None,
+        };
         match event {
             SessionEvent::TextDelta { content } => {
                 if !content.is_empty() {
@@ -145,7 +149,7 @@ impl AutonomousRenderer {
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TypedFinish { .. } => {}
         }
-        Ok(())
+        Ok(handoff_session_id)
     }
 
     pub(crate) fn rendered_plugin_output(&self) -> Option<String> {
@@ -199,19 +203,21 @@ impl AutonomousRenderer {
     }
 }
 
-/// Run the session autonomously: send prompt, consume events, print final response to stdout.
-pub(crate) async fn run_autonomous(
+struct AutonomousTurnOutcome {
+    done: crate::turn_runner::RuntimeRunResult,
+    cancel: tokio_util::sync::CancellationToken,
+    handoff_session_id: Option<String>,
+}
+
+async fn run_autonomous_turn(
     runtime: LashRuntime,
-    prompt: String,
-    skills: SkillCatalog,
-    persistence: AutonomousPersistenceContext,
-) -> anyhow::Result<()> {
-    let before_usage = runtime.usage_report();
-    let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
-    let turn_input = make_turn_input(&prepared);
+    turn_input: TurnInput,
+    renderer: &mut AutonomousRenderer,
+    stream_id: u64,
+) -> anyhow::Result<AutonomousTurnOutcome> {
     let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
     let sink = AutonomousChannelSink { tx: event_tx };
-    let (cancel, return_rx) = spawn_runtime_turn(runtime, turn_input, sink, 1);
+    let (cancel, return_rx) = spawn_runtime_turn(runtime, turn_input, sink, stream_id);
     #[cfg(unix)]
     {
         let cancel = cancel.clone();
@@ -224,14 +230,20 @@ pub(crate) async fn run_autonomous(
         });
     }
     let mut task = tokio::spawn(async move { (return_rx.await, cancel) });
+    let mut handoff_session_id = None;
 
-    let mut renderer = AutonomousRenderer::new();
     let (done, cancel) = loop {
         tokio::select! {
             Some(event) = event_rx.recv() => {
-                if let Err(err) = renderer.handle(event) {
-                    eprintln!("error: {err}");
-                    std::process::exit(2);
+                match renderer.handle(event) {
+                    Ok(Some(session_id)) => {
+                        handoff_session_id = Some(session_id);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        std::process::exit(2);
+                    }
                 }
             }
             join = &mut task => {
@@ -242,8 +254,84 @@ pub(crate) async fn run_autonomous(
             }
         }
     };
-    let mut done =
-        done.map_err(|err| anyhow::anyhow!("autonomous turn task channel failed: {err}"))?;
+    let done = done.map_err(|err| anyhow::anyhow!("autonomous turn task channel failed: {err}"))?;
+    while let Ok(event) = event_rx.try_recv() {
+        match renderer.handle(event) {
+            Ok(Some(session_id)) => {
+                handoff_session_id = Some(session_id);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    Ok(AutonomousTurnOutcome {
+        done,
+        cancel,
+        handoff_session_id,
+    })
+}
+
+async fn activate_autonomous_handoff(
+    runtime: &mut LashRuntime,
+    session_id: &str,
+) -> anyhow::Result<TurnInput> {
+    let session_manager = runtime
+        .session_manager()
+        .map_err(|err| anyhow::anyhow!("failed to access session manager: {err}"))?;
+    runtime
+        .activate_managed_session(session_id)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to activate session `{session_id}`: {err}"))?;
+    let seed = session_manager
+        .take_first_turn_input(session_id)
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!("failed to read first turn for session `{session_id}`: {err}")
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!("handoff session `{session_id}` did not provide a first turn")
+        })?;
+    if seed.content.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "handoff session `{session_id}` provided an empty first turn"
+        ));
+    }
+    let prepared =
+        PreparedTurn::prepare_with_effective_text(seed.content.clone(), seed.content, Vec::new());
+    Ok(make_turn_input(&prepared))
+}
+
+/// Run the session autonomously: send prompt, consume events, print final response to stdout.
+pub(crate) async fn run_autonomous(
+    runtime: LashRuntime,
+    prompt: String,
+    skills: SkillCatalog,
+    persistence: AutonomousPersistenceContext,
+) -> anyhow::Result<()> {
+    let before_usage = runtime.usage_report();
+    let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
+    let mut runtime = runtime;
+    let mut turn_input = make_turn_input(&prepared);
+    let mut renderer = AutonomousRenderer::new();
+    let mut stream_id = 1;
+    let (mut done, cancel) = loop {
+        let outcome = run_autonomous_turn(runtime, turn_input, &mut renderer, stream_id).await?;
+        let mut turn_done = outcome.done;
+        if let Some(session_id) = outcome.handoff_session_id {
+            if turn_done.result.status != TurnStatus::Completed {
+                break (turn_done, outcome.cancel);
+            }
+            turn_input = activate_autonomous_handoff(&mut turn_done.runtime, &session_id).await?;
+            runtime = turn_done.runtime;
+            stream_id += 1;
+            continue;
+        }
+        break (turn_done, outcome.cancel);
+    };
     if persistence.await_background_work {
         done.runtime.await_background_work().await?;
         done.result.state = done.runtime.export_state();

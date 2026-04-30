@@ -1919,6 +1919,66 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
 }
 
 #[tokio::test]
+async fn inherited_child_session_carries_parent_dynamic_tool_state() {
+    let plugin_host = crate::PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
+        "memory_probe",
+        crate::PluginSpec::new().with_tool_provider(Arc::new(MemoryProbeTool)),
+    ))])
+    .with_dynamic_tools();
+    let plugin_session = plugin_host
+        .build_standard_session("root", None)
+        .expect("plugins");
+    let mut runtime = LashRuntime::from_embedded_state(
+        standard_test_policy(),
+        test_host_config(),
+        crate::RuntimeServices::new(plugin_session),
+        PersistedSessionState::default(),
+    )
+    .await
+    .expect("runtime");
+    runtime.policy.provider = mock_provider(Vec::new()).into_handle();
+    let manager = runtime.session_manager().expect("session manager");
+    let mut snapshot = manager
+        .dynamic_tool_state("root")
+        .await
+        .expect("dynamic tool state");
+    assert!(snapshot.tools.remove("memory_probe").is_some());
+    manager
+        .apply_dynamic_tool_state("root", snapshot)
+        .await
+        .expect("apply dynamic state");
+
+    let handle = manager
+        .create_session(crate::SessionCreateRequest {
+            session_id: Some("dynamic-child".to_string()),
+            parent_session_id: Some("root".to_string()),
+            start: crate::SessionStartPoint::Empty,
+            policy: None,
+            plugin_mode: crate::SessionPluginMode::InheritCurrent,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            context_surface: crate::SessionContextSurface::default(),
+            mode_extras: crate::ModeExtras::default(),
+            usage_source: None,
+        })
+        .await
+        .expect("child session");
+
+    let catalog = manager
+        .tool_catalog(&handle.session_id)
+        .await
+        .expect("tool catalog");
+    let tool_names = catalog
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>();
+    assert!(
+        !tool_names.contains(&"memory_probe"),
+        "inherited child should receive the parent's dynamic snapshot, got {tool_names:?}"
+    );
+}
+
+#[tokio::test]
 async fn parent_turn_receives_live_child_token_usage_events() {
     let transport = mock_provider(vec![
         MockCall {

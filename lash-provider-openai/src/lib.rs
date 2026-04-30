@@ -714,17 +714,35 @@ impl OpenAiGenericProvider {
     fn usage_from_response_value(value: &Value) -> LlmUsage {
         let usage = value.get("usage").unwrap_or(&Value::Null);
         LlmUsage {
-            input_tokens: Self::parse_i64(usage.get("input_tokens")),
-            output_tokens: Self::parse_i64(usage.get("output_tokens")),
+            input_tokens: Self::parse_i64(
+                usage
+                    .get("input_tokens")
+                    .or_else(|| usage.get("prompt_tokens")),
+            ),
+            output_tokens: Self::parse_i64(
+                usage
+                    .get("output_tokens")
+                    .or_else(|| usage.get("completion_tokens")),
+            ),
             cached_input_tokens: Self::parse_i64(
                 usage
                     .get("input_tokens_details")
-                    .and_then(|d| d.get("cached_tokens")),
+                    .and_then(|d| d.get("cached_tokens"))
+                    .or_else(|| {
+                        usage
+                            .get("prompt_tokens_details")
+                            .and_then(|d| d.get("cached_tokens"))
+                    }),
             ),
             reasoning_tokens: Self::parse_i64(
                 usage
                     .get("output_tokens_details")
-                    .and_then(|d| d.get("reasoning_tokens")),
+                    .and_then(|d| d.get("reasoning_tokens"))
+                    .or_else(|| {
+                        usage
+                            .get("completion_tokens_details")
+                            .and_then(|d| d.get("reasoning_tokens"))
+                    }),
             ),
         }
     }
@@ -1408,6 +1426,36 @@ mod tests {
         assert!(body.get("store").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
         assert!(body.get("text").is_none());
+    }
+
+    #[test]
+    fn usage_parser_accepts_responses_and_chat_completion_shapes() {
+        let responses_usage =
+            OpenAiGenericProvider::usage_from_response_value(&serde_json::json!({
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 7,
+                    "input_tokens_details": { "cached_tokens": 3 },
+                    "output_tokens_details": { "reasoning_tokens": 5 }
+                }
+            }));
+        assert_eq!(responses_usage.input_tokens, 11);
+        assert_eq!(responses_usage.output_tokens, 7);
+        assert_eq!(responses_usage.cached_input_tokens, 3);
+        assert_eq!(responses_usage.reasoning_tokens, 5);
+
+        let chat_usage = OpenAiGenericProvider::usage_from_response_value(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 13,
+                "completion_tokens": 17,
+                "prompt_tokens_details": { "cached_tokens": 2 },
+                "completion_tokens_details": { "reasoning_tokens": 4 }
+            }
+        }));
+        assert_eq!(chat_usage.input_tokens, 13);
+        assert_eq!(chat_usage.output_tokens, 17);
+        assert_eq!(chat_usage.cached_input_tokens, 2);
+        assert_eq!(chat_usage.reasoning_tokens, 4);
     }
 
     #[test]

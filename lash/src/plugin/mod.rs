@@ -940,7 +940,8 @@ pub use session_obj::PluginSession;
 pub use tool_result_projection_builtin::{
     BuiltinToolResultProjectionPluginFactory, DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES,
     DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES, ToolResultProjectionMode,
-    ToolResultProjectionPluginConfig, truncate_observation_text,
+    ToolResultProjectionPluginConfig, observation_projection_metadata, project_observation_text,
+    truncate_observation_text,
 };
 
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {

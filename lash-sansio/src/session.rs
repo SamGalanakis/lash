@@ -1,9 +1,22 @@
 use crate::{ToolCallRecord, ToolImage};
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TextProjectionMetadata {
+    pub truncated: bool,
+    pub original_chars: usize,
+    pub projected_chars: usize,
+    pub original_lines: usize,
+    pub projected_lines: usize,
+    pub limit: usize,
+    pub limit_mode: String,
+    pub max_lines: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecResponse {
     pub output: String,
     pub observations: Vec<String>,
+    pub observation_truncation: Vec<TextProjectionMetadata>,
     pub tool_calls: Vec<ToolCallRecord>,
     pub images: Vec<ToolImage>,
     pub error: Option<String>,

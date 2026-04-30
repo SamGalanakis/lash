@@ -280,7 +280,7 @@ mod tests {
             .expect("matching mode");
         assert!(matches!(
             decoded.termination,
-            lash_rlm_types::RlmTermination::Finish { schema: None }
+            lash_rlm_types::RlmTermination::Finish { schema: None, .. }
         ));
     }
 

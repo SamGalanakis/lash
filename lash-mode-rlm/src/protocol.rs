@@ -258,17 +258,24 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                         on_empty: CheckpointResumeAction::Finish,
                     });
                 }
-                RlmTermination::Finish { .. } => {
+                RlmTermination::Finish {
+                    include_submit_prompt,
+                    ..
+                } => {
                     let mut events = Vec::new();
                     if !assistant_text.trim().is_empty() {
                         events.push(conversation_event(assistant_prose_message(assistant_text)));
                     }
                     let requires_schema = matches!(
                         ctx.termination().rlm_termination(),
-                        RlmTermination::Finish { schema: Some(_) }
+                        RlmTermination::Finish {
+                            schema: Some(_),
+                            ..
+                        }
                     );
                     events.push(conversation_event(submit_required_reminder_message(
                         requires_schema,
+                        include_submit_prompt,
                     )));
                     actions.push(DriverAction::AppendEvents(events));
                     actions.push(DriverAction::AdvanceIteration);
@@ -330,7 +337,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     .find_map(baton_successor_from_tool_result);
                 for tool_call in &response.tool_calls {
                     actions.push(DriverAction::Emit(SessionEvent::ToolCall {
-                        call_id: None,
+                        call_id: tool_call.call_id.clone(),
                         name: tool_call.tool.clone(),
                         args: tool_call.args.clone(),
                         result: tool_call.result.clone(),
@@ -388,6 +395,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             // through to the shared terminate-with-value path below.
             if let RlmTermination::Finish {
                 schema: Some(schema),
+                ..
             } = ctx.termination().rlm_termination()
                 && let Err(error_text) = validate_finish_value(finish_value, &schema)
             {
@@ -597,9 +605,11 @@ fn assistant_prose_message(content: String) -> Message {
     }
 }
 
-fn submit_required_reminder_message(requires_schema: bool) -> Message {
+fn submit_required_reminder_message(requires_schema: bool, include_submit_prompt: bool) -> Message {
     let id = fresh_message_id();
-    let content = if requires_schema {
+    let content = if !include_submit_prompt {
+        "[runtime] This session must continue from a fenced ```lashlang block until the task-specific completion path is satisfied. Plain text outside a fence is not delivered."
+    } else if requires_schema {
         "[runtime] The final answer must be delivered from a fenced ```lashlang block by calling `submit <value>` with a value matching the required output schema. Plain text outside a fence is not delivered."
     } else {
         "[runtime] The final answer must be delivered from a fenced ```lashlang block by calling `submit <value>`. Plain text outside a fence is not delivered."

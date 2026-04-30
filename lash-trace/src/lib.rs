@@ -118,6 +118,11 @@ pub enum TraceEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream_summary: Option<Value>,
     },
+    ToolCallStarted {
+        call_id: Option<String>,
+        name: String,
+        args: Value,
+    },
     ToolCallCompleted {
         call_id: Option<String>,
         name: String,
@@ -138,6 +143,8 @@ pub enum TraceEvent {
     TurnCompleted {
         status: String,
         done_reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff: Option<TraceHandoff>,
     },
     Custom {
         name: String,
@@ -242,6 +249,11 @@ pub struct TraceTokenUsage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceHandoff {
+    pub successor_session_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceError {
     pub message: String,
     pub retryable: bool,
@@ -320,5 +332,35 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"type\":\"custom\""));
         assert!(text.contains("\"session_id\":\"root\""));
+    }
+
+    #[test]
+    fn tool_start_and_handoff_records_are_jsonl_shaped() {
+        let started = TraceRecord::new(
+            TraceContext::default().for_session("root"),
+            TraceEvent::ToolCallStarted {
+                call_id: Some("call-1".to_string()),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": "README.md"}),
+            },
+        );
+        let completed = TraceRecord::new(
+            TraceContext::default().for_session("root"),
+            TraceEvent::TurnCompleted {
+                status: "completed".to_string(),
+                done_reason: "modelstop".to_string(),
+                handoff: Some(TraceHandoff {
+                    successor_session_id: "child-1".to_string(),
+                }),
+            },
+        );
+
+        let started_json = serde_json::to_value(started).unwrap();
+        assert_eq!(started_json["type"], "tool_call_started");
+        assert_eq!(started_json["call_id"], "call-1");
+
+        let completed_json = serde_json::to_value(completed).unwrap();
+        assert_eq!(completed_json["type"], "turn_completed");
+        assert_eq!(completed_json["handoff"]["successor_session_id"], "child-1");
     }
 }

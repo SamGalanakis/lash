@@ -566,6 +566,7 @@ fn exec_driver_state_round_trip() {
         result: Ok(crate::ExecResponse {
             output: String::new(),
             observations: Vec::new(),
+            observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
             error: None,

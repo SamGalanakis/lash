@@ -28,7 +28,8 @@ pub use sansio::{
     UnitModeProtocol, WaitingExecState, WaitingLlmState, driver_state,
 };
 pub use session::{
-    CompletedTurn, ExecResponse, PromptUsage, SansIoSessionState, apply_completed_turn,
+    CompletedTurn, ExecResponse, PromptUsage, SansIoSessionState, TextProjectionMetadata,
+    apply_completed_turn,
 };
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
@@ -277,6 +278,37 @@ pub struct ModelTool {
     pub output_schema: serde_json::Value,
 }
 
+const COMPACT_TOOL_EXAMPLE_LIMIT: usize = 2;
+const COMPACT_TOOL_EXAMPLE_CHAR_LIMIT: usize = 240;
+const COMPACT_SCHEMA_FIELD_LIMIT: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CompactToolContract {
+    pub name: String,
+    pub signature: String,
+    pub returns: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
+}
+
+impl CompactToolContract {
+    pub fn render_markdown(&self) -> String {
+        let mut sections = vec![format!("### `{}`", self.signature)];
+        if !self.returns.trim().is_empty() {
+            sections.push(format!("Returns: {}", self.returns.trim()));
+        }
+        if !self.description.trim().is_empty() {
+            sections.push(self.description.trim().to_string());
+        }
+        if !self.examples.is_empty() {
+            sections.push(format!("Examples: {}", self.examples.join("; ")));
+        }
+        sections.join("\n")
+    }
+}
+
 impl ToolDefinition {
     pub fn new(
         name: impl Into<String>,
@@ -359,13 +391,34 @@ impl ToolDefinition {
         })
     }
 
-    pub fn signature(&self) -> String {
+    pub fn input_signature(&self) -> String {
         let params = schema_parameter_docs(&self.input_schema)
             .into_iter()
             .map(|p| p.signature_fragment())
             .collect::<Vec<_>>();
-        let ret = schema_type_label(&self.output_schema);
-        format!("{}({}) -> {}", self.name, params.join(", "), ret)
+        format!("{}({})", self.name, params.join(", "))
+    }
+
+    pub fn output_summary(&self) -> String {
+        compact_schema_label(&self.output_schema)
+    }
+
+    pub fn signature(&self) -> String {
+        format!("{} -> {}", self.input_signature(), self.output_summary())
+    }
+
+    pub fn compact_contract(&self) -> CompactToolContract {
+        self.compact_contract_with_example_limit(COMPACT_TOOL_EXAMPLE_LIMIT)
+    }
+
+    pub fn compact_contract_with_example_limit(&self, example_limit: usize) -> CompactToolContract {
+        CompactToolContract {
+            name: self.name.clone(),
+            signature: self.input_signature(),
+            returns: self.output_summary(),
+            description: self.description.trim().to_string(),
+            examples: compact_examples(&self.examples, example_limit),
+        }
     }
 
     pub fn effective_availability(&self, mode: &ExecutionMode) -> ToolAvailability {
@@ -391,13 +444,7 @@ impl ToolDefinition {
     ) -> String {
         tools
             .into_iter()
-            .map(|tool| {
-                let mut sections = vec![format!("### `{}`", tool.signature())];
-                if !tool.description.trim().is_empty() {
-                    sections.push(tool.description.trim().to_string());
-                }
-                sections.join("\n")
-            })
+            .map(|tool| tool.compact_contract().render_markdown())
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -669,6 +716,56 @@ mod tests {
     }
 
     #[test]
+    fn compact_tool_contract_renders_prompt_and_search_shape_from_schemas() {
+        let tool = ToolDefinition::new(
+            "search_docs",
+            "Search indexed docs",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "maximum": 10, "default": 5 }
+                },
+                "required": ["query"]
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "matches": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "next_page": { "type": ["string", "null"] }
+                },
+                "required": ["matches"]
+            }),
+        )
+        .with_examples(vec![
+            "search_docs(query=\"rust\")".to_string(),
+            "search_docs(query=\"rust\", limit=3)".to_string(),
+            "search_docs(query=\"ignored\")".to_string(),
+        ]);
+
+        let contract = tool.compact_contract();
+        assert_eq!(
+            contract.signature,
+            "search_docs(limit?: int <= 10 = 5, query: str)"
+        );
+        assert_eq!(
+            contract.returns,
+            "record{matches: list[str], next_page?: str | null}"
+        );
+        assert_eq!(contract.examples.len(), 2);
+
+        let docs = ToolDefinition::format_tool_docs(&[tool]);
+        assert!(docs.contains("### `search_docs(limit?: int <= 10 = 5, query: str)`"));
+        assert!(docs.contains("Returns: record{matches: list[str], next_page?: str | null}"));
+        assert!(docs.contains(
+            "Examples: search_docs(query=\"rust\"); search_docs(query=\"rust\", limit=3)"
+        ));
+    }
+
+    #[test]
     fn tool_result_from_result_serializes_success_values() {
         let result: ToolResult = Result::<_, std::io::Error>::Ok(vec!["alpha", "beta"]).into();
         assert!(result.success);
@@ -738,6 +835,110 @@ mod tests {
 
 fn schema_type_label(schema: &serde_json::Value) -> String {
     schema_type_label_and_nullability(schema).0
+}
+
+fn compact_schema_label(schema: &serde_json::Value) -> String {
+    if let Some(any_of) = schema
+        .get("anyOf")
+        .or_else(|| schema.get("oneOf"))
+        .and_then(serde_json::Value::as_array)
+    {
+        let labels = any_of
+            .iter()
+            .map(compact_schema_label)
+            .collect::<std::collections::BTreeSet<_>>();
+        let joined = labels.into_iter().collect::<Vec<_>>().join(" | ");
+        return if joined.is_empty() {
+            "any".to_string()
+        } else {
+            joined
+        };
+    }
+
+    if let Some(types) = schema.get("type").and_then(serde_json::Value::as_array) {
+        let labels = types
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|ty| *ty != "null")
+            .map(|ty| compact_schema_label(&serde_json::json!({ "type": ty })))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut out = if labels.is_empty() {
+            "any".to_string()
+        } else {
+            labels.into_iter().collect::<Vec<_>>().join(" | ")
+        };
+        if types.iter().any(|value| value.as_str() == Some("null")) {
+            out.push_str(" | null");
+        }
+        return out;
+    }
+
+    match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("array") => schema
+            .get("items")
+            .map(compact_schema_label)
+            .filter(|value| !value.is_empty())
+            .map(|item| format!("list[{item}]"))
+            .unwrap_or_else(|| "list[any]".to_string()),
+        Some("object") => compact_record_label(schema),
+        _ => schema_type_label(schema),
+    }
+}
+
+fn compact_record_label(schema: &serde_json::Value) -> String {
+    let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return "record".to_string();
+    };
+    if properties.is_empty() {
+        return "record".to_string();
+    }
+
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut fields = properties
+        .iter()
+        .take(COMPACT_SCHEMA_FIELD_LIMIT)
+        .map(|(name, field_schema)| {
+            let suffix = if required.contains(name.as_str()) {
+                ""
+            } else {
+                "?"
+            };
+            format!("{name}{suffix}: {}", compact_schema_label(field_schema))
+        })
+        .collect::<Vec<_>>();
+    if properties.len() > COMPACT_SCHEMA_FIELD_LIMIT {
+        fields.push("...".to_string());
+    }
+    format!("record{{{}}}", fields.join(", "))
+}
+
+fn compact_examples(examples: &[String], limit: usize) -> Vec<String> {
+    examples
+        .iter()
+        .map(|example| example.trim())
+        .filter(|example| !example.is_empty())
+        .take(limit)
+        .map(|example| {
+            if example.chars().count() <= COMPACT_TOOL_EXAMPLE_CHAR_LIMIT {
+                return example.to_string();
+            }
+            let mut out = example
+                .chars()
+                .take(COMPACT_TOOL_EXAMPLE_CHAR_LIMIT.saturating_sub(3))
+                .collect::<String>();
+            out.push_str("...");
+            out
+        })
+        .collect()
 }
 
 fn schema_type_label_and_nullability(schema: &serde_json::Value) -> (String, bool) {

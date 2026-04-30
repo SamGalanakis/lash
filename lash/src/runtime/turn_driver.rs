@@ -96,6 +96,23 @@ impl RuntimeTurnDriver {
         );
     }
 
+    fn emit_tool_call_started_trace(
+        &self,
+        iteration: usize,
+        call_id: Option<String>,
+        name: String,
+        args: serde_json::Value,
+    ) {
+        self.emit_trace(
+            iteration,
+            lash_trace::TraceEvent::ToolCallStarted {
+                call_id,
+                name,
+                args,
+            },
+        );
+    }
+
     fn emit_rlm_exec_step(&self, iteration: usize, phase: &str, payload: serde_json::Value) {
         let mut payload = payload;
         if let Some(object) = payload.as_object_mut() {
@@ -299,6 +316,16 @@ impl RuntimeTurnDriver {
                         machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
                     }
                     Effect::ToolCalls { id, calls } => {
+                        if self.host.core.trace_sink.is_some() {
+                            for pending in &calls {
+                                self.emit_tool_call_started_trace(
+                                    machine.iteration(),
+                                    Some(pending.call_id.clone()),
+                                    pending.tool_name.clone(),
+                                    pending.args.clone(),
+                                );
+                            }
+                        }
                         let results = self.run_tool_calls(calls, &event_tx, &cancel).await;
                         if self.host.core.trace_sink.is_some() {
                             for outcome in &results {
@@ -354,12 +381,30 @@ impl RuntimeTurnDriver {
                                         "output_chars": output.output.chars().count(),
                                         "observations": output.observations,
                                         "observation_count": output.observations.len(),
+                                        "observation_truncation": output.observation_truncation,
                                         "error": output.error,
                                         "terminal_finish": output.terminal_finish,
                                         "terminal_finish_present": output.terminal_finish.is_some(),
                                         "tool_call_count": output.tool_calls.len(),
                                     }),
                                 );
+                                for record in &output.tool_calls {
+                                    self.emit_tool_call_started_trace(
+                                        iteration,
+                                        record.call_id.clone(),
+                                        record.tool.clone(),
+                                        record.args.clone(),
+                                    );
+                                }
+                                if !output.observation_truncation.is_empty() {
+                                    self.emit_rlm_exec_step(
+                                        iteration,
+                                        "observation_projection",
+                                        serde_json::json!({
+                                            "observations": output.observation_truncation,
+                                        }),
+                                    );
+                                }
                                 for record in &output.tool_calls {
                                     self.emit_tool_call_trace(iteration, record);
                                 }

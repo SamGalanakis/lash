@@ -65,6 +65,7 @@ where
                     raw: None,
                 }],
                 typed_finish: None,
+                handoff_successor_session_id: None,
             },
         };
         tracing::debug!(stream_id, status = ?result.status, "runtime turn task returning runtime");

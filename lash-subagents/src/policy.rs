@@ -120,7 +120,7 @@ fn capability_list_for_description(capability_names: &[String]) -> String {
 fn pass_baton_definition(examples: Vec<String>) -> ToolDefinition {
     tool_definition(
         "pass_baton",
-        "Hand off to a fresh successor session and end the current session immediately. Use when most of your trajectory has become irrelevant or when context budget is approaching the limit. The successor inherits only the values you put in `seed` as lashlang globals and the `task` string as its `user_input_1`. It does not inherit prior conversation, trajectory, or globals. The successor keeps the current session's output schema, and the successor's `submit` becomes the user-facing answer.",
+        "Hand off to a fresh successor session and end the current session immediately. Use when most of your trajectory has become irrelevant or when context budget is approaching the limit. The successor starts with the same tool access and output schema, but it does not inherit prior conversation, trajectory, or globals. Put everything directly relevant to continuing the task in `task` and `seed`: include concrete goals, constraints, discovered facts, IDs, tokens, file paths, partial results, and next steps. Be selective; do not copy irrelevant history or dead ends. If useful, include a short slice of prior lashlang/repl history in `seed` so the successor can resume without rediscovering it.",
         pass_baton_input_schema(),
         examples,
         ToolExecutionMode::Parallel,

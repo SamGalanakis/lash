@@ -308,6 +308,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
         tool_calls: Vec::new(),
         errors: Vec::new(),
         typed_finish: None,
+        handoff_successor_session_id: None,
     }
 }
 

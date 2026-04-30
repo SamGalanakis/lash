@@ -88,7 +88,8 @@ fn tool_catalogue_prompt(surface: &lash::ToolSurface) -> Option<String> {
 
     let mut rendered = format!(
         "Catalogued tools: {omitted_tool_count} not showcased here; searchable with `search_tools`.\n\
-         When a task needs a tool not showcased here, run `search_tools(query=...)` and call the relevant result by name."
+         When a task needs a tool not showcased here, run `search_tools(query=...)` and call the relevant result by name. \
+         Results use the same compact contract shape as showcased tools: signature, returns, description, and capped examples."
     );
 
     if by_namespace.len() <= CATALOGUE_NAMESPACE_LIMIT {
@@ -203,6 +204,27 @@ mod catalogue_tests {
         assert!(prompt.contains("bulk(51)"));
         assert!(!prompt.contains("Catalogued names:"));
     }
+
+    #[test]
+    fn finish_finalization_prompt_defaults_to_submit_guidance() {
+        let prompt = rlm_finalization_prompt(&RlmTermination::Finish {
+            schema: None,
+            include_submit_prompt: true,
+        });
+
+        assert!(prompt.contains("submit <value>"));
+    }
+
+    #[test]
+    fn finish_finalization_prompt_can_suppress_submit_guidance() {
+        let prompt = rlm_finalization_prompt(&RlmTermination::Finish {
+            schema: None,
+            include_submit_prompt: false,
+        });
+
+        assert!(prompt.contains("task-specific completion path"));
+        assert!(!prompt.contains("submit"));
+    }
 }
 
 struct RlmContextProjector {
@@ -227,14 +249,8 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
     fn project(&self, ctx: ProjectorContext<'_>) -> LlmRequest {
         let task_context = self.format_task_context(ctx.events, ctx.messages.as_slice());
         let repl_history = self.format_repl_history(ctx.events);
-        let finalization = match ctx.config.termination.rlm_termination() {
-            RlmTermination::ProseWithoutFence => {
-                "Finalization\nWhen the task only needs a conversational reply, answer in prose with no lashlang block — that ends the turn. When you need to call tools, compute, or fetch data first, emit a `lashlang` block; the next iteration sees its observations."
-            }
-            RlmTermination::Finish { .. } => {
-                "Finalization\nCall `submit <value>` from lashlang when the task is complete. Do not answer in prose without a lashlang block."
-            }
-        };
+        let termination = ctx.config.termination.rlm_termination();
+        let finalization = rlm_finalization_prompt(&termination);
         let user_prompt = format!(
             "Task\n{task_context}\n\nREPL history\n{repl_history}\n\nIteration\n{}\n\n{finalization}",
             ctx.iteration + 1
@@ -259,6 +275,26 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
             session_id: ctx.config.run_session_id.clone(),
             output_spec: None,
             stream_events: None,
+        }
+    }
+}
+
+fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
+    match termination {
+        RlmTermination::ProseWithoutFence => {
+            "Finalization\nWhen the task only needs a conversational reply, answer in prose with no lashlang block — that ends the turn. When you need to call tools, compute, or fetch data first, emit a `lashlang` block; the next iteration sees its observations."
+        }
+        RlmTermination::Finish {
+            include_submit_prompt: true,
+            ..
+        } => {
+            "Finalization\nCall `submit <value>` from lashlang when the task is complete. Do not answer in prose without a lashlang block."
+        }
+        RlmTermination::Finish {
+            include_submit_prompt: false,
+            ..
+        } => {
+            "Finalization\nContinue in lashlang blocks until the task-specific completion path is satisfied. Do not answer in prose without a lashlang block."
         }
     }
 }
