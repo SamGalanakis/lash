@@ -4,9 +4,14 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 
+[features]
+default = []
+semantic-tool-search = ["dep:model2vec-rs"]
+
 [dependencies]
 lash = { path = "../lash" }
 async-trait = "0.1"
+model2vec-rs = { version = "0.1.4", optional = true }
 serde_json = "1"
 schemars = "0.8"
 strsim = "0.11"

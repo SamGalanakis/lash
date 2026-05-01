@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
+#[cfg(feature = "semantic-tool-search")]
+use std::sync::{Mutex, OnceLock};
 
 use lash::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     ToolSurfaceContext,
 };
 use lash::{
+    DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolDefinition, ToolExecutionContext,
     ToolExecutionMode, ToolProvider, ToolResult, ToolSurfaceContribution, ToolSurfaceOverride,
 };
@@ -14,7 +17,11 @@ use serde_json::{Value, json};
 
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 100;
+const LLM_CANDIDATE_LIMIT: usize = 100;
+const DEFAULT_LLM_RERANK_MODEL: &str = "anthropic/claude-sonnet-4.6";
 const FUZZY_SCORE_CAP: f64 = 1.25;
+const SEMANTIC_CANDIDATE_FLOOR: usize = 50;
+const RRF_K: f64 = 60.0;
 
 #[derive(Clone, Debug)]
 struct CatalogTool {
@@ -41,14 +48,25 @@ struct FieldIndex {
 struct DiscoveryDoc {
     tool: CatalogTool,
     fields: Vec<FieldIndex>,
+    #[cfg(feature = "semantic-tool-search")]
+    semantic_text: String,
 }
 
 #[derive(Clone, Debug)]
+struct RankedCandidate {
+    idx: usize,
+    lexical_score: f64,
+    semantic_score: Option<f64>,
+}
+
+#[derive(Debug)]
 pub struct ToolDiscoveryIndex {
     key: u64,
     docs: Vec<DiscoveryDoc>,
     avg_len: f64,
     doc_freq: HashMap<String, usize>,
+    #[cfg(feature = "semantic-tool-search")]
+    semantic_embeddings: OnceLock<Vec<Vec<f32>>>,
 }
 
 #[derive(Clone, Default)]
@@ -88,9 +106,44 @@ impl ToolDiscoveryToolsProvider {
         index
     }
 
-    fn search_tools(&self, args: &Value, catalog: Vec<Value>) -> ToolResult {
+    async fn search_tools(
+        &self,
+        args: &Value,
+        catalog: Vec<Value>,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
         let index = self.index_for_catalog(catalog);
-        ToolResult::ok(json!(index.search(args)))
+        let limit = limit_from_args(args);
+        let candidate_args = args_with_limit(args, LLM_CANDIDATE_LIMIT);
+        let candidates = index.search(&candidate_args);
+        if candidates.is_empty() {
+            return ToolResult::ok(json!([]));
+        }
+
+        let request = llm_rerank_request(args, &candidates, limit);
+        let completion = match context
+            .host
+            .direct_completion(request, "search_tools")
+            .await
+        {
+            Ok(completion) => completion,
+            Err(err) => return ToolResult::err_fmt(format_args!("search_tools failed: {err}")),
+        };
+
+        let selected_names = match parse_llm_tool_names(&completion.text) {
+            Ok(names) => names,
+            Err(err) => {
+                return ToolResult::err_fmt(format_args!(
+                    "search_tools returned invalid JSON: {err}"
+                ));
+            }
+        };
+
+        ToolResult::ok(json!(merge_llm_selection(
+            candidates,
+            selected_names,
+            limit
+        )))
     }
 
     fn requested_names(args: &Value) -> Result<Vec<String>, ToolResult> {
@@ -220,10 +273,21 @@ impl ToolDiscoveryIndex {
             docs,
             avg_len,
             doc_freq,
+            #[cfg(feature = "semantic-tool-search")]
+            semantic_embeddings: OnceLock::new(),
         }
     }
 
     fn search(&self, args: &Value) -> Vec<Value> {
+        let semantic_scores = self.semantic_scores(args);
+        self.search_with_semantic_scores(args, semantic_scores.as_deref())
+    }
+
+    fn search_with_semantic_scores(
+        &self,
+        args: &Value,
+        semantic_scores: Option<&[f64]>,
+    ) -> Vec<Value> {
         let query = args
             .get("query")
             .and_then(Value::as_str)
@@ -232,8 +296,7 @@ impl ToolDiscoveryIndex {
         let limit = limit_from_args(args);
         let debug = args.get("debug").and_then(Value::as_bool).unwrap_or(false);
         let query_tokens = tokenize(query);
-
-        let mut ranked = Vec::new();
+        let mut lexical = Vec::new();
         for (idx, doc) in self.docs.iter().enumerate() {
             if !doc.matches_filters(args) {
                 continue;
@@ -245,39 +308,147 @@ impl ToolDiscoveryIndex {
                 doc,
                 &matched_fields,
             );
-            let include = if query.is_empty() {
-                true
-            } else {
-                !matched_fields.is_empty()
-            };
-            if include {
-                ranked.push((idx, score, matched_fields));
+            if query.is_empty() || !matched_fields.is_empty() {
+                lexical.push(RankedCandidate {
+                    idx,
+                    lexical_score: score,
+                    semantic_score: semantic_scores
+                        .filter(|scores| scores.len() == self.docs.len())
+                        .and_then(|scores| scores.get(idx))
+                        .copied(),
+                });
             }
         }
 
         if query.is_empty() {
-            ranked.sort_by(|(left, _, _), (right, _, _)| {
-                self.docs[*left].tool.name.cmp(&self.docs[*right].tool.name)
+            lexical.sort_by(|left, right| {
+                self.docs[left.idx]
+                    .tool
+                    .name
+                    .cmp(&self.docs[right.idx].tool.name)
             });
         } else {
-            ranked.sort_by(|(left_idx, left_score, _), (right_idx, right_score, _)| {
-                right_score
-                    .partial_cmp(left_score)
+            lexical.sort_by(|left, right| {
+                right
+                    .lexical_score
+                    .partial_cmp(&left.lexical_score)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
-                        self.docs[*left_idx]
+                        self.docs[left.idx]
                             .tool
                             .name
-                            .cmp(&self.docs[*right_idx].tool.name)
+                            .cmp(&self.docs[right.idx].tool.name)
                     })
             });
         }
 
+        let ranked = if query.is_empty() {
+            lexical
+        } else if let Some(scores) =
+            semantic_scores.filter(|scores| scores.len() == self.docs.len())
+        {
+            let semantic = self.semantic_candidates(args, scores, limit);
+            reciprocal_rank_fusion(lexical, semantic)
+        } else {
+            lexical
+        };
+
         ranked
             .into_iter()
             .take(limit)
-            .map(|(idx, score, _matched_fields)| self.docs[idx].tool.project(score, debug))
+            .map(|candidate| {
+                let score = candidate
+                    .semantic_score
+                    .map(|semantic| {
+                        round_score(candidate.lexical_score) + round_score(semantic.max(0.0))
+                    })
+                    .unwrap_or(candidate.lexical_score);
+                self.docs[candidate.idx].tool.project(score, debug)
+            })
             .collect()
+    }
+
+    fn semantic_candidates(
+        &self,
+        args: &Value,
+        semantic_scores: &[f64],
+        limit: usize,
+    ) -> Vec<RankedCandidate> {
+        let candidate_limit = limit
+            .saturating_mul(5)
+            .max(SEMANTIC_CANDIDATE_FLOOR)
+            .min(semantic_scores.len());
+        let mut ranked = semantic_scores
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(idx, score)| {
+                score.is_finite() && *score > 0.0 && self.docs[*idx].matches_filters(args)
+            })
+            .map(|(idx, score)| RankedCandidate {
+                idx,
+                lexical_score: 0.0,
+                semantic_score: Some(score),
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .semantic_score
+                .partial_cmp(&left.semantic_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    self.docs[left.idx]
+                        .tool
+                        .name
+                        .cmp(&self.docs[right.idx].tool.name)
+                })
+        });
+        ranked.truncate(candidate_limit);
+        ranked
+    }
+
+    fn semantic_scores(&self, args: &Value) -> Option<Vec<f64>> {
+        #[cfg(feature = "semantic-tool-search")]
+        {
+            self.semantic_scores_enabled(args)
+        }
+        #[cfg(not(feature = "semantic-tool-search"))]
+        {
+            let _ = args;
+            None
+        }
+    }
+
+    #[cfg(feature = "semantic-tool-search")]
+    fn semantic_scores_enabled(&self, args: &Value) -> Option<Vec<f64>> {
+        if !semantic_requested(args) {
+            return None;
+        }
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if query.is_empty() || self.docs.is_empty() {
+            return None;
+        }
+        let model_guard = semantic_model()?;
+        let model = model_guard.as_ref()?;
+        let doc_embeddings = self.semantic_embeddings.get_or_init(|| {
+            let docs = self
+                .docs
+                .iter()
+                .map(|doc| doc.semantic_text.clone())
+                .collect::<Vec<_>>();
+            model.encode(&docs)
+        });
+        let query_embedding = model.encode_single(query);
+        Some(
+            doc_embeddings
+                .iter()
+                .map(|embedding| cosine_similarity(&query_embedding, embedding) as f64)
+                .collect(),
+        )
     }
 }
 
@@ -325,14 +496,8 @@ impl CatalogTool {
         let contract = definition.compact_contract();
         let mut out = serde_json::Map::new();
         out.insert("name".to_string(), json!(contract.name));
-        out.insert("signature".to_string(), json!(contract.signature));
-        out.insert("returns".to_string(), json!(contract.returns));
-        if !contract.parameters.is_empty() {
-            out.insert("parameters".to_string(), json!(contract.parameters));
-        }
-        if !contract.return_fields.is_empty() {
-            out.insert("return_fields".to_string(), json!(contract.return_fields));
-        }
+        out.insert("signature".to_string(), json!(contract.render_signature()));
+        out.insert("returns".to_string(), json!(contract.render_returns()));
         if !contract.description.is_empty() {
             out.insert("description".to_string(), json!(contract.description));
         }
@@ -410,17 +575,30 @@ impl DiscoveryDoc {
             false,
         );
 
-        Self { tool, fields }
+        #[cfg(feature = "semantic-tool-search")]
+        let semantic_text = semantic_index_text(&tool);
+
+        Self {
+            tool,
+            fields,
+            #[cfg(feature = "semantic-tool-search")]
+            semantic_text,
+        }
     }
 
     fn matches_filters(&self, args: &Value) -> bool {
         let namespaces = namespace_filter(args.get("namespace"));
         if !namespaces.is_empty() {
-            return self.tool.namespace.as_deref().is_some_and(|namespace| {
-                namespaces.iter().any(|candidate| candidate == namespace)
-            });
+            if !self
+                .tool
+                .namespace
+                .as_deref()
+                .is_some_and(|namespace| namespaces.iter().any(|candidate| candidate == namespace))
+            {
+                return false;
+            }
         }
-        true
+        !exclude_filter(args.get("exclude")).contains(&self.tool.name)
     }
 
     fn weighted_len(&self) -> f64 {
@@ -624,8 +802,8 @@ fn matched_fields(query_tokens: &[String], doc: &DiscoveryDoc) -> Vec<String> {
             && query_tokens.iter().any(|query| {
                 field.tokens.iter().any(|token| {
                     token == query
-                        || token.contains(query)
-                        || query.contains(token)
+                        || (query.len() >= 3 && token.len() >= 3 && token.contains(query))
+                        || (query.len() >= 3 && token.len() >= 3 && query.contains(token))
                         || (query.len() >= 3
                             && field.fuzzy
                             && strsim::jaro_winkler(query, token) >= 0.88)
@@ -636,6 +814,60 @@ fn matched_fields(query_tokens: &[String], doc: &DiscoveryDoc) -> Vec<String> {
         }
     }
     hits.into_iter().collect()
+}
+
+fn reciprocal_rank_fusion(
+    lexical: Vec<RankedCandidate>,
+    semantic: Vec<RankedCandidate>,
+) -> Vec<RankedCandidate> {
+    let mut fused: HashMap<usize, (f64, RankedCandidate)> = HashMap::new();
+    add_rrf_candidates(&mut fused, lexical, |candidate| candidate.lexical_score);
+    add_rrf_candidates(&mut fused, semantic, |candidate| {
+        candidate.semantic_score.unwrap_or_default()
+    });
+
+    let mut fused = fused.into_values().collect::<Vec<_>>();
+    fused.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                right
+                    .lexical_score
+                    .partial_cmp(&left.lexical_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                right
+                    .semantic_score
+                    .partial_cmp(&left.semantic_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.idx.cmp(&right.idx))
+    });
+    fused.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+fn add_rrf_candidates(
+    fused: &mut HashMap<usize, (f64, RankedCandidate)>,
+    candidates: Vec<RankedCandidate>,
+    score_of: impl Fn(&RankedCandidate) -> f64,
+) {
+    for (rank, candidate) in candidates.into_iter().enumerate() {
+        let rank_score = 1.0 / (RRF_K + rank as f64 + 1.0);
+        let raw_score = score_of(&candidate).max(0.0) * 0.000_001;
+        let entry = fused
+            .entry(candidate.idx)
+            .or_insert_with(|| (0.0, candidate.clone()));
+        entry.0 += rank_score + raw_score;
+        entry.1.lexical_score = entry.1.lexical_score.max(candidate.lexical_score);
+        if let Some(score) = candidate.semantic_score {
+            let current = entry.1.semantic_score.unwrap_or(f64::NEG_INFINITY);
+            if score > current {
+                entry.1.semantic_score = Some(score);
+            }
+        }
+    }
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -651,6 +883,13 @@ fn limit_from_args(args: &Value) -> usize {
         .and_then(|value| usize::try_from(value).ok())
         .map(|value| value.clamp(1, MAX_LIMIT))
         .unwrap_or(DEFAULT_LIMIT)
+}
+
+fn args_with_limit(args: &Value, limit: usize) -> Value {
+    let mut args = args.as_object().cloned().unwrap_or_default();
+    args.insert("limit".to_string(), json!(limit.clamp(1, MAX_LIMIT)));
+    args.insert("debug".to_string(), json!(false));
+    Value::Object(args)
 }
 
 fn namespace_filter(value: Option<&Value>) -> Vec<String> {
@@ -672,6 +911,25 @@ fn namespace_filter(value: Option<&Value>) -> Vec<String> {
     }
 }
 
+fn exclude_filter(value: Option<&Value>) -> BTreeSet<String> {
+    match value {
+        Some(Value::String(name)) => name
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
 fn string_field(value: &Value, key: &str) -> String {
     value
         .get(key)
@@ -690,6 +948,25 @@ fn schema_index_text(schema: Option<&Value>) -> String {
         collect_schema_index_text("", schema, &mut parts);
     }
     parts.join("\n")
+}
+
+#[cfg(feature = "semantic-tool-search")]
+fn semantic_index_text(tool: &CatalogTool) -> String {
+    let definition = tool.compact_definition();
+    let contract = definition.compact_contract();
+    let mut parts = vec![
+        contract.name.clone(),
+        contract.render_signature(),
+        contract.render_returns(),
+        contract.description.clone(),
+    ];
+    parts.extend(contract.examples.clone());
+    parts
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn collect_schema_index_text(path: &str, schema: &Value, parts: &mut Vec<String>) {
@@ -757,6 +1034,64 @@ fn round_score(score: f64) -> f64 {
     (score * 100.0).round() / 100.0
 }
 
+#[cfg(feature = "semantic-tool-search")]
+fn semantic_requested(args: &Value) -> bool {
+    if let Some(value) = args.get("semantic").and_then(Value::as_bool) {
+        return value;
+    }
+    if let Ok(value) = std::env::var("LASH_TOOL_SEARCH_SEMANTIC") {
+        return truthy_env_value(&value);
+    }
+    false
+}
+
+#[cfg(feature = "semantic-tool-search")]
+fn truthy_env_value(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+#[cfg(feature = "semantic-tool-search")]
+fn semantic_model()
+-> Option<std::sync::MutexGuard<'static, Option<model2vec_rs::model::StaticModel>>> {
+    static MODEL: OnceLock<Mutex<Option<model2vec_rs::model::StaticModel>>> = OnceLock::new();
+    let lock = MODEL.get_or_init(|| Mutex::new(None));
+    let mut guard = lock.lock().ok()?;
+    if guard.is_none() {
+        if let Ok(model) = {
+            let model_id = std::env::var("LASH_TOOL_SEARCH_SEMANTIC_MODEL")
+                .unwrap_or_else(|_| "minishlab/potion-base-2M".to_string());
+            model2vec_rs::model::StaticModel::from_pretrained(model_id, None, None, None)
+        } {
+            *guard = Some(model);
+        }
+    }
+    guard.as_ref()?;
+    Some(guard)
+}
+
+#[cfg(feature = "semantic-tool-search")]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.is_empty() || left.len() != right.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut left_norm = 0.0;
+    let mut right_norm = 0.0;
+    for (left, right) in left.iter().zip(right.iter()) {
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+        0.0
+    } else {
+        dot / (left_norm.sqrt() * right_norm.sqrt())
+    }
+}
+
 fn string_vec(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(items)) => items
@@ -780,15 +1115,169 @@ fn catalog_key(catalog: &[Value]) -> u64 {
     hasher.finish()
 }
 
+fn llm_rerank_request(args: &Value, candidates: &[Value], limit: usize) -> DirectRequest {
+    let model = std::env::var("LASH_TOOL_SEARCH_LLM_MODEL")
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_LLM_RERANK_MODEL.to_string());
+    let model_variant = std::env::var("LASH_TOOL_SEARCH_LLM_VARIANT")
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty());
+    let candidate_names = candidates
+        .iter()
+        .filter_map(|candidate| candidate.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let schema = DirectJsonSchema {
+        name: "tool_search_rerank".to_string(),
+        strict: true,
+        schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tool_names"],
+            "properties": {
+                "tool_names": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": candidate_names,
+                    }
+                }
+            }
+        }),
+    };
+    let prompt = llm_rerank_prompt(args, candidates, limit);
+    DirectRequest {
+        model,
+        model_variant,
+        messages: vec![
+            DirectMessage {
+                role: DirectRole::System,
+                parts: vec![DirectPart::Text(
+                    "You select API tools for another agent. Return tool names only through the requested JSON schema. Maximize recall for the caller's query while keeping the ranking precise."
+                        .to_string(),
+                )],
+            },
+            DirectMessage {
+                role: DirectRole::User,
+                parts: vec![DirectPart::Text(prompt)],
+            },
+        ],
+        attachments: Vec::new(),
+        output: DirectOutputSpec::JsonSchema(schema),
+        stream_events: None,
+        session_id: None,
+    }
+}
+
+fn llm_rerank_prompt(args: &Value, candidates: &[Value], limit: usize) -> String {
+    let compact_candidates = candidates
+        .iter()
+        .map(llm_candidate_payload)
+        .collect::<Vec<_>>();
+    json!({
+        "instructions": [
+            "Select tools from candidates for the caller's query.",
+            "Return only tools that may be needed to complete the task, best to worst.",
+            "Prefer read/list/show/search tools for inspection or counting tasks.",
+            "Prefer mutation tools only when the query explicitly asks to change state.",
+            "For combined constraints, include complementary tools for each constraint.",
+            "Do not include tools outside the candidate list."
+        ],
+        "query": args.get("query").and_then(Value::as_str).unwrap_or_default(),
+        "namespace": args.get("namespace").cloned().unwrap_or(Value::Null),
+        "exclude": args.get("exclude").cloned().unwrap_or_else(|| json!([])),
+        "limit": limit,
+        "candidates": compact_candidates,
+    })
+    .to_string()
+}
+
+fn llm_candidate_payload(candidate: &Value) -> Value {
+    json!({
+        "name": candidate.get("name").cloned().unwrap_or(Value::Null),
+        "signature": candidate.get("signature").cloned().unwrap_or(Value::Null),
+        "returns": candidate.get("returns").cloned().unwrap_or(Value::Null),
+        "description": candidate.get("description").cloned().unwrap_or(Value::Null),
+        "examples": candidate.get("examples").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn parse_llm_tool_names(text: &str) -> Result<Vec<String>, serde_json::Error> {
+    let trimmed = text.trim();
+    let value = match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => value,
+        Err(err) => {
+            let Some(start) = trimmed.find('{') else {
+                return Err(err);
+            };
+            let Some(end) = trimmed.rfind('}') else {
+                return Err(err);
+            };
+            serde_json::from_str::<Value>(&trimmed[start..=end])?
+        }
+    };
+    Ok(value
+        .get("tool_names")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn merge_llm_selection(
+    candidates: Vec<Value>,
+    selected_names: Vec<String>,
+    limit: usize,
+) -> Vec<Value> {
+    let mut by_name = BTreeMap::new();
+    let mut deterministic_names = Vec::new();
+    for candidate in candidates {
+        let Some(name) = candidate.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if !by_name.contains_key(name) {
+            deterministic_names.push(name.to_string());
+        }
+        by_name.insert(name.to_string(), candidate);
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut ranked = Vec::new();
+    for name in selected_names.into_iter().chain(deterministic_names) {
+        if ranked.len() >= limit {
+            break;
+        }
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(candidate) = by_name.get(&name) {
+            ranked.push(candidate.clone());
+        }
+    }
+    ranked
+}
+
 fn search_tools_definition() -> ToolDefinition {
     #[derive(schemars::JsonSchema)]
     #[allow(dead_code)]
     struct SearchToolsArgs {
+        #[schemars(
+            description = "Concise tool search query. Prefer keywords and short intent phrases with the app/domain, action, object, qualifiers, and important fields; for multi-constraint tasks include every constraint, such as \"spotify liked songs library\"."
+        )]
         query: String,
+        #[schemars(description = "Optional namespace filter, such as \"appworld\".")]
         namespace: Option<NamespaceFilter>,
         #[schemars(range(min = 1, max = 100))]
+        #[schemars(description = "Maximum number of results to return. Defaults to 10.")]
         limit: Option<usize>,
-        debug: Option<bool>,
+        #[schemars(description = "Exact tool name or names to exclude from results.")]
+        exclude: Option<NameFilter>,
     }
 
     #[derive(schemars::JsonSchema)]
@@ -799,11 +1288,20 @@ fn search_tools_definition() -> ToolDefinition {
         Many(Vec<String>),
     }
 
+    #[derive(schemars::JsonSchema)]
+    #[allow(dead_code)]
+    #[serde(untagged)]
+    enum NameFilter {
+        One(String),
+        Many(Vec<String>),
+    }
+
     ToolDefinition::native::<SearchToolsArgs>(
         "search_tools",
-        "Search catalogued tool names, namespaces, aliases, descriptions, parameters, and examples. Use this when the tool you need is not showcased in the prompt. Query with concise keywords and intent phrases, not a full sentence: include the app/domain, action, object, and important fields or constraints.",
+        "Search catalogued tool names, namespaces, aliases, descriptions, signatures, return fields, and examples. Use this when the tool you need is not showcased in the prompt. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints. For initial exploration, print only result names and signatures; inspect descriptions and examples only when you need to choose between close matches or learn call idioms.",
     )
         .with_examples(vec![
+            "search_tools(query=\"spotify liked songs library\", namespace=\"appworld\")".into(),
             "search_tools(query=\"spotify song details play_count genre title song_id\", namespace=\"appworld\")".into(),
             "search_tools(query=\"venmo send money private payment_card receiver_email\", namespace=\"appworld\")".into(),
         ])
@@ -813,7 +1311,7 @@ fn search_tools_definition() -> ToolDefinition {
             namespace: Some("runtime".to_string()),
             aliases: vec!["tool_search".to_string()],
         })
-        .with_execution_mode(ToolExecutionMode::Parallel)
+        .with_execution_mode(ToolExecutionMode::Serial)
 }
 
 fn load_tools_definition() -> ToolDefinition {
@@ -857,7 +1355,7 @@ impl ToolProvider for ToolDiscoveryToolsProvider {
     ) -> ToolResult {
         match name {
             "search_tools" => match context.host.tool_catalog(&context.session_id).await {
-                Ok(catalog) => self.search_tools(args, catalog),
+                Ok(catalog) => self.search_tools(args, catalog, context).await,
                 Err(err) => ToolResult::err_fmt(err.to_string()),
             },
             "load_tools" => self.load_tools(args, context).await,
@@ -944,8 +1442,8 @@ mod tests {
         PluginError, SessionHandle, SessionManager, SessionSnapshot, SessionTurnHandle,
     };
     use lash::{
-        AssembledTurn, ExecutionMode, ToolExecutionContext, ToolSurfaceBuildInput, TurnInput,
-        build_tool_surface,
+        AssembledTurn, DirectCompletion, ExecutionMode, TokenUsage, ToolExecutionContext,
+        ToolSurfaceBuildInput, TurnInput, build_tool_surface,
     };
     use std::sync::Mutex;
 
@@ -986,6 +1484,8 @@ mod tests {
     struct FakeSessionManager {
         catalog: Vec<Value>,
         promoted: Mutex<Vec<String>>,
+        direct_response: Mutex<Option<String>>,
+        direct_requests: Mutex<Vec<lash::DirectRequest>>,
     }
 
     #[async_trait::async_trait]
@@ -1016,6 +1516,27 @@ mod tests {
                 .expect("promoted lock poisoned")
                 .extend(tool_names.iter().cloned());
             Ok(2)
+        }
+
+        async fn direct_completion(
+            &self,
+            request: lash::DirectRequest,
+            _usage_source: &str,
+        ) -> Result<DirectCompletion, PluginError> {
+            self.direct_requests
+                .lock()
+                .expect("direct requests lock poisoned")
+                .push(request);
+            let text = self
+                .direct_response
+                .lock()
+                .expect("direct response lock poisoned")
+                .clone()
+                .unwrap_or_else(|| "{\"tool_names\":[]}".to_string());
+            Ok(DirectCompletion {
+                text,
+                usage: TokenUsage::default(),
+            })
         }
 
         async fn create_session(
@@ -1184,6 +1705,38 @@ mod tests {
         assert_eq!(results[0]["name"], json!("spotify_search_songs"));
         let typo = index.search(&json!({ "query": "spotfy songs" }));
         assert_eq!(typo[0]["name"], json!("spotify_search_songs"));
+    }
+
+    #[test]
+    fn short_query_words_do_not_create_substring_matches() {
+        let index = ToolDiscoveryIndex::build(
+            1,
+            vec![
+                catalog_tool_with_metadata(
+                    "mcp__appworld__spotify_show_album",
+                    "Show details for a Spotify album.",
+                    Some("appworld"),
+                    vec!["spotify_album_details"],
+                ),
+                catalog_tool_with_metadata(
+                    "mcp__appworld__spotify_show_song_library",
+                    "Show songs saved in your collection.",
+                    Some("appworld"),
+                    vec!["spotify_song_library"],
+                ),
+            ],
+        );
+
+        let results = index.search(&json!({
+            "query": "tracks in collection",
+            "namespace": "appworld",
+            "limit": 5
+        }));
+
+        assert_eq!(
+            ranked_names(&results),
+            vec!["mcp__appworld__spotify_show_song_library"]
+        );
     }
 
     #[test]
@@ -1571,8 +2124,235 @@ mod tests {
     }
 
     #[test]
+    fn semantic_fusion_adds_recall_candidates_without_replacing_exact_matches() {
+        let index = ToolDiscoveryIndex::build(
+            1,
+            vec![
+                catalog_tool_with_metadata(
+                    "read_file",
+                    "Read file contents",
+                    Some("filesystem"),
+                    vec!["cat"],
+                ),
+                catalog_tool_with_metadata(
+                    "mcp__appworld__music_collection",
+                    "Show saved tracks.",
+                    Some("appworld"),
+                    vec!["music_collection"],
+                ),
+                catalog_tool_with_metadata(
+                    "mcp__appworld__spotify_show_liked_songs",
+                    "Show songs that you have favorited.",
+                    Some("appworld"),
+                    vec!["spotify_favorite_songs"],
+                ),
+            ],
+        );
+
+        let lexical_only = index.search(&json!({
+            "query": "spotify liked songs library",
+            "namespace": "appworld",
+            "limit": 2
+        }));
+        assert_eq!(
+            ranked_names(&lexical_only),
+            vec!["mcp__appworld__spotify_show_liked_songs"]
+        );
+
+        let semantic = index.search_with_semantic_scores(
+            &json!({
+                "query": "spotify liked songs library",
+                "namespace": "appworld",
+                "limit": 2
+            }),
+            Some(&[0.0, 0.92, 0.86]),
+        );
+        assert_eq!(
+            ranked_names(&semantic),
+            vec![
+                "mcp__appworld__spotify_show_liked_songs",
+                "mcp__appworld__music_collection",
+            ]
+        );
+
+        let exact = index.search_with_semantic_scores(
+            &json!({ "query": "read file", "limit": 2 }),
+            Some(&[0.45, 0.9, 0.8]),
+        );
+        assert_eq!(exact[0]["name"], json!("read_file"));
+    }
+
+    #[test]
+    fn semantic_fusion_promotes_complementary_tools_for_mixed_qualifier_queries() {
+        let catalog = vec![
+            catalog_tool_with_metadata(
+                "mcp__appworld__spotify_show_liked_songs",
+                "Show songs that you have liked.",
+                Some("appworld"),
+                vec!["spotify_liked_songs"],
+            ),
+            catalog_tool_with_metadata(
+                "mcp__appworld__spotify_show_song_library",
+                "Show songs in your saved Spotify library.",
+                Some("appworld"),
+                vec!["spotify_song_library"],
+            ),
+            catalog_tool_with_metadata(
+                "mcp__appworld__spotify_show_liked_playlists",
+                "Show Spotify playlists that you have liked.",
+                Some("appworld"),
+                vec!["spotify_liked_playlists"],
+            ),
+            catalog_tool_with_metadata(
+                "mcp__appworld__spotify_show_playlist_library",
+                "Show playlists in your Spotify library.",
+                Some("appworld"),
+                vec!["spotify_playlist_library"],
+            ),
+            catalog_tool_with_metadata(
+                "mcp__appworld__spotify_show_playlist",
+                "Show songs from a Spotify playlist.",
+                Some("appworld"),
+                vec!["spotify_playlist_songs"],
+            ),
+        ];
+        let index = ToolDiscoveryIndex::build(1, catalog);
+
+        let library_and_liked = index.search_with_semantic_scores(
+            &json!({
+                "query": "spotify liked songs library",
+                "namespace": "appworld",
+                "limit": 3
+            }),
+            Some(&[0.92, 0.91, 0.76, 0.74, 0.68]),
+        );
+        let names = ranked_names(&library_and_liked);
+        assert_eq!(names.len(), 3);
+        assert!(names[..2].contains(&"mcp__appworld__spotify_show_liked_songs".to_string()));
+        assert!(names[..2].contains(&"mcp__appworld__spotify_show_song_library".to_string()));
+
+        let playlist_and_liked = index.search_with_semantic_scores(
+            &json!({
+                "query": "spotify playlist songs liked",
+                "namespace": "appworld",
+                "limit": 4
+            }),
+            Some(&[0.88, 0.62, 0.91, 0.84, 0.87]),
+        );
+        let names = ranked_names(&playlist_and_liked);
+        assert!(names.contains(&"mcp__appworld__spotify_show_playlist".to_string()));
+        assert!(names.contains(&"mcp__appworld__spotify_show_liked_songs".to_string()));
+        assert!(names.contains(&"mcp__appworld__spotify_show_liked_playlists".to_string()));
+    }
+
+    #[cfg(feature = "semantic-tool-search")]
+    #[test]
+    #[ignore = "downloads and loads an external embedding model"]
+    fn semantic_model_smoke_retrieves_paraphrased_tool_matches() {
+        let index = ToolDiscoveryIndex::build(
+            1,
+            vec![
+                catalog_tool_with_metadata(
+                    "mcp__appworld__spotify_show_liked_songs",
+                    "Show songs that you have liked.",
+                    Some("appworld"),
+                    vec!["spotify_liked_songs"],
+                ),
+                catalog_tool_with_metadata(
+                    "mcp__appworld__spotify_show_song_library",
+                    "Show songs saved in your Spotify library.",
+                    Some("appworld"),
+                    vec!["spotify_song_library"],
+                ),
+                catalog_tool_with_metadata(
+                    "mcp__appworld__spotify_show_album",
+                    "Show details for a Spotify album.",
+                    Some("appworld"),
+                    vec!["spotify_album_details"],
+                ),
+                catalog_tool_with_metadata(
+                    "mcp__appworld__venmo_create_transaction",
+                    "Send money to another Venmo user.",
+                    Some("appworld"),
+                    vec!["venmo_send_money"],
+                ),
+            ],
+        );
+
+        let lexical = index.search(&json!({
+            "query": "favorite tracks in my saved collection",
+            "namespace": "appworld",
+            "limit": 3
+        }));
+        let semantic = index.search(&json!({
+            "query": "favorite tracks in my saved collection",
+            "namespace": "appworld",
+            "semantic": true,
+            "limit": 3
+        }));
+
+        eprintln!("lexical={:?}", ranked_names(&lexical));
+        eprintln!("semantic={:?}", ranked_names(&semantic));
+
+        let names = ranked_names(&semantic);
+        assert!(names.contains(&"mcp__appworld__spotify_show_liked_songs".to_string()));
+        assert!(names.contains(&"mcp__appworld__spotify_show_song_library".to_string()));
+        assert!(!names.contains(&"mcp__appworld__venmo_create_transaction".to_string()));
+    }
+
+    #[test]
+    fn reciprocal_rank_fusion_keeps_cross_list_hits_ahead_of_single_list_noise() {
+        let fused = reciprocal_rank_fusion(
+            vec![
+                RankedCandidate {
+                    idx: 0,
+                    lexical_score: 10.0,
+                    semantic_score: None,
+                },
+                RankedCandidate {
+                    idx: 1,
+                    lexical_score: 8.0,
+                    semantic_score: None,
+                },
+                RankedCandidate {
+                    idx: 2,
+                    lexical_score: 6.0,
+                    semantic_score: None,
+                },
+            ],
+            vec![
+                RankedCandidate {
+                    idx: 3,
+                    lexical_score: 0.0,
+                    semantic_score: Some(0.99),
+                },
+                RankedCandidate {
+                    idx: 1,
+                    lexical_score: 0.0,
+                    semantic_score: Some(0.88),
+                },
+                RankedCandidate {
+                    idx: 4,
+                    lexical_score: 0.0,
+                    semantic_score: Some(0.87),
+                },
+            ],
+        );
+
+        let names = fused
+            .iter()
+            .map(|candidate| candidate.idx)
+            .collect::<Vec<_>>();
+        assert_eq!(names[..3], [1, 0, 3]);
+    }
+
+    #[test]
     fn search_results_include_compact_schema_parameter_restrictions() {
         let mut spotify = catalog_tool("mcp__appworld__spotify_search_songs", "Find songs");
+        spotify.as_object_mut().unwrap().insert(
+            "examples".to_string(),
+            json!(["search songs by genre", "search songs by play count"]),
+        );
         spotify.as_object_mut().unwrap().insert(
             "input_schema".to_string(),
             json!({
@@ -1656,126 +2436,22 @@ mod tests {
         assert_eq!(
             results[0]["signature"],
             json!(
-                "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 20)"
+                "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 20)\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 20` — Maximum number of results to return."
             )
         );
         assert_eq!(
             results[0]["returns"],
             json!(
-                "record{error?: str, response: list[record{album_id: int | null, duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]}"
+                "record{error?: str, response: list[record{album_id: int | null, duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]}\nReturn fields:\n- `error?: str` — Error message when search fails.\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str`\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title."
             )
         );
-        assert_eq!(
-            results[0]["parameters"],
-            json!([
-                {
-                    "name": "access_token",
-                    "type": "str",
-                    "required": true,
-                    "description": "Access token obtained from spotify app login.",
-                    "signature": "access_token: str"
-                },
-                {
-                    "name": "genre",
-                    "type": "str | null",
-                    "required": false,
-                    "nullable": true,
-                    "description": "Only include songs from this genre.",
-                    "default": null,
-                    "signature": "genre?: str | null = null"
-                },
-                {
-                    "name": "page_limit",
-                    "type": "int",
-                    "required": false,
-                    "description": "Maximum number of results to return.",
-                    "default": 20,
-                    "minimum": 1,
-                    "maximum": 20,
-                    "signature": "page_limit?: int >= 1 <= 20 = 20"
-                }
-            ])
-        );
-        assert_eq!(
-            results[0]["return_fields"],
-            json!([
-                {
-                    "path": "error",
-                    "type": "str",
-                    "required": false,
-                    "description": "Error message when search fails.",
-                    "signature": "error?: str"
-                },
-                {
-                    "path": "response",
-                    "type": "list[record]",
-                    "required": true,
-                    "description": "Matched songs.",
-                    "items": "record",
-                    "signature": "response: list[record]"
-                },
-                {
-                    "path": "response[].album_id",
-                    "type": "int | null",
-                    "required": true,
-                    "nullable": true,
-                    "signature": "response[].album_id: int | null"
-                },
-                {
-                    "path": "response[].duration",
-                    "type": "int",
-                    "required": true,
-                    "signature": "response[].duration: int"
-                },
-                {
-                    "path": "response[].genre",
-                    "type": "str",
-                    "required": true,
-                    "signature": "response[].genre: str"
-                },
-                {
-                    "path": "response[].like_count",
-                    "type": "int",
-                    "required": true,
-                    "signature": "response[].like_count: int"
-                },
-                {
-                    "path": "response[].play_count",
-                    "type": "int",
-                    "required": true,
-                    "description": "Number of times the song was played.",
-                    "minimum": 0,
-                    "signature": "response[].play_count: int >= 0"
-                },
-                {
-                    "path": "response[].rating",
-                    "type": "float",
-                    "required": true,
-                    "signature": "response[].rating: float"
-                },
-                {
-                    "path": "response[].release_date",
-                    "type": "str",
-                    "required": true,
-                    "signature": "response[].release_date: str"
-                },
-                {
-                    "path": "response[].song_id",
-                    "type": "int",
-                    "required": true,
-                    "description": "Stable song identifier.",
-                    "signature": "response[].song_id: int"
-                },
-                {
-                    "path": "response[].title",
-                    "type": "str",
-                    "required": true,
-                    "description": "Song title.",
-                    "signature": "response[].title: str"
-                }
-            ])
-        );
         assert!(results[0].get("params").is_none());
+        assert!(results[0].get("parameters").is_none());
+        assert!(results[0].get("return_fields").is_none());
+        assert_eq!(
+            results[0]["examples"],
+            json!(["search songs by genre", "search songs by play count"])
+        );
         assert!(results[0].get("input_schema").is_none());
         assert!(results[0].get("output_schema").is_none());
         assert!(results[0].get("matched_fields").is_none());
@@ -1800,6 +2476,7 @@ mod tests {
                 ),
             ],
             promoted: Mutex::default(),
+            ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
         let context = ToolExecutionContext {
@@ -1844,6 +2521,139 @@ mod tests {
         assert!(results[0].get("matched_fields").is_none());
     }
 
+    #[test]
+    fn exclude_filter_removes_exact_tool_names() {
+        let index = ToolDiscoveryIndex::build(
+            1,
+            vec![
+                catalog_tool("read_file", "Read files"),
+                catalog_tool("search_web", "Search the web"),
+            ],
+        );
+
+        let results = index.search(&json!({
+            "query": "",
+            "exclude": ["read_file"],
+        }));
+
+        assert_eq!(ranked_names(&results), vec!["search_web"]);
+    }
+
+    #[test]
+    fn llm_rerank_request_uses_structured_name_enum_schema() {
+        let candidates = vec![
+            json!({"name": "read_file", "signature": "read_file()", "returns": "str", "description": "Read file"}),
+            json!({"name": "search_web", "signature": "search_web(query: str)", "returns": "record", "description": "Search web"}),
+        ];
+
+        let request = llm_rerank_request(&json!({"query": "find docs"}), &candidates, 2);
+
+        assert_eq!(
+            request.model,
+            std::env::var("LASH_TOOL_SEARCH_LLM_MODEL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_LLM_RERANK_MODEL.to_string())
+        );
+        let DirectOutputSpec::JsonSchema(schema) = request.output else {
+            panic!("expected json schema output");
+        };
+        assert_eq!(schema.name, "tool_search_rerank");
+        assert!(
+            schema.schema["properties"]["tool_names"]
+                .get("uniqueItems")
+                .is_none()
+        );
+        assert!(
+            schema.schema["properties"]["tool_names"]
+                .get("maxItems")
+                .is_none()
+        );
+        assert_eq!(
+            schema.schema["properties"]["tool_names"]["items"]["enum"],
+            json!(["read_file", "search_web"])
+        );
+    }
+
+    #[test]
+    fn merge_llm_selection_dedupes_and_fills_from_deterministic_order() {
+        let candidates = vec![
+            json!({"name": "a"}),
+            json!({"name": "b"}),
+            json!({"name": "c"}),
+        ];
+
+        let merged = merge_llm_selection(
+            candidates,
+            vec!["b".to_string(), "b".to_string(), "missing".to_string()],
+            3,
+        );
+
+        assert_eq!(ranked_names(&merged), vec!["b", "a", "c"]);
+    }
+
+    #[tokio::test]
+    async fn search_tools_reranks_candidates_with_direct_completion() {
+        let host = Arc::new(FakeSessionManager {
+            catalog: vec![
+                catalog_tool_with_metadata("read_file", "Read file contents", None, vec!["cat"]),
+                catalog_tool_with_metadata("search_web", "Search the web", None, vec!["web"]),
+            ],
+            promoted: Mutex::default(),
+            direct_response: Mutex::new(Some(
+                "{\"tool_names\":[\"search_web\",\"search_web\",\"unknown\"]}".to_string(),
+            )),
+            ..Default::default()
+        });
+        let provider = ToolDiscoveryToolsProvider::new();
+        let context = ToolExecutionContext {
+            session_id: "session".to_string(),
+            host: host.clone(),
+            cancellation_token: None,
+            async_task_id: None,
+        };
+
+        let result = provider
+            .execute_with_context(
+                "search_tools",
+                &json!({
+                    "query": "",
+                    "exclude": ["read_file"],
+                    "limit": 2,
+                }),
+                &context,
+            )
+            .await;
+
+        assert!(result.success, "{result:?}");
+        let results = result.result.as_array().expect("search result list");
+        assert_eq!(ranked_names(results), vec!["search_web"]);
+        let requests = host
+            .direct_requests
+            .lock()
+            .expect("direct requests lock poisoned");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .messages
+                .iter()
+                .flat_map(|message| message.parts.iter())
+                .any(|part| matches!(
+                    part,
+                    DirectPart::Text(text)
+                        if text.contains("\"exclude\":[\"read_file\"]")
+                            && !text.contains("\"name\":\"read_file\"")
+                ))
+        );
+        let DirectOutputSpec::JsonSchema(schema) = &requests[0].output else {
+            panic!("expected json schema output");
+        };
+        assert_eq!(
+            schema.schema["properties"]["tool_names"]["items"]["enum"],
+            json!(["search_web"])
+        );
+    }
+
     #[tokio::test]
     async fn load_tools_reports_callable_undocumented_as_already_callable() {
         let host = Arc::new(FakeSessionManager {
@@ -1852,6 +2662,7 @@ mod tests {
                 catalog_tool("fetch_url", "Fetch a URL"),
             ],
             promoted: Mutex::default(),
+            ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
         let context = ToolExecutionContext {

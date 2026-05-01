@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 dhat-heap = ["dep:dhat"]
 fff-zlob = ["lash/fff-zlob"]
+semantic-tool-search = ["lash-default-tools/semantic-tool-search"]
 
 [[bin]]
 name = "lash"
