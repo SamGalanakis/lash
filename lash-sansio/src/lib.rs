@@ -297,6 +297,35 @@ pub struct CompactToolContract {
 }
 
 impl CompactToolContract {
+    pub fn render_signature(&self) -> String {
+        let mut sections = vec![self.signature.trim().to_string()];
+        let parameter_lines = self
+            .parameters
+            .iter()
+            .filter_map(compact_doc_line)
+            .collect::<Vec<_>>();
+        if !parameter_lines.is_empty() {
+            sections.push(format!("Parameters:\n{}", parameter_lines.join("\n")));
+        }
+        sections.join("\n")
+    }
+
+    pub fn render_returns(&self) -> String {
+        let mut sections = Vec::new();
+        if !self.returns.trim().is_empty() {
+            sections.push(self.returns.trim().to_string());
+        }
+        let return_field_lines = self
+            .return_fields
+            .iter()
+            .filter_map(compact_doc_line)
+            .collect::<Vec<_>>();
+        if !return_field_lines.is_empty() {
+            sections.push(format!("Return fields:\n{}", return_field_lines.join("\n")));
+        }
+        sections.join("\n")
+    }
+
     pub fn render_markdown(&self) -> String {
         let mut sections = vec![format!("### `{}`", self.signature)];
         if !self.returns.trim().is_empty() {
@@ -1475,6 +1504,14 @@ mod tests {
         assert_eq!(
             contract.render_markdown(),
             "### `mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null)`\nReturns: record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\n[MCP appworld] Search for songs with a query.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message.\nExamples: search songs by genre"
+        );
+        assert_eq!(
+            contract.render_signature(),
+            "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null)\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order."
+        );
+        assert_eq!(
+            contract.render_returns(),
+            "record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message."
         );
     }
 
