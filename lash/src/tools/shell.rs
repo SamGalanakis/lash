@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicBool, AtomicI32, Ordering},
@@ -11,6 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::json;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -155,15 +158,19 @@ impl ShellRuntime {
         }
     }
 
-    fn command_for_spawn(&self, command: &str, shell_path: &str) -> String {
+    fn command_for_spawn(&self, command: &str, shell_path: &str, pty: bool) -> String {
         let shell_name = Self::shell_name(shell_path);
-        // Disable terminal echo so bytes delivered via `write_stdin`
-        // don't appear in the captured output stream. The PTY allocates
-        // with `ECHO` on by default (matching interactive terminals),
-        // but agents drive these sessions programmatically and the echo
-        // is pure noise. `stty -echo || true` keeps the prefix
-        // harmless on environments where `stty` isn't available.
-        let echo_off = "stty -echo 2>/dev/null || true\n";
+        let echo_off = if pty {
+            // Disable terminal echo so bytes delivered via `write_stdin`
+            // don't appear in the captured output stream. The PTY allocates
+            // with `ECHO` on by default (matching interactive terminals),
+            // but agents drive these sessions programmatically and the echo
+            // is pure noise. `stty -echo || true` keeps the prefix
+            // harmless on environments where `stty` isn't available.
+            "stty -echo 2>/dev/null || true\n"
+        } else {
+            ""
+        };
         let pipefail_prefix = if command.contains('|') && shell_supports_pipefail(shell_name) {
             "set -o pipefail\n"
         } else {
@@ -177,8 +184,9 @@ impl ShellRuntime {
         command: &str,
         login: bool,
         shell_path: &str,
+        pty: bool,
     ) -> Result<Vec<String>, String> {
-        let command = self.command_for_spawn(command, shell_path);
+        let command = self.command_for_spawn(command, shell_path, pty);
         if login {
             if !shell_supports_login(Self::shell_name(shell_path)) {
                 return Err(format!(
@@ -206,7 +214,7 @@ impl ShellRuntime {
             .map_err(|err| format!("Failed to open PTY: {err}"))?;
 
         let mut cmd = CommandBuilder::new(shell_path);
-        for arg in self.shell_args(command, login, shell_path)? {
+        for arg in self.shell_args(command, login, shell_path, true)? {
             cmd.arg(arg);
         }
         cmd.cwd(workdir.as_os_str());
@@ -515,12 +523,240 @@ impl ShellRuntime {
         .await
         .map_err(|err| format!("Close stdin task failed: {err}"))?
     }
+
+    async fn exec_pipe_process(
+        &self,
+        id: &str,
+        command: &str,
+        workdir: &Path,
+        login: bool,
+        shell_path: &str,
+        timeout: Option<Duration>,
+        progress: Option<&ProgressSender>,
+        max_output_tokens: Option<usize>,
+        cancel: Option<CancellationToken>,
+    ) -> Result<PollOutcome, String> {
+        let mut cmd = TokioCommand::new(shell_path);
+        for arg in self.shell_args(command, login, shell_path, false)? {
+            cmd.arg(arg);
+        }
+        cmd.current_dir(workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let mut child = cmd.spawn().map_err(|err| {
+            format!(
+                "Failed to spawn command with shell `{}` in `{}`: {err}",
+                shell_path,
+                workdir.display()
+            )
+        })?;
+        let child_pid = child.id();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let buffer = Arc::new(StdMutex::new(Vec::new()));
+        let buffer_start = Arc::new(StdMutex::new(0usize));
+        let truncated = Arc::new(AtomicBool::new(false));
+        let spill = Arc::new(StdMutex::new(None));
+        let output_notify = Arc::new(Notify::new());
+
+        if let Some(stdout) = stdout {
+            spawn_async_reader(
+                id.to_string(),
+                stdout,
+                Arc::clone(&buffer),
+                Arc::clone(&buffer_start),
+                Arc::clone(&truncated),
+                Arc::clone(&spill),
+                Arc::clone(&output_notify),
+            );
+        }
+        if let Some(stderr) = stderr {
+            spawn_async_reader(
+                id.to_string(),
+                stderr,
+                Arc::clone(&buffer),
+                Arc::clone(&buffer_start),
+                Arc::clone(&truncated),
+                Arc::clone(&spill),
+                Arc::clone(&output_notify),
+            );
+        }
+
+        let deadline = timeout.map(|value| tokio::time::Instant::now() + value);
+        let wait_handle = tokio::spawn(async move { child.wait().await });
+        tokio::pin!(wait_handle);
+        let mut sent_len = 0usize;
+
+        loop {
+            if let Some(token) = cancel.as_ref()
+                && token.is_cancelled()
+            {
+                terminate_pipe_process(child_pid);
+                let _ = tokio::time::timeout(Duration::from_millis(500), &mut wait_handle).await;
+                return Ok(PollOutcome::Cancelled);
+            }
+
+            if let Some(tx) = progress
+                && let Some(chunk) = progress_chunk(&buffer, &buffer_start, &mut sent_len)
+                && !chunk.is_empty()
+            {
+                let _ = tx.send(SandboxMessage {
+                    text: chunk,
+                    kind: "tool_output".into(),
+                });
+            }
+
+            if let Some(dl) = deadline
+                && tokio::time::Instant::now() >= dl
+            {
+                terminate_pipe_process(child_pid);
+                let _ = tokio::time::timeout(Duration::from_millis(500), &mut wait_handle).await;
+                wait_for_pipe_buffer_settle(
+                    &buffer,
+                    &output_notify,
+                    Duration::from_millis(OUTPUT_QUIET_PERIOD_MS),
+                )
+                .await;
+                let (output, original_token_count, full_output_path) = render_buffer_output(
+                    id,
+                    &buffer,
+                    &buffer_start,
+                    Arc::as_ref(&truncated),
+                    &spill,
+                    max_output_tokens,
+                );
+                return Ok(PollOutcome::Running {
+                    output,
+                    original_token_count,
+                    full_output_path,
+                });
+            }
+
+            let cancel_future = async {
+                match cancel.as_ref() {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
+            if let Some(wake_at) = deadline {
+                tokio::select! {
+                    status = &mut wait_handle => {
+                        let exit_code = status
+                            .map_err(|err| format!("Wait task failed: {err}"))?
+                            .map(exit_status_code)
+                            .unwrap_or(-1);
+                        wait_for_pipe_buffer_settle(&buffer, &output_notify, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
+                        let (output, original_token_count, full_output_path) = render_buffer_output(
+                            id,
+                            &buffer,
+                            &buffer_start,
+                            Arc::as_ref(&truncated),
+                            &spill,
+                            max_output_tokens,
+                        );
+                        return Ok(PollOutcome::Exited {
+                            output,
+                            original_token_count,
+                            exit_code,
+                            full_output_path,
+                        });
+                    }
+                    _ = output_notify.notified() => {}
+                    _ = tokio::time::sleep_until(wake_at) => {}
+                    _ = cancel_future => {}
+                }
+            } else {
+                tokio::select! {
+                    status = &mut wait_handle => {
+                        let exit_code = status
+                            .map_err(|err| format!("Wait task failed: {err}"))?
+                            .map(exit_status_code)
+                            .unwrap_or(-1);
+                        wait_for_pipe_buffer_settle(&buffer, &output_notify, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
+                        let (output, original_token_count, full_output_path) = render_buffer_output(
+                            id,
+                            &buffer,
+                            &buffer_start,
+                            Arc::as_ref(&truncated),
+                            &spill,
+                            max_output_tokens,
+                        );
+                        return Ok(PollOutcome::Exited {
+                            output,
+                            original_token_count,
+                            exit_code,
+                            full_output_path,
+                        });
+                    }
+                    _ = output_notify.notified() => {}
+                    _ = cancel_future => {}
+                }
+            }
+        }
+    }
 }
 
 fn kill_child(state: &ProcessState) {
     if let Some(mut killer) = state.killer.lock().unwrap().take() {
         let _ = killer.kill();
     }
+}
+
+#[cfg(unix)]
+fn terminate_pipe_process(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let pgid = -(pid as i32);
+    unsafe {
+        if libc::kill(pgid, libc::SIGKILL) == -1 {
+            let _ = libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_pipe_process(_pid: Option<u32>) {}
+
+fn exit_status_code(status: std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or(-1)
+}
+
+fn progress_chunk(
+    buffer: &Arc<StdMutex<Vec<u8>>>,
+    buffer_start: &Arc<StdMutex<usize>>,
+    sent_len: &mut usize,
+) -> Option<String> {
+    let buf = buffer.lock().unwrap();
+    let start_offset = *buffer_start.lock().unwrap();
+    let buffer_end = start_offset + buf.len();
+    if buffer_end <= *sent_len {
+        return None;
+    }
+    let start = (*sent_len).max(start_offset);
+    let mut chunk = String::from_utf8_lossy(&buf[start.saturating_sub(start_offset)..]).to_string();
+    if *sent_len < start_offset && !chunk.is_empty() {
+        if !chunk.ends_with('\n') {
+            chunk.push('\n');
+        }
+        chunk.push_str("[truncated]");
+    }
+    *sent_len = buffer_end;
+    Some(clean_terminal_output(&chunk))
 }
 
 async fn wait_for_child_exit(state: &ProcessState, timeout: Duration) {
@@ -541,6 +777,59 @@ async fn wait_for_child_exit(state: &ProcessState, timeout: Duration) {
             _ = tokio::time::sleep_until(deadline) => return,
         }
     }
+}
+
+async fn wait_for_pipe_buffer_settle(
+    buffer: &Arc<StdMutex<Vec<u8>>>,
+    output_notify: &Arc<Notify>,
+    quiet_period: Duration,
+) {
+    let mut last_len = buffer.lock().unwrap().len();
+    let mut quiet_until = tokio::time::Instant::now() + quiet_period;
+
+    loop {
+        tokio::select! {
+            _ = output_notify.notified() => {
+                let buffer_len = buffer.lock().unwrap().len();
+                if buffer_len != last_len {
+                    last_len = buffer_len;
+                    quiet_until = tokio::time::Instant::now() + quiet_period;
+                }
+            }
+            _ = tokio::time::sleep_until(quiet_until) => break,
+        }
+    }
+}
+
+fn render_buffer_output(
+    id: &str,
+    buffer: &Arc<StdMutex<Vec<u8>>>,
+    buffer_start: &Arc<StdMutex<usize>>,
+    truncated: &AtomicBool,
+    spill: &Arc<StdMutex<Option<ShellOutputSpill>>>,
+    max_output_tokens: Option<usize>,
+) -> (String, Option<usize>, Option<PathBuf>) {
+    let buf = buffer.lock().unwrap();
+    let start_offset = *buffer_start.lock().unwrap();
+    let mut rendered = String::from_utf8_lossy(&buf).to_string();
+    if truncated.load(Ordering::SeqCst) || start_offset > 0 {
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+        rendered.push_str("[truncated]");
+    }
+    let rendered = clean_terminal_output(&rendered);
+    let (rendered, original_token_count, token_truncated) =
+        truncate_exec_output(rendered, max_output_tokens);
+    let mut spill_guard = spill.lock().unwrap();
+    let mut full_output_path = spill_guard.as_ref().map(|spill| spill.path.clone());
+    if token_truncated && full_output_path.is_none() {
+        full_output_path = activate_spill(id, &buf, &mut spill_guard);
+    }
+    if let Some(spill) = spill_guard.as_mut() {
+        let _ = spill.file.flush();
+    }
+    (rendered, original_token_count, full_output_path)
 }
 
 async fn wait_for_buffer_settle(state: &ProcessState, quiet_period: Duration) {
@@ -682,24 +971,17 @@ impl StandardShell {
         let started = Instant::now();
         let handle_id = self.runtime.allocate_handle_id();
 
-        if let Err(err) = self.runtime.spawn_process(
-            handle_id.clone(),
-            &params.cmd,
-            &params.workdir,
-            params.login,
-            &params.shell_path,
-        ) {
-            return ToolResult::err(json!(err));
-        }
-
         match self
             .runtime
-            .wait_until_exit_or_timeout(
+            .exec_pipe_process(
                 &handle_id,
+                &params.cmd,
+                &params.workdir,
+                params.login,
+                &params.shell_path,
                 params.timeout_ms.map(Duration::from_millis),
                 progress,
                 params.max_output_tokens,
-                WaitBehavior { baseline_len: 0 },
                 cancel,
             )
             .await
@@ -709,57 +991,30 @@ impl StandardShell {
                 original_token_count,
                 full_output_path,
                 ..
-            }) => {
-                let mut output = output;
-                let mut original_token_count = original_token_count;
-                let mut full_output_path = full_output_path;
-                if let Ok(state) = self.runtime.process_state(&handle_id) {
-                    kill_child(&state);
-                    wait_for_child_exit(&state, Duration::from_millis(500)).await;
-                    if let Ok((tail, tail_token_count, tail_full_output_path)) = self
-                        .runtime
-                        .take_incremental_output(&handle_id, params.max_output_tokens)
-                    {
-                        append_shell_output(&mut output, tail);
-                        original_token_count = original_token_count.or(tail_token_count);
-                        full_output_path = full_output_path.or(tail_full_output_path);
-                    }
-                }
-                self.runtime.remove_process(&handle_id);
-                timed_out_shell_io_result(
-                    &handle_id,
-                    output,
-                    original_token_count,
-                    full_output_path.as_deref(),
-                    started.elapsed().as_secs_f64(),
-                    params.timeout_ms.unwrap_or_default(),
-                )
-            }
+            }) => timed_out_shell_io_result(
+                &handle_id,
+                output,
+                original_token_count,
+                full_output_path.as_deref(),
+                started.elapsed().as_secs_f64(),
+                params.timeout_ms.unwrap_or_default(),
+            ),
             Ok(PollOutcome::Exited {
                 output,
                 original_token_count,
                 exit_code,
                 full_output_path,
-            }) => {
-                self.runtime.remove_process(&handle_id);
-                shell_io_result(
-                    &handle_id,
-                    output,
-                    Some(exit_code),
-                    original_token_count,
-                    full_output_path.as_deref(),
-                    started.elapsed().as_secs_f64(),
-                    params.allow_failure,
-                )
-            }
-            Ok(PollOutcome::Cancelled) => {
-                self.runtime.remove_process(&handle_id);
-                ToolResult::err_fmt("tool call cancelled")
-            }
-            Err(err) => {
-                self.runtime.remove_process(&handle_id);
-                ToolResult::err(json!(err))
-            }
+            }) => shell_io_result(
+                &handle_id,
+                output,
+                Some(exit_code),
+                original_token_count,
+                full_output_path.as_deref(),
+                started.elapsed().as_secs_f64(),
+                params.allow_failure,
+            ),
+            Ok(PollOutcome::Cancelled) => ToolResult::err_fmt("tool call cancelled"),
+            Err(err) => ToolResult::err(json!(err)),
         }
     }
 
@@ -973,7 +1228,7 @@ impl ToolProvider for StandardShell {
         vec![
             ToolDefinition::new(
                 "exec_command",
-                "Run a one-shot command in a PTY and wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Use `timeout_ms` as a hard timeout; timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Use `timeout_ms` as a hard timeout; timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 {
                     let mut properties = command_common("Shell command to execute.");
                     properties["timeout_ms"] = json!({
@@ -1122,6 +1377,57 @@ fn spawn_reader_thread(
         let mut chunk = [0u8; 4096];
         loop {
             match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    {
+                        let mut buf = buffer.lock().unwrap();
+                        let mut spill = spill.lock().unwrap();
+                        if buf.len() + n > SPILL_OUTPUT_THRESHOLD {
+                            let _ = activate_spill(&id, &buf, &mut spill);
+                        }
+                        let mut clear_spill = false;
+                        if let Some(spill_file) = spill.as_mut()
+                            && spill_file.file.write_all(&chunk[..n]).is_err()
+                        {
+                            clear_spill = true;
+                        }
+                        if clear_spill {
+                            *spill = None;
+                        }
+
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > MAX_OUTPUT {
+                            let to_drop = buf.len() - MAX_OUTPUT;
+                            buf.drain(..to_drop);
+                            *buffer_start.lock().unwrap() += to_drop;
+                            truncated.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    output_notify.notify_waiters();
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        output_notify.notify_waiters();
+    });
+}
+
+fn spawn_async_reader<R>(
+    id: String,
+    mut reader: R,
+    buffer: Arc<StdMutex<Vec<u8>>>,
+    buffer_start: Arc<StdMutex<usize>>,
+    truncated: Arc<AtomicBool>,
+    spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
+    output_notify: Arc<Notify>,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
                     {
@@ -1326,16 +1632,6 @@ fn standard_shell_io_record(
     serde_json::Value::Object(record)
 }
 
-fn append_shell_output(output: &mut String, tail: String) {
-    if tail.is_empty() {
-        return;
-    }
-    if !output.is_empty() && !output.ends_with('\n') {
-        output.push('\n');
-    }
-    output.push_str(&tail);
-}
-
 fn shell_io_result(
     id: &str,
     output: String,
@@ -1455,6 +1751,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_command_runs_without_a_tty() {
+        let shell = test_shell();
+        let result = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": "if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then echo tty; exit 1; else echo no-tty; fi"}),
+            )
+            .await;
+
+        assert!(result.success, "{}", result.result);
+        assert_eq!(result.result["exit_code"], 0);
+        assert_eq!(result.result["output"].as_str().unwrap().trim(), "no-tty");
+    }
+
+    #[tokio::test]
+    async fn exec_command_closes_stdin() {
+        let shell = test_shell();
+        let result = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": "python3 -c 'import sys; print(sys.stdin.read() == \"\")'"}),
+            )
+            .await;
+
+        assert!(result.success, "{}", result.result);
+        assert_eq!(result.result["output"].as_str().unwrap().trim(), "True");
+    }
+
+    #[tokio::test]
+    async fn exec_command_captures_stdout_and_stderr() {
+        let shell = test_shell();
+        let result = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": "echo stdout-line; echo stderr-line >&2"}),
+            )
+            .await;
+
+        assert!(result.success, "{}", result.result);
+        let output = result.result["output"].as_str().unwrap();
+        assert!(output.contains("stdout-line"), "{output}");
+        assert!(output.contains("stderr-line"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn start_command_runs_in_a_pty() {
+        let shell = test_shell();
+        let result = shell
+            .execute(
+                "start_command",
+                &json!({"cmd": "if [ -t 0 ] && [ -t 1 ]; then echo tty; else echo no-tty; exit 1; fi", "poll_ms": 1000}),
+            )
+            .await;
+
+        assert!(result.success, "{}", result.result);
+        assert_eq!(result.result["exit_code"], 0);
+        assert_eq!(result.result["output"].as_str().unwrap().trim(), "tty");
+    }
+
+    #[tokio::test]
     async fn exec_command_timeout_kills_and_fails_running_process() {
         let shell = StandardShell::new().with_cwd("/");
         let result = shell
@@ -1474,6 +1830,35 @@ mod tests {
                 .unwrap_or("")
                 .contains("started")
         );
+    }
+
+    #[tokio::test]
+    async fn exec_command_timeout_kills_process_group_children() {
+        let shell = test_shell();
+        let marker = std::env::temp_dir().join(format!(
+            "lash-exec-timeout-child-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cmd = format!(
+            "sh -c 'sleep 0.4; echo leaked > {}' & wait",
+            marker.display()
+        );
+
+        let result = shell
+            .execute(
+                "exec_command",
+                &json!({"cmd": cmd, "timeout_ms": 50, "allow_failure": true}),
+            )
+            .await;
+
+        assert!(!result.success, "{}", result.result);
+        assert_eq!(result.result["status"], "timed_out");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(!marker.exists(), "timed-out child process wrote marker");
+        let _ = fs::remove_file(marker);
     }
 
     #[tokio::test]
@@ -1779,7 +2164,7 @@ mod tests {
 
         // A long-running sleep that would otherwise hold the tool call for
         // 5s. The dispatcher must return promptly once the token fires, and
-        // the PTY child must be killed rather than left to run.
+        // the pipe-backed process group must be killed rather than left to run.
         let args = json!({
             "cmd": "sleep 5",
             "login": false,

@@ -791,11 +791,18 @@ impl SessionManager for RuntimeSessionManager {
 
     async fn direct_completion(
         &self,
-        request: crate::DirectRequest,
+        mut request: crate::DirectRequest,
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
         let mut provider = self.current_policy.provider.clone();
-        let model = provider.resolve_model(&request.model);
+        let model = if let Some(selection) = provider.default_agent_model(&request.model) {
+            if request.model_variant.is_none() {
+                request.model_variant = selection.variant;
+            }
+            provider.resolve_model(&selection.model)
+        } else {
+            provider.resolve_model(&request.model)
+        };
         if let Some(variant) = request.model_variant.as_deref() {
             provider
                 .validate_variant(&model, variant)

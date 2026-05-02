@@ -166,19 +166,18 @@ pub fn budget_prompt_contributions(
     if used == 0 {
         return Vec::new();
     }
-    let pct = (used * 100).checked_div(max).unwrap_or(0);
-    let content = if used >= max {
-        format!(
-            "Used: {used} / {max} tokens ({pct}%)\n\
-You are over the configured context-budget handoff threshold. Do not continue ordinary work in this session.\n\
-Call `pass_baton(task=..., seed={{...}})` with the directly relevant context, facts, IDs, partial results, and next steps. The next agent keeps the same tool access; do not carry irrelevant history."
-        )
+    let pct = used.saturating_mul(100) / max.max(1);
+    if pct < 60 {
+        return Vec::new();
+    }
+    let tail = if used >= max {
+        "Past the handoff threshold. Do not continue ordinary work — `continue_as` now and pack only what the successor needs into `task` + `seed`."
+    } else if pct >= 90 {
+        "Budget tight — finish the current step, then `continue_as`."
     } else {
-        format!(
-            "Used: {used} / {max} tokens ({pct}%)\n\
-Prepare to hand off via `pass_baton(task=..., seed={{...}})` when carrying this context becomes inefficient. Include only directly relevant context; the next agent keeps the same tool access."
-        )
+        "Look for a clean handoff point and `continue_as` rather than starting new work."
     };
+    let content = format!("Tokens: {used} · handoff threshold: {max} ({pct}%).\n{tail}");
     vec![PromptContribution::execution("Context Budget", content)]
 }
 

@@ -8,16 +8,18 @@ The lash agent uses **your local Codex OAuth subscription** by default — the h
 
 ```bash
 # Smoke test — one easy task, RLM + gpt-5.4 at high effort.
-bench/terminalbench2/run.sh --sample --preset trivial --execution-mode rlm --model gpt-5.4 --variant high
+bench/terminalbench2/run.sh --sample --preset trivial --execution-mode rlm --provider codex --model gpt-5.4 --variant high
 
-# Full sample dataset (~70 tasks), RLM.
-bench/terminalbench2/run.sh --sample --execution-mode rlm --model gpt-5.4 --variant high
+# Full sample dataset (10 tasks), RLM.
+bench/terminalbench2/run.sh --sample --execution-mode rlm --provider codex --model gpt-5.4 --variant high
 
-# Full dataset (~270 tasks), Standard mode + rolling history.
+# Full dataset (89 tasks), Standard mode + rolling history.
 bench/terminalbench2/run.sh --full --execution-mode standard --model gpt-5.4 --variant high --context-approach rolling_history
 ```
 
 `--model` is optional; if `~/.lash/config.json`'s active provider is Codex, passing just `--variant high` picks up whatever model that provider is configured with. We pin `--model gpt-5.4` in examples to make runs reproducible across config changes.
+
+Use `--provider codex` to force the Lash provider for a run without changing your host config. The runner writes a run-local config with `active_provider` switched to `codex`, copies that into the container, and exports the same config metadata into the structured results.
 
 Or call the underlying script directly:
 
@@ -54,7 +56,8 @@ bench/terminalbench2/run.sh --sample --tasks regex-log,fix-code-vulnerability --
 
 | Flag | Required | Notes |
 |---|---|---|
-| `--execution-mode` | yes (for lash) | `rlm` or `standard`. No `repl` (old name). |
+| `--execution-mode` | yes (for lash) | `rlm`, `rlmpure`, or `standard`. No `repl` (old name). |
+| `--provider` | optional | Lash provider key to activate for this run, e.g. `codex`. |
 | `--variant` | yes | Provider-native effort level: `high`, `xhigh`, etc. |
 | `--model` | optional for lash | Defaults to the active provider's model in `~/.lash/config.json`. Pass `--model gpt-5.4` to pin. |
 | `--context-approach` | optional | Standard mode only: `rolling_history` or `observational_memory`. |
@@ -65,7 +68,7 @@ bench/terminalbench2/run.sh --sample --tasks regex-log,fix-code-vulnerability --
 ## Outputs
 
 - **Harbor jobs**: `jobs/<job-name>/` — raw harbor session logs, pulled container filesystems.
-- **Structured results**: `.benchmarks/terminalbench2/<job-name>/` — gathered trial JSONs + a markdown summary.
+- **Structured results**: `.benchmarks/terminalbench2/<timestamp>__<job-name>/` — gathered trial JSONs + a markdown summary.
 - **Lash traces**: exported under each trial's `artifacts/sessions/*.trace.jsonl` when the lash agent runs; dashboard LLM-call counts come from typed `llm_call_completed` trace records.
 
 ## Implementation notes

@@ -24,6 +24,8 @@ Options:
   --exclude-task <glob>         Task exclude pattern (repeatable)
   --model <model>               Model to request from the benchmark agent
                                 (optional for lash, required for opencode and codex)
+  --provider <kind>             Lash provider key to activate for this run
+                                (for example: codex; optional for --agent lash)
   --variant <name>              Provider-native model variant passed through when supported
                                 (required for all benchmark runs)
   --execution-mode <mode>       Lash execution mode: rlm|rlmpure|standard
@@ -54,6 +56,7 @@ Options:
 
 Examples:
   scripts/run-terminalbench.sh --sample --execution-mode rlm --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode rlm --provider codex --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset trivial --execution-mode rlm --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset smoke --execution-mode rlm --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
@@ -83,6 +86,7 @@ JOBS_DIR="jobs"
 RESULTS_DIR=".benchmarks/terminalbench2"
 JOB_NAME=""
 MODEL=""
+LASH_PROVIDER_KIND=""
 VARIANT=""
 EXECUTION_MODE=""
 CONTEXT_APPROACH=""
@@ -317,6 +321,10 @@ while [[ $# -gt 0 ]]; do
       MODEL="${2:?missing value for --model}"
       shift 2
       ;;
+    --provider)
+      LASH_PROVIDER_KIND="${2:?missing value for --provider}"
+      shift 2
+      ;;
     --variant)
       VARIANT="${2:?missing value for --variant}"
       shift 2
@@ -413,6 +421,11 @@ done
 
 if [[ "${AGENT}" != "lash" && "${AGENT}" != "opencode" && "${AGENT}" != "codex" ]]; then
   echo "error: unsupported --agent: ${AGENT} (expected lash|opencode|codex)" >&2
+  exit 2
+fi
+
+if [[ -n "${LASH_PROVIDER_KIND}" && "${AGENT}" != "lash" ]]; then
+  echo "error: --provider only applies to --agent lash" >&2
   exit 2
 fi
 
@@ -594,6 +607,43 @@ if [[ -z "${JOB_NAME}" ]]; then
   fi
 fi
 
+PROVIDER_CONFIG_PATH="${HOME}/.lash/config.json"
+if [[ "${AGENT}" == "lash" && -f "${HOME}/.lash/config.json" ]]; then
+  provider_config_dir="${RESULTS_DIR}/provider-configs"
+  mkdir -p "${provider_config_dir}"
+  PROVIDER_CONFIG_PATH="$(cd -- "${provider_config_dir}" && pwd)/${JOB_NAME}.json"
+  python3 - "${HOME}/.lash/config.json" "${PROVIDER_CONFIG_PATH}" "${LASH_PROVIDER_KIND}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+provider = sys.argv[3]
+
+data = json.loads(source.read_text())
+if provider:
+    providers = data.get("providers")
+    if not isinstance(providers, dict) or provider not in providers:
+        available = ", ".join(sorted(providers)) if isinstance(providers, dict) else "<none>"
+        raise SystemExit(
+            f"error: provider `{provider}` is not configured in {source}; available: {available}"
+        )
+    data["active_provider"] = provider
+
+# Terminal Bench should be hermetic. Strip web-search credentials from the
+# run-local config so `search_web` / `fetch_url` are not registered even when
+# the user's normal Lash config has Tavily enabled.
+auxiliary = data.get("auxiliary_secrets")
+if isinstance(auxiliary, dict):
+    auxiliary.pop("tavily_api_key", None)
+    if not auxiliary:
+        data.pop("auxiliary_secrets", None)
+target.write_text(json.dumps(data, indent=2) + "\n")
+PY
+  export LASH_BENCH_CONFIG="${PROVIDER_CONFIG_PATH}"
+fi
+
 CMD=(
   harbor run
   --dataset "${DATASET}"
@@ -677,8 +727,8 @@ if [[ -d "${JOB_DIR}" ]]; then
   if [[ -n "${BINARY_PATH}" ]]; then
     EXPORT_CMD+=(--binary-path "${BINARY_PATH}")
   fi
-  if [[ "${AGENT}" == "lash" && -f "${HOME}/.lash/config.json" ]]; then
-    EXPORT_CMD+=(--provider-config "${HOME}/.lash/config.json")
+  if [[ "${AGENT}" == "lash" && -f "${PROVIDER_CONFIG_PATH}" ]]; then
+    EXPORT_CMD+=(--provider-config "${PROVIDER_CONFIG_PATH}")
   fi
   if [[ -n "${MODEL}" ]]; then
     EXPORT_CMD+=(--requested-model "${MODEL}")

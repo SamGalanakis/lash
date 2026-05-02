@@ -210,20 +210,20 @@ impl SubagentToolsProvider {
         serde_json::to_value(response).map_err(|err| err.to_string())
     }
 
-    async fn pass_baton(
+    async fn continue_as(
         &self,
         args: &Value,
         context: &ToolExecutionContext,
     ) -> Result<Value, String> {
         if self.execution_mode != lash::ExecutionMode::new("rlm") {
-            return Err("pass_baton is only available in rlm mode".to_string());
+            return Err("continue_as is only available in rlm mode".to_string());
         }
 
         let task = required_string(args, "task")?;
         let seed = match args.get("seed") {
             None | Some(Value::Null) => serde_json::Map::new(),
             Some(Value::Object(map)) => map.clone(),
-            Some(_) => return Err("pass_baton `seed` must be a record/dict".to_string()),
+            Some(_) => return Err("continue_as `seed` must be a record/dict".to_string()),
         };
 
         let current_snapshot = context
@@ -251,7 +251,7 @@ impl SubagentToolsProvider {
             SessionStartPoint::Empty,
             policy,
             mode_extras,
-            "baton",
+            "continue_as",
         );
         request.plugin_mode = SessionPluginMode::InheritCurrent;
         let successor_session_id = request
@@ -264,11 +264,11 @@ impl SubagentToolsProvider {
             .host
             .create_session(request)
             .await
-            .map_err(|err| format!("failed to create baton successor: {err}"))?;
+            .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
 
         Ok(json!({
             "ok": true,
-            "_baton": successor_session_id,
+            "_continue_as": successor_session_id,
             "task": task,
         }))
     }
@@ -412,7 +412,7 @@ impl ToolProvider for SubagentToolsProvider {
     ) -> ToolResult {
         let result = match name {
             "spawn_agent" => self.spawn_agent(args, context).await,
-            "pass_baton" => self.pass_baton(args, context).await,
+            "continue_as" => self.continue_as(args, context).await,
             "send_message" => self.send_message(args, context).await,
             "followup_task" => self.followup_task(args, context).await,
             "wait_agent" => self.wait_agent(args, context).await,
@@ -1027,7 +1027,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pass_baton_creates_empty_rlm_successor_with_seed_and_task() {
+    async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
         #[derive(Default)]
         struct BatonManager {
             snapshot: PersistedSessionState,
@@ -1125,7 +1125,7 @@ mod tests {
 
         let result = provider
             .execute_with_context(
-                "pass_baton",
+                "continue_as",
                 &json!({
                     "task": "finish from here",
                     "seed": { "x": 1, "query": "original" }
@@ -1138,7 +1138,7 @@ mod tests {
         assert!(
             result
                 .result
-                .get("_baton")
+                .get("_continue_as")
                 .and_then(Value::as_str)
                 .is_some()
         );

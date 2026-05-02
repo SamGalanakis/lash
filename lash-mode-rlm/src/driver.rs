@@ -27,14 +27,15 @@ impl Default for RlmProjectorConfig {
 }
 
 pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> ModePreamble {
-    let omitted_tool_count = input.tool_surface.omitted_tool_count();
+    let tool_surface = rlm_prompt_tool_surface((*input.tool_surface).clone());
+    let omitted_tool_count = tool_surface.omitted_tool_count();
     let mut prompt_contributions = Vec::new();
 
-    let tool_docs = input.tool_surface.prompt_tool_docs();
+    let tool_docs = tool_surface.prompt_tool_docs();
     if !tool_docs.trim().is_empty() {
         prompt_contributions.push(PromptContribution::execution("Showcased Tools", tool_docs));
     }
-    if let Some(catalogue_prompt) = tool_catalogue_prompt(&input.tool_surface) {
+    if let Some(catalogue_prompt) = tool_catalogue_prompt(&tool_surface) {
         prompt_contributions.push(PromptContribution::guidance(
             "Tool Catalogue",
             catalogue_prompt,
@@ -52,11 +53,28 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
             sync_execution_surface: true,
         },
         tool_specs: Arc::new(Vec::new()),
-        tool_names: input.tool_surface.tool_names(),
+        tool_names: tool_surface.tool_names(),
         omitted_tool_count,
         execution_prompt: crate::protocol::rlm_execution_section(),
         prompt_contributions,
     }
+}
+
+fn rlm_prompt_tool_surface(mut surface: lash::ToolSurface) -> lash::ToolSurface {
+    let has_omitted_tools = surface.omitted_tool_count() > 0;
+    if !has_omitted_tools {
+        for entry in &mut surface.tools {
+            if entry.definition.name == "search_tools" {
+                entry.availability = lash::ToolAvailability::Hidden;
+            }
+        }
+    }
+    for entry in &mut surface.tools {
+        if entry.definition.name == "load_tools" {
+            entry.availability = lash::ToolAvailability::Hidden;
+        }
+    }
+    surface
 }
 
 const CATALOGUE_NAMESPACE_LIMIT: usize = 100;
@@ -203,6 +221,83 @@ mod catalogue_tests {
         let prompt = tool_catalogue_prompt(&surface).expect("catalogue prompt");
         assert!(prompt.contains("bulk(51)"));
         assert!(!prompt.contains("Catalogued names:"));
+    }
+
+    #[test]
+    fn rlm_preamble_hides_catalogue_tools_when_everything_is_showcased() {
+        let surface = build_tool_surface(lash::ToolSurfaceBuildInput {
+            tools: vec![
+                tool(
+                    "search_tools",
+                    ToolAvailability::Documented,
+                    Some("runtime"),
+                ),
+                tool("load_tools", ToolAvailability::Documented, Some("runtime")),
+                tool("grep", ToolAvailability::Documented, Some("filesystem")),
+            ],
+            mode: ExecutionMode::new("test"),
+            contributions: Vec::new(),
+        });
+
+        let preamble = build_rlm_preamble(
+            lash::ModeBuildInput {
+                mode: ExecutionMode::new("test"),
+                tool_surface: Arc::new(surface),
+                extra_prompt_contributions: Vec::new(),
+            },
+            RlmProjectorConfig::default(),
+        );
+
+        assert_eq!(preamble.omitted_tool_count, 0);
+        assert_eq!(preamble.tool_names, vec!["grep".to_string()]);
+        let prompt = preamble
+            .prompt_contributions
+            .iter()
+            .map(|contribution| contribution.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!prompt.contains("search_tools"));
+        assert!(!prompt.contains("load_tools"));
+        assert!(!prompt.contains("Tool Catalogue"));
+    }
+
+    #[test]
+    fn rlm_preamble_keeps_search_tools_but_hides_load_tools_when_catalogue_has_omitted_tools() {
+        let surface = build_tool_surface(lash::ToolSurfaceBuildInput {
+            tools: vec![
+                tool(
+                    "search_tools",
+                    ToolAvailability::Documented,
+                    Some("runtime"),
+                ),
+                tool("load_tools", ToolAvailability::Documented, Some("runtime")),
+                tool("grep", ToolAvailability::Callable, Some("filesystem")),
+            ],
+            mode: ExecutionMode::new("test"),
+            contributions: Vec::new(),
+        });
+
+        let preamble = build_rlm_preamble(
+            lash::ModeBuildInput {
+                mode: ExecutionMode::new("test"),
+                tool_surface: Arc::new(surface),
+                extra_prompt_contributions: Vec::new(),
+            },
+            RlmProjectorConfig::default(),
+        );
+
+        assert_eq!(preamble.omitted_tool_count, 1);
+        assert!(preamble.tool_names.contains(&"search_tools".to_string()));
+        assert!(!preamble.tool_names.contains(&"load_tools".to_string()));
+        let prompt = preamble
+            .prompt_contributions
+            .iter()
+            .map(|contribution| contribution.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("search_tools"));
+        assert!(!prompt.contains("load_tools"));
+        assert!(prompt.contains("Catalogued tools: 1 not showcased here"));
     }
 
     #[test]

@@ -72,8 +72,8 @@ fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDefinit
                 r#"update = await wait"#.into(),
             ],
         ),
-        pass_baton_definition(vec![
-            r#"call pass_baton { task: "filter the candidates by relevance to the user's query and submit the top 3", seed: { candidates: candidates, query: user_input_1 } }"#.into(),
+        continue_as_definition(vec![
+            r#"call continue_as { task: "filter the candidates by relevance to the user's query and submit the top 3", seed: { candidates: candidates, query: user_input_1 } }"#.into(),
         ]),
         send_message_definition(vec![
             r#"call send_message { target: "/root", message: "Found the config file and traced the parse path." }"#.into(),
@@ -117,11 +117,11 @@ fn capability_list_for_description(capability_names: &[String]) -> String {
     }
 }
 
-fn pass_baton_definition(examples: Vec<String>) -> ToolDefinition {
+fn continue_as_definition(examples: Vec<String>) -> ToolDefinition {
     tool_definition(
-        "pass_baton",
-        "Hand off to a fresh successor session and end the current session immediately. Use when most of your trajectory has become irrelevant or when context budget is approaching the limit. The successor starts with the same tool access and output schema, but it does not inherit prior conversation, trajectory, or globals. Put everything directly relevant to continuing the task in `task` and `seed`: include concrete goals, constraints, discovered facts, IDs, tokens, file paths, partial results, and next steps. Be selective; do not copy irrelevant history or dead ends. If useful, include a short slice of prior lashlang/repl history in `seed` so the successor can resume without rediscovering it.",
-        pass_baton_input_schema(),
+        "continue_as",
+        "Tail-call: end this session and continue the work as a fresh successor with the same tools and a clean window. The successor inherits tool access and output schema but does not inherit prior conversation, trajectory, or globals — it sees only `task` and `seed`. Use when most of your trajectory has gone stale (failed attempts, large observations you've already extracted from) or context budget is tight. Pack `task` and `seed` with what the successor needs to keep going: concrete goals, constraints, discovered facts, IDs, tokens, file paths, partial results, and next steps. Be selective; leave dead ends behind. If useful, include a short slice of prior lashlang/repl history in `seed` so the successor can resume without rediscovering it.",
+        continue_as_input_schema(),
         examples,
         ToolExecutionMode::Parallel,
     )
@@ -204,7 +204,7 @@ fn tool_definition(
     .with_execution_mode(execution_mode)
 }
 
-fn pass_baton_input_schema() -> serde_json::Value {
+fn continue_as_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
