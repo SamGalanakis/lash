@@ -123,6 +123,12 @@ impl SubagentToolsProvider {
         })
     }
 
+    fn normalize_context_policy(policy: &mut SessionPolicy) {
+        if policy.execution_mode != lash::ExecutionMode::standard() {
+            policy.standard_context_approach = None;
+        }
+    }
+
     async fn build_spawn_create_request(
         &self,
         context: &ToolExecutionContext,
@@ -145,6 +151,7 @@ impl SubagentToolsProvider {
             policy.execution_mode = lash::ExecutionMode::new("rlm");
             mode_extras = Self::finish_mode_extras(&policy.execution_mode, termination)?;
         }
+        Self::normalize_context_policy(&mut policy);
         let start = match fork_turns {
             ForkTurns::None => SessionStartPoint::Empty,
             ForkTurns::All => SessionStartPoint::ExistingSession {
@@ -234,6 +241,7 @@ impl SubagentToolsProvider {
         let termination = current_snapshot.mode_turn_options.rlm_termination();
         let mut policy = current_snapshot.policy.clone();
         policy.execution_mode = lash::ExecutionMode::new("rlm");
+        Self::normalize_context_policy(&mut policy);
 
         let mut initial_nodes = Vec::new();
         if !seed.is_empty() {
@@ -888,6 +896,28 @@ mod tests {
                 .iter()
                 .all(|example| example.contains("call "))
         );
+
+        let rlm_wait = rlm
+            .iter()
+            .find(|tool| tool.name == "wait_agent")
+            .expect("rlm wait_agent");
+        assert!(
+            rlm_wait.output_schema["properties"]
+                .get("completed")
+                .is_some()
+        );
+        assert!(
+            rlm_wait.output_schema["properties"]
+                .get("pending")
+                .is_some()
+        );
+        assert!(
+            rlm_wait.output_schema["properties"]
+                .get("completion")
+                .is_none()
+        );
+        assert!(rlm_wait.description.contains("completed"));
+        assert!(rlm_wait.description.contains("pending"));
     }
 
     #[tokio::test]
@@ -1024,6 +1054,29 @@ mod tests {
         );
         assert_ne!(child_policy.model, stale_choice);
         assert_eq!(child_policy.model, "live-low");
+
+        let structured_request = provider
+            .build_spawn_create_request(
+                &context,
+                "low",
+                ForkTurns::None,
+                Some(json!({
+                    "type": "object",
+                    "properties": { "ok": { "type": "boolean" } },
+                    "required": ["ok"]
+                })),
+            )
+            .await
+            .expect("structured spawn request");
+        let structured_policy = structured_request.policy.expect("structured child policy");
+        assert_eq!(
+            structured_policy.execution_mode,
+            lash::ExecutionMode::new("rlm")
+        );
+        assert_eq!(
+            structured_policy.standard_context_approach, None,
+            "RLM child sessions must not inherit standard-only context policy"
+        );
     }
 
     #[tokio::test]
@@ -1093,6 +1146,7 @@ mod tests {
                     execution_mode: lash::ExecutionMode::new("rlm"),
                     model: "model".to_string(),
                     max_context_tokens: Some(200_000),
+                    standard_context_approach: Some(lash::StandardContextApproach::default()),
                     ..SessionPolicy::default()
                 },
                 mode_turn_options: lash::ModeTurnOptions::rlm(RlmTermination::Finish {
@@ -1148,6 +1202,14 @@ mod tests {
         assert!(matches!(request.start, SessionStartPoint::Empty));
         assert_eq!(request.plugin_mode, SessionPluginMode::InheritCurrent);
         assert_eq!(request.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(
+            request
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.standard_context_approach.clone()),
+            None,
+            "continue_as successors run in RLM and must not inherit standard-only context policy"
+        );
         assert_eq!(
             request
                 .first_turn_input

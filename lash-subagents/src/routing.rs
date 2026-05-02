@@ -82,56 +82,85 @@ pub(crate) fn event_visible_for_until(event: &WaitAgentEvent, until: WaitUntil) 
     }
 }
 
-pub(crate) fn wait_response(timed_out: bool, events: Vec<WaitAgentEvent>) -> WaitAgentResponse {
-    let completion = events.iter().find_map(|event| {
-        if let WaitAgentEvent::TaskCompleted {
-            target,
-            task,
-            status,
-            result,
-            error,
-            session,
-        } = event
-        {
-            Some(WaitAgentCompletion {
-                target: target.clone(),
-                task: task.clone(),
-                status: status.clone(),
-                result: result.clone(),
-                error: error.clone(),
-                session: session.clone(),
-            })
-        } else {
-            None
-        }
-    });
-    let message = events.iter().find_map(|event| {
-        if let WaitAgentEvent::Message { from, to, message } = event {
-            Some(WaitAgentMessage {
-                from: from.clone(),
-                to: to.clone(),
-                message: message.clone(),
-            })
-        } else {
-            None
-        }
-    });
-    let closed = events.iter().find_map(|event| {
-        if let WaitAgentEvent::AgentClosed { target } = event {
-            Some(WaitAgentClosed {
-                target: target.clone(),
-            })
-        } else {
-            None
-        }
-    });
+pub(crate) fn wait_response(
+    timed_out: bool,
+    events: Vec<WaitAgentEvent>,
+    pending: Vec<String>,
+) -> WaitAgentResponse {
+    let completed = events
+        .iter()
+        .filter_map(|event| {
+            if let WaitAgentEvent::TaskCompleted {
+                target,
+                task,
+                status,
+                result,
+                error,
+                session,
+            } = event
+            {
+                Some(WaitAgentCompletion {
+                    target: target.clone(),
+                    task: task.clone(),
+                    status: status.clone(),
+                    result: result.clone(),
+                    error: error.clone(),
+                    session: session.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    let messages = events
+        .iter()
+        .filter_map(|event| {
+            if let WaitAgentEvent::Message { from, to, message } = event {
+                Some(WaitAgentMessage {
+                    from: from.clone(),
+                    to: to.clone(),
+                    message: message.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    let closed = events
+        .iter()
+        .filter_map(|event| {
+            if let WaitAgentEvent::AgentClosed { target } = event {
+                Some(WaitAgentClosed {
+                    target: target.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
     WaitAgentResponse {
         timed_out,
-        completion,
-        message,
+        completed,
+        pending,
+        messages,
         closed,
         events,
     }
+}
+
+pub(crate) fn completed_targets(events: &[WaitAgentEvent]) -> HashSet<String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            if let WaitAgentEvent::TaskCompleted { target, .. }
+            | WaitAgentEvent::AgentClosed { target } = event
+            {
+                Some(target.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn normalize_relative_path(value: &str) -> Result<String, String> {

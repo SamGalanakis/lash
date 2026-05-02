@@ -2342,7 +2342,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                         .ok_or_else(|| RuntimeError::UndefinedVariable {
                             name: root_name.text.to_string(),
                         })?;
-                assign_path(root, path, &indexes, value, &self.chunk.names)?;
+                assign_path(root, path, indexes, value, &self.chunk.names)?;
                 self.stack.truncate(index_start);
                 self.record_assignment(slot);
                 self.last_value = Some(last_value);

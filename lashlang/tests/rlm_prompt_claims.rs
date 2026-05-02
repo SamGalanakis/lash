@@ -103,9 +103,9 @@ impl ToolHost for MockHost {
                         Value::Record(ev.into())
                     })
                     .collect();
-                let completion = events.first().cloned().unwrap_or(Value::Null);
                 let mut out = Record::default();
-                out.insert("completion".into(), completion);
+                out.insert("completed".into(), Value::List(events.clone().into()));
+                out.insert("pending".into(), Value::List(Vec::<Value>::new().into()));
                 out.insert("events".into(), Value::List(events.into()));
                 Ok(Value::Record(out.into()))
             }
@@ -892,7 +892,7 @@ events = await {
   a: start call wait_agent { targets: [a.target] },
   b: start call wait_agent { targets: [b.target] },
 }
-submit [events.a?.completion.result, events.b?.completion.result]"#,
+submit [events.a?.completed[0].result, events.b?.completed[0].result]"#,
     ) else {
         panic!("expected list");
     };
