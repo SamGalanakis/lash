@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 PRESET_TASKS: dict[str, tuple[str, ...]] = {
     "trivial": ("log-summary-date-ranges",),
@@ -91,6 +91,32 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def read_text(path: Path) -> str:
     return path.read_text(errors="replace") if path.exists() else ""
+
+
+def nested_str(value: Any, path: tuple[str, ...]) -> str | None:
+    current = value
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    if isinstance(current, str) and current.strip():
+        return current.strip()
+    return None
+
+
+def trace_tool_name(record: dict[str, Any]) -> str | None:
+    for path in (
+        ("tool", "name"),
+        ("tool_call", "name"),
+        ("payload", "tool_name"),
+        ("payload", "name"),
+        ("tool_name",),
+        ("name",),
+    ):
+        name = nested_str(record, path)
+        if name:
+            return name
+    return None
 
 
 def normalize_task_names(values: Any) -> list[str]:
@@ -324,9 +350,14 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
         "reasoning": 0,
     }
     usage_record_count = 0
+    tool_call_count = 0
+    batch_call_count = 0
+    tool_call_breakdown: dict[str, int] = defaultdict(int)
     for llm_path in llm_paths:
         file_record_count = 0
         file_call_count = 0
+        file_tool_call_count = 0
+        file_tool_call_breakdown: dict[str, int] = defaultdict(int)
         file_models: list[str] = []
         file_turns: set[int] = set()
         for line in llm_path.read_text(errors="replace").splitlines():
@@ -344,6 +375,15 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
             if is_summary_call:
                 call_count += 1
                 file_call_count += 1
+            if record_type == "tool_call_started":
+                name = trace_tool_name(record)
+                if name:
+                    tool_call_count += 1
+                    file_tool_call_count += 1
+                    tool_call_breakdown[name] += 1
+                    file_tool_call_breakdown[name] += 1
+                    if name == "batch":
+                        batch_call_count += 1
             usage = record.get("usage")
             if isinstance(usage, dict):
                 token_totals["raw_input"] += int(usage.get("input_tokens") or 0)
@@ -370,6 +410,8 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
                 "name": llm_path.name,
                 "record_count": file_record_count,
                 "call_count": file_call_count,
+                "tool_call_count": file_tool_call_count,
+                "tool_call_breakdown": dict(sorted(file_tool_call_breakdown.items())),
                 "turn_count": len(file_turns),
                 "models": file_models,
             }
@@ -381,6 +423,9 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
         "models": models,
         "files": files,
         "usage_record_count": usage_record_count,
+        "tool_call_count": tool_call_count,
+        "batch_call_count": batch_call_count,
+        "tool_call_breakdown": dict(sorted(tool_call_breakdown.items())),
         "tokens": token_totals,
     }
 
@@ -885,17 +930,27 @@ def combine_activity_metadata(
     session_turn_count = int(session_activity.get("turn_count") or 0)
     session_tool_count = int(session_activity.get("tool_call_count") or 0)
     session_batch_count = int(session_activity.get("batch_call_count") or 0)
+    trace_tool_count = int(llm_metadata.get("tool_call_count") or 0)
+    trace_batch_count = int(llm_metadata.get("batch_call_count") or 0)
     exec_result_count = int(lash_log_activity.get("exec_result_count") or 0)
     trajectory_turn_count = int(trajectory_metadata.get("llm_turn_count") or 0)
     trajectory_call_count = int(trajectory_metadata.get("llm_call_count") or 0)
     trajectory_tool_count = int(trajectory_metadata.get("tool_call_count") or 0)
     trajectory_batch_count = int(trajectory_metadata.get("batch_call_count") or 0)
 
-    tool_breakdown = trajectory_metadata.get("tool_call_breakdown") or {}
-    if not tool_breakdown:
-        tool_breakdown = session_activity.get("tool_call_breakdown") or {}
-    if not tool_breakdown:
-        tool_breakdown = lash_log_activity.get("tool_call_breakdown") or {}
+    breakdown_sources = [
+        (trace_tool_count, llm_metadata.get("tool_call_breakdown") or {}),
+        (session_tool_count, session_activity.get("tool_call_breakdown") or {}),
+        (
+            int(lash_log_activity.get("tool_call_count") or 0),
+            lash_log_activity.get("tool_call_breakdown") or {},
+        ),
+        (trajectory_tool_count, trajectory_metadata.get("tool_call_breakdown") or {}),
+    ]
+    tool_breakdown = max(
+        breakdown_sources,
+        key=lambda source: source[0] if source[1] else -1,
+    )[1]
 
     return {
         "llm_record_count": llm_record_count,
@@ -906,11 +961,12 @@ def combine_activity_metadata(
         # that don't produce a lash LLM trace.
         "llm_call_count": max(llm_call_count, exec_result_count, trajectory_call_count),
         "tool_call_count": max(
+            trace_tool_count,
             session_tool_count,
             int(lash_log_activity.get("tool_call_count") or 0),
             trajectory_tool_count,
         ),
-        "batch_call_count": max(session_batch_count, trajectory_batch_count),
+        "batch_call_count": max(trace_batch_count, session_batch_count, trajectory_batch_count),
         "tool_call_breakdown": tool_breakdown,
     }
 

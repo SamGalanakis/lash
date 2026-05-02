@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 100;
 const LLM_CANDIDATE_LIMIT: usize = 100;
-const DEFAULT_LLM_RERANK_MODEL: &str = "anthropic/claude-sonnet-4.6";
+const DEFAULT_LLM_RERANK_MODEL: &str = "medium";
 const FUZZY_SCORE_CAP: f64 = 1.25;
 const SEMANTIC_CANDIDATE_FLOOR: usize = 50;
 const RRF_K: f64 = 60.0;
@@ -2633,6 +2633,7 @@ mod tests {
             .lock()
             .expect("direct requests lock poisoned");
         assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model, "medium");
         assert!(
             requests[0]
                 .messages

@@ -102,13 +102,16 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - Nested shapes require the `Type` keyword: `nested: Type { ok: bool }` (bare `{ ok: bool }` is rejected — that's a record value, not a type).
 "#;
 
-const RLM_DECOMPOSITION_SECTION: &str = r#"### Decomposition
+const RLM_DECOMPOSITION_SECTION: &str = r#"### Working with context
 
-- Break big tasks into small steps. Prefer narrow `print`-then-continue checks over brute-force scans.
-- Keep full results in variables and compute over them in lashlang. Do not `print` a large result just to copy IDs or fields back into code; filter, map, count, and pass variables directly into later tool calls.
-- Print decision-sized views: lengths, keys, selected fields, a few records, or a slice. If you need many IDs, print a count and small sample, not the whole list.
-- Use `print` to verify a subquestion before acting on it. Use `submit` only when you are ready to deliver the final answer.
-- Use `start`/`await` when a long-running tool can progress in the background while you do other work — especially `wait_agent`. Prefer record-shaped fanout (`await { a: h1, b: h2 }`) so resolved results are named.
+Your turn's REPL trace is your working memory. Keep it small, decision-sized, and current. Big artifacts (files, search results, long pages, raw tool dumps) live outside — pull them in only when you need to compute over them yourself. Keep full results in variables; `print` only lengths, keys, selected fields, or slices, never large objects you intend to hand-copy IDs from.
+
+Two ways to keep your context lean while still making progress:
+
+- `spawn_agent` — branch a subagent that does focused work in parallel and returns a value. You stay alive, collect results, decide. Use it whenever the inputs would balloon your trace if you read them yourself: bulk reads, scans, validations, deep dives into one section. Prefer `output: { ... }` so the subagent returns typed facts, not prose. Use `start`/`await` (especially with `wait_agent`) so multiple subagents progress at once; record-shaped fanout (`await { a: h1, b: h2 }`) gives named results.
+- `continue_as` — tail-call to a fresh successor. Your turn ends; the successor inherits the same tools and a clean window. Use it when most of your trace has gone stale (failed attempts, large observations you've already extracted from) or you're approaching the context limit. The successor sees only `task` + `seed` — pack the goal, concrete IDs and paths, partial results, and next steps; leave dead ends behind.
+
+Rule of thumb: many independent subproblems → spawn fanout, then `wait_agent`. One thread outgrowing its window → `continue_as`. Small enough to keep in your head → just do it inline.
 
 Example fanout to two subagents (use `?` for fail-fast unwrapping):
 
@@ -333,10 +336,10 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
 
         match result {
             Ok(response) => {
-                let baton_successor = response
+                let continue_as_successor = response
                     .tool_calls
                     .iter()
-                    .find_map(baton_successor_from_tool_result);
+                    .find_map(continue_as_successor_from_tool_result);
                 for tool_call in &response.tool_calls {
                     actions.push(DriverAction::Emit(SessionEvent::ToolCall {
                         call_id: tool_call.call_id.clone(),
@@ -372,7 +375,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 if let Some(finish_value) = response.terminal_finish {
                     state.terminal_finish = Some(finish_value);
                 }
-                if let Some(successor_session_id) = baton_successor {
+                if let Some(successor_session_id) = continue_as_successor {
                     actions.push(DriverAction::AppendEvents(vec![trajectory_event(
                         trajectory_entry(ctx.iteration(), &state, None, None),
                     )]));
@@ -467,13 +470,13 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
     }
 }
 
-fn baton_successor_from_tool_result(record: &ToolCallRecord) -> Option<String> {
-    if record.tool != "pass_baton" || !record.success {
+fn continue_as_successor_from_tool_result(record: &ToolCallRecord) -> Option<String> {
+    if record.tool != "continue_as" || !record.success {
         return None;
     }
     record
         .result
-        .get("_baton")
+        .get("_continue_as")
         .and_then(Value::as_str)
         .filter(|session_id| !session_id.trim().is_empty())
         .map(ToOwned::to_owned)

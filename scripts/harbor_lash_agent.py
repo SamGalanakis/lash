@@ -20,7 +20,9 @@ DEFAULT_LASH_BINARY_CANDIDATES = (
     REPO_ROOT / "target-bookworm" / "release" / "lash",
     REPO_ROOT / "target-bullseye" / "release" / "lash",
 )
-HOST_LASH_CONFIG = Path.home() / ".lash" / "config.json"
+HOST_LASH_CONFIG = Path(
+    os.environ.get("LASH_BENCH_CONFIG", str(Path.home() / ".lash" / "config.json"))
+).expanduser()
 HOST_CA_CERT_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
 
 REMOTE_HOME = "/installed-agent/home"
@@ -65,10 +67,6 @@ it were the answer — the grader is not reading your response.
 - `start_command` and `write_stdin` can return `status: "running"` with
   a `session_id`; that output is partial and is not proof that a build,
   install, test, service setup, or verifier command finished.
-- Treat leftover build products, temp scripts, debug artifacts, and
-  stray outputs as failures unless the task explicitly requires them.
-  Clean up before finishing — but do not clean away the required end
-  state.
 - If the task implies a service or port must be reachable, confirm it
   yourself (curl / nc / the service's own healthcheck) before stopping.
 - Prefer direct verification over assumption. Re-open the exact file
@@ -81,7 +79,7 @@ it were the answer — the grader is not reading your response.
 - Keep scope tight. Do not repeat the same searches or re-read the same
   artifact unless new evidence changes what you are checking.
 - When time is tight, prioritize the required end state and direct
-  verification over cleanup, refactors, or broader investigation.
+  verification over refactors or broader investigation.
 """
 
 INSTALL_GNU_TIME_COMMAND = """

@@ -26,15 +26,15 @@ pub struct RlmModePluginConfig {
     pub observe_projection: ToolResultProjectionPluginConfig,
     #[serde(default = "default_max_output_chars")]
     pub max_output_chars: usize,
-    #[serde(default = "default_baton_soft_warn_tokens")]
-    pub baton_soft_warn_tokens: Option<usize>,
+    #[serde(default = "default_continue_as_soft_warn_tokens")]
+    pub continue_as_soft_warn_tokens: Option<usize>,
 }
 
 fn default_max_output_chars() -> usize {
     10_000
 }
 
-fn default_baton_soft_warn_tokens() -> Option<usize> {
+fn default_continue_as_soft_warn_tokens() -> Option<usize> {
     Some(100_000)
 }
 
@@ -43,7 +43,7 @@ impl Default for RlmModePluginConfig {
         Self {
             observe_projection: ToolResultProjectionPluginConfig::default(),
             max_output_chars: default_max_output_chars(),
-            baton_soft_warn_tokens: default_baton_soft_warn_tokens(),
+            continue_as_soft_warn_tokens: default_continue_as_soft_warn_tokens(),
         }
     }
 }
@@ -104,7 +104,7 @@ impl SessionPlugin for RlmModePlugin {
         });
         reg.prompt().contribute(bound_vars_hook);
 
-        let max_budget_tokens = self.config.baton_soft_warn_tokens;
+        let max_budget_tokens = self.config.continue_as_soft_warn_tokens;
         let budget_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
             Box::pin(async move { Ok(budget_prompt_contributions(&ctx, max_budget_tokens)) })
         });
@@ -174,7 +174,7 @@ impl RlmModeSession {
         if ctx.checkpoint != CheckpointKind::AfterWork {
             return Ok(Vec::new());
         }
-        let Some(threshold) = self.config.baton_soft_warn_tokens else {
+        let Some(threshold) = self.config.continue_as_soft_warn_tokens else {
             return Ok(Vec::new());
         };
         let used = ctx.state.token_usage().total().max(0) as usize;
@@ -396,7 +396,9 @@ mod tests {
     }
 
     #[test]
-    fn budget_prompt_contribution_renders_used_over_configured_budget() {
+    fn budget_prompt_contribution_omits_below_advisory_floor() {
+        // 23% of the configured handoff threshold — plenty of headroom; the
+        // model shouldn't be nagged about budget at all.
         let state = lash::SessionStateEnvelope {
             policy: lash::SessionPolicy {
                 max_context_tokens: Some(1_050_000),
@@ -419,14 +421,70 @@ mod tests {
 
         let contributions = budget_prompt_contributions(&ctx, Some(200_000));
 
-        assert_eq!(contributions.len(), 1);
-        assert!(contributions[0].content.contains("47213 / 200000"));
-        assert!(contributions[0].content.contains("23%"));
-        assert!(contributions[0].content.contains("Prepare to hand off"));
+        assert!(contributions.is_empty());
     }
 
     #[test]
-    fn budget_prompt_contribution_over_threshold_forces_handoff_choice() {
+    fn budget_prompt_contribution_advisory_tier_60_to_89_pct() {
+        // 75% of threshold — advisory: scout for a clean handoff point.
+        let state = lash::SessionStateEnvelope {
+            last_prompt_usage: Some(lash::PromptUsage {
+                prompt_context_tokens: 75_000,
+                input_tokens: 75_000,
+                cached_input_tokens: 0,
+                context_budget_tokens: 75_000,
+            }),
+            ..Default::default()
+        };
+        let ctx = lash::plugin::PromptHookContext {
+            session_id: "root".to_string(),
+            host: std::sync::Arc::new(NoopPromptManager),
+            state: lash::SessionReadView::new(state),
+            mode_turn_options: lash::ModeTurnOptions::default(),
+        };
+
+        let contributions = budget_prompt_contributions(&ctx, Some(100_000));
+
+        assert_eq!(contributions.len(), 1);
+        let content = &contributions[0].content;
+        assert!(content.contains("Tokens: 75000 · handoff threshold: 100000 (75%)"));
+        assert!(content.contains("Look for a clean handoff point"));
+        assert!(!content.contains("Budget tight"));
+        assert!(!content.contains("Past the handoff threshold"));
+    }
+
+    #[test]
+    fn budget_prompt_contribution_tight_tier_90_to_99_pct() {
+        // 95% of threshold — tight: wrap the current step, then continue_as.
+        let state = lash::SessionStateEnvelope {
+            last_prompt_usage: Some(lash::PromptUsage {
+                prompt_context_tokens: 95_000,
+                input_tokens: 95_000,
+                cached_input_tokens: 0,
+                context_budget_tokens: 95_000,
+            }),
+            ..Default::default()
+        };
+        let ctx = lash::plugin::PromptHookContext {
+            session_id: "root".to_string(),
+            host: std::sync::Arc::new(NoopPromptManager),
+            state: lash::SessionReadView::new(state),
+            mode_turn_options: lash::ModeTurnOptions::default(),
+        };
+
+        let contributions = budget_prompt_contributions(&ctx, Some(100_000));
+
+        assert_eq!(contributions.len(), 1);
+        let content = &contributions[0].content;
+        assert!(content.contains("Tokens: 95000 · handoff threshold: 100000 (95%)"));
+        assert!(content.contains("Budget tight"));
+        assert!(content.contains("`continue_as`"));
+        assert!(!content.contains("Past the handoff threshold"));
+        assert!(!content.contains("Look for a clean handoff point"));
+    }
+
+    #[test]
+    fn budget_prompt_contribution_over_threshold_forces_handoff() {
         let state = lash::SessionStateEnvelope {
             last_prompt_usage: Some(lash::PromptUsage {
                 prompt_context_tokens: 120_292,
@@ -447,20 +505,17 @@ mod tests {
 
         assert_eq!(contributions.len(), 1);
         let content = &contributions[0].content;
-        assert!(content.contains("120292 / 100000"));
+        assert!(content.contains("Tokens: 120292 · handoff threshold: 100000 (120%)"));
+        assert!(content.contains("Past the handoff threshold"));
         assert!(content.contains("Do not continue ordinary work"));
-        assert!(content.contains("Call `pass_baton(task=..., seed={...})`"));
-        assert!(content.contains("directly relevant context"));
-        assert!(content.contains("The next agent keeps the same tool access"));
-        assert!(content.contains("do not carry irrelevant history"));
-        assert!(!content.contains("Otherwise"));
-        assert!(!content.contains("otherwise"));
+        assert!(content.contains("`continue_as` now"));
+        assert!(content.contains("`task` + `seed`"));
     }
 
     #[test]
     fn soft_budget_warning_emits_surface_event_not_user_message() {
         let session = RlmModeSession::new(RlmModePluginConfig {
-            baton_soft_warn_tokens: Some(100_000),
+            continue_as_soft_warn_tokens: Some(100_000),
             ..Default::default()
         });
         let state = lash::SessionStateEnvelope {
