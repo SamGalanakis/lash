@@ -40,7 +40,7 @@ use crate::queue::{
     message_turn_input, task_completion_event,
 };
 use crate::routing::{
-    event_matches, event_visible_for_until, is_same_or_descendant, join_path,
+    completed_targets, event_matches, event_visible_for_until, is_same_or_descendant, join_path,
     normalize_absolute_path, normalize_relative_path, wait_response, wait_until_satisfied,
 };
 use crate::types::{
@@ -179,6 +179,44 @@ impl LocalSubagentHost {
             .get(root_session_id)
             .and_then(|tree| tree.agents.get(path))
             .map(|agent| agent.owner_session_id.clone())
+    }
+
+    fn agent_has_pending_task(agent: &AgentRecord) -> bool {
+        agent
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| matches!(turn.kind, ActiveTurnKind::Task { .. }))
+            || agent
+                .queued_turns
+                .iter()
+                .any(|turn| matches!(turn, QueuedTurn::Task(_)))
+    }
+
+    fn pending_task_targets(
+        tree: &AgentTree,
+        current_path: &str,
+        targets: &[String],
+        events: &[WaitAgentEvent],
+    ) -> Vec<String> {
+        let finished = completed_targets(events);
+        let candidates = if targets.is_empty() {
+            tree.agents
+                .keys()
+                .filter(|path| is_same_or_descendant(path, current_path))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            targets.to_vec()
+        };
+        candidates
+            .into_iter()
+            .filter(|target| !finished.contains(target))
+            .filter(|target| {
+                tree.agents
+                    .get(target)
+                    .is_some_and(Self::agent_has_pending_task)
+            })
+            .collect()
     }
 
     /// Close an agent subtree by absolute path without needing a
@@ -931,12 +969,22 @@ impl SubagentHost for LocalSubagentHost {
                         .filter(|event| event_visible_for_until(event, request.until)),
                 );
                 if wait_until_satisfied(&events, request.until) {
-                    return Ok(wait_response(false, events));
+                    let pending =
+                        Self::pending_task_targets(tree, &current_path, &targets, &events);
+                    return Ok(wait_response(false, events, pending));
                 }
             }
 
             if timeout_ms == 0 || tokio::time::Instant::now() >= deadline {
-                return Ok(wait_response(true, events));
+                let pending = {
+                    let state = self.state_lock()?;
+                    let tree = state
+                        .trees
+                        .get(&root_session_id)
+                        .ok_or_else(|| "subagent tree missing".to_string())?;
+                    Self::pending_task_targets(tree, &current_path, &targets, &events)
+                };
+                return Ok(wait_response(true, events, pending));
             }
 
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -951,7 +999,8 @@ impl SubagentHost for LocalSubagentHost {
                         .filter(|event| event_visible_for_until(event, request.until)),
                 );
                 let timed_out = !wait_until_satisfied(&events, request.until);
-                return Ok(wait_response(timed_out, events));
+                let pending = Self::pending_task_targets(tree, &current_path, &targets, &events);
+                return Ok(wait_response(timed_out, events, pending));
             }
         }
     }
@@ -1429,7 +1478,8 @@ mod tests {
 
         assert!(response.timed_out);
         assert!(response.events.is_empty());
-        assert!(response.completion.is_none());
+        assert!(response.completed.is_empty());
+        assert_eq!(response.pending, vec!["/root/worker"]);
     }
 
     #[tokio::test]
@@ -1463,7 +1513,8 @@ mod tests {
 
         assert!(response.timed_out);
         assert!(response.events.is_empty());
-        assert!(response.completion.is_none());
+        assert!(response.completed.is_empty());
+        assert_eq!(response.pending, vec!["/root/worker"]);
     }
 
     #[tokio::test]
@@ -1497,6 +1548,7 @@ mod tests {
 
         assert!(response.timed_out);
         assert!(response.events.is_empty());
+        assert_eq!(response.pending, vec!["/root/worker"]);
     }
 
     #[tokio::test]
@@ -1531,11 +1583,12 @@ mod tests {
         assert!(!response.timed_out);
         assert_eq!(
             response
-                .message
-                .as_ref()
+                .messages
+                .first()
                 .map(|message| message.message.as_str()),
             Some("inbound")
         );
+        assert_eq!(response.pending, vec!["/root/worker"]);
     }
 
     #[tokio::test]
@@ -1576,11 +1629,53 @@ mod tests {
         ));
         assert_eq!(
             response
-                .completion
-                .as_ref()
+                .completed
+                .first()
                 .map(|completion| &completion.result),
             Some(&Value::String("done".to_string()))
         );
+        assert!(response.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_agent_reports_completed_and_pending_targets() {
+        let host = LocalSubagentHost::default();
+        seed_started_worker(&host);
+        {
+            let mut state = host.state_lock().expect("state");
+            let tree = state.trees.get_mut("root").expect("tree");
+            tree.agents.insert(
+                "/root/other".to_string(),
+                test_agent(
+                    "other-session",
+                    Some("/root"),
+                    Some(ActiveTurn {
+                        kind: ActiveTurnKind::Task {
+                            task: "other".to_string(),
+                        },
+                        turn_id: "turn-2".to_string(),
+                    }),
+                ),
+            );
+            LocalSubagentHost::queue_event(tree, test_completed_event("/root/worker"));
+        }
+
+        let response = host
+            .wait_agent(
+                &test_context(),
+                WaitAgentRequest {
+                    targets: vec!["/root/worker".to_string(), "/root/other".to_string()],
+                    until: WaitUntil::TaskCompleted,
+                    timeout_ms: Some(1),
+                },
+            )
+            .await
+            .expect("wait response");
+
+        assert!(!response.timed_out);
+        assert_eq!(response.completed.len(), 1);
+        assert_eq!(response.completed[0].target, "/root/worker");
+        assert_eq!(response.pending, vec!["/root/other"]);
     }
 
     #[tokio::test]

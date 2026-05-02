@@ -5,7 +5,7 @@ use crate::CapabilityRegistry;
 pub(super) fn subagent_prompt_contributions() -> Vec<PromptContribution> {
     vec![PromptContribution::guidance(
         "Subagents",
-        "Use `spawn_agent` for bounded subagent work that can run in parallel with your current step. Pick `capability` to match the task: `low` for read-heavy exploration, `medium` for contained implementation or validation, `high` for larger independent ownership. Keep each spawned task concrete and scoped, and avoid overlapping file edits across concurrently running subagents. In user-facing prose, call them subagents, not delegates or child agents.\n\nLifecycle: `send_message` (concise out-of-band notes; may target `/root`), `followup_task` (hand an existing subagent more work; cannot target `/root`; use `delivery: \"interrupt\"` to cancel its current turn), `wait_agent` (defaults to waiting for task completion and returns `completion.result` directly), `list_agents` (inspect the live tree), and `tasks_stop` with the `task_id` returned by `spawn_agent` to stop a subtree.\n\n`fork_turns` controls how much of the current session context a new subagent receives: `none`, `all`, or a positive integer string for only the most recent turns.",
+        "Use `spawn_agent` for bounded subagent work that can run in parallel with your current step. Pick `capability` to match the task: `low` for read-heavy exploration, `medium` for contained implementation or validation, `high` for larger independent ownership. Keep each spawned task concrete and scoped, and avoid overlapping file edits across concurrently running subagents. In user-facing prose, call them subagents, not delegates or child agents.\n\nLifecycle: `send_message` (concise out-of-band notes; may target `/root`), `followup_task` (hand an existing subagent more work; cannot target `/root`; use `delivery: \"interrupt\"` to cancel its current turn), `wait_agent` (defaults to task completion; read `completed` and `pending`), `list_agents` (inspect the live tree), and `tasks_stop` with the `task_id` returned by `spawn_agent` to stop a subtree.\n\n`fork_turns` controls how much of the current session context a new subagent receives: `none`, `all`, or a positive integer string for only the most recent turns.",
     )]
 }
 
@@ -69,7 +69,8 @@ fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDefinit
                     r#"signed = call spawn_agent {{ task_name: "catalog", task: "Parse the book listing", capability: "{example_capability}", output: Shape }}"#
                 ),
                 r#"wait = start call wait_agent { targets: [worker.target], timeout_ms: 30000 }"#.into(),
-                r#"update = await wait"#.into(),
+                r#"update = (await wait)?"#.into(),
+                r#"if !empty(update.pending) { update = (call wait_agent { targets: update.pending, timeout_ms: 30000 })? }"#.into(),
             ],
         ),
         continue_as_definition(vec![
@@ -162,13 +163,14 @@ fn followup_task_definition(examples: Vec<String>) -> ToolDefinition {
 }
 
 fn wait_agent_definition(examples: Vec<String>) -> ToolDefinition {
-    tool_definition(
+    ToolDefinition::new(
         "wait_agent",
-        "Wait for **subagent** lifecycle events. By default `until` is `task_completed`, so messages and `task_started` events do not complete the wait. Default responses contain only completion events plus a stable `completion.result`; do not read `events[0].result` unless you explicitly requested `any_event`. Use `until=\"message\"`, `\"terminal\"`, `\"any_result\"`, or `\"any_event\"` only when that exact behavior is needed. With no `targets`, waits on the current agent and descendants. This tool only receives subagent events — it does **not** collect `monitor` tool output, shell process events, or any other background stream. Monitor events are delivered automatically as new turn input, so never call `wait_agent` hoping to drain a monitor.",
+        "Wait for **subagent** lifecycle events. By default `until` is `task_completed`, so messages and `task_started` events do not complete the wait. Responses are plural and task-oriented: `completed` contains finished task results and `pending` contains targets that still have task work in flight. A timeout is a successful tool result with `timed_out: true`, `completed: []`, and `pending` populated when targets are still running; wait again with `targets: response.pending` if you need all results. Do not read `events[0].result` unless you explicitly requested `any_event`. Use `until=\"message\"`, `\"terminal\"`, `\"any_result\"`, or `\"any_event\"` only when that exact behavior is needed. With no `targets`, waits on the current agent and descendants. This tool only receives subagent events — it does **not** collect `monitor` tool output, shell process events, or any other background stream. Monitor events are delivered automatically as new turn input, so never call `wait_agent` hoping to drain a monitor.",
         wait_agent_input_schema(),
-        examples,
-        ToolExecutionMode::Parallel,
+        wait_agent_output_schema(),
     )
+    .with_examples(examples)
+    .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 fn list_agents_definition(examples: Vec<String>) -> ToolDefinition {
@@ -252,6 +254,74 @@ fn wait_agent_input_schema() -> serde_json::Value {
             },
             "timeout_ms": { "type": "integer", "minimum": 0 }
         },
+        "additionalProperties": false
+    })
+}
+
+fn wait_agent_output_schema() -> serde_json::Value {
+    let session = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string" },
+            "parent_session_id": { "type": ["string", "null"] },
+            "task": { "type": "string" },
+            "iterations": { "type": "integer", "minimum": 0 },
+            "tool_calls": { "type": "integer", "minimum": 0 },
+            "model": { "type": "string" },
+            "model_variant": { "type": ["string", "null"] },
+            "token_usage": { "type": "object", "additionalProperties": true }
+        },
+        "required": ["id", "task", "iterations", "tool_calls", "model", "token_usage"],
+        "additionalProperties": false
+    });
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "timed_out": { "type": "boolean" },
+            "completed": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "target": { "type": "string" },
+                        "task": { "type": "string" },
+                        "status": { "type": "string" },
+                        "result": {
+                            "description": "Subagent result value; typed by spawn_agent.output when provided."
+                        },
+                        "error": { "type": ["string", "null"] },
+                        "session": session
+                    },
+                    "required": ["target", "task", "status", "result", "session"],
+                    "additionalProperties": false
+                }
+            },
+            "pending": { "type": "array", "items": { "type": "string" } },
+            "messages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string" },
+                        "to": { "type": "string" },
+                        "message": { "type": "string" }
+                    },
+                    "required": ["from", "to", "message"],
+                    "additionalProperties": false
+                }
+            },
+            "closed": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": { "target": { "type": "string" } },
+                    "required": ["target"],
+                    "additionalProperties": false
+                }
+            },
+            "events": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        },
+        "required": ["timed_out", "completed", "pending", "messages", "closed", "events"],
         "additionalProperties": false
     })
 }

@@ -588,15 +588,14 @@ impl DiscoveryDoc {
 
     fn matches_filters(&self, args: &Value) -> bool {
         let namespaces = namespace_filter(args.get("namespace"));
-        if !namespaces.is_empty() {
-            if !self
+        if !namespaces.is_empty()
+            && !self
                 .tool
                 .namespace
                 .as_deref()
                 .is_some_and(|namespace| namespaces.iter().any(|candidate| candidate == namespace))
-            {
-                return false;
-            }
+        {
+            return false;
         }
         !exclude_filter(args.get("exclude")).contains(&self.tool.name)
     }

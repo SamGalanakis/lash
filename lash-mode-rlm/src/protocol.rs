@@ -122,7 +122,7 @@ events = await {
   a: start call wait_agent { targets: [a.target], timeout_ms: 30000 },
   b: start call wait_agent { targets: [b.target], timeout_ms: 30000 },
 }
-submit [events.a?.completion.result, events.b?.completion.result]
+submit [events.a?.completed[0].result, events.b?.completed[0].result]
 ```"#;
 
 pub fn rlm_execution_section() -> String {

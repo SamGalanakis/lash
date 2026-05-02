@@ -101,12 +101,10 @@ pub struct FollowupTaskResponse {
 #[derive(Clone, Debug, Serialize)]
 pub struct WaitAgentResponse {
     pub timed_out: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completion: Option<WaitAgentCompletion>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<WaitAgentMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closed: Option<WaitAgentClosed>,
+    pub completed: Vec<WaitAgentCompletion>,
+    pub pending: Vec<String>,
+    pub messages: Vec<WaitAgentMessage>,
+    pub closed: Vec<WaitAgentClosed>,
     pub events: Vec<WaitAgentEvent>,
 }
 
