@@ -3,7 +3,7 @@
 //! All four produce an `ActivityKind::Exploration` block with one
 //! `ExplorationOp`. Consecutive explorations merge into a single
 //! `Explored` block via `merge_exploration_activity`, which is called
-//! from `projection.rs::append_activity_block`.
+//! from `projection.rs::UiTimeline::append_activity`.
 
 use serde_json::Value;
 

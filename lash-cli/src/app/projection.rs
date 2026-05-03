@@ -15,6 +15,10 @@ impl UiTimeline {
         Self::default()
     }
 
+    pub(crate) fn from_items(items: Vec<UiTimelineItem>) -> Self {
+        Self { items }
+    }
+
     fn push(&mut self, item: UiTimelineItem) {
         self.items.push(item);
     }
@@ -40,8 +44,50 @@ impl UiTimeline {
         self.items.clone()
     }
 
-    fn into_items(self) -> Vec<UiTimelineItem> {
+    pub(crate) fn into_items(self) -> Vec<UiTimelineItem> {
         self.items
+    }
+
+    pub(crate) fn push_system_message_if_new(&mut self, message: String) {
+        if matches!(
+            self.last(),
+            Some(UiTimelineItem::SystemMessage(existing)) if existing == &message
+        ) {
+            return;
+        }
+        self.push(UiTimelineItem::SystemMessage(message));
+    }
+
+    pub(crate) fn push_user_turn_start(&mut self) {
+        let show_separator = match self.last() {
+            None => false,
+            Some(UiTimelineItem::Splash) => false,
+            Some(UiTimelineItem::TurnStart(_)) => false,
+            Some(_) => true,
+        };
+        self.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
+    }
+
+    pub(crate) fn append_activity(&mut self, activity: ActivityBlock) {
+        if let Some(UiTimelineItem::Activity(existing)) = self.last_mut()
+            && existing.call.kind == ActivityKind::Exploration
+            && activity.call.kind == ActivityKind::Exploration
+            && existing.result.status == ActivityStatus::Completed
+            && activity.result.status == ActivityStatus::Completed
+            && merge_exploration_activity(existing, activity.clone())
+        {
+            return;
+        }
+        if let Some(UiTimelineItem::Activity(existing)) = self.last_mut()
+            && existing.call.kind == ActivityKind::Edit
+            && activity.call.kind == ActivityKind::Edit
+            && existing.result.status == ActivityStatus::Completed
+            && activity.result.status == ActivityStatus::Completed
+            && merge_edit_activity(existing, activity.clone())
+        {
+            return;
+        }
+        self.push(UiTimelineItem::Activity(Box::new(activity)));
     }
 }
 
@@ -75,14 +121,32 @@ pub(crate) enum UiTimelineItem {
     Splash,
 }
 
-pub(crate) fn timeline_items_from_read_model(
-    read_model: &lash::SessionReadModel,
+pub(crate) fn timeline_items_from_read_view(
+    read_view: &lash::SessionReadView,
     ui_state: &UiProjectionState,
 ) -> Vec<UiTimelineItem> {
-    timeline_from_read_model(read_model, ui_state).into_items()
+    timeline_from_read_view(read_view, ui_state).into_items()
 }
 
-pub(crate) fn timeline_from_read_model(
+pub(crate) fn timeline_from_read_view(
+    read_view: &lash::SessionReadView,
+    ui_state: &UiProjectionState,
+) -> UiTimeline {
+    let projection = read_view.read_model().chronological_projection();
+    let mut timeline = timeline_from_chronological(&projection);
+    append_live_projection_items(&mut timeline, ui_state);
+    timeline.extend(
+        ui_state
+            .plugin_panels
+            .iter()
+            .cloned()
+            .map(UiTimelineItem::PluginPanel),
+    );
+    timeline
+}
+
+#[cfg(test)]
+fn timeline_from_read_model(
     read_model: &lash::SessionReadModel,
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
@@ -121,13 +185,13 @@ pub(crate) fn timeline_from_read_model_parts(
     timeline_from_read_model(&read_model, ui_state)
 }
 
-pub(crate) fn interrupted_blocks_from_read_model(
-    read_model: &lash::SessionReadModel,
+pub(crate) fn interrupted_blocks_from_read_view(
+    read_view: &lash::SessionReadView,
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
 ) -> Vec<UiTimelineItem> {
-    let mut timeline = timeline_from_read_model(read_model, ui_state);
-    push_system_message_item_if_new(&mut timeline, status_message.into());
+    let mut timeline = timeline_from_read_view(read_view, ui_state);
+    timeline.push_system_message_if_new(status_message.into());
     timeline.into_items()
 }
 
@@ -141,7 +205,7 @@ pub(crate) fn interrupted_blocks_from_read_model_parts(
 ) -> Vec<UiTimelineItem> {
     let read_model = read_model_from_parts(events, messages, tool_calls);
     let mut timeline = timeline_from_read_model(&read_model, ui_state);
-    push_system_message_item_if_new(&mut timeline, status_message.into());
+    timeline.push_system_message_if_new(status_message.into());
     timeline.into_items()
 }
 
@@ -332,73 +396,8 @@ fn append_live_projection_items(timeline: &mut UiTimeline, ui_state: &UiProjecti
     }
 }
 
-pub(crate) fn push_system_message_block_if_new(blocks: &mut Vec<UiTimelineItem>, message: String) {
-    if matches!(
-        blocks.last(),
-        Some(UiTimelineItem::SystemMessage(existing)) if existing == &message
-    ) {
-        return;
-    }
-    blocks.push(UiTimelineItem::SystemMessage(message));
-}
-
-/// Emit a `TurnStart` marker before a `UserInput` block. The marker is the
-/// data-driven source of truth for the horizontal rule between turns. The
-/// first turn in the stream (nothing above it, or only a `Splash` above
-/// it) does not show a separator — the rule is a *between* signal, not a
-/// *leading* ornament.
-pub(crate) fn push_user_turn_start(blocks: &mut Vec<UiTimelineItem>) {
-    let show_separator = match blocks.last() {
-        None => false,
-        Some(UiTimelineItem::Splash) => false,
-        Some(UiTimelineItem::TurnStart(_)) => false,
-        Some(_) => true,
-    };
-    blocks.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
-}
-
-pub(crate) fn append_activity_block(blocks: &mut Vec<UiTimelineItem>, activity: ActivityBlock) {
-    if let Some(UiTimelineItem::Activity(existing)) = blocks.last_mut()
-        && existing.call.kind == ActivityKind::Exploration
-        && activity.call.kind == ActivityKind::Exploration
-        && existing.result.status == ActivityStatus::Completed
-        && activity.result.status == ActivityStatus::Completed
-        && merge_exploration_activity(existing, activity.clone())
-    {
-        return;
-    }
-    if let Some(UiTimelineItem::Activity(existing)) = blocks.last_mut()
-        && existing.call.kind == ActivityKind::Edit
-        && activity.call.kind == ActivityKind::Edit
-        && existing.result.status == ActivityStatus::Completed
-        && activity.result.status == ActivityStatus::Completed
-        && merge_edit_activity(existing, activity.clone())
-    {
-        return;
-    }
-    blocks.push(UiTimelineItem::Activity(Box::new(activity)));
-}
-
 fn append_activity_item(timeline: &mut UiTimeline, activity: ActivityBlock) {
-    if let Some(UiTimelineItem::Activity(existing)) = timeline.last_mut()
-        && existing.call.kind == ActivityKind::Exploration
-        && activity.call.kind == ActivityKind::Exploration
-        && existing.result.status == ActivityStatus::Completed
-        && activity.result.status == ActivityStatus::Completed
-        && merge_exploration_activity(existing, activity.clone())
-    {
-        return;
-    }
-    if let Some(UiTimelineItem::Activity(existing)) = timeline.last_mut()
-        && existing.call.kind == ActivityKind::Edit
-        && activity.call.kind == ActivityKind::Edit
-        && existing.result.status == ActivityStatus::Completed
-        && activity.result.status == ActivityStatus::Completed
-        && merge_edit_activity(existing, activity.clone())
-    {
-        return;
-    }
-    timeline.push(UiTimelineItem::Activity(Box::new(activity)));
+    timeline.append_activity(activity);
 }
 
 pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {
@@ -539,7 +538,7 @@ fn append_transcript_items(
                     .map(|user_input| user_input.display_text.clone())
                     .unwrap_or_else(|| rendered_message_text(message));
                 if !text.is_empty() {
-                    push_user_turn_start_item(timeline);
+                    timeline.push_user_turn_start();
                     timeline.push(UiTimelineItem::UserInput(text));
                 }
             }
@@ -593,6 +592,9 @@ fn append_tool_call_record_items(
     record: &ToolCallRecord,
     activity_state: &mut ActivityState,
 ) {
+    if record.tool == "execute_lashlang" {
+        return;
+    }
     for activity in activity_state.blocks_for_tool_call(
         &record.tool,
         record.args.clone(),
@@ -672,26 +674,6 @@ fn push_assistant_reasoning_item(timeline: &mut UiTimeline, text: &str) -> bool 
     }
     timeline.push(UiTimelineItem::AssistantReasoning(cleaned));
     true
-}
-
-fn push_system_message_item_if_new(timeline: &mut UiTimeline, message: String) {
-    if matches!(
-        timeline.last(),
-        Some(UiTimelineItem::SystemMessage(existing)) if existing == &message
-    ) {
-        return;
-    }
-    timeline.push(UiTimelineItem::SystemMessage(message));
-}
-
-fn push_user_turn_start_item(timeline: &mut UiTimeline) {
-    let show_separator = match timeline.last() {
-        None => false,
-        Some(UiTimelineItem::Splash) => false,
-        Some(UiTimelineItem::TurnStart(_)) => false,
-        Some(_) => true,
-    };
-    timeline.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
 }
 
 pub(crate) fn rendered_message_text(message: &Message) -> String {

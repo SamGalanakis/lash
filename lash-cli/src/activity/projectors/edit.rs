@@ -2,7 +2,7 @@
 //!
 //! Produces an `Edit` block with a `PatchPreview` artifact listing the
 //! changed files. Consecutive edits merge via `merge_edit_activity`
-//! (called from `projection.rs::append_activity_block`) so a run of
+//! (called through `projection.rs::UiTimeline::append_activity`) so a run of
 //! patches collapses into a single "Edited N files (+M -K)" block.
 
 use std::collections::HashSet;

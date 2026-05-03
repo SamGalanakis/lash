@@ -30,14 +30,10 @@ use crate::repo_status::RepoStatus;
 use crate::stream_markdown::LiveMarkdown;
 use crate::util::{is_cancelled_error, manual_interrupt_message};
 
-use self::projection::{
-    append_activity_block, push_system_message_block_if_new, push_user_turn_start,
-};
-
 pub(crate) use self::projection::{
-    UiTimelineItem, interrupted_assistant_tail, interrupted_blocks_from_read_model,
+    UiTimeline, UiTimelineItem, interrupted_assistant_tail, interrupted_blocks_from_read_view,
     preview_text_lines, smart_truncate_preview_line, strip_ansi_escape_sequences,
-    timeline_items_from_read_model,
+    timeline_items_from_read_view,
 };
 #[cfg(test)]
 pub(crate) use self::projection::{
@@ -616,13 +612,13 @@ impl App {
         UiProjectionState::from_app(self)
     }
 
-    pub fn finish_turn_from_read_model(&mut self, read_model: &lash::SessionReadModel) {
+    pub fn finish_turn_from_read_view(&mut self, read_view: &lash::SessionReadView) {
         let current_turn_starts = user_turn_start_indices(&self.blocks);
         let current_turn_start = current_turn_starts.last().copied();
 
         self.stop_turn();
         let ui_state = UiProjectionState::from_app(self);
-        let projected_blocks = timeline_items_from_read_model(read_model, &ui_state);
+        let projected_blocks = timeline_items_from_read_view(read_view, &ui_state);
         let projected_turn_starts = user_turn_start_indices(&projected_blocks);
         let projected_turn_start = current_turn_start
             .and_then(|_| {
@@ -797,7 +793,9 @@ impl App {
     fn push_activity_block(&mut self, activity: ActivityBlock) {
         let invalidate_from = self.append_invalidation_start();
         let prior_len = self.blocks.len();
-        append_activity_block(&mut self.blocks, activity);
+        let mut timeline = UiTimeline::from_items(std::mem::take(&mut self.blocks));
+        timeline.append_activity(activity);
+        self.blocks = timeline.into_items();
         if !self.blocks.is_empty() {
             let changed_idx = if self.blocks.len() == prior_len {
                 prior_len.saturating_sub(1)
@@ -1003,6 +1001,17 @@ impl App {
         self.blocks
             .retain(|block| !matches!(block, UiTimelineItem::Splash));
         self.invalidate_height_cache();
+    }
+
+    #[cfg(test)]
+    pub fn finish_turn_from_read_model(&mut self, read_model: &lash::SessionReadModel) {
+        let mut state = lash::SessionStateEnvelope::default();
+        state.session_graph.replace_active_read_state(
+            read_model.messages.as_slice(),
+            read_model.tool_calls.as_slice(),
+        );
+        let read_view = state.read_view();
+        self.finish_turn_from_read_view(&read_view);
     }
 
     fn live_assistant_normalized_text(&self) -> Option<String> {
@@ -1352,7 +1361,9 @@ impl App {
         }
         let changed_idx = self.blocks.len();
         let invalidate_from = self.append_invalidation_start();
-        push_user_turn_start(&mut self.blocks);
+        let mut timeline = UiTimeline::from_items(std::mem::take(&mut self.blocks));
+        timeline.push_user_turn_start();
+        self.blocks = timeline.into_items();
         self.blocks.push(UiTimelineItem::UserInput(history_text));
         self.invalidate_height_cache_from(
             invalidate_from
@@ -1525,14 +1536,13 @@ impl App {
                 if is_cancelled_error(&message, code) {
                     let manual_interrupt_requested = self.manual_interrupt_requested;
                     self.stop_turn();
-                    push_system_message_block_if_new(
-                        &mut self.blocks,
-                        if manual_interrupt_requested {
-                            manual_interrupt_message().to_string()
-                        } else {
-                            "Cancelled.".to_string()
-                        },
-                    );
+                    let mut timeline = UiTimeline::from_items(std::mem::take(&mut self.blocks));
+                    timeline.push_system_message_if_new(if manual_interrupt_requested {
+                        manual_interrupt_message().to_string()
+                    } else {
+                        "Cancelled.".to_string()
+                    });
+                    self.blocks = timeline.into_items();
                 } else {
                     self.manual_interrupt_requested = false;
                     self.set_transient_status(

@@ -46,29 +46,35 @@ pub(super) struct ManagedSessionTurn {
 }
 
 #[derive(Clone)]
-pub(super) struct RuntimeSessionManager {
-    runtime_scope_id: Arc<str>,
-    current_session_id: String,
-    current_snapshot: CurrentSnapshot,
-    current_policy: SessionPolicy,
-    current_host: RuntimeHost,
-    current_plugins: Arc<crate::PluginSession>,
-    current_tool_catalog: Arc<Vec<serde_json::Value>>,
-    current_prompt_bridge: Option<HostPromptBridge>,
-    current_store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+struct CurrentSessionBacking {
+    session_id: String,
+    snapshot: CurrentSnapshot,
+    policy: SessionPolicy,
+    host: RuntimeHost,
+    plugins: Arc<crate::PluginSession>,
+    tool_catalog: Arc<Vec<serde_json::Value>>,
+    prompt_bridge: Option<HostPromptBridge>,
+    store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+}
+
+#[derive(Clone)]
+struct ManagedSessionsBacking {
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
-    /// Session-scoped token cost ledger shared with the parent
-    /// `LashRuntime`. All managers created from the same runtime
-    /// write to the same Arc. Drained at turn-commit time.
-    token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
-    background_sync_needed: Arc<AtomicBool>,
-    /// Maps child session_id → usage_source label.
-    child_usage_sources: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Maps child session_id → seed PluginMessage queued via
     /// `SessionCreateRequest::first_turn_input`. Drained by
     /// `take_first_turn_input` when a host claims it.
     pending_first_turn_inputs: Arc<std::sync::Mutex<HashMap<String, crate::PluginMessage>>>,
+}
+
+#[derive(Clone)]
+struct UsageBridgeBacking {
+    /// Session-scoped token cost ledger shared with the parent
+    /// `LashRuntime`. All managers created from the same runtime
+    /// write to the same Arc. Drained at turn-commit time.
+    token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
+    /// Maps child session_id → usage_source label.
+    child_sources: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Tracks live child-turn usage already bubbled into the shared
     /// token ledger so `await_turn` can reconcile the final turn usage
     /// without double counting.
@@ -79,7 +85,21 @@ pub(super) struct RuntimeSessionManager {
     /// Out-of-turn managers persist drained usage back into the
     /// current session graph. Turn-time managers leave the shared
     /// ledger alone so the parent turn can commit it once.
-    persist_usage_to_store: bool,
+    persist_to_store: bool,
+}
+
+#[derive(Clone)]
+struct BackgroundTaskBacking {
+    runtime_scope_id: Arc<str>,
+    sync_needed: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+pub(super) struct RuntimeSessionManager {
+    current: CurrentSessionBacking,
+    managed: ManagedSessionsBacking,
+    usage: UsageBridgeBacking,
+    background: BackgroundTaskBacking,
 }
 
 impl RuntimeSessionManager {
@@ -117,42 +137,50 @@ impl RuntimeSessionManager {
             return Err(ExternalInvokeError::Unknown("session_manager".to_string()));
         };
         Ok(Self {
-            runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
-            current_session_id: runtime.state.session_id.clone(),
-            current_snapshot: if persist_usage_to_store {
-                CurrentSnapshot::Owned(runtime.export_graph_first_state())
-            } else {
-                let read_model = runtime.state.read_model();
-                CurrentSnapshot::ReadModel {
-                    meta: Self::current_snapshot_meta_without_graph(runtime),
-                    messages: read_model.messages,
-                    tool_calls: read_model.tool_calls,
-                }
+            current: CurrentSessionBacking {
+                session_id: runtime.state.session_id.clone(),
+                snapshot: if persist_usage_to_store {
+                    CurrentSnapshot::Owned(runtime.export_graph_first_state())
+                } else {
+                    let read_model = runtime.state.read_model();
+                    CurrentSnapshot::ReadModel {
+                        meta: Self::current_snapshot_meta_without_graph(runtime),
+                        messages: read_model.messages,
+                        tool_calls: read_model.tool_calls,
+                    }
+                },
+                policy: runtime.policy.clone(),
+                host: runtime.host.clone(),
+                plugins: Arc::clone(session.plugins()),
+                tool_catalog: runtime.active_tool_catalog_shared(),
+                prompt_bridge,
+                store: runtime.services.store.clone(),
             },
-            current_policy: runtime.policy.clone(),
-            current_host: runtime.host.clone(),
-            current_plugins: Arc::clone(session.plugins()),
-            current_tool_catalog: runtime.active_tool_catalog_shared(),
-            current_prompt_bridge: prompt_bridge,
-            current_store: runtime.services.store.clone(),
-            registry: Arc::clone(&runtime.managed_sessions),
-            turns: Arc::clone(&runtime.managed_turns),
-            token_ledger: Arc::clone(&runtime.shared_token_ledger),
-            background_sync_needed: Arc::clone(&runtime.background_sync_needed),
-            child_usage_sources: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            pending_first_turn_inputs: Arc::clone(&runtime.pending_first_turn_inputs),
-            child_turn_live_usage: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            child_usage_event_relay,
-            persist_usage_to_store,
+            managed: ManagedSessionsBacking {
+                registry: Arc::clone(&runtime.managed_sessions),
+                turns: Arc::clone(&runtime.managed_turns),
+                pending_first_turn_inputs: Arc::clone(&runtime.pending_first_turn_inputs),
+            },
+            usage: UsageBridgeBacking {
+                token_ledger: Arc::clone(&runtime.shared_token_ledger),
+                child_sources: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                child_turn_live_usage: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                child_usage_event_relay,
+                persist_to_store: persist_usage_to_store,
+            },
+            background: BackgroundTaskBacking {
+                runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
+                sync_needed: Arc::clone(&runtime.background_sync_needed),
+            },
         })
     }
 
     fn record_token_usage(&self, source: &str, model: &str, usage: &TokenUsage) {
-        record_token_usage_shared(&self.token_ledger, source, model, usage);
+        record_token_usage_shared(&self.usage.token_ledger, source, model, usage);
     }
 
     fn drain_token_ledger(&self) -> Vec<TokenLedgerEntry> {
-        let mut ledger = self.token_ledger.lock().expect("token ledger lock");
+        let mut ledger = self.usage.token_ledger.lock().expect("token ledger lock");
         std::mem::take(&mut *ledger)
     }
 
@@ -165,12 +193,12 @@ impl RuntimeSessionManager {
     }
 
     fn background_scope_key(&self, session_id: &str) -> String {
-        format!("{}:{session_id}", self.runtime_scope_id)
+        format!("{}:{session_id}", self.background.runtime_scope_id)
     }
 
     async fn current_snapshot_for_store_write(&self) -> SessionSnapshot {
-        let mut state = self.current_snapshot.to_snapshot();
-        if let Some(store) = &self.current_store {
+        let mut state = self.current.snapshot.to_snapshot();
+        if let Some(store) = &self.current.store {
             crate::store::refresh_persisted_session_state(store.as_ref(), &mut state).await;
         }
         super::normalize_session_graph(&mut state);
@@ -178,10 +206,10 @@ impl RuntimeSessionManager {
     }
 
     async fn persist_current_usage_ledger(&self) -> Result<(), crate::PluginError> {
-        if !self.persist_usage_to_store {
+        if !self.usage.persist_to_store {
             return Ok(());
         }
-        let Some(store) = &self.current_store else {
+        let Some(store) = &self.current.store else {
             return Ok(());
         };
         let mut state = self.current_snapshot_for_store_write().await;
@@ -219,14 +247,14 @@ impl RuntimeSessionManager {
         &self,
         session_id: &str,
     ) -> Result<SessionSnapshot, crate::PluginError> {
-        if session_id == self.current_session_id {
-            let mut snapshot = self.current_snapshot.to_snapshot();
+        if session_id == self.current.session_id {
+            let mut snapshot = self.current.snapshot.to_snapshot();
             super::normalize_session_graph(&mut snapshot);
             self.enrich_current_snapshot(&mut snapshot);
             return Ok(snapshot);
         }
         let runtime = {
-            let registry = self.registry.lock().await;
+            let registry = self.managed.registry.lock().await;
             registry.get(session_id).cloned()
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
@@ -238,20 +266,21 @@ impl RuntimeSessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
-        if session_id == self.current_session_id {
-            if let Some(runtime) = self.registry.lock().await.get(session_id).cloned() {
+        if session_id == self.current.session_id {
+            if let Some(runtime) = self.managed.registry.lock().await.get(session_id).cloned() {
                 let runtime = runtime.lock().await;
                 return Ok(runtime.active_tool_catalog());
             }
-            if self.current_plugins.dynamic_tools().is_some() {
+            if self.current.plugins.dynamic_tools().is_some() {
                 return Ok(self
-                    .current_plugins
-                    .tool_catalog(session_id, self.current_policy.execution_mode.clone()));
+                    .current
+                    .plugins
+                    .tool_catalog(session_id, self.current.policy.execution_mode.clone()));
             }
-            return Ok(self.current_tool_catalog.as_ref().clone());
+            return Ok(self.current.tool_catalog.as_ref().clone());
         }
         let runtime = {
-            let registry = self.registry.lock().await;
+            let registry = self.managed.registry.lock().await;
             registry.get(session_id).cloned()
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
@@ -260,7 +289,7 @@ impl RuntimeSessionManager {
     }
 
     fn enrich_current_snapshot(&self, snapshot: &mut SessionSnapshot) {
-        if let Some(dynamic_tools) = self.current_plugins.dynamic_tools() {
+        if let Some(dynamic_tools) = self.current.plugins.dynamic_tools() {
             let dynamic_state = dynamic_tools.export_state();
             snapshot.dynamic_state_generation = Some(dynamic_state.base_generation);
             snapshot.dynamic_state_snapshot = Some(dynamic_state);
@@ -268,13 +297,13 @@ impl RuntimeSessionManager {
             snapshot.dynamic_state_generation = None;
             snapshot.dynamic_state_snapshot = None;
         }
-        snapshot.plugin_snapshot = self.current_plugins.snapshot().ok();
+        snapshot.plugin_snapshot = self.current.plugins.snapshot().ok();
         snapshot.plugin_snapshot_revision =
-            Some(self.current_plugins.snapshot_revision_fingerprint());
+            Some(self.current.plugins.snapshot_revision_fingerprint());
     }
 
     fn current_dynamic_tools(&self) -> Result<Arc<crate::DynamicToolProvider>, crate::PluginError> {
-        self.current_plugins.dynamic_tools().ok_or_else(|| {
+        self.current.plugins.dynamic_tools().ok_or_else(|| {
             crate::PluginError::Session("dynamic tools are unavailable in this session".to_string())
         })
     }
@@ -285,7 +314,8 @@ impl RuntimeSessionManager {
         name: &str,
         args: serde_json::Value,
     ) -> Result<crate::ToolResult, crate::PluginError> {
-        self.current_plugins
+        self.current
+            .plugins
             .host()
             .invoke_external_for_session(session_id, name, args, Arc::new(self.clone()))
             .await
@@ -297,7 +327,8 @@ impl RuntimeSessionManager {
         session_id: &str,
     ) -> Result<(), crate::PluginError> {
         let specs = self
-            .current_plugins
+            .current
+            .plugins
             .host()
             .monitor_specs_for_session(session_id)
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;

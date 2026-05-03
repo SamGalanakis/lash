@@ -73,6 +73,7 @@ struct SessionReadMeta {
     iteration: usize,
     token_usage: crate::TokenUsage,
     last_prompt_usage: Option<crate::runtime::PromptUsage>,
+    mode_turn_options: crate::ModeTurnOptions,
 }
 
 impl SessionReadMeta {
@@ -83,6 +84,7 @@ impl SessionReadMeta {
             iteration: state.iteration,
             token_usage: state.token_usage.clone(),
             last_prompt_usage: state.last_prompt_usage.clone(),
+            mode_turn_options: state.mode_turn_options.clone(),
         }
     }
 
@@ -93,6 +95,7 @@ impl SessionReadMeta {
             iteration: state.iteration,
             token_usage: state.token_usage,
             last_prompt_usage: state.last_prompt_usage,
+            mode_turn_options: state.mode_turn_options,
         }
     }
 
@@ -104,7 +107,7 @@ impl SessionReadMeta {
             iteration: self.iteration,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
-            mode_turn_options: crate::ModeTurnOptions::default(),
+            mode_turn_options: self.mode_turn_options.clone(),
         }
     }
 }
@@ -260,6 +263,10 @@ impl SessionReadView {
         self.0.meta.last_prompt_usage.as_ref()
     }
 
+    pub fn mode_turn_options(&self) -> &crate::ModeTurnOptions {
+        &self.0.meta.mode_turn_options
+    }
+
     pub fn to_owned_state(&self) -> SessionStateEnvelope {
         self.0.meta.to_owned_state(self.session_graph().clone())
     }
@@ -302,6 +309,7 @@ mod tests {
         let mut state = SessionStateEnvelope {
             session_id: "session-read-view-test".to_string(),
             iteration: 7,
+            mode_turn_options: crate::ModeTurnOptions::Unit,
             ..SessionStateEnvelope::default()
         };
         state.policy.max_turns = Some(3);
@@ -357,6 +365,54 @@ mod tests {
             owned.session_graph.nodes.len(),
             state.session_graph.nodes.len()
         );
+        assert!(matches!(
+            owned.mode_turn_options,
+            crate::ModeTurnOptions::Unit
+        ));
+        assert!(matches!(
+            view.mode_turn_options(),
+            crate::ModeTurnOptions::Unit
+        ));
+    }
+
+    #[test]
+    fn derived_read_view_materializes_graph_lazily_and_preserves_mode_turn_options() {
+        let state = SessionStateEnvelope {
+            session_id: "derived-read-view".to_string(),
+            mode_turn_options: crate::ModeTurnOptions::Unit,
+            ..SessionStateEnvelope::default()
+        };
+        let base_graph = Arc::new(crate::SessionGraph::default());
+        let user = text_message("u1", MessageRole::User, "hello");
+
+        let view = SessionReadView::from_graph_message_sequence(
+            &state,
+            base_graph,
+            crate::MessageSequence::from_base(vec![user.clone()].into()),
+            Arc::new(Vec::new()),
+        );
+
+        match &view.0.graph {
+            SessionReadGraph::Derived { cache, .. } => assert!(cache.get().is_none()),
+            SessionReadGraph::Owned(_) => panic!("expected derived read graph"),
+        }
+        assert_eq!(view.messages().len(), 1);
+        assert_eq!(view.messages()[0].id, user.id);
+        match &view.0.graph {
+            SessionReadGraph::Derived { cache, .. } => assert!(cache.get().is_none()),
+            SessionReadGraph::Owned(_) => panic!("expected derived read graph"),
+        }
+
+        let owned = view.to_owned_state();
+
+        assert!(matches!(
+            owned.mode_turn_options,
+            crate::ModeTurnOptions::Unit
+        ));
+        match &view.0.graph {
+            SessionReadGraph::Derived { cache, .. } => assert!(cache.get().is_some()),
+            SessionReadGraph::Owned(_) => panic!("expected derived read graph"),
+        }
     }
 }
 

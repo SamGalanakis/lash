@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 impl RuntimeSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, crate::PluginError> {
-        let mut snapshot = self.current_snapshot.to_snapshot();
+        let mut snapshot = self.current.snapshot.to_snapshot();
         super::normalize_session_graph(&mut snapshot);
         self.enrich_current_snapshot(&mut snapshot);
         Ok(snapshot)
@@ -28,8 +28,8 @@ impl RuntimeSessionManager {
         &self,
         session_id: &str,
     ) -> Result<crate::DynamicStateSnapshot, crate::PluginError> {
-        if session_id == self.current_session_id {
-            if let Some(runtime) = self.registry.lock().await.get(session_id).cloned() {
+        if session_id == self.current.session_id {
+            if let Some(runtime) = self.managed.registry.lock().await.get(session_id).cloned() {
                 let runtime = runtime.lock().await;
                 return runtime
                     .dynamic_tool_state()
@@ -39,7 +39,7 @@ impl RuntimeSessionManager {
         }
 
         let runtime = {
-            let registry = self.registry.lock().await;
+            let registry = self.managed.registry.lock().await;
             registry.get(session_id).cloned()
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
@@ -54,8 +54,8 @@ impl RuntimeSessionManager {
         session_id: &str,
         snapshot: crate::DynamicStateSnapshot,
     ) -> Result<u64, crate::PluginError> {
-        if session_id == self.current_session_id {
-            if let Some(runtime) = self.registry.lock().await.get(session_id).cloned() {
+        if session_id == self.current.session_id {
+            if let Some(runtime) = self.managed.registry.lock().await.get(session_id).cloned() {
                 let mut runtime = runtime.lock().await;
                 return runtime
                     .apply_dynamic_tool_state(snapshot)
@@ -69,7 +69,7 @@ impl RuntimeSessionManager {
         }
 
         let runtime = {
-            let registry = self.registry.lock().await;
+            let registry = self.managed.registry.lock().await;
             registry.get(session_id).cloned()
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
@@ -89,8 +89,8 @@ impl RuntimeSessionManager {
             .clone()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if session_id == self.current_session_id
-            || self.registry.lock().await.contains_key(&session_id)
+        if session_id == self.current.session_id
+            || self.managed.registry.lock().await.contains_key(&session_id)
         {
             return Err(crate::PluginError::Session(format!(
                 "session `{session_id}` already exists"
@@ -101,7 +101,7 @@ impl RuntimeSessionManager {
                 session_id: session_id.clone(),
                 ..Default::default()
             },
-            SessionStartPoint::CurrentSession => self.current_snapshot.to_snapshot(),
+            SessionStartPoint::CurrentSession => self.current.snapshot.to_snapshot(),
             SessionStartPoint::ExistingSession { session_id } => {
                 self.snapshot_by_id(session_id).await?
             }
@@ -111,7 +111,7 @@ impl RuntimeSessionManager {
             .policy
             .clone()
             .unwrap_or_else(|| match &request.start {
-                SessionStartPoint::Empty => self.current_policy.clone(),
+                SessionStartPoint::Empty => self.current.policy.clone(),
                 _ => snapshot.policy.clone(),
             });
         if request.parent_session_id.is_some() {
@@ -124,7 +124,8 @@ impl RuntimeSessionManager {
         };
         let plugins = match request.plugin_mode {
             crate::SessionPluginMode::Fresh => self
-                .current_plugins
+                .current
+                .plugins
                 .host()
                 .build_session_with_parent(
                     &session_id,
@@ -136,7 +137,8 @@ impl RuntimeSessionManager {
                 )
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
             crate::SessionPluginMode::InheritCurrent => self
-                .current_plugins
+                .current
+                .plugins
                 .fork_for_child_session(
                     &session_id,
                     request.parent_session_id.clone(),
@@ -146,7 +148,7 @@ impl RuntimeSessionManager {
                 )
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
         };
-        let session_store = match &self.current_host.session_store_factory {
+        let session_store = match &self.current.host.session_store_factory {
             Some(factory) => Some(
                 factory
                     .create_store(&SessionStoreCreateRequest {
@@ -158,12 +160,12 @@ impl RuntimeSessionManager {
             ),
             None => None,
         };
-        let mut runtime = match (&self.current_host.session_task_executor, &session_store) {
+        let mut runtime = match (&self.current.host.session_task_executor, &session_store) {
             (Some(executor), Some(store)) => {
                 let host = BackgroundRuntimeHost::new(
                     EmbeddedRuntimeHost {
-                        core: self.current_host.core.clone(),
-                        session_store_factory: self.current_host.session_store_factory.clone(),
+                        core: self.current.host.core.clone(),
+                        session_store_factory: self.current.host.session_store_factory.clone(),
                     },
                     Arc::clone(executor),
                 );
@@ -178,8 +180,8 @@ impl RuntimeSessionManager {
             (Some(executor), None) => {
                 let host = BackgroundRuntimeHost::new(
                     EmbeddedRuntimeHost {
-                        core: self.current_host.core.clone(),
-                        session_store_factory: self.current_host.session_store_factory.clone(),
+                        core: self.current.host.core.clone(),
+                        session_store_factory: self.current.host.session_store_factory.clone(),
                     },
                     Arc::clone(executor),
                 );
@@ -193,8 +195,8 @@ impl RuntimeSessionManager {
             }
             (None, Some(store)) => {
                 let host = EmbeddedRuntimeHost {
-                    core: self.current_host.core.clone(),
-                    session_store_factory: self.current_host.session_store_factory.clone(),
+                    core: self.current.host.core.clone(),
+                    session_store_factory: self.current.host.session_store_factory.clone(),
                 };
                 LashRuntime::from_persistent_embedded_state(
                     policy.clone(),
@@ -206,8 +208,8 @@ impl RuntimeSessionManager {
             }
             (None, None) => {
                 let host = EmbeddedRuntimeHost {
-                    core: self.current_host.core.clone(),
-                    session_store_factory: self.current_host.session_store_factory.clone(),
+                    core: self.current.host.core.clone(),
+                    session_store_factory: self.current.host.session_store_factory.clone(),
                 };
                 LashRuntime::from_embedded_state(
                     policy.clone(),
@@ -245,20 +247,23 @@ impl RuntimeSessionManager {
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
             persisted_state.apply_persisted_commit_result(result);
         }
-        self.registry
+        self.managed
+            .registry
             .lock()
             .await
             .insert(session_id.clone(), Arc::new(Mutex::new(runtime)));
         // Stash the usage_source label so await_turn can tag the child's
         // token cost in the parent's ledger.
         if let Some(source) = &request.usage_source {
-            self.child_usage_sources
+            self.usage
+                .child_sources
                 .lock()
                 .expect("child usage sources lock")
                 .insert(session_id.clone(), source.clone());
         }
         if let Some(seed) = request.first_turn_input.clone() {
-            self.pending_first_turn_inputs
+            self.managed
+                .pending_first_turn_inputs
                 .lock()
                 .expect("pending first turn inputs lock")
                 .insert(session_id.clone(), seed);
@@ -276,21 +281,22 @@ impl RuntimeSessionManager {
         event: lash_trace::TraceEvent,
     ) -> Result<(), crate::PluginError> {
         crate::trace::emit_trace(
-            &self.current_host.core.trace_sink,
-            &self.current_host.core.trace_context,
-            context.for_session(self.current_session_id.clone()),
+            &self.current.host.core.trace_sink,
+            &self.current.host.core.trace_context,
+            context.for_session(self.current.session_id.clone()),
             event,
         );
         Ok(())
     }
 
     async fn close_session(&self, session_id: &str) -> Result<(), crate::PluginError> {
-        if session_id == self.current_session_id {
+        if session_id == self.current.session_id {
             return Err(crate::PluginError::Session(
                 "cannot close the current session".to_string(),
             ));
         }
         if self
+            .managed
             .turns
             .lock()
             .await
@@ -301,16 +307,18 @@ impl RuntimeSessionManager {
                 "cannot close session `{session_id}` while a turn is running"
             )));
         }
-        self.registry.lock().await.remove(session_id);
-        self.child_usage_sources
+        self.managed.registry.lock().await.remove(session_id);
+        self.usage
+            .child_sources
             .lock()
             .expect("child usage sources lock")
             .remove(session_id);
-        self.pending_first_turn_inputs
+        self.managed
+            .pending_first_turn_inputs
             .lock()
             .expect("pending first turn inputs lock")
             .remove(session_id);
-        self.current_plugins.host().unregister_session(session_id)?;
+        self.current.plugins.host().unregister_session(session_id)?;
         Ok(())
     }
 
@@ -320,6 +328,7 @@ impl RuntimeSessionManager {
         input: TurnInput,
     ) -> Result<crate::plugin::SessionTurnHandle, crate::PluginError> {
         if self
+            .managed
             .turns
             .lock()
             .await
@@ -331,7 +340,7 @@ impl RuntimeSessionManager {
             )));
         }
         let runtime = {
-            let registry = self.registry.lock().await;
+            let registry = self.managed.registry.lock().await;
             registry.get(session_id).cloned()
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
@@ -343,7 +352,8 @@ impl RuntimeSessionManager {
         let cancel = CancellationToken::new();
         let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(100);
         let usage_source = self
-            .child_usage_sources
+            .usage
+            .child_sources
             .lock()
             .expect("child usage sources lock")
             .get(session_id)
@@ -358,9 +368,9 @@ impl RuntimeSessionManager {
                 session_id: session_id.to_string(),
                 source: usage_source,
                 model: policy.model.clone(),
-                token_ledger: Arc::clone(&self.token_ledger),
-                child_turn_live_usage: Arc::clone(&self.child_turn_live_usage),
-                relay: self.child_usage_event_relay.clone(),
+                token_ledger: Arc::clone(&self.usage.token_ledger),
+                child_turn_live_usage: Arc::clone(&self.usage.child_turn_live_usage),
+                relay: self.usage.child_usage_event_relay.clone(),
             }),
         };
         let task = tokio::spawn(async move {
@@ -374,7 +384,7 @@ impl RuntimeSessionManager {
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))
         });
-        self.turns.lock().await.insert(
+        self.managed.turns.lock().await.insert(
             turn_id.clone(),
             ManagedSessionTurn {
                 session_id: session_id.to_string(),
@@ -392,6 +402,7 @@ impl RuntimeSessionManager {
 
     async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, crate::PluginError> {
         let managed = self
+            .managed
             .turns
             .lock()
             .await
@@ -403,6 +414,7 @@ impl RuntimeSessionManager {
             .await
             .map_err(|err| crate::PluginError::Session(format!("turn task failed: {err}")))?;
         let live_reported = self
+            .usage
             .child_turn_live_usage
             .lock()
             .expect("child turn live usage lock")
@@ -410,7 +422,8 @@ impl RuntimeSessionManager {
             .unwrap_or_default();
         if let Ok(turn) = &turn {
             let source = self
-                .child_usage_sources
+                .usage
+                .child_sources
                 .lock()
                 .expect("child usage sources lock")
                 .get(&session_id)
@@ -425,7 +438,7 @@ impl RuntimeSessionManager {
     }
 
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), crate::PluginError> {
-        let turns = self.turns.lock().await;
+        let turns = self.managed.turns.lock().await;
         let managed = turns
             .get(turn_id)
             .ok_or_else(|| crate::PluginError::Session(format!("unknown turn `{turn_id}`")))?;
@@ -439,21 +452,21 @@ impl RuntimeSessionManager {
         label: &str,
         task: crate::plugin::PluginSessionTask,
     ) -> Result<(), crate::PluginError> {
-        if session_id != self.current_session_id {
-            let known = self.registry.lock().await.contains_key(session_id);
+        if session_id != self.current.session_id {
+            let known = self.managed.registry.lock().await.contains_key(session_id);
             if !known {
                 return Err(crate::PluginError::Session(format!(
                     "unknown session `{session_id}`"
                 )));
             }
         }
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return Err(crate::PluginError::Session(
                 "session tasks are unavailable in this runtime".to_string(),
             ));
         };
-        if session_id == self.current_session_id {
-            self.background_sync_needed.store(true, Ordering::Release);
+        if session_id == self.current.session_id {
+            self.background.sync_needed.store(true, Ordering::Release);
         }
         executor
             .spawn_hidden(&self.background_scope_key(session_id), label, task)
@@ -461,7 +474,7 @@ impl RuntimeSessionManager {
     }
 
     async fn await_hidden_tasks(&self, session_id: &str) -> Result<(), crate::PluginError> {
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return Ok(());
         };
         executor
@@ -475,21 +488,21 @@ impl RuntimeSessionManager {
         spec: crate::ManagedTaskSpec,
         task: crate::plugin::PluginSessionTask,
     ) -> Result<(), crate::PluginError> {
-        if session_id != self.current_session_id {
-            let known = self.registry.lock().await.contains_key(session_id);
+        if session_id != self.current.session_id {
+            let known = self.managed.registry.lock().await.contains_key(session_id);
             if !known {
                 return Err(crate::PluginError::Session(format!(
                     "unknown session `{session_id}`"
                 )));
             }
         }
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return Err(crate::PluginError::Session(
                 "managed session tasks are unavailable in this runtime".to_string(),
             ));
         };
-        if session_id == self.current_session_id {
-            self.background_sync_needed.store(true, Ordering::Release);
+        if session_id == self.current.session_id {
+            self.background.sync_needed.store(true, Ordering::Release);
         }
         executor
             .spawn_managed(&self.background_scope_key(session_id), spec, task)
@@ -501,7 +514,7 @@ impl RuntimeSessionManager {
         session_id: &str,
         task_id: &str,
     ) -> Result<(), crate::PluginError> {
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return Ok(());
         };
         executor
@@ -515,7 +528,7 @@ impl RuntimeSessionManager {
         spec: crate::ManagedTaskSpec,
         cancel: Option<crate::ManagedTaskCancel>,
     ) -> Result<(), crate::PluginError> {
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return Err(crate::PluginError::Session(
                 "background task registry is unavailable in this runtime".to_string(),
             ));
@@ -526,7 +539,7 @@ impl RuntimeSessionManager {
     }
 
     async fn unregister_background_task(&self, session_id: &str, task_id: &str) {
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return;
         };
         executor
@@ -540,7 +553,7 @@ impl RuntimeSessionManager {
         task_id: &str,
         run_state: crate::ManagedRunState,
     ) {
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return;
         };
         executor
@@ -554,7 +567,7 @@ impl RuntimeSessionManager {
         task_id: &str,
         run_state: crate::ManagedRunState,
     ) {
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return;
         };
         executor
@@ -567,6 +580,7 @@ impl RuntimeSessionManager {
         session_id: &str,
     ) -> Result<Option<crate::PluginMessage>, crate::PluginError> {
         Ok(self
+            .managed
             .pending_first_turn_inputs
             .lock()
             .expect("pending first turn inputs lock")
@@ -579,7 +593,7 @@ impl RuntimeSessionManager {
         message: crate::PluginMessage,
     ) -> Result<(), crate::PluginError> {
         let runtime_arc = {
-            let registry = self.registry.lock().await;
+            let registry = self.managed.registry.lock().await;
             registry.get(session_id).cloned()
         };
         let Some(runtime_arc) = runtime_arc else {
@@ -603,7 +617,7 @@ impl RuntimeSessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return Err(crate::PluginError::Session(
                 "background task registry is unavailable in this runtime".to_string(),
             ));
@@ -618,7 +632,7 @@ impl RuntimeSessionManager {
         session_id: &str,
         task_id: &str,
     ) -> Result<crate::ManagedTaskStatus, crate::PluginError> {
-        let Some(executor) = &self.current_host.session_task_executor else {
+        let Some(executor) = &self.current.host.session_task_executor else {
             return Err(crate::PluginError::Session(
                 "background task registry is unavailable in this runtime".to_string(),
             ));
@@ -738,7 +752,7 @@ impl RuntimeSessionManager {
         &self,
         request: crate::PromptRequest,
     ) -> Result<crate::PromptResponse, crate::PluginError> {
-        let Some(prompt_bridge) = &self.current_prompt_bridge else {
+        let Some(prompt_bridge) = &self.current.prompt_bridge else {
             return Err(crate::PluginError::Session(
                 "user prompts are unavailable in this session".to_string(),
             ));
@@ -752,7 +766,7 @@ impl RuntimeSessionManager {
         request: crate::AppendSessionNodesRequest,
     ) -> Result<crate::AppendSessionNodesResult, crate::PluginError> {
         if let Some(runtime) = {
-            let registry = self.registry.lock().await;
+            let registry = self.managed.registry.lock().await;
             registry.get(session_id).cloned()
         } {
             let mut runtime = runtime.lock().await;
@@ -762,26 +776,26 @@ impl RuntimeSessionManager {
                 .map_err(|err| crate::PluginError::Session(err.to_string()));
         }
 
-        if session_id != self.current_session_id {
+        if session_id != self.current.session_id {
             return Err(crate::PluginError::Session(format!(
                 "unknown session `{session_id}`"
             )));
         }
 
-        let Some(store) = &self.current_store else {
+        let Some(store) = &self.current.store else {
             return Err(crate::PluginError::Session(
                 "session graph mutation requires a runtime store".to_string(),
             ));
         };
 
-        let mut state = if self.persist_usage_to_store {
+        let mut state = if self.usage.persist_to_store {
             self.current_snapshot_for_store_write().await
         } else {
-            let mut state = self.current_snapshot.to_snapshot();
+            let mut state = self.current.snapshot.to_snapshot();
             super::normalize_session_graph(&mut state);
             state
         };
-        let usage_deltas = if self.persist_usage_to_store {
+        let usage_deltas = if self.usage.persist_to_store {
             self.merge_drained_token_ledger(&mut state)
         } else {
             Vec::new()
@@ -800,7 +814,7 @@ impl RuntimeSessionManager {
             .await
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         state.apply_persisted_commit_result(result);
-        self.background_sync_needed.store(true, Ordering::Release);
+        self.background.sync_needed.store(true, Ordering::Release);
         Ok(crate::AppendSessionNodesResult::Appended {
             node_ids,
             leaf_node_id,
@@ -812,7 +826,7 @@ impl RuntimeSessionManager {
         mut request: crate::DirectRequest,
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
-        let mut provider = self.current_policy.provider.clone();
+        let mut provider = self.current.policy.provider.clone();
         let model = if let Some(selection) = provider.default_agent_model(&request.model) {
             if request.model_variant.is_none() {
                 request.model_variant = selection.variant;
@@ -831,13 +845,13 @@ impl RuntimeSessionManager {
             .await
             .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
         let llm_request = crate::direct::build_llm_request(&provider, request, model.clone());
-        let llm_call_id = if self.current_host.core.trace_sink.is_some() {
+        let llm_call_id = if self.current.host.core.trace_sink.is_some() {
             let id = uuid::Uuid::new_v4().to_string();
             crate::trace::emit_trace(
-                &self.current_host.core.trace_sink,
-                &self.current_host.core.trace_context,
+                &self.current.host.core.trace_sink,
+                &self.current.host.core.trace_context,
                 lash_trace::TraceContext::default()
-                    .for_session(self.current_session_id.clone())
+                    .for_session(self.current.session_id.clone())
                     .for_llm_call(id.clone()),
                 lash_trace::TraceEvent::LlmCallStarted {
                     request: crate::trace::trace_llm_request(&llm_request),
@@ -852,10 +866,10 @@ impl RuntimeSessionManager {
             Err(err) => {
                 if let Some(llm_call_id) = llm_call_id {
                     crate::trace::emit_trace(
-                        &self.current_host.core.trace_sink,
-                        &self.current_host.core.trace_context,
+                        &self.current.host.core.trace_sink,
+                        &self.current.host.core.trace_context,
                         lash_trace::TraceContext::default()
-                            .for_session(self.current_session_id.clone())
+                            .for_session(self.current.session_id.clone())
                             .for_llm_call(llm_call_id),
                         lash_trace::TraceEvent::LlmCallFailed {
                             error: lash_trace::TraceError {
@@ -873,10 +887,10 @@ impl RuntimeSessionManager {
         };
         if let Some(llm_call_id) = llm_call_id {
             crate::trace::emit_trace(
-                &self.current_host.core.trace_sink,
-                &self.current_host.core.trace_context,
+                &self.current.host.core.trace_sink,
+                &self.current.host.core.trace_context,
                 lash_trace::TraceContext::default()
-                    .for_session(self.current_session_id.clone())
+                    .for_session(self.current.session_id.clone())
                     .for_llm_call(llm_call_id),
                 lash_trace::TraceEvent::LlmCallCompleted {
                     response: crate::trace::trace_llm_response(
