@@ -573,6 +573,8 @@ async fn summarize_compaction_prefix(
             plugin_mode: SessionPluginMode::Fresh,
             initial_nodes: Vec::new(),
             first_turn_input: None,
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: None,
             context_surface: SessionContextSurface {
                 include_base_tools: false,
                 tool_providers: Vec::new(),

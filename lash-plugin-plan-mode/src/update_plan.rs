@@ -413,12 +413,16 @@ mod tests {
             session_id: "root".into(),
             execution_mode: lash::ExecutionMode::standard(),
             standard_context_approach: Some(lash::StandardContextApproach::default()),
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: None,
             parent_session_id: None,
         };
         let child_ctx = PluginSessionContext {
             session_id: "child".into(),
             execution_mode: lash::ExecutionMode::standard(),
             standard_context_approach: Some(lash::StandardContextApproach::default()),
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: None,
             parent_session_id: Some("root".into()),
         };
         assert!(root_ctx.is_root_session());
@@ -466,6 +470,7 @@ mod tests {
                 ExecutionMode::standard(),
                 Some(lash::StandardContextApproach::default()),
                 None,
+                lash::plugin::SessionAuthorityContext::default(),
             )
             .expect("session");
 

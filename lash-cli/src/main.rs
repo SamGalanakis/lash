@@ -41,7 +41,7 @@ mod ui_trace;
 mod update;
 mod util;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 #[cfg(feature = "dhat-heap")]
 use dhat::Alloc as DhatAlloc;
 use lash::*;
@@ -71,6 +71,22 @@ const LONG_VERSION: &str = concat!(
     "lash-sansio ",
     env!("CARGO_PKG_VERSION")
 );
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum CliTraceLevel {
+    #[default]
+    Standard,
+    Extended,
+}
+
+impl From<CliTraceLevel> for TraceLevel {
+    fn from(value: CliTraceLevel) -> Self {
+        match value {
+            CliTraceLevel::Standard => TraceLevel::Standard,
+            CliTraceLevel::Extended => TraceLevel::Extended,
+        }
+    }
+}
 
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
@@ -243,9 +259,9 @@ struct Args {
     #[arg(long)]
     debug: bool,
 
-    /// Include raw per-token LLM stream events in debug traces
-    #[arg(long = "debug-trace-stream-events", hide = true)]
-    debug_trace_stream_events: bool,
+    /// Trace capture detail for per-session LLM traces
+    #[arg(long = "trace-level", value_enum, default_value_t = CliTraceLevel::Standard)]
+    trace_level: CliTraceLevel,
 
     /// Record the live TUI session as a replayable UI trace JSON plus final .snap
     #[arg(long, value_name = "TRACE.json")]

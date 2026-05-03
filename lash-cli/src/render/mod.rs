@@ -96,6 +96,10 @@ pub fn plan_dock_trailing_height(app: &App) -> usize {
     }
 }
 
+pub fn background_task_trailing_height(app: &App) -> usize {
+    usize::from(!app.background_tasks.is_empty()) + app.background_tasks.len()
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ChromeLayout {
     history_height: u16,
@@ -207,9 +211,10 @@ pub fn plan_dock_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // ── gutter: one blank row above the plan so it reads as its own
-    //    block rather than glomming onto the previous activity.
-    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "  Plan",
+        theme::text_faint_style().add_modifier(Modifier::Dim),
+    )]));
 
     // ── items
     for item in &plan.items {
@@ -246,6 +251,56 @@ pub fn plan_dock_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line
             Span::styled("  ", Style::default()),
             Span::styled(glyph, glyph_style),
             Span::styled(item.text.clone(), text_style),
+        ]));
+    }
+
+    Some(lines)
+}
+
+pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'static>>> {
+    if app.background_tasks.is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "  Background",
+        theme::text_faint_style().add_modifier(Modifier::Dim),
+    )]));
+    for task in &app.background_tasks {
+        let state = match task.run_state {
+            lash::ManagedRunState::Running => "running",
+            lash::ManagedRunState::Idle => "idle",
+            lash::ManagedRunState::Completed => "completed",
+            lash::ManagedRunState::Failed => "failed",
+            lash::ManagedRunState::Cancelled => "cancelled",
+        };
+        let kind = task.kind.as_str();
+        let elapsed = task
+            .started_at
+            .elapsed()
+            .ok()
+            .and_then(|elapsed| {
+                crate::util::format_duration_ms_if_visible(elapsed.as_millis() as u64)
+            })
+            .unwrap_or_else(|| "0:00".to_string());
+        let state_style = match task.run_state {
+            lash::ManagedRunState::Running => theme::turn_status_state(),
+            lash::ManagedRunState::Idle => theme::text_subtle_style(),
+            lash::ManagedRunState::Completed => theme::tool_success(),
+            lash::ManagedRunState::Failed | lash::ManagedRunState::Cancelled => {
+                theme::tool_failure()
+            }
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ◆ ", theme::text_faint_style()),
+            Span::styled(state.to_string(), state_style),
+            Span::styled(" · ", theme::text_faint_style()),
+            Span::styled(kind.to_string(), theme::text_subtle_style()),
+            Span::styled(" · ", theme::text_faint_style()),
+            Span::styled(task.label.clone(), Style::default().fg(theme::text_muted())),
+            Span::styled(" · ", theme::text_faint_style()),
+            Span::styled(elapsed, theme::text_faint_style()),
         ]));
     }
 

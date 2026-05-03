@@ -25,7 +25,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
+use crate::llm::types::{
+    LlmOutputPart, LlmProviderTraceEvent, LlmProviderTraceSender, LlmRequest, LlmResponse,
+    LlmStreamEvent, LlmUsage,
+};
 use crate::plugin::{
     CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
 };

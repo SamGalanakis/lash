@@ -127,8 +127,8 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_trace_stream_events(mut self, enabled: bool) -> Self {
-        self.core = self.core.with_trace_stream_events(enabled);
+    pub fn with_trace_level(mut self, level: lash_trace::TraceLevel) -> Self {
+        self.core = self.core.with_trace_level(level);
         self
     }
 

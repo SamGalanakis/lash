@@ -1295,9 +1295,35 @@ fn search_tools_definition() -> ToolDefinition {
         Many(Vec<String>),
     }
 
-    ToolDefinition::native::<SearchToolsArgs>(
+    ToolDefinition::new(
         "search_tools",
         "Search catalogued tool names, namespaces, aliases, descriptions, signatures, return fields, and examples. Use this when the tool you need is not showcased in the prompt. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints. For initial exploration, print only result names and signatures; inspect descriptions and examples only when you need to choose between close matches or learn call idioms.",
+        serde_json::to_value(schemars::schema_for!(SearchToolsArgs))
+            .unwrap_or_else(|_| json!({})),
+        json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "signature": {
+                        "type": "string",
+                        "description": "Callable signature plus compact parameter details."
+                    },
+                    "returns": {
+                        "type": "string",
+                        "description": "Compact return signature plus return-field details."
+                    },
+                    "description": { "type": "string" },
+                    "examples": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["name", "signature", "returns"],
+                "additionalProperties": false
+            }
+        }),
     )
         .with_examples(vec![
             "search_tools(query=\"spotify liked songs library\", namespace=\"appworld\")".into(),
@@ -1324,9 +1350,7 @@ fn load_tools_definition() -> ToolDefinition {
         "load_tools",
         "Promote loadable tools into the documented surface. Callable omitted tools do not need loading and can be called directly.",
     )
-        .with_examples(vec![
-            "load_tools(names=[\"search_web\", \"fetch_url\"])".into()
-        ])
+        .with_examples(vec!["load_tools(names=[\"tool_name\"])".into()])
         .with_availability(ToolAvailabilityConfig::documented())
         .with_activation(ToolActivation::Always)
         .with_discovery(lash::ToolDiscoveryMetadata {
@@ -2693,6 +2717,34 @@ mod tests {
     }
 
     #[test]
+    fn search_tools_has_typed_result_schema() {
+        let definition = search_tools_definition();
+
+        assert_eq!(definition.output_schema["type"], json!("array"));
+        let item = &definition.output_schema["items"];
+        assert_eq!(item["type"], json!("object"));
+        assert_eq!(item["required"], json!(["name", "signature", "returns"]));
+        let properties = item["properties"].as_object().expect("properties");
+        assert!(properties.contains_key("description"));
+        assert!(properties.contains_key("examples"));
+
+        let rendered_returns = definition.compact_contract().render_returns();
+        assert!(
+            rendered_returns.starts_with("list[record{"),
+            "{rendered_returns}"
+        );
+        assert!(rendered_returns.contains("name: str"), "{rendered_returns}");
+        assert!(
+            rendered_returns.contains("signature: str"),
+            "{rendered_returns}"
+        );
+        assert!(
+            rendered_returns.contains("returns: str"),
+            "{rendered_returns}"
+        );
+    }
+
+    #[test]
     fn rlm_surface_hides_load_tools_and_promotes_discoverable_tools() {
         let tools = vec![
             search_tools_definition(),
@@ -2712,6 +2764,8 @@ mod tests {
             session_id: "session".to_string(),
             mode: mode.clone(),
             tools: tools.clone(),
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: None,
         })
         .unwrap();
         let surface = build_tool_surface(ToolSurfaceBuildInput {

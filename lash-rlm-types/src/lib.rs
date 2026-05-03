@@ -56,6 +56,14 @@ pub fn apply_globals_patch(
 pub enum RlmModeEvent {
     RlmTrajectoryEntry(RlmTrajectoryEntry),
     RlmGlobalsPatch(RlmGlobalsPatchPluginBody),
+    RlmDiagnostic(RlmDiagnosticEvent),
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct RlmDiagnosticEvent {
+    pub phase: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -81,6 +89,7 @@ impl RlmProjection {
             RlmModeEvent::RlmGlobalsPatch(patch) => {
                 apply_globals_patch(&mut self.globals, &patch);
             }
+            RlmModeEvent::RlmDiagnostic(_) => {}
         }
     }
 }

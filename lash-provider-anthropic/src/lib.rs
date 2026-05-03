@@ -10,8 +10,8 @@ use lash::llm::timeouts::{
 };
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
-    LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse,
-    LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
+    LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
+    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
 };
 use lash::provider::{
     AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
@@ -20,6 +20,31 @@ use lash::provider::{
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const FINE_GRAINED_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
+
+fn emit_provider_trace(
+    tx: Option<&lash::llm::types::LlmProviderTraceSender>,
+    provider: &'static str,
+    raw: &str,
+) {
+    let Some(tx) = tx else {
+        return;
+    };
+    let event_name = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .or_else(|| value.get("event"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "provider_event".to_string());
+    tx.send(LlmProviderTraceEvent {
+        provider,
+        event_name,
+        raw: raw.to_string(),
+    });
+}
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 
 const CLAUDE_ADAPTIVE_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
@@ -913,6 +938,7 @@ impl Provider for AnthropicProvider {
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
+        let provider_trace = req.provider_trace.clone();
         let timeouts = self.options.llm_timeouts();
         let base_url = self
             .base_url
@@ -982,7 +1008,10 @@ impl Provider for AnthropicProvider {
             resp,
             timeouts.chunk_timeout,
             "Anthropic stream chunk timed out",
-            |raw| Self::process_sse_event(raw, &mut state, stream_events.as_ref()),
+            |raw| {
+                emit_provider_trace(provider_trace.as_ref(), "anthropic", raw);
+                Self::process_sse_event(raw, &mut state, stream_events.as_ref())
+            },
         )
         .await?;
 

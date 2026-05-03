@@ -22,7 +22,9 @@ pub(crate) fn emit_trace(
     };
     let mut merged = base_context.clone();
     merge_context(&mut merged, context);
-    sink.append(&TraceRecord::new(merged, event));
+    if let Err(err) = sink.append(&TraceRecord::new(merged, event)) {
+        tracing::warn!(error = %err, "failed to append trace record");
+    }
 }
 
 fn merge_context(base: &mut TraceContext, overlay: TraceContext) {

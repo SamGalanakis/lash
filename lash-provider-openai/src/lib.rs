@@ -12,8 +12,9 @@ use lash::llm::timeouts::{
 };
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
+    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta,
+    ResponseTextPhase,
 };
 use lash::provider::{
     AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
@@ -23,6 +24,31 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 const OPENROUTER_REASONING_VARIANTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh"];
+
+fn emit_provider_trace(
+    tx: Option<&lash::llm::types::LlmProviderTraceSender>,
+    provider: &'static str,
+    raw: &str,
+) {
+    let Some(tx) = tx else {
+        return;
+    };
+    let event_name = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .or_else(|| value.get("event"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "provider_event".to_string());
+    tx.send(LlmProviderTraceEvent {
+        provider,
+        event_name,
+        raw: raw.to_string(),
+    });
+}
 
 static DEFAULT_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
 
@@ -1113,6 +1139,7 @@ impl Provider for OpenAiGenericProvider {
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
+        let provider_trace = req.provider_trace.clone();
         let timeouts = self.options.llm_timeouts();
         let body = self.build_request_body(&req, stream_events.is_some());
         let body_bytes = serde_json::to_vec(&body).map_err(|e| {
@@ -1184,6 +1211,7 @@ impl Provider for OpenAiGenericProvider {
                 "OpenAI-compatible response body timed out",
             )
             .await?;
+            emit_provider_trace(provider_trace.as_ref(), "openai_compatible", &text);
             let mut state = ResponsesStreamState::default();
             if text.trim_start().starts_with("data:") || text.contains("\ndata:") {
                 Self::parse_sse_payload(&text, &mut state)?;
@@ -1238,6 +1266,7 @@ impl Provider for OpenAiGenericProvider {
             timeouts.chunk_timeout,
             "OpenAI-compatible stream chunk timed out",
             |raw| {
+                emit_provider_trace(provider_trace.as_ref(), "openai_compatible", raw);
                 let prev_len = state.deltas.len();
                 let prev_usage = state.usage.clone();
                 Self::process_sse_event(raw, &mut state, Some(&mut emitted_parts))?;
@@ -1368,6 +1397,7 @@ mod tests {
             session_id: Some("session-1".to_string()),
             output_spec: None,
             stream_events: None,
+            provider_trace: None,
         }
     }
 

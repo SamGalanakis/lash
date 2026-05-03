@@ -25,6 +25,7 @@ impl App {
         self.model_variant = None;
         self.clear_mode_indicators();
         self.plan_dock = None;
+        self.background_tasks.clear();
         self.invalidate_height_cache();
     }
 
@@ -415,5 +416,6 @@ impl App {
             + self.live_reasoning_height()
             + self.live_assistant_height()
             + crate::render::plan_dock_trailing_height(self)
+            + crate::render::background_task_trailing_height(self)
     }
 }

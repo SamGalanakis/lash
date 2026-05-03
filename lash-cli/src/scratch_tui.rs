@@ -428,10 +428,13 @@ fn build_status_slots(app: &App) -> (Vec<StatusSlot>, Vec<StatusSlot>) {
 }
 
 fn status_bar_context_spans(app: &App) -> Option<StatusSlot> {
+    // Don't add `live_output_tokens_estimate` to either branch's total: on the
+    // very first turn, before `last_response_usage` lands, that's the only
+    // nonzero number — and using it as the displayed total reads as if the
+    // streamed output bytes were the entire context, producing nonsense like
+    // `36 · 0%` against a 1.1M-token window. Wait for real input accounting.
     let Some(context_window) = app.context_window else {
-        let total = app.token_usage.input_tokens
-            + app.token_usage.output_tokens
-            + app.live_output_tokens_estimate;
+        let total = app.token_usage.input_tokens + app.token_usage.output_tokens;
         if total <= 0 {
             return None;
         }
@@ -451,12 +454,10 @@ fn status_bar_context_spans(app: &App) -> Option<StatusSlot> {
                 .map(|usage| usage.context_budget_tokens as i64)
                 .filter(|used| *used > 0)
         })
-        .unwrap_or_else(|| {
-            (app.token_usage.input_tokens
-                + app.token_usage.output_tokens
-                + app.live_output_tokens_estimate)
-                .max(0)
-        });
+        .or_else(|| {
+            let total = app.token_usage.input_tokens + app.token_usage.output_tokens;
+            (total > 0).then_some(total)
+        })?;
 
     let pct = if context_window == 0 {
         0.0
@@ -566,6 +567,19 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
             written_rows += 1;
         }
+        skip_lines = skip_lines.saturating_sub(plan_lines.len());
+    }
+
+    if written_rows < viewport_height
+        && let Some(task_lines) = render::background_task_lines_snapshot(app, area.width)
+    {
+        for line in task_lines.iter().skip(skip_lines) {
+            if written_rows >= viewport_height {
+                break;
+            }
+            frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
+            written_rows += 1;
+        }
     }
 
     if let Some((x, y, height)) = render::history_scroll_indicator(app, area) {
@@ -637,14 +651,24 @@ pub(crate) fn sync_chrome_turn_status(app: &App) {
     let snapshot = if app.has_prompt() {
         None
     } else {
-        app.live_turn.as_ref().map(|turn| TurnStatusSnapshot {
-            label: match turn.status_text.as_str() {
-                "error" => TurnStatusLabel::Error,
-                "thinking" => TurnStatusLabel::Thinking,
-                "responding" => TurnStatusLabel::Responding,
-                _ => TurnStatusLabel::Working,
+        let background = background_task_summary(app);
+        Some(match app.live_turn.as_ref() {
+            Some(turn) => TurnStatusSnapshot {
+                label: match turn.status_text.as_str() {
+                    "error" => TurnStatusLabel::Error,
+                    "thinking" => TurnStatusLabel::Thinking,
+                    "responding" => TurnStatusLabel::Responding,
+                    status if status.contains("wait") => TurnStatusLabel::Waiting,
+                    _ => TurnStatusLabel::RunningTool,
+                },
+                turn_started_at: Some(turn.turn_started_at),
+                detail: combine_status_detail(turn.status_detail.as_deref(), background),
             },
-            turn_started_at: turn.turn_started_at,
+            None => TurnStatusSnapshot {
+                label: TurnStatusLabel::Idle,
+                turn_started_at: None,
+                detail: background,
+            },
         })
     };
 
@@ -659,16 +683,55 @@ pub(crate) fn sync_chrome_turn_status(app: &App) {
     }
 }
 
+fn combine_status_detail(primary: Option<&str>, background: Option<String>) -> Option<String> {
+    match (primary.filter(|value| !value.is_empty()), background) {
+        (Some(primary), Some(background)) => Some(format!("{primary} · {background}")),
+        (Some(primary), None) => Some(primary.to_string()),
+        (None, Some(background)) => Some(background),
+        (None, None) => None,
+    }
+}
+
+fn background_task_summary(app: &App) -> Option<String> {
+    let running = app
+        .background_tasks
+        .iter()
+        .filter(|task| task.run_state == lash::ManagedRunState::Running)
+        .count();
+    let idle = app
+        .background_tasks
+        .iter()
+        .filter(|task| task.run_state == lash::ManagedRunState::Idle)
+        .count();
+    match (running, idle) {
+        (0, 0) => None,
+        (running, 0) => Some(format!(
+            "{} background task{} running",
+            running,
+            if running == 1 { "" } else { "s" }
+        )),
+        (0, idle) => Some(format!(
+            "{} background task{} idle",
+            idle,
+            if idle == 1 { "" } else { "s" }
+        )),
+        (running, idle) => Some(format!("{running} running · {idle} idle")),
+    }
+}
+
 fn current_context_budget_tokens(app: &App) -> Option<i64> {
     if !app.running {
         return None;
     }
     let input = app.last_response_usage.input_tokens.max(0);
     let cached = app.last_response_usage.cached_input_tokens.max(0);
-    let output = (app.last_response_usage.output_tokens + app.live_output_tokens_estimate).max(0);
-    if input == 0 && cached == 0 && output == 0 {
+    // Suppress until input accounting from a completed response has landed.
+    // Showing only the streaming output token estimate against the full
+    // context window otherwise reads as `36 · 0%` on the first turn.
+    if input == 0 && cached == 0 {
         return None;
     }
+    let output = (app.last_response_usage.output_tokens + app.live_output_tokens_estimate).max(0);
     Some(if app.context_usage_excludes_cached_input {
         input + output + cached
     } else {
@@ -1275,6 +1338,31 @@ mod tests {
         // middle dot. The old representation was `7.0k / 1.1M (0.6%)`,
         // which gave three renderings of the same number.
         assert!(top.contains("7.0k · 1%"));
+    }
+
+    #[test]
+    fn status_bar_hides_meter_during_first_turn_before_input_accounting_lands() {
+        // Regression: while the very first response is streaming, only
+        // `live_output_tokens_estimate` is nonzero; using it as the displayed
+        // total reads as if those streamed bytes were the entire context, so
+        // the bar shows e.g. `36 · 0%` against a 1.1M-token window. The
+        // meter should stay hidden until real input accounting lands.
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+        app.context_window = Some(1_100_000);
+        app.running = true;
+        app.live_output_tokens_estimate = 36;
+        // No `last_prompt_usage`, no `last_response_usage` — first turn.
+
+        let snapshot = lash_tui::render_snapshot(80, 4, |frame| draw(frame, &mut app));
+        let top = snapshot.visible_line_trimmed(0);
+        // The `·` separators between identity fields (`lash · gpt-5.4`)
+        // are fine; what we don't want is a raw token count or a percent
+        // sourced from the streaming output estimate.
+        assert!(!top.contains('%'), "unexpected percent on top line: {top}");
+        assert!(
+            !top.contains("36"),
+            "unexpected token count on top line: {top}"
+        );
     }
 
     #[test]

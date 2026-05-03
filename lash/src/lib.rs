@@ -107,8 +107,9 @@ pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostModeProtocol>;
 pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
     JsonlTraceSink, TraceAttachment, TraceContentBlock, TraceContext, TraceError, TraceEvent,
-    TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent, TraceRecord,
-    TraceSink, TraceTokenUsage, TraceToolSpec,
+    TraceLevel, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent,
+    TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent, TraceSink, TraceSinkError,
+    TraceTokenUsage, TraceToolSpec,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
@@ -133,13 +134,14 @@ pub use plugin::{
     PromptRequestHookContext, RewriteContext, RewriteTrigger, RuntimeServices, SessionAppendNode,
     SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
     SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
-    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionTurnHandle,
-    SnapshotReader, SnapshotWriter, StandardCreateExtras, ToolDiscoveryContext,
-    ToolDiscoveryContribution, ToolDiscoveryContributor, ToolDiscoveryToolContribution,
-    ToolResultProjectionContext, ToolResultProjectionHook, ToolResultProjectionMode,
-    ToolResultProjectionPluginConfig, ToolResultProjector, ToolSurfaceContribution,
-    TurnContextTransform, TurnHookContext, TurnResultHookContext, TurnResultSummary,
-    TurnTransformContext, plugin_surface_event_renders_visible_output,
+    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionToolAccess,
+    SessionTurnHandle, SnapshotReader, SnapshotWriter, StandardCreateExtras,
+    SubagentSessionAuthority, ToolDiscoveryContext, ToolDiscoveryContribution,
+    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
+    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
+    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary, TurnTransformContext,
+    plugin_surface_event_renders_visible_output,
 };
 pub use provider::{
     AgentModelSelection, LashConfig, Provider, ProviderFactory, ProviderHandle, ProviderOptions,

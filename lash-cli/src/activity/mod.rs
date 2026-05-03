@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lash_subagents::SubagentHost;
 use serde_json::Value;
 
 mod projector;
@@ -36,6 +37,8 @@ pub enum ActivityKind {
 pub enum ActivityStatus {
     Completed,
     Failed,
+    Running,
+    Partial,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -231,6 +234,11 @@ pub struct ActivityState {
     /// falling through to the legacy match (during the refactor) or the
     /// generic projector (once the refactor is complete).
     registry: HashMap<&'static str, Arc<dyn ToolProjector>>,
+    /// Live subagent host, plumbed through to projectors via `ProjectCtx`
+    /// so they can fetch display-only metadata (capability, model, run
+    /// state, per-completion stats) by agent name. `None` in test
+    /// contexts that don't exercise subagent rendering.
+    subagent_host: Option<Arc<dyn SubagentHost>>,
 }
 
 impl Default for ActivityState {
@@ -256,9 +264,17 @@ impl ActivityState {
         let mut state = Self {
             shell_handles: HashMap::new(),
             registry: HashMap::new(),
+            subagent_host: None,
         };
         projectors::register_builtins(&mut state);
         state
+    }
+
+    /// Provide a live subagent host so subagent projectors can fetch
+    /// display metadata (capability, model, run state) by agent name.
+    /// Production code calls this once during App setup.
+    pub fn set_subagent_host(&mut self, host: Arc<dyn SubagentHost>) {
+        self.subagent_host = Some(host);
     }
 
     /// Register a projector under every name it claims. Intended for
@@ -300,6 +316,7 @@ impl ActivityState {
             success,
             duration_ms,
             shell_handles: &mut self.shell_handles,
+            subagent_host: self.subagent_host.as_ref(),
         };
         if let Some(projector) = self.registry.get(name).cloned() {
             return projector.project(&mut ctx);
@@ -407,9 +424,119 @@ fn batch_result_entries(result: &Value) -> Option<&Vec<Value>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use lash_subagents::{
+        AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, FollowupTaskRequest,
+        FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse, SendMessageRequest,
+        SendMessageResponse, SpawnAgentRequest, SpawnAgentResponse, SubagentHost, WaitAgentRequest,
+        WaitAgentResponse,
+    };
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// In-memory `SubagentHost` for projector tests. Pre-populate with
+    /// `insert(session_id, agent_name, AgentMetadata { … })` to feed the activity
+    /// projector's profile/model/run_state lookups.
+    #[derive(Default)]
+    pub(crate) struct MockSubagentHost {
+        metadata: Mutex<HashMap<String, AgentMetadata>>,
+    }
+
+    impl MockSubagentHost {
+        pub(crate) fn insert(
+            &self,
+            session_id: impl Into<String>,
+            agent_name: impl Into<String>,
+            meta: AgentMetadata,
+        ) {
+            self.metadata
+                .lock()
+                .expect("metadata lock")
+                .insert(format!("{}:{}", session_id.into(), agent_name.into()), meta);
+        }
+    }
+
+    #[async_trait]
+    impl SubagentHost for MockSubagentHost {
+        fn agent_metadata(&self, session_id: &str, agent_name: &str) -> Option<AgentMetadata> {
+            self.metadata
+                .lock()
+                .expect("metadata lock")
+                .get(&format!("{session_id}:{agent_name}"))
+                .cloned()
+        }
+
+        async fn spawn_agent(
+            &self,
+            _context: &lash::ToolExecutionContext,
+            _request: SpawnAgentRequest,
+        ) -> Result<SpawnAgentResponse, String> {
+            unreachable!("MockSubagentHost is read-only")
+        }
+
+        async fn send_message(
+            &self,
+            _context: &lash::ToolExecutionContext,
+            _request: SendMessageRequest,
+        ) -> Result<SendMessageResponse, String> {
+            unreachable!("MockSubagentHost is read-only")
+        }
+
+        async fn followup_task(
+            &self,
+            _context: &lash::ToolExecutionContext,
+            _request: FollowupTaskRequest,
+        ) -> Result<FollowupTaskResponse, String> {
+            unreachable!("MockSubagentHost is read-only")
+        }
+
+        async fn wait_agent(
+            &self,
+            _context: &lash::ToolExecutionContext,
+            _request: WaitAgentRequest,
+        ) -> Result<WaitAgentResponse, String> {
+            unreachable!("MockSubagentHost is read-only")
+        }
+
+        async fn close_agent(
+            &self,
+            _context: &lash::ToolExecutionContext,
+            _request: CloseAgentRequest,
+        ) -> Result<CloseAgentResponse, String> {
+            unreachable!("MockSubagentHost is read-only")
+        }
+
+        async fn list_agents(
+            &self,
+            _context: &lash::ToolExecutionContext,
+            _request: ListAgentsRequest,
+        ) -> Result<ListAgentsResponse, String> {
+            Ok(ListAgentsResponse {
+                agents: Vec::<AgentSummary>::new(),
+            })
+        }
+    }
+
+    pub(crate) fn explore_metadata(
+        capability: impl Into<String>,
+        model: impl Into<String>,
+        variant: impl Into<String>,
+    ) -> AgentMetadata {
+        AgentMetadata {
+            session_id: "session".to_string(),
+            parent_session_id: Some("root".to_string()),
+            capability: Some(capability.into()),
+            run_state: "running".to_string(),
+            model: model.into(),
+            model_variant: Some(variant.into()),
+            last_iterations: None,
+            last_tool_calls: None,
+            last_token_usage: None,
+        }
+    }
 
     #[test]
     fn batch_expands_into_child_tool_blocks() {
@@ -781,19 +908,23 @@ mod tests {
 
     #[test]
     fn spawn_agent_projects_compact_headline_and_labeled_details() {
+        let host = Arc::new(MockSubagentHost::default());
+        host.insert(
+            "root",
+            "probe_repo_shape",
+            explore_metadata("explore", "gpt-5.4-mini", "low"),
+        );
         let mut state = ActivityState::default();
+        state.set_subagent_host(host);
         let blocks = state.blocks_for_tool_call(
             "spawn_agent",
             json!({
-                "task_name":"probe_repo_shape",
-                "task":"In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary."
+                "agent_name":"probe_repo_shape",
+                "task":"In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary.",
+                "capability":"explore"
             }),
             json!({
-                "task_name":"probe_repo_shape",
-                "target":"/root/probe_repo_shape",
-                "capability":"low",
-                "model":"gpt-5.4-mini",
-                "model_variant":"low"
+                "agent_name":"probe_repo_shape",
             }),
             true,
             12,
@@ -805,143 +936,8 @@ mod tests {
             blocks[0].result.detail_lines,
             vec![
                 "Task In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary.".to_string(),
-                "Target /root/probe_repo_shape".to_string(),
-                "Profile low capability · gpt-5.4-mini".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn wait_agent_task_started_uses_compact_name_and_wrapped_metadata() {
-        let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
-            "wait_agent",
-            json!({"targets":["/root/probe_repo_shape"]}),
-            json!({
-                "timed_out": false,
-                "events": [{
-                    "kind":"task_started",
-                    "path":"/root/probe_repo_shape",
-                    "task":"In /home/sam/code/lash, inspect the repo shape only.",
-                    "capability":"low",
-                    "model":"gpt-5.4-mini",
-                    "model_variant":"low"
-                }]
-            }),
-            true,
-            12,
-        );
-
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].call.summary, "subagent started");
-        assert_eq!(blocks[0].call.tag.as_deref(), Some("probe_repo_shape"));
-        assert_eq!(
-            blocks[0].result.detail_lines,
-            vec![
-                "Task In /home/sam/code/lash, inspect the repo shape only.".to_string(),
-                "Path /root/probe_repo_shape".to_string(),
-                "Profile low capability · gpt-5.4-mini".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn wait_agent_projects_task_completion_and_token_usage() {
-        let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
-            "wait_agent",
-            json!({"targets":["/root/inspect_queue"]}),
-            json!({
-                "timed_out": false,
-                "events": [{
-                    "kind":"task_completed",
-                    "path":"/root/inspect_queue",
-                    "task":"inspect queue rendering",
-                    "status":"interrupted",
-                    "result":"delegate result",
-                    "session":{
-                        "id":"child-1",
-                        "parent_session_id":"root",
-                        "task":"inspect queue rendering",
-                        "model":"gpt-5.4",
-                        "model_variant":"high",
-                        "iterations":2,
-                        "tool_calls":1,
-                        "tool_call_details":[
-                            {"tool":"read_file","success":true,"duration_ms":12}
-                        ],
-                        "token_usage":{
-                            "input_tokens":101,
-                            "output_tokens":22,
-                            "cached_input_tokens":5,
-                            "reasoning_tokens":7,
-                            "total_tokens":135
-                        }
-                    }
-                }]
-            }),
-            true,
-            12,
-        );
-
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
-        assert_eq!(blocks[0].call.summary, "subagent stopped");
-        assert_eq!(blocks[0].call.tag.as_deref(), Some("inspect_queue"));
-        assert_eq!(
-            blocks[0].result.detail_lines,
-            vec![
-                "Task inspect queue rendering".to_string(),
-                "Path /root/inspect_queue".to_string(),
-                "Run gpt-5.4 (high) · 2 iterations · 1 tool call".to_string(),
-                "Tokens 135 total · 101 in · 22 out · 7 reasoning · 5 cached".to_string(),
-            ]
-        );
-        assert!(blocks[0].children.is_empty());
-    }
-
-    #[test]
-    fn wait_agent_surfaces_child_error_details() {
-        let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
-            "wait_agent",
-            json!({"targets":["/root/inspect_queue"]}),
-            json!({
-                "timed_out": false,
-                "events": [{
-                    "kind":"task_completed",
-                    "path":"/root/inspect_queue",
-                    "task":"inspect queue rendering",
-                    "status":"failed",
-                    "result":"",
-                    "error":"LLM error: Codex request failed with 400",
-                    "session":{
-                        "id":"child-1",
-                        "parent_session_id":"root",
-                        "task":"inspect queue rendering",
-                        "model":"gpt-5.4-mini",
-                        "model_variant":"low",
-                        "iterations":24,
-                        "tool_calls":49,
-                        "tool_call_details":[]
-                    }
-                }]
-            }),
-            true,
-            12,
-        );
-
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
-        assert_eq!(blocks[0].call.summary, "subagent failed");
-        assert_eq!(blocks[0].call.tag.as_deref(), Some("inspect_queue"));
-        assert_eq!(
-            blocks[0].result.detail_lines,
-            vec![
-                "Task inspect queue rendering".to_string(),
-                "Error LLM error: Codex request failed with 400".to_string(),
-                "Path /root/inspect_queue".to_string(),
-                "Run gpt-5.4-mini (low) · 24 iterations · 49 tool calls".to_string(),
+                "Agent probe_repo_shape".to_string(),
+                "Profile explore capability".to_string(),
             ]
         );
     }

@@ -401,6 +401,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     lash::ToolExecutionMode::Parallel,
                 ),
             ],
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: None,
         })
         .expect("tool surface");
     assert!(

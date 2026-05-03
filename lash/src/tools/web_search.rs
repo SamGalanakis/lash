@@ -29,7 +29,7 @@ impl ToolProvider for WebSearch {
                 object_schema(
                     serde_json::json!({
                         "query": { "type": "string" },
-                        "max_results": {
+                        "limit": {
                             "type": "integer",
                             "minimum": 1,
                             "default": 5,
@@ -38,15 +38,37 @@ impl ToolProvider for WebSearch {
                     }),
                     &["query"],
                 ),
-                serde_json::json!({ "type": "object", "additionalProperties": true }),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "results": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": { "type": "string" },
+                                    "url": { "type": "string" },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "Search-result snippet text."
+                                    }
+                                },
+                                "required": ["title", "url", "content"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "answer": {
+                            "type": "string",
+                            "description": "Optional synthesized answer returned by the search backend."
+                        }
+                    },
+                    "required": ["results"],
+                    "additionalProperties": false
+                }),
             )
             .with_examples(vec![
-                "search_web(query=\"latest Rust release notes\", max_results=5)".into(),
+                "search_web(query=\"latest Rust release notes\", limit=5)".into(),
             ])
-            .with_availability(crate::ToolAvailabilityConfig::same(
-                crate::ToolAvailability::Discoverable,
-            ))
-            .with_activation(crate::ToolActivation::Loadable)
             .with_discovery(crate::tools::discovery_metadata("web", &["web_search"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
@@ -57,15 +79,12 @@ impl ToolProvider for WebSearch {
             .get("query")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let max_results = args
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5);
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5);
 
         let body = json!({
             "api_key": self.api_key,
             "query": query,
-            "max_results": max_results,
+            "max_results": limit,
             "include_answer": true,
         });
 
@@ -111,5 +130,47 @@ impl ToolProvider for WebSearch {
             }
             Err(e) => ToolResult::err_fmt(format_args!("Request failed: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_web_uses_limit_argument_in_model_contract() {
+        let definition = WebSearch::new("test-key")
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == "search_web")
+            .expect("search_web definition");
+
+        let properties = definition
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("object properties");
+        assert!(properties.contains_key("limit"));
+        assert!(!properties.contains_key("max_results"));
+        assert_eq!(properties["limit"]["default"], serde_json::json!(5));
+        assert!(
+            definition
+                .examples
+                .iter()
+                .all(|example| example.contains("limit"))
+        );
+        assert_eq!(
+            definition.output_schema["type"],
+            serde_json::json!("object")
+        );
+        assert_eq!(
+            definition.output_schema["required"],
+            serde_json::json!(["results"])
+        );
+        assert_eq!(definition.activation, crate::ToolActivation::Always);
+        assert_eq!(
+            definition.availability.standard,
+            crate::ToolAvailability::Documented
+        );
     }
 }

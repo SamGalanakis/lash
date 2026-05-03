@@ -41,13 +41,23 @@ impl ToolProvider for FetchUrl {
                     }),
                     &["url"],
                 ),
-                serde_json::json!({ "type": "string" }),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Fetched URL."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Extracted readable page text. Empty when no extractable content was returned."
+                        }
+                    },
+                    "required": ["url", "content"],
+                    "additionalProperties": false
+                }),
             )
             .with_examples(vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()])
-            .with_availability(crate::ToolAvailabilityConfig::same(
-                crate::ToolAvailability::Discoverable,
-            ))
-            .with_activation(crate::ToolActivation::Loadable)
             .with_discovery(crate::tools::discovery_metadata(
                 "web",
                 &["fetch", "open_url"],
@@ -93,12 +103,16 @@ impl ToolProvider for FetchUrl {
                         .unwrap_or_default();
 
                     if content.is_empty() {
-                        return ToolResult::ok(json!(format!(
-                            "No extractable content returned for {url}"
-                        )));
+                        return ToolResult::ok(json!({
+                            "url": url,
+                            "content": "",
+                        }));
                     }
 
-                    ToolResult::ok(json!(content))
+                    ToolResult::ok(json!({
+                        "url": url,
+                        "content": content,
+                    }))
                 }
                 Err(e) => ToolResult::err_fmt(format_args!("Failed to parse response: {e}")),
             },
@@ -109,5 +123,37 @@ impl ToolProvider for FetchUrl {
             }
             Err(e) => ToolResult::err_fmt(format_args!("Request failed: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fetch_url_returns_minimal_typed_record_and_is_showcased() {
+        let definition = FetchUrl::new("test-key")
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == "fetch_url")
+            .expect("fetch_url definition");
+
+        assert_eq!(
+            definition.output_schema["type"],
+            serde_json::json!("object")
+        );
+        assert_eq!(
+            definition.output_schema["required"],
+            serde_json::json!(["url", "content"])
+        );
+        assert_eq!(
+            definition.output_schema["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(definition.activation, crate::ToolActivation::Always);
+        assert_eq!(
+            definition.availability.standard,
+            crate::ToolAvailability::Documented
+        );
     }
 }

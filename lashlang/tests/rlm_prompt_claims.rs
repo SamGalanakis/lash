@@ -27,6 +27,7 @@ struct MockHost {
     // `{ handle: "h<n>", tool: "<name>" }`, and `await_handle` looks up
     // the pending tool result by handle id.
     pending: Mutex<HashMap<String, Value>>,
+    handle_names: Mutex<HashMap<String, String>>,
     next_handle: Mutex<u32>,
 }
 
@@ -65,48 +66,29 @@ impl ToolHost for MockHost {
             "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
             "spawn_agent" => {
                 let name = args
-                    .get("task_name")
+                    .get("agent_name")
                     .and_then(|v| match v {
                         Value::String(s) => Some(s.to_string()),
                         _ => None,
                     })
                     .unwrap_or_default();
-                let target = format!("/root/{name}");
                 let mut record = Record::default();
-                record.insert("target".into(), Value::String(target.clone().into()));
-                record.insert(
-                    "task_id".into(),
-                    Value::String(format!("subagent:{target}").into()),
-                );
-                record.insert("task_name".into(), Value::String(name.into()));
-                record.insert("run_state".into(), Value::String("running".into()));
+                record.insert("claim".into(), Value::String(format!("done:{name}").into()));
                 Ok(Value::Record(record.into()))
             }
-            "wait_agent" => {
-                // Fake one terminal event per target.
-                let targets = args
-                    .get("targets")
-                    .and_then(|v| match v {
-                        Value::List(items) => Some(items.to_vec()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                let events: Vec<Value> = targets
-                    .into_iter()
-                    .map(|target| {
-                        let mut ev = Record::default();
-                        ev.insert("target".into(), target.clone());
-                        ev.insert(
-                            "result".into(),
-                            Value::String(format!("done:{}", target).into()),
-                        );
-                        Value::Record(ev.into())
-                    })
-                    .collect();
+            "list_async_handles" => {
+                let names = self.handle_names.lock().unwrap().clone();
+                let mut subagent = Record::default();
+                for (handle_id, name) in names {
+                    let mut handle = Record::default();
+                    handle.insert("__handle__".into(), Value::String("task".into()));
+                    handle.insert("id".into(), Value::String(handle_id.into()));
+                    handle.insert("tool".into(), Value::String("spawn_agent".into()));
+                    subagent.insert(name.into(), Value::Record(handle.into()));
+                }
                 let mut out = Record::default();
-                out.insert("completed".into(), Value::List(events.clone().into()));
-                out.insert("pending".into(), Value::List(Vec::<Value>::new().into()));
-                out.insert("events".into(), Value::List(events.into()));
+                out.insert("subagent".into(), Value::Record(subagent.into()));
+                out.insert("tool".into(), Value::Record(Record::default().into()));
                 Ok(Value::Record(out.into()))
             }
             "boom" => Err(ToolHostError::new("explicit failure for tests")),
@@ -125,8 +107,17 @@ impl ToolHost for MockHost {
             .lock()
             .unwrap()
             .insert(handle_id.clone(), result);
+        if name == "spawn_agent"
+            && let Some(Value::String(agent_name)) = args.get("agent_name")
+        {
+            self.handle_names
+                .lock()
+                .unwrap()
+                .insert(handle_id.clone(), agent_name.to_string());
+        }
         let mut record = Record::default();
-        record.insert("handle".into(), Value::String(handle_id.into()));
+        record.insert("__handle__".into(), Value::String("task".into()));
+        record.insert("id".into(), Value::String(handle_id.into()));
         record.insert("tool".into(), Value::String(name.to_string().into()));
         Ok(Value::Record(record.into()))
     }
@@ -136,12 +127,13 @@ impl ToolHost for MockHost {
             .as_record()
             .ok_or_else(|| ToolHostError::new("expected handle record"))?;
         let id = record
-            .get("handle")
+            .get("id")
             .and_then(|v| match v {
                 Value::String(s) => Some(s.to_string()),
                 _ => None,
             })
-            .ok_or_else(|| ToolHostError::new("handle record missing `handle` field"))?;
+            .ok_or_else(|| ToolHostError::new("handle record missing `id` field"))?;
+        self.handle_names.lock().unwrap().remove(&id);
         self.pending
             .lock()
             .unwrap()
@@ -151,9 +143,10 @@ impl ToolHost for MockHost {
 
     fn cancel_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
         if let Some(record) = handle.as_record()
-            && let Some(Value::String(id)) = record.get("handle")
+            && let Some(Value::String(id)) = record.get("id")
         {
             self.pending.lock().unwrap().remove(id.as_str());
+            self.handle_names.lock().unwrap().remove(id.as_str());
         }
         Ok(Value::Null)
     }
@@ -339,7 +332,7 @@ submit h"#,
         handle.get("ok").is_none(),
         "start should not wrap in {{ok,value}}"
     );
-    assert!(matches!(handle.get("handle"), Some(Value::String(_))));
+    assert!(matches!(handle.get("id"), Some(Value::String(_))));
 }
 
 #[test]
@@ -886,24 +879,25 @@ fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
     let host = MockHost::default();
     let Value::List(results) = run(
         &host,
-        r#"a = (call spawn_agent { task_name: "chunk_1", task: "x", capability: "low" })?
-b = (call spawn_agent { task_name: "chunk_2", task: "y", capability: "low" })?
-events = await {
-  a: start call wait_agent { targets: [a.target] },
-  b: start call wait_agent { targets: [b.target] },
+        r#"a = start call spawn_agent { agent_name: "chunk_1", task: "x", capability: "explore" }
+b = start call spawn_agent { agent_name: "chunk_2", task: "y", capability: "explore" }
+handles = (call list_async_handles {})?
+results = parallel {
+  a: (await handles.subagent.chunk_1)?,
+  b: (await handles.subagent.chunk_2)?,
 }
-submit [events.a?.completed[0].result, events.b?.completed[0].result]"#,
+submit [results.a.claim, results.b.claim]"#,
     ) else {
         panic!("expected list");
     };
     assert_eq!(results.len(), 2);
     assert_eq!(
         results[0],
-        Value::String("done:/root/chunk_1".to_string().into())
+        Value::String("done:chunk_1".to_string().into())
     );
     assert_eq!(
         results[1],
-        Value::String("done:/root/chunk_2".to_string().into())
+        Value::String("done:chunk_2".to_string().into())
     );
 }
 

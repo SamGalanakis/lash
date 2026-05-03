@@ -152,6 +152,9 @@ impl RuntimeTurnDriver {
         // own committed offset instead so each new sansio event is
         // appended exactly once.
         if events.len() > self.sansio_events_synced {
+            for event in &events[self.sansio_events_synced..] {
+                self.emit_mode_event_trace(iteration, event);
+            }
             self.progress_graph
                 .append_events(events[self.sansio_events_synced..].iter().cloned());
             self.sansio_events_synced = events.len();
@@ -200,6 +203,20 @@ impl RuntimeTurnDriver {
     fn mark_phase_begin(&self, phase: RuntimeTurnPhase) {
         if let Some(probe) = self.turn_phase_probe.as_ref() {
             probe.begin(phase);
+        }
+    }
+
+    fn emit_mode_event_trace(&self, iteration: usize, event: &crate::SessionEventRecord) {
+        if !self.host.core.trace_level.is_extended() {
+            return;
+        }
+        let crate::SessionEventRecord::Mode(mode_event) = event else {
+            return;
+        };
+        if let Some(lash_rlm_types::RlmModeEvent::RlmDiagnostic(diagnostic)) =
+            mode_event.rlm_event()
+        {
+            self.emit_rlm_exec_step(iteration, &diagnostic.phase, diagnostic.payload);
         }
     }
 

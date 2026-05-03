@@ -19,6 +19,13 @@ struct BuildPluginSessionRequest<'a> {
     snapshot: Option<&'a PluginSessionSnapshot>,
     tool_surface_overlay: ToolSurfaceContribution,
     tool_snapshot: Option<crate::DynamicStateSnapshot>,
+    authority: SessionAuthorityContext,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SessionAuthorityContext {
+    pub tool_access: SessionToolAccess,
+    pub subagent: Option<SubagentSessionAuthority>,
 }
 
 impl PluginHost {
@@ -112,6 +119,7 @@ impl PluginHost {
         execution_mode: ExecutionMode,
         standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
+        authority: SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_with_parent_and_surface(
             session_id,
@@ -121,6 +129,7 @@ impl PluginHost {
             snapshot,
             ToolSurfaceContribution::default(),
             None,
+            authority,
         )
     }
 
@@ -133,6 +142,7 @@ impl PluginHost {
         snapshot: Option<&PluginSessionSnapshot>,
         tool_surface_overlay: ToolSurfaceContribution,
         tool_snapshot: Option<crate::DynamicStateSnapshot>,
+        authority: SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_inner(BuildPluginSessionRequest {
             session_id: session_id.into(),
@@ -142,6 +152,7 @@ impl PluginHost {
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
+            authority,
         })
     }
 
@@ -162,6 +173,7 @@ impl PluginHost {
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
+            authority: SessionAuthorityContext::default(),
         })
     }
 
@@ -177,6 +189,7 @@ impl PluginHost {
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
+            authority,
         } = request;
         if execution_mode == ExecutionMode::standard() {
             let approach = standard_context_approach.as_ref().ok_or_else(|| {
@@ -203,6 +216,8 @@ impl PluginHost {
             session_id,
             execution_mode: execution_mode.clone(),
             standard_context_approach: standard_context_approach.clone(),
+            tool_access: authority.tool_access.clone(),
+            subagent: authority.subagent.clone(),
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();
@@ -285,6 +300,8 @@ impl PluginHost {
             tools,
             dynamic_tools,
             tool_surface_overlay,
+            tool_access: authority.tool_access,
+            subagent: authority.subagent,
             prompt_contributors: reg.prompt_contributors,
             prompt_request_hooks: reg.prompt_request_hooks,
             tool_surface_contributors: reg.tool_surface_contributors,

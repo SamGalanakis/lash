@@ -25,12 +25,13 @@ use std::sync::Arc;
 use lash::{AssembledTurn, InputItem, TurnInput, TurnStatus};
 use serde_json::{Value, json};
 
-use crate::types::{WaitAgentEvent, WaitAgentSessionSummary};
+use crate::types::WaitAgentEvent;
 
 #[derive(Default)]
 pub(crate) struct HostState {
     pub(crate) trees: HashMap<String, AgentTree>,
     pub(crate) session_agents: HashMap<String, AgentLocator>,
+    pub(crate) children_by_parent_session: HashMap<String, BTreeMap<String, String>>,
 }
 
 pub(crate) struct AgentTree {
@@ -53,6 +54,8 @@ impl Default for AgentTree {
 pub(crate) struct AgentLocator {
     pub(crate) root_session_id: String,
     pub(crate) path: String,
+    pub(crate) agent_name: Option<String>,
+    pub(crate) depth: u8,
 }
 
 #[derive(Clone)]
@@ -63,8 +66,8 @@ pub(crate) struct QueuedMessage {
 
 pub(crate) struct AgentRecord {
     pub(crate) session_id: String,
+    pub(crate) agent_name: String,
     pub(crate) parent_session_id: Option<String>,
-    pub(crate) parent_path: Option<String>,
     pub(crate) capability: Option<String>,
     pub(crate) model: String,
     pub(crate) model_variant: Option<String>,
@@ -72,6 +75,12 @@ pub(crate) struct AgentRecord {
     pub(crate) queued_turns: VecDeque<QueuedTurn>,
     pub(crate) closing: bool,
     pub(crate) last_task_state: Option<String>,
+    /// Per-completion stats from the most recently finished turn. Stashed
+    /// on the record so the activity projector can render the dock without
+    /// the wire shape carrying the data.
+    pub(crate) last_iterations: Option<usize>,
+    pub(crate) last_tool_calls: Option<usize>,
+    pub(crate) last_token_usage: Option<Value>,
     /// Session that spawned this agent; used to complete the agent's entry
     /// in that session's background task registry when the agent exits.
     pub(crate) owner_session_id: String,
@@ -110,16 +119,24 @@ pub(crate) struct PreparedTurnLaunch {
 /// `TaskCompleted` or `AgentClosed` events for that same target are
 /// purged first. See the module doc for why this matters.
 pub(crate) fn queue_event(tree: &mut AgentTree, event: WaitAgentEvent) {
-    if let WaitAgentEvent::TaskStarted { target, .. } = &event {
-        let target = target.clone();
+    if let WaitAgentEvent::TaskStarted {
+        agent_name,
+        parent_session_id,
+        ..
+    } = &event
+    {
+        let agent_name = agent_name.clone();
+        let parent_session_id = parent_session_id.clone();
         tree.events.retain(|existing| match existing {
             WaitAgentEvent::TaskCompleted {
-                target: other_target,
+                agent_name: other_name,
+                parent_session_id: other_parent,
                 ..
             }
             | WaitAgentEvent::AgentClosed {
-                target: other_target,
-            } => other_target != &target,
+                agent_name: other_name,
+                parent_session_id: other_parent,
+            } => other_name != &agent_name || other_parent != &parent_session_id,
             _ => true,
         });
     }
@@ -127,32 +144,25 @@ pub(crate) fn queue_event(tree: &mut AgentTree, event: WaitAgentEvent) {
     tree.notify.notify_waiters();
 }
 
-pub(crate) fn build_session_summary(
-    agent: &AgentRecord,
-    task: &str,
-    turn: &AssembledTurn,
-) -> WaitAgentSessionSummary {
-    WaitAgentSessionSummary {
-        id: agent.session_id.clone(),
-        parent_session_id: agent.parent_session_id.clone(),
-        task: task.to_string(),
-        iterations: turn.state.iteration,
-        tool_calls: turn.state.shared_projection().tool_calls.len(),
-        model: turn.state.policy.model.clone(),
-        model_variant: turn.state.policy.model_variant.clone(),
-        token_usage: json!({
-            "input_tokens": turn.token_usage.input_tokens,
-            "output_tokens": turn.token_usage.output_tokens,
-            "cached_input_tokens": turn.token_usage.cached_input_tokens,
-            "reasoning_tokens": turn.token_usage.reasoning_tokens,
-            "total_tokens": turn.token_usage.total(),
-        }),
-    }
-}
-
 pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
+    if let Some(record) = turn
+        .tool_calls
+        .iter()
+        .rev()
+        .find(|record| record.tool == "submit_error" && record.success)
+    {
+        return record.args.clone();
+    }
     if let Some(value) = &turn.typed_finish {
         return value.clone();
+    }
+    if let Some(record) = turn
+        .tool_calls
+        .iter()
+        .rev()
+        .find(|record| record.tool == "submit" && record.success)
+    {
+        return record.args.clone();
     }
     if !turn.assistant_output.safe_text.trim().is_empty() {
         return json!(turn.assistant_output.safe_text.trim().to_string());
@@ -169,55 +179,73 @@ pub(crate) fn task_result_text(turn: &AssembledTurn) -> String {
 
 pub(crate) fn task_completion_event(
     agent: &mut AgentRecord,
-    path: &str,
     task: String,
     outcome: &Result<AssembledTurn, lash::PluginError>,
 ) -> WaitAgentEvent {
     match outcome {
         Ok(turn) => {
-            let status = turn_status_label(&turn.status);
+            let submitted_error = turn
+                .tool_calls
+                .iter()
+                .rev()
+                .find(|record| record.tool == "submit_error" && record.success);
+            let status = if submitted_error.is_some() {
+                "failed"
+            } else {
+                turn_status_label(&turn.status)
+            };
             agent.last_task_state = Some(status.to_string());
-            let session = build_session_summary(agent, &task, turn);
+            agent.last_iterations = Some(turn.state.iteration);
+            agent.last_tool_calls = Some(turn.state.shared_projection().tool_calls.len());
+            agent.last_token_usage = Some(json!({
+                "input_tokens": turn.token_usage.input_tokens,
+                "output_tokens": turn.token_usage.output_tokens,
+                "cached_input_tokens": turn.token_usage.cached_input_tokens,
+                "reasoning_tokens": turn.token_usage.reasoning_tokens,
+                "total_tokens": turn.token_usage.total(),
+            }));
             WaitAgentEvent::TaskCompleted {
-                target: path.to_string(),
+                agent_name: agent.agent_name.clone(),
+                parent_session_id: agent.parent_session_id.clone().unwrap_or_default(),
                 task,
                 status: status.to_string(),
                 result: task_result_value(turn),
-                error: None,
-                session,
+                error: submitted_error.map(|record| {
+                    record
+                        .args
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Subagent reported an error.")
+                        .to_string()
+                }),
             }
         }
         Err(_) => {
             agent.last_task_state = Some("failed".to_string());
+            agent.last_iterations = Some(0);
+            agent.last_tool_calls = Some(0);
+            agent.last_token_usage = Some(json!({
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "reasoning_tokens": 0,
+                "total_tokens": 0,
+            }));
             WaitAgentEvent::TaskCompleted {
-                target: path.to_string(),
-                task: task.clone(),
+                agent_name: agent.agent_name.clone(),
+                parent_session_id: agent.parent_session_id.clone().unwrap_or_default(),
+                task,
                 status: "failed".to_string(),
                 result: Value::Null,
                 error: Some("Subagent failed while executing its task.".to_string()),
-                session: WaitAgentSessionSummary {
-                    id: agent.session_id.clone(),
-                    parent_session_id: agent.parent_session_id.clone(),
-                    task,
-                    iterations: 0,
-                    tool_calls: 0,
-                    model: agent.model.clone(),
-                    model_variant: agent.model_variant.clone(),
-                    token_usage: json!({
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cached_input_tokens": 0,
-                        "reasoning_tokens": 0,
-                        "total_tokens": 0,
-                    }),
-                },
             }
         }
     }
 }
 
 pub(crate) fn message_response_event(
-    path: &str,
+    agent_name: &str,
+    parent_session_id: &str,
     to: String,
     outcome: &Result<AssembledTurn, lash::PluginError>,
 ) -> WaitAgentEvent {
@@ -226,8 +254,9 @@ pub(crate) fn message_response_event(
         Err(_) => "Subagent failed while handling the message.".to_string(),
     };
     WaitAgentEvent::Message {
-        from: path.to_string(),
-        to,
+        from_agent: agent_name.to_string(),
+        to_agent: to,
+        parent_session_id: parent_session_id.to_string(),
         message,
     }
 }
@@ -253,5 +282,26 @@ pub(crate) fn turn_status_label(status: &TurnStatus) -> &'static str {
         TurnStatus::Completed => "completed",
         TurnStatus::Interrupted => "interrupted",
         TurnStatus::Failed => "failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lash::{ToolCallRecord, testing::mock_assembled_turn};
+
+    use super::*;
+
+    #[test]
+    fn task_result_value_prefers_standard_submit_tool_args() {
+        let mut turn = mock_assembled_turn("child", "fallback");
+        turn.tool_calls.push(ToolCallRecord {
+            call_id: Some("submit-1".to_string()),
+            tool: "submit".to_string(),
+            args: json!({ "answer": "ok" }),
+            result: json!({ "answer": "ok" }),
+            success: true,
+            duration_ms: 1,
+        });
+        assert_eq!(task_result_value(&turn), json!({ "answer": "ok" }));
     }
 }

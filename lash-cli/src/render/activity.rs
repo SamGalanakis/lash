@@ -5,6 +5,8 @@ fn activity_style(status: ActivityStatus) -> Style {
     match status {
         ActivityStatus::Completed => theme::tool_success(),
         ActivityStatus::Failed => theme::tool_failure(),
+        ActivityStatus::Running => theme::turn_status_state(),
+        ActivityStatus::Partial => theme::text_subtle_style(),
     }
 }
 
@@ -80,6 +82,16 @@ fn activity_prefix(activity: &ActivityBlock) -> (&'static str, Style, Style) {
             ActivityStatus::Failed => (
                 "× ",
                 theme::tool_failure(),
+                activity_style(activity.result.status),
+            ),
+            ActivityStatus::Running => (
+                "◆ ",
+                theme::turn_status_slash(),
+                activity_style(activity.result.status),
+            ),
+            ActivityStatus::Partial => (
+                "◐ ",
+                theme::text_subtle_style(),
                 activity_style(activity.result.status),
             ),
         },
@@ -211,10 +223,11 @@ pub(super) fn render_activity_block(
                 detail_prefix.to_string(),
                 detail_prefix.to_string(),
                 &child.call.summary,
-                if child.result.status == ActivityStatus::Failed {
-                    theme::error()
-                } else {
-                    theme::subagent_child()
+                match child.result.status {
+                    ActivityStatus::Failed => theme::error(),
+                    ActivityStatus::Running => theme::turn_status_state(),
+                    ActivityStatus::Partial => theme::text_subtle_style(),
+                    ActivityStatus::Completed => theme::subagent_child(),
                 },
                 viewport_width,
             );

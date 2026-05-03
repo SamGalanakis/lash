@@ -9,7 +9,7 @@ use opentelemetry::trace::{
 use opentelemetry::{Context, InstrumentationScope, KeyValue, Value as OtelValue, global};
 use serde_json::Value;
 
-use crate::{TraceContext, TraceEvent, TraceRecord, TraceSink, TraceTokenUsage};
+use crate::{TraceContext, TraceEvent, TraceRecord, TraceSink, TraceSinkError, TraceTokenUsage};
 
 const INSTRUMENTATION_NAME: &str = "lash-trace";
 
@@ -171,6 +171,22 @@ where
     fn attributes_for(&self, record: &TraceRecord) -> Vec<KeyValue> {
         event_attributes(record, &self.options)
     }
+
+    fn add_llm_event(&self, record: &TraceRecord, name: &'static str) -> bool {
+        let Some(key) = llm_key(&record.context) else {
+            return false;
+        };
+        let Ok(mut active) = self.active.lock() else {
+            return false;
+        };
+        let Some(active_span) = active.get_mut(&key) else {
+            return false;
+        };
+        let mut attrs = common_attributes(record, &self.options);
+        attrs.extend(self.attributes_for(record));
+        active_span.span.add_event(name, attrs);
+        true
+    }
 }
 
 impl<T> TraceSink for OtelTraceSink<T>
@@ -178,7 +194,7 @@ where
     T: Tracer + Send + Sync,
     T::Span: Send + Sync + 'static,
 {
-    fn append(&self, record: &TraceRecord) {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
         match &record.event {
             TraceEvent::TurnStarted { .. } => {
                 if let Some(key) = turn_key(&record.context) {
@@ -218,6 +234,16 @@ where
                     self.emit_instant(record, "lash.llm", None);
                 }
             }
+            TraceEvent::ProviderStreamEvent { .. } => {
+                if !self.add_llm_event(record, "lash.provider_stream_event") {
+                    self.emit_instant(record, "lash.provider_stream_event", None);
+                }
+            }
+            TraceEvent::RuntimeStreamEvent { .. } => {
+                if !self.add_llm_event(record, "lash.runtime_stream_event") {
+                    self.emit_instant(record, "lash.runtime_stream_event", None);
+                }
+            }
             TraceEvent::ToolCallStarted { .. } => {
                 if let Some(key) = tool_key(&record.event) {
                     self.start_active(key, record, "lash.tool");
@@ -243,6 +269,7 @@ where
             TraceEvent::TokenUsage { .. } => self.emit_instant(record, "lash.token_usage", None),
             TraceEvent::Custom { .. } => self.emit_instant(record, "lash.custom", None),
         }
+        Ok(())
     }
 }
 
@@ -417,6 +444,63 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
             );
             push_payload_json(&mut attrs, options, "lash.error.raw", &error.raw);
         }
+        TraceEvent::ProviderStreamEvent { event } => {
+            attrs.push(KeyValue::new("lash.provider.name", event.provider.clone()));
+            attrs.push(KeyValue::new("lash.stream.sequence", event.sequence as i64));
+            attrs.push(KeyValue::new(
+                "lash.stream.elapsed_ms",
+                event.elapsed_ms as i64,
+            ));
+            attrs.push(KeyValue::new(
+                "lash.stream.event_name",
+                event.event_name.clone(),
+            ));
+            push_opt(&mut attrs, "lash.stream.item_id", &event.item_id);
+            if let Some(output_index) = event.output_index {
+                attrs.push(KeyValue::new("lash.stream.output_index", output_index));
+            }
+            attrs.push(KeyValue::new("lash.stream.raw_len", event.raw_len as i64));
+            attrs.push(KeyValue::new(
+                "lash.stream.raw_sha256",
+                event.raw_sha256.clone(),
+            ));
+            push_payload_json(&mut attrs, options, "lash.stream.raw_json", &event.raw_json);
+        }
+        TraceEvent::RuntimeStreamEvent { event } => {
+            attrs.push(KeyValue::new("lash.stream.sequence", event.sequence as i64));
+            attrs.push(KeyValue::new(
+                "lash.stream.elapsed_ms",
+                event.elapsed_ms as i64,
+            ));
+            attrs.push(KeyValue::new(
+                "lash.stream.event_name",
+                event.event_name.clone(),
+            ));
+            if let Some(text) = &event.visible_text {
+                attrs.push(KeyValue::new(
+                    "lash.stream.visible_chars",
+                    text.len() as i64,
+                ));
+            }
+            if let Some(text) = &event.raw_text {
+                attrs.push(KeyValue::new("lash.stream.raw_chars", text.len() as i64));
+            }
+            push_opt(&mut attrs, "lash.stream.item_id", &event.item_id);
+            if let Some(output_index) = event.output_index {
+                attrs.push(KeyValue::new("lash.stream.output_index", output_index));
+            }
+            push_opt(&mut attrs, "lash.tool.call_id", &event.call_id);
+            push_opt(&mut attrs, "lash.tool.name", &event.tool_name);
+            push_payload_json(
+                &mut attrs,
+                options,
+                "lash.tool.input_json",
+                &event.input_json,
+            );
+            if let Some(usage) = &event.usage {
+                usage_attributes(&mut attrs, "gen_ai.usage", usage);
+            }
+        }
         TraceEvent::ToolCallStarted {
             call_id,
             name,
@@ -589,6 +673,8 @@ fn event_type(event: &TraceEvent) -> &'static str {
         TraceEvent::LlmCallStarted { .. } => "llm_call_started",
         TraceEvent::LlmCallCompleted { .. } => "llm_call_completed",
         TraceEvent::LlmCallFailed { .. } => "llm_call_failed",
+        TraceEvent::ProviderStreamEvent { .. } => "provider_stream_event",
+        TraceEvent::RuntimeStreamEvent { .. } => "runtime_stream_event",
         TraceEvent::ToolCallStarted { .. } => "tool_call_started",
         TraceEvent::ToolCallCompleted { .. } => "tool_call_completed",
         TraceEvent::ModeStep { .. } => "mode_step",
@@ -643,7 +729,8 @@ mod tests {
             TraceEvent::TurnStarted {
                 metadata: Default::default(),
             },
-        ));
+        ))
+        .unwrap();
         sink.append(&TraceRecord::new(
             turn_context.clone(),
             TraceEvent::LlmCallStarted {
@@ -658,7 +745,8 @@ mod tests {
                     stream: true,
                 },
             },
-        ));
+        ))
+        .unwrap();
         sink.append(&TraceRecord::new(
             turn_context.clone(),
             TraceEvent::LlmCallFailed {
@@ -670,7 +758,8 @@ mod tests {
                 },
                 stream_summary: None,
             },
-        ));
+        ))
+        .unwrap();
         sink.append(&TraceRecord::new(
             turn_context,
             TraceEvent::TurnCompleted {
@@ -678,7 +767,8 @@ mod tests {
                 done_reason: "error".to_string(),
                 handoff: None,
             },
-        ));
+        ))
+        .unwrap();
 
         assert!(sink.active.lock().unwrap().is_empty());
     }

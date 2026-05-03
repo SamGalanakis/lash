@@ -763,9 +763,8 @@ fn build_plugin_session(
         }
     }
     let mut subagent_models = std::collections::BTreeMap::new();
-    subagent_models.insert("low".to_string(), session_policy.model.clone());
-    subagent_models.insert("medium".to_string(), session_policy.model.clone());
-    subagent_models.insert("high".to_string(), session_policy.model.clone());
+    subagent_models.insert("explore".to_string(), session_policy.model.clone());
+    subagent_models.insert("peer".to_string(), session_policy.model.clone());
     let registry = std::sync::Arc::new(lash_subagents::default_registry(
         &subagent_models,
         ExecutionMode::standard(),
@@ -890,7 +889,7 @@ Format each work step like this:
 Brief reasoning here in plain prose.
 
 ```lashlang
-candidate = (call spawn_agent { task_name: "narrow_candidates", task: "narrow the search to likely sessions", capability: "low" })?
+candidate = (call spawn_agent { task_name: "narrow_candidates", task: "narrow the search to likely sessions", capability: "explore" })?
 result = (call wait_agent { targets: [candidate.path], timeout_ms: 30000 })?
 print result
 ```
