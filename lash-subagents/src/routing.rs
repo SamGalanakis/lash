@@ -148,8 +148,8 @@ pub fn truncate_snapshot_to_recent_turns(
         return snapshot;
     }
 
-    let read_model = snapshot.read_model();
-    let messages = read_model.messages.as_slice();
+    let read_view = snapshot.read_view();
+    let messages = read_view.messages();
     let user_turn_starts = messages
         .iter()
         .enumerate()
@@ -165,8 +165,8 @@ pub fn truncate_snapshot_to_recent_turns(
         .flat_map(|message| message.parts.iter())
         .filter_map(|part| part.tool_call_id.clone())
         .collect::<HashSet<_>>();
-    let kept_tool_calls = read_model
-        .tool_calls
+    let kept_tool_calls = read_view
+        .tool_calls()
         .iter()
         .filter(|tool_call| {
             tool_call

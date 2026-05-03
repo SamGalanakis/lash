@@ -176,22 +176,12 @@ enum ActiveReadItem<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct SessionReadModel {
-    pub active_events: Arc<Vec<SessionEventRecord>>,
-    pub messages: Arc<Vec<Message>>,
-    pub tool_calls: Arc<Vec<ToolCallRecord>>,
-    pub rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
-    pub prompt_render_cache: Arc<BaseRenderCache>,
-}
-
-impl SessionReadModel {
-    pub fn chronological_projection(&self) -> crate::ChronologicalProjection {
-        crate::ChronologicalProjection::from_read_model(self)
-    }
-
-    pub fn rlm_history(&self) -> Vec<lash_rlm_types::RlmHistoryItem> {
-        self.chronological_projection().rlm_history()
-    }
+pub(crate) struct SessionReadModel {
+    pub(crate) active_events: Arc<Vec<SessionEventRecord>>,
+    pub(crate) messages: Arc<Vec<Message>>,
+    pub(crate) tool_calls: Arc<Vec<ToolCallRecord>>,
+    pub(crate) rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    pub(crate) prompt_render_cache: Arc<BaseRenderCache>,
 }
 
 #[derive(Clone, Debug)]
@@ -733,7 +723,7 @@ impl SessionGraph {
             .collect()
     }
 
-    pub fn read_model(&self) -> SessionReadModel {
+    pub(crate) fn read_model(&self) -> SessionReadModel {
         let cache = self.cache();
         SessionReadModel {
             active_events: Arc::clone(&cache.active_events),
@@ -1327,7 +1317,10 @@ mod tests {
             success: true,
             duration_ms: 3,
         };
-        graph.replace_active_read_state(&[user.clone(), assistant.clone()], &[tool_call.clone()]);
+        graph.replace_active_read_state(
+            &[user.clone(), assistant.clone()],
+            std::slice::from_ref(&tool_call),
+        );
         graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
             RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
                 set: serde_json::Map::from_iter([(
@@ -1434,7 +1427,7 @@ mod tests {
         });
 
         let read_model = graph.read_model();
-        let projection = read_model.chronological_projection();
+        let projection = crate::ChronologicalProjection::from_read_model(&read_model);
         let labels = projection
             .entries()
             .iter()

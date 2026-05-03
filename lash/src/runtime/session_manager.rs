@@ -2,12 +2,18 @@ use super::*;
 use std::sync::atomic::AtomicBool;
 
 mod api;
+mod background;
+mod current;
+mod direct;
+mod graph;
+mod managed;
+mod monitor;
 mod prompt;
+mod turns;
 mod usage;
 
 pub(in crate::runtime) use prompt::{HostPromptBridge, PendingPrompt};
 pub(in crate::runtime) use usage::ChildUsageEventRelay;
-use usage::record_token_usage_shared;
 pub(in crate::runtime::session_manager) use usage::{
     ChannelEventSink, LiveChildUsageForwarder, subtract_usage,
 };
@@ -173,191 +179,6 @@ impl RuntimeSessionManager {
                 sync_needed: Arc::clone(&runtime.background_sync_needed),
             },
         })
-    }
-
-    fn record_token_usage(&self, source: &str, model: &str, usage: &TokenUsage) {
-        record_token_usage_shared(&self.usage.token_ledger, source, model, usage);
-    }
-
-    fn drain_token_ledger(&self) -> Vec<TokenLedgerEntry> {
-        let mut ledger = self.usage.token_ledger.lock().expect("token ledger lock");
-        std::mem::take(&mut *ledger)
-    }
-
-    fn merge_drained_token_ledger(&self, state: &mut SessionSnapshot) -> Vec<TokenLedgerEntry> {
-        let drained = self.drain_token_ledger();
-        for entry in drained.iter().cloned() {
-            merge_ledger_entry(&mut state.token_ledger, entry);
-        }
-        drained
-    }
-
-    fn background_scope_key(&self, session_id: &str) -> String {
-        format!("{}:{session_id}", self.background.runtime_scope_id)
-    }
-
-    async fn current_snapshot_for_store_write(&self) -> SessionSnapshot {
-        let mut state = self.current.snapshot.to_snapshot();
-        if let Some(store) = &self.current.store {
-            crate::store::refresh_persisted_session_state(store.as_ref(), &mut state).await;
-        }
-        super::normalize_session_graph(&mut state);
-        state
-    }
-
-    async fn persist_current_usage_ledger(&self) -> Result<(), crate::PluginError> {
-        if !self.usage.persist_to_store {
-            return Ok(());
-        }
-        let Some(store) = &self.current.store else {
-            return Ok(());
-        };
-        let mut state = self.current_snapshot_for_store_write().await;
-        let drained = self.drain_token_ledger();
-        if drained.is_empty() {
-            return Ok(());
-        }
-        for entry in drained.iter().cloned() {
-            merge_ledger_entry(&mut state.token_ledger, entry);
-        }
-        let commit = crate::store::PersistedStateCommit::persisted_state(&state, &drained);
-        match crate::store::apply_runtime_commit(store.as_ref(), commit).await {
-            Ok(result) => state.apply_persisted_commit_result(result),
-            Err(err) => tracing::warn!("failed to persist current usage ledger: {err}"),
-        }
-        Ok(())
-    }
-
-    fn build_runtime_state(
-        &self,
-        session_id: String,
-        request: &SessionCreateRequest,
-        mut base: SessionSnapshot,
-        policy: &SessionPolicy,
-    ) -> SessionSnapshot {
-        normalize_session_graph(&mut base);
-        base.session_id = session_id;
-        base.policy = policy.clone();
-        append_session_nodes_to_state(&mut base, &request.initial_nodes);
-        normalize_session_graph(&mut base);
-        base
-    }
-
-    async fn snapshot_by_id(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionSnapshot, crate::PluginError> {
-        if session_id == self.current.session_id {
-            let mut snapshot = self.current.snapshot.to_snapshot();
-            super::normalize_session_graph(&mut snapshot);
-            self.enrich_current_snapshot(&mut snapshot);
-            return Ok(snapshot);
-        }
-        let runtime = {
-            let registry = self.managed.registry.lock().await;
-            registry.get(session_id).cloned()
-        }
-        .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
-        let runtime = runtime.lock().await;
-        Ok(runtime.export_persisted_state())
-    }
-
-    async fn tool_catalog_by_id(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
-        if session_id == self.current.session_id {
-            if let Some(runtime) = self.managed.registry.lock().await.get(session_id).cloned() {
-                let runtime = runtime.lock().await;
-                return Ok(runtime.active_tool_catalog());
-            }
-            if self.current.plugins.dynamic_tools().is_some() {
-                return Ok(self
-                    .current
-                    .plugins
-                    .tool_catalog(session_id, self.current.policy.execution_mode.clone()));
-            }
-            return Ok(self.current.tool_catalog.as_ref().clone());
-        }
-        let runtime = {
-            let registry = self.managed.registry.lock().await;
-            registry.get(session_id).cloned()
-        }
-        .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
-        let runtime = runtime.lock().await;
-        Ok(runtime.active_tool_catalog())
-    }
-
-    fn enrich_current_snapshot(&self, snapshot: &mut SessionSnapshot) {
-        if let Some(dynamic_tools) = self.current.plugins.dynamic_tools() {
-            let dynamic_state = dynamic_tools.export_state();
-            snapshot.dynamic_state_generation = Some(dynamic_state.base_generation);
-            snapshot.dynamic_state_snapshot = Some(dynamic_state);
-        } else {
-            snapshot.dynamic_state_generation = None;
-            snapshot.dynamic_state_snapshot = None;
-        }
-        snapshot.plugin_snapshot = self.current.plugins.snapshot().ok();
-        snapshot.plugin_snapshot_revision =
-            Some(self.current.plugins.snapshot_revision_fingerprint());
-    }
-
-    fn current_dynamic_tools(&self) -> Result<Arc<crate::DynamicToolProvider>, crate::PluginError> {
-        self.current.plugins.dynamic_tools().ok_or_else(|| {
-            crate::PluginError::Session("dynamic tools are unavailable in this session".to_string())
-        })
-    }
-
-    async fn invoke_monitor_external(
-        &self,
-        session_id: &str,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<crate::ToolResult, crate::PluginError> {
-        self.current
-            .plugins
-            .host()
-            .invoke_external_for_session(session_id, name, args, Arc::new(self.clone()))
-            .await
-            .map_err(|err| crate::PluginError::Session(err.to_string()))
-    }
-
-    async fn ensure_registered_monitor_specs(
-        &self,
-        session_id: &str,
-    ) -> Result<(), crate::PluginError> {
-        let specs = self
-            .current
-            .plugins
-            .host()
-            .monitor_specs_for_session(session_id)
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        if specs.is_empty() {
-            return Ok(());
-        }
-        let specs = specs
-            .into_iter()
-            .map(|owned| {
-                serde_json::json!({
-                    "plugin_id": owned.plugin_id,
-                    "spec": owned.value,
-                })
-            })
-            .collect::<Vec<_>>();
-        let result = self
-            .invoke_monitor_external(
-                session_id,
-                "monitor.register_specs",
-                serde_json::json!({
-                    "specs": specs,
-                }),
-            )
-            .await?;
-        if result.success {
-            Ok(())
-        } else {
-            Err(crate::PluginError::Session(result.result.to_string()))
-        }
     }
 }
 

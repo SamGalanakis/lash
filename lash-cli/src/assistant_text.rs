@@ -1,7 +1,10 @@
 use lash_tui::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::{app::UiTimelineItem, markdown, text_layout, theme};
+use crate::{
+    app::{UiTimeline, UiTimelineItem},
+    markdown, text_layout, theme,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownLane {
@@ -45,7 +48,7 @@ pub fn normalize_assistant_text(text: &str) -> String {
     out
 }
 
-pub fn push_assistant_text_block(blocks: &mut Vec<UiTimelineItem>, text: &str) -> bool {
+pub fn push_assistant_text_block(blocks: &mut UiTimeline, text: &str) -> bool {
     let cleaned = normalize_assistant_text(text);
     if cleaned.is_empty() {
         return false;
@@ -67,7 +70,7 @@ pub fn render_assistant_text_block(
     )
 }
 
-pub fn push_assistant_reasoning_block(blocks: &mut Vec<UiTimelineItem>, text: &str) -> bool {
+pub fn push_assistant_reasoning_block(blocks: &mut UiTimeline, text: &str) -> bool {
     let cleaned = normalize_assistant_text(text);
     if cleaned.is_empty() {
         return false;

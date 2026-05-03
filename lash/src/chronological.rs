@@ -29,7 +29,7 @@ pub enum ChronologicalPayload {
 }
 
 impl ChronologicalProjection {
-    pub fn from_read_model(read_model: &crate::SessionReadModel) -> Self {
+    pub(crate) fn from_read_model(read_model: &crate::session_graph::SessionReadModel) -> Self {
         if read_model.active_events.is_empty() {
             return Self::from_transcript(
                 read_model.messages.as_slice(),

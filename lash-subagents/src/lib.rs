@@ -84,7 +84,7 @@ impl PluginFactory for SubagentsPluginFactory {
             "subagents",
             Arc::new(move |ctx| {
                 let contributions = subagent_prompt_contributions_for_context(
-                    &ctx,
+                    ctx,
                     &prompt_contributions,
                     &continue_as_prompt_contributions,
                 );

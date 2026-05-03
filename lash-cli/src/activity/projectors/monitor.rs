@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn monitor_start_projects_human_friendly_status_lines() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "monitor",
             json!({
                 "description": "app errors",
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn persistent_monitor_projects_run_until_stopped() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "monitor",
             json!({
                 "description": "dev server",
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn monitor_failure_surfaces_error_lines() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "monitor",
             json!({
                 "description": "bad",
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn tasks_stop_projects_cancelled_task_status() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "tasks_stop",
             json!({
                 "task_id": "monitor:abc123",

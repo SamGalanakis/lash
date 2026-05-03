@@ -309,7 +309,7 @@ fn run_once(scenario: UiPerfScenario) -> UiPerfRunResult {
         selection_render_max_ms: max_value(&selection_frame_durations),
         selection_frames: selection_frame_durations.len(),
         selection_perf: aggregate_frame_perf(&selection_perf_samples),
-        total_blocks: harness.app.blocks.len(),
+        total_blocks: harness.app.timeline.len(),
         total_content_rows,
     }
 }
@@ -617,7 +617,7 @@ fn build_benchmark_app() -> App {
         "ui-perf".to_string(),
         "test-session-id".into(),
     );
-    app.blocks.clear();
+    app.timeline.clear();
     app.token_usage = TokenUsage {
         input_tokens: 208_000,
         output_tokens: 11_500,
@@ -639,27 +639,27 @@ fn build_benchmark_app() -> App {
             Vec::new(),
         );
         app.push_prepared_user_input(&turn);
-        app.blocks
+        app.timeline
             .push(UiTimelineItem::AssistantText(long_assistant_text(
                 turn.preview().as_str(),
             )));
         if turn.draft_id.is_empty() {
             unreachable!("prepared turns should always have a draft id");
         }
-        app.blocks
+        app.timeline
             .push(UiTimelineItem::Activity(Box::new(exploration_activity(
                 turn.preview().as_str(),
                 turn.display_text.as_str(),
             ))));
         if turn.display_text.len().is_multiple_of(3) {
-            app.blocks
+            app.timeline
                 .push(UiTimelineItem::Activity(Box::new(snippet_activity(
                     &turn_label,
                     false,
                 ))));
         }
         if turn.display_text.len().is_multiple_of(5) {
-            app.blocks
+            app.timeline
                 .push(UiTimelineItem::Activity(Box::new(snippet_activity(
                     &turn_label,
                     true,

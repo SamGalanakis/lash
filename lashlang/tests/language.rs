@@ -2099,8 +2099,3 @@ fn snapshot_round_trip_preserves_type_values() {
     };
     assert_eq!(value, v2);
 }
-
-// Silence the warnings emitted when the module compiles but some helpers are
-// unused.
-#[allow(dead_code)]
-fn _use_unused(_: ExecuteError) {}

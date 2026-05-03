@@ -5,8 +5,8 @@ use crate::session_graph::tool_call_record_active_read_key;
 use crate::session_model::SessionEventRecord;
 use crate::{MessageSequence, SessionReadView, ToolCallRecord};
 
+use super::PersistedSessionState;
 use super::turn_graph::TurnGraphOverlay;
-use super::{PersistedSessionState, RuntimeReadSnapshot};
 
 #[derive(Debug)]
 pub(super) struct TurnProgress {
@@ -71,15 +71,15 @@ impl TurnProgress {
         mode_turn_options: crate::ModeTurnOptions,
         messages: MessageSequence,
     ) -> SessionReadView {
-        RuntimeReadSnapshot::from_persisted(&self.state)
-            .with_policy(policy)
-            .with_iteration(iteration)
-            .with_mode_turn_options(mode_turn_options)
-            .derived_message_view(
-                self.graph.base_graph(),
-                messages,
-                self.graph.tool_calls_arc(),
-            )
+        SessionReadView::derived_from_persisted_state(
+            &self.state,
+            policy,
+            iteration,
+            mode_turn_options,
+            self.graph.base_graph(),
+            messages,
+            self.graph.tool_calls_arc(),
+        )
     }
 
     pub(super) fn finalize_turn_read_state(

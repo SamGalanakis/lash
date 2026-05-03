@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub fn clear(&mut self) {
-        self.blocks = vec![UiTimelineItem::Splash];
+        self.timeline = vec![UiTimelineItem::Splash].into();
         self.scroll_offset = 0;
         self.follow_mode = FollowOutputMode::Bottom;
         self.live_assistant.clear();
@@ -99,7 +99,7 @@ impl App {
         } else {
             let cache = &self.height_cache;
             let idx = cache.partition_point(|&cum| cum <= self.scroll_offset);
-            if idx >= self.blocks.len() {
+            if idx >= self.timeline.len() {
                 None
             } else {
                 let block_start = if idx == 0 { 0 } else { cache[idx - 1] };
@@ -180,7 +180,7 @@ impl App {
         }
 
         let Some(last_idx) = self
-            .blocks
+            .timeline
             .iter()
             .rposition(|block| matches!(block, UiTimelineItem::UserInput(_)))
         else {
@@ -203,7 +203,7 @@ impl App {
         let block_end = self.height_cache[last_idx];
         let block_height = block_end.saturating_sub(block_start);
         let block_content_start = self.block_content_start_offset(last_idx);
-        let has_splash_before = self.blocks[..last_idx]
+        let has_splash_before = self.timeline[..last_idx]
             .iter()
             .any(|block| matches!(block, UiTimelineItem::Splash));
 
@@ -271,13 +271,13 @@ impl App {
 
     pub(super) fn latest_turn_output_start_offset(&self) -> Option<usize> {
         let search_start = self
-            .blocks
+            .timeline
             .iter()
             .rposition(|block| matches!(block, UiTimelineItem::UserInput(_)))
             .map(|idx| idx + 1)
             .unwrap_or(0);
 
-        if let Some(idx) = self.blocks[search_start..]
+        if let Some(idx) = self.timeline[search_start..]
             .iter()
             .position(Self::is_turn_visible_output_block)
             .map(|offset| search_start + offset)
@@ -308,7 +308,7 @@ impl App {
 
     fn latest_user_block_anchor_offset(&self, max_scroll: usize) -> usize {
         let Some(last_idx) = self
-            .blocks
+            .timeline
             .iter()
             .rposition(|block| matches!(block, UiTimelineItem::UserInput(_)))
         else {
@@ -349,12 +349,12 @@ impl App {
             return 0;
         }
 
-        match self.blocks.get(idx) {
+        match self.timeline.get(idx) {
             Some(UiTimelineItem::UserInput(_)) => {
-                usize::from(!matches!(self.blocks[idx - 1], UiTimelineItem::Splash))
+                usize::from(!matches!(self.timeline[idx - 1], UiTimelineItem::Splash))
             }
             Some(UiTimelineItem::AssistantText(_)) => usize::from(!matches!(
-                self.blocks[idx - 1],
+                self.timeline[idx - 1],
                 UiTimelineItem::AssistantText(_) | UiTimelineItem::Splash
             )),
             _ => 0,
@@ -379,14 +379,14 @@ impl App {
         }
         if !self.height_cache.is_empty()
             && !dimensions_changed
-            && self.height_cache_dirty_from >= self.blocks.len()
+            && self.height_cache_dirty_from >= self.timeline.len()
         {
             return;
         }
         self.height_cache_width = width;
         self.height_cache_vh = viewport_height;
 
-        let target_len = self.blocks.len();
+        let target_len = self.timeline.len();
         if self.height_cache.len() > target_len {
             self.height_cache.truncate(target_len);
         }

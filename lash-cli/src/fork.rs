@@ -791,8 +791,12 @@ mod fork_tests {
             .turn_state;
         assert_eq!(child_turn.iteration, 1);
 
-        let child_messages = child_graph.read_model().messages;
-        assert_eq!(child_messages.len(), 1);
-        assert_eq!(child_messages[0].parts[0].content, "hello");
+        let child_state = lash::SessionStateEnvelope {
+            session_graph: child_graph,
+            ..lash::SessionStateEnvelope::default()
+        };
+        let child_view = lash::SessionReadView::from_exported_state(&child_state);
+        assert_eq!(child_view.messages().len(), 1);
+        assert_eq!(child_view.messages()[0].parts[0].content, "hello");
     }
 }

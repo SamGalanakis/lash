@@ -1072,14 +1072,14 @@ fn semantic_model()
     static MODEL: OnceLock<Mutex<Option<model2vec_rs::model::StaticModel>>> = OnceLock::new();
     let lock = MODEL.get_or_init(|| Mutex::new(None));
     let mut guard = lock.lock().ok()?;
-    if guard.is_none() {
-        if let Ok(model) = {
+    if guard.is_none()
+        && let Ok(model) = {
             let model_id = std::env::var("LASH_TOOL_SEARCH_SEMANTIC_MODEL")
                 .unwrap_or_else(|_| "minishlab/potion-base-2M".to_string());
             model2vec_rs::model::StaticModel::from_pretrained(model_id, None, None, None)
-        } {
-            *guard = Some(model);
         }
+    {
+        *guard = Some(model);
     }
     guard.as_ref()?;
     Some(guard)

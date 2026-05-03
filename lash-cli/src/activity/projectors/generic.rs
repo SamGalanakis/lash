@@ -3,7 +3,7 @@
 //!
 //! The generic projector is special because it acts as both a
 //! registered projector (for `search_tools`, which wants rich detail
-//! lines) and as the fallback path in `ActivityState::blocks_for_tool_call`
+//! lines) and as the fallback path in `ActivityState::project_tool_call`
 //! for names with no dedicated projector. Anything the fallback
 //! produces is an `ActivityKind::GenericTool` with a semantic summary
 //! and an optional text preview artifact.
@@ -56,7 +56,7 @@ impl ToolProjector for GenericProjector {
 }
 
 /// Build a `GenericTool` block for an unregistered tool. Called from
-/// `ActivityState::blocks_for_tool_call` as the default fallback.
+/// `ActivityState::project_tool_call` as the default fallback.
 pub(crate) fn fallback_block(ctx: &mut ProjectCtx<'_>, status: ActivityStatus) -> ActivityBlock {
     let summary = semantic_tool_summary(ctx.name, &ctx.args);
     let artifact = text_preview_artifact(None, &ctx.result);

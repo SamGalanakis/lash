@@ -66,6 +66,18 @@ struct ShellOutputSpill {
     file: File,
 }
 
+struct PipeExecProcessRequest<'a> {
+    id: &'a str,
+    command: &'a str,
+    workdir: &'a Path,
+    login: bool,
+    shell_path: &'a str,
+    timeout: Option<Duration>,
+    progress: Option<&'a ProgressSender>,
+    max_output_tokens: Option<usize>,
+    cancel: Option<CancellationToken>,
+}
+
 const MAX_OUTPUT: usize = 512_000;
 const SPILL_OUTPUT_THRESHOLD: usize = 50 * 1024;
 const DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10 * 60 * 1000;
@@ -527,16 +539,19 @@ impl ShellRuntime {
 
     async fn exec_pipe_process(
         &self,
-        id: &str,
-        command: &str,
-        workdir: &Path,
-        login: bool,
-        shell_path: &str,
-        timeout: Option<Duration>,
-        progress: Option<&ProgressSender>,
-        max_output_tokens: Option<usize>,
-        cancel: Option<CancellationToken>,
+        request: PipeExecProcessRequest<'_>,
     ) -> Result<PollOutcome, String> {
+        let PipeExecProcessRequest {
+            id,
+            command,
+            workdir,
+            login,
+            shell_path,
+            timeout,
+            progress,
+            max_output_tokens,
+            cancel,
+        } = request;
         let mut cmd = TokioCommand::new(shell_path);
         for arg in self.shell_args(command, login, shell_path, false)? {
             cmd.arg(arg);
@@ -975,17 +990,17 @@ impl StandardShell {
 
         match self
             .runtime
-            .exec_pipe_process(
-                &handle_id,
-                &params.cmd,
-                &params.workdir,
-                params.login,
-                &params.shell_path,
-                Some(Duration::from_millis(params.timeout_ms)),
+            .exec_pipe_process(PipeExecProcessRequest {
+                id: &handle_id,
+                command: &params.cmd,
+                workdir: &params.workdir,
+                login: params.login,
+                shell_path: &params.shell_path,
+                timeout: Some(Duration::from_millis(params.timeout_ms)),
                 progress,
-                params.max_output_tokens,
+                max_output_tokens: params.max_output_tokens,
                 cancel,
-            )
+            })
             .await
         {
             Ok(PollOutcome::Running {

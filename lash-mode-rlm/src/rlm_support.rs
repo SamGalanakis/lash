@@ -13,8 +13,8 @@ pub async fn restore_execution_state_and_globals(
     if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
         ctx.restore_execution_state(&snapshot).await?;
     }
-    let read_model = state.read_model();
-    apply_globals_patch_events(ctx, read_model.active_events.iter()).await
+    let read_view = state.read_view();
+    apply_globals_patch_events(ctx, read_view.active_events()).await
 }
 
 pub async fn apply_globals_patch_nodes(

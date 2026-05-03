@@ -285,7 +285,7 @@ pub(super) async fn handle_resume(
                 );
             }
             Err(err) => {
-                app.blocks.push(UiTimelineItem::SystemMessage(err));
+                app.timeline.push(UiTimelineItem::SystemMessage(err));
                 app.invalidate_height_cache();
                 app.scroll_to_bottom();
             }
@@ -301,7 +301,7 @@ pub(super) async fn handle_resume(
         .await
         .unwrap_or_default();
         if sessions.is_empty() {
-            app.blocks.push(UiTimelineItem::SystemMessage(
+            app.timeline.push(UiTimelineItem::SystemMessage(
                 "No sessions found.".to_string(),
             ));
             app.invalidate_height_cache();
@@ -322,7 +322,7 @@ pub(super) fn handle_skills(app: &mut App) -> anyhow::Result<bool> {
         .map(|s| (s.name.clone(), s.description.clone()))
         .collect();
     if items.is_empty() {
-        app.blocks.push(UiTimelineItem::SystemMessage(
+        app.timeline.push(UiTimelineItem::SystemMessage(
             "No skills found.\n\
              Add skill directories to ~/.lash/skills/ or .agents/lash/skills/\n\
              Each skill is a directory with a SKILL.md file."

@@ -167,7 +167,7 @@ mod tests {
         let stale_state = persistence_state;
 
         assert_eq!(stale_state.iteration, 2);
-        assert_eq!(stale_state.read_model().messages.len(), 1);
+        assert_eq!(stale_state.read_view().messages().len(), 1);
         assert_eq!(stale_state.token_ledger.len(), 1);
         assert_eq!(stale_state.token_ledger[0].source, "turn");
         assert_eq!(stale_state.token_ledger[0].model, "gpt-5.4-mini");

@@ -314,7 +314,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -338,7 +338,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -367,7 +367,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -396,7 +396,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -428,7 +428,7 @@ mod tests {
             .soft_warn_directives(lash::plugin::CheckpointHookContext {
                 session_id: "root".to_string(),
                 checkpoint: lash::CheckpointKind::AfterWork,
-                state: lash::SessionReadView::new(state),
+                state: lash::SessionReadView::from_exported_state(&state),
                 host: std::sync::Arc::new(NoopPromptManager),
             })
             .expect("warning directives");
@@ -471,7 +471,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -492,7 +492,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 

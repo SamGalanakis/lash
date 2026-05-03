@@ -544,9 +544,9 @@ async fn summarize_compaction_prefix(
     snapshot.last_prompt_usage = None;
     let previous_summary = extract_previous_summary(&messages);
     let referenced = referenced_tool_call_ids(&messages);
-    let read_model = state.read_model();
-    let tool_calls = read_model
-        .tool_calls
+    let read_view = state.read_view();
+    let tool_calls = read_view
+        .tool_calls()
         .iter()
         .filter(|record| {
             record
@@ -954,7 +954,11 @@ async fn handle_compact_command(
         .snapshot_session(&session_id)
         .await
         .map_err(|err| PluginError::Session(format!("compact: snapshot failed: {err}")))?;
-    let input = HistoryState::from_state(&state.export_state());
+    let input = HistoryState {
+        messages: state.read_view().messages().to_vec(),
+        tool_calls: state.read_view().tool_calls().to_vec(),
+        metadata: Default::default(),
+    };
     let ctx = RewriteContext {
         session_id: session_id.clone(),
         trigger: RewriteTrigger::Manual {

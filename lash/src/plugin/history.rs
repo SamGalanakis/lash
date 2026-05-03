@@ -47,10 +47,10 @@ pub struct HistoryState {
 
 impl HistoryState {
     pub fn from_state(state: &SessionStateEnvelope) -> Self {
-        let read_model = state.read_model();
+        let read_view = state.read_view();
         Self {
-            messages: read_model.messages.as_ref().clone(),
-            tool_calls: read_model.tool_calls.as_ref().clone(),
+            messages: read_view.messages().to_vec(),
+            tool_calls: read_view.tool_calls().to_vec(),
             metadata: HistoryRewriteMetadata::default(),
         }
     }
@@ -63,7 +63,7 @@ pub struct SessionReadView(Arc<SessionReadState>);
 struct SessionReadState {
     meta: SessionReadMeta,
     graph: SessionReadGraph,
-    read_model: crate::SessionReadModel,
+    read_model: crate::session_graph::SessionReadModel,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +99,32 @@ impl SessionReadMeta {
         }
     }
 
+    fn from_persisted_ref(state: &PersistedSessionState) -> Self {
+        Self {
+            session_id: state.session_id.clone(),
+            policy: state.policy.clone(),
+            iteration: state.iteration,
+            token_usage: state.token_usage.clone(),
+            last_prompt_usage: state.last_prompt_usage.clone(),
+            mode_turn_options: state.mode_turn_options.clone(),
+        }
+    }
+
+    fn with_policy(mut self, policy: SessionPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    fn with_iteration(mut self, iteration: usize) -> Self {
+        self.iteration = iteration;
+        self
+    }
+
+    fn with_mode_turn_options(mut self, mode_turn_options: crate::ModeTurnOptions) -> Self {
+        self.mode_turn_options = mode_turn_options;
+        self
+    }
+
     fn to_owned_state(&self, session_graph: crate::SessionGraph) -> SessionStateEnvelope {
         SessionStateEnvelope {
             session_id: self.session_id.clone(),
@@ -122,19 +148,9 @@ enum SessionReadGraph {
 }
 
 impl SessionReadView {
-    pub fn new(state: SessionStateEnvelope) -> Self {
-        let mut state = state;
-        let graph = Arc::new(std::mem::take(&mut state.session_graph));
-        let read_model = graph.read_model();
-        Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_owned(state),
-            graph: SessionReadGraph::Owned(Arc::clone(&graph)),
-            read_model,
-        }))
-    }
-
-    pub fn from_read_model_state(
+    pub fn from_derived_message_view(
         mut state: SessionStateEnvelope,
+        active_events: Arc<Vec<crate::SessionEventRecord>>,
         messages: Arc<Vec<crate::Message>>,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     ) -> Self {
@@ -147,8 +163,8 @@ impl SessionReadView {
                 cache: OnceLock::new(),
                 base_graph: None,
             },
-            read_model: crate::SessionReadModel {
-                active_events: Arc::new(Vec::new()),
+            read_model: crate::session_graph::SessionReadModel {
+                active_events,
                 messages,
                 tool_calls,
                 rlm_globals: Arc::new(serde_json::Map::new()),
@@ -157,8 +173,8 @@ impl SessionReadView {
         }))
     }
 
-    pub(crate) fn from_graph_message_sequence(
-        state: &SessionStateEnvelope,
+    fn from_graph_message_sequence_meta(
+        meta: SessionReadMeta,
         base_graph: Arc<crate::SessionGraph>,
         messages: crate::MessageSequence,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
@@ -167,12 +183,12 @@ impl SessionReadView {
         let active_events = base_read_model.active_events;
         let rlm_globals = base_read_model.rlm_globals;
         Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_ref(state),
+            meta,
             graph: SessionReadGraph::Derived {
                 cache: OnceLock::new(),
                 base_graph: Some(base_graph),
             },
-            read_model: crate::SessionReadModel {
+            read_model: crate::session_graph::SessionReadModel {
                 active_events,
                 messages: messages.shared(),
                 tool_calls,
@@ -182,7 +198,22 @@ impl SessionReadView {
         }))
     }
 
-    pub fn from_state(state: &SessionStateEnvelope) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_graph_message_sequence(
+        state: &SessionStateEnvelope,
+        base_graph: Arc<crate::SessionGraph>,
+        messages: crate::MessageSequence,
+        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    ) -> Self {
+        Self::from_graph_message_sequence_meta(
+            SessionReadMeta::from_state_ref(state),
+            base_graph,
+            messages,
+            tool_calls,
+        )
+    }
+
+    pub fn from_exported_state(state: &SessionStateEnvelope) -> Self {
         let read_model = state.session_graph.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
@@ -192,7 +223,49 @@ impl SessionReadView {
     }
 
     pub fn from_persisted_state(state: &PersistedSessionState) -> Self {
-        Self::from_state(&state.export_state())
+        let graph = Arc::new(state.session_graph.clone());
+        let read_model = graph.read_model();
+        Self(Arc::new(SessionReadState {
+            meta: SessionReadMeta::from_persisted_ref(state),
+            graph: SessionReadGraph::Owned(graph),
+            read_model,
+        }))
+    }
+
+    pub(crate) fn from_runtime_state(
+        state: &PersistedSessionState,
+        policy: SessionPolicy,
+        mode_turn_options: crate::ModeTurnOptions,
+    ) -> Self {
+        let graph = Arc::new(state.session_graph.clone());
+        let read_model = graph.read_model();
+        Self(Arc::new(SessionReadState {
+            meta: SessionReadMeta::from_persisted_ref(state)
+                .with_policy(policy)
+                .with_mode_turn_options(mode_turn_options),
+            graph: SessionReadGraph::Owned(graph),
+            read_model,
+        }))
+    }
+
+    pub(crate) fn derived_from_persisted_state(
+        state: &PersistedSessionState,
+        policy: SessionPolicy,
+        iteration: usize,
+        mode_turn_options: crate::ModeTurnOptions,
+        base_graph: Arc<crate::SessionGraph>,
+        messages: crate::MessageSequence,
+        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    ) -> Self {
+        Self::from_graph_message_sequence_meta(
+            SessionReadMeta::from_persisted_ref(state)
+                .with_policy(policy)
+                .with_iteration(iteration)
+                .with_mode_turn_options(mode_turn_options),
+            base_graph,
+            messages,
+            tool_calls,
+        )
     }
 
     fn graph_arc(&self) -> &Arc<crate::SessionGraph> {
@@ -220,8 +293,12 @@ impl SessionReadView {
         &self.0.meta.policy
     }
 
-    pub fn session_graph(&self) -> &crate::SessionGraph {
+    fn session_graph(&self) -> &crate::SessionGraph {
         self.graph_arc().as_ref()
+    }
+
+    pub fn materialized_session_graph(&self) -> crate::SessionGraph {
+        self.session_graph().clone()
     }
 
     pub fn messages(&self) -> &[crate::Message] {
@@ -247,8 +324,21 @@ impl SessionReadView {
         Arc::clone(&self.0.read_model.rlm_globals)
     }
 
-    pub fn read_model(&self) -> &crate::SessionReadModel {
+    #[cfg(test)]
+    pub(crate) fn read_model(&self) -> &crate::session_graph::SessionReadModel {
         &self.0.read_model
+    }
+
+    pub fn chronological_projection(&self) -> crate::ChronologicalProjection {
+        crate::ChronologicalProjection::from_read_model(&self.0.read_model)
+    }
+
+    pub fn rlm_history(&self) -> Vec<lash_rlm_types::RlmHistoryItem> {
+        self.chronological_projection().rlm_history()
+    }
+
+    pub fn message_tree(&self) -> Vec<crate::SessionMessageTreeNode> {
+        self.session_graph().message_tree()
     }
 
     pub fn iteration(&self) -> usize {
@@ -323,9 +413,10 @@ mod tests {
             success: true,
             duration_ms: 5,
         };
-        state
-            .session_graph
-            .replace_active_read_state(&[user.clone(), assistant.clone()], &[tool_call.clone()]);
+        state.session_graph.replace_active_read_state(
+            &[user.clone(), assistant.clone()],
+            std::slice::from_ref(&tool_call),
+        );
         state
             .session_graph
             .append_event(SessionEventRecord::Mode(ModeEvent::rlm(
@@ -338,7 +429,7 @@ mod tests {
                 }),
             )));
 
-        let view = SessionReadView::from_state(&state);
+        let view = SessionReadView::from_exported_state(&state);
         assert_eq!(view.session_id(), "session-read-view-test");
         assert_eq!(view.policy().max_turns, Some(3));
         assert_eq!(view.iteration(), 7);
@@ -354,7 +445,7 @@ mod tests {
         );
         assert_eq!(view.read_model().messages.len(), 2);
         assert_eq!(
-            view.session_graph().nodes.len(),
+            view.materialized_session_graph().nodes.len(),
             state.session_graph.nodes.len()
         );
 

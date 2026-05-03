@@ -65,6 +65,14 @@ impl LashRuntime {
         self.state.export_state()
     }
 
+    pub fn read_view(&self) -> crate::SessionReadView {
+        crate::SessionReadView::from_runtime_state(
+            &self.state,
+            self.policy.clone(),
+            self.mode_turn_options.clone(),
+        )
+    }
+
     /// Export the narrow persistence snapshot used by stores and resume logic.
     pub fn export_persistence_state(&self) -> PersistedSessionState {
         self.state.clone()
@@ -213,7 +221,7 @@ impl LashRuntime {
         let ctx = crate::RewriteContext {
             session_id: self.state.session_id.clone(),
             trigger,
-            state: self.read_snapshot().read_view(),
+            state: self.read_view(),
             host: manager,
         };
         let input = crate::HistoryState::from_state(&self.state.export_state());

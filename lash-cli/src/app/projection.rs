@@ -15,37 +15,40 @@ impl UiTimeline {
         Self::default()
     }
 
-    pub(crate) fn from_items(items: Vec<UiTimelineItem>) -> Self {
-        Self { items }
-    }
-
-    fn push(&mut self, item: UiTimelineItem) {
+    pub(crate) fn push(&mut self, item: UiTimelineItem) {
         self.items.push(item);
     }
 
-    fn extend(&mut self, items: impl IntoIterator<Item = UiTimelineItem>) {
+    pub(crate) fn extend(&mut self, items: impl IntoIterator<Item = UiTimelineItem>) {
         self.items.extend(items);
     }
 
-    fn last(&self) -> Option<&UiTimelineItem> {
+    pub(crate) fn last(&self) -> Option<&UiTimelineItem> {
         self.items.last()
     }
 
-    fn last_mut(&mut self) -> Option<&mut UiTimelineItem> {
+    pub(crate) fn last_mut(&mut self) -> Option<&mut UiTimelineItem> {
         self.items.last_mut()
     }
 
-    #[cfg(test)]
     pub(crate) fn items(&self) -> &[UiTimelineItem] {
         self.items.as_slice()
     }
 
-    pub(crate) fn to_items(&self) -> Vec<UiTimelineItem> {
-        self.items.clone()
+    pub(crate) fn clear(&mut self) {
+        self.items.clear();
     }
 
-    pub(crate) fn into_items(self) -> Vec<UiTimelineItem> {
-        self.items
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.items.truncate(len);
+    }
+
+    pub(crate) fn retain(&mut self, f: impl FnMut(&UiTimelineItem) -> bool) {
+        self.items.retain(f);
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, UiTimelineItem> {
+        self.items.iter_mut()
     }
 
     pub(crate) fn push_system_message_if_new(&mut self, message: String) {
@@ -67,27 +70,19 @@ impl UiTimeline {
         };
         self.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
     }
+}
 
-    pub(crate) fn append_activity(&mut self, activity: ActivityBlock) {
-        if let Some(UiTimelineItem::Activity(existing)) = self.last_mut()
-            && existing.call.kind == ActivityKind::Exploration
-            && activity.call.kind == ActivityKind::Exploration
-            && existing.result.status == ActivityStatus::Completed
-            && activity.result.status == ActivityStatus::Completed
-            && merge_exploration_activity(existing, activity.clone())
-        {
-            return;
-        }
-        if let Some(UiTimelineItem::Activity(existing)) = self.last_mut()
-            && existing.call.kind == ActivityKind::Edit
-            && activity.call.kind == ActivityKind::Edit
-            && existing.result.status == ActivityStatus::Completed
-            && activity.result.status == ActivityStatus::Completed
-            && merge_edit_activity(existing, activity.clone())
-        {
-            return;
-        }
-        self.push(UiTimelineItem::Activity(Box::new(activity)));
+impl From<Vec<UiTimelineItem>> for UiTimeline {
+    fn from(items: Vec<UiTimelineItem>) -> Self {
+        Self { items }
+    }
+}
+
+impl std::ops::Deref for UiTimeline {
+    type Target = [UiTimelineItem];
+
+    fn deref(&self) -> &Self::Target {
+        self.items()
     }
 }
 
@@ -121,18 +116,11 @@ pub(crate) enum UiTimelineItem {
     Splash,
 }
 
-pub(crate) fn timeline_items_from_read_view(
-    read_view: &lash::SessionReadView,
-    ui_state: &UiProjectionState,
-) -> Vec<UiTimelineItem> {
-    timeline_from_read_view(read_view, ui_state).into_items()
-}
-
 pub(crate) fn timeline_from_read_view(
     read_view: &lash::SessionReadView,
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
-    let projection = read_view.read_model().chronological_projection();
+    let projection = read_view.chronological_projection();
     let mut timeline = timeline_from_chronological(&projection);
     append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
@@ -146,11 +134,11 @@ pub(crate) fn timeline_from_read_view(
 }
 
 #[cfg(test)]
-fn timeline_from_read_model(
-    read_model: &lash::SessionReadModel,
+fn timeline_from_test_read_view(
+    read_view: &lash::SessionReadView,
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
-    let projection = read_model.chronological_projection();
+    let projection = read_view.chronological_projection();
     let mut timeline = timeline_from_chronological(&projection);
     append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
@@ -164,64 +152,65 @@ fn timeline_from_read_model(
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_items_from_read_model_parts(
+pub(crate) fn timeline_items_from_read_view_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
 ) -> Vec<UiTimelineItem> {
-    let read_model = read_model_from_parts(events, messages, tool_calls);
-    timeline_from_read_model(&read_model, ui_state).into_items()
+    let read_view = read_view_from_parts(events, messages, tool_calls);
+    timeline_from_test_read_view(&read_view, ui_state)
+        .items()
+        .to_vec()
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_from_read_model_parts(
+pub(crate) fn timeline_from_read_view_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
-    let read_model = read_model_from_parts(events, messages, tool_calls);
-    timeline_from_read_model(&read_model, ui_state)
+    let read_view = read_view_from_parts(events, messages, tool_calls);
+    timeline_from_test_read_view(&read_view, ui_state)
 }
 
 pub(crate) fn interrupted_blocks_from_read_view(
     read_view: &lash::SessionReadView,
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
-) -> Vec<UiTimelineItem> {
+) -> UiTimeline {
     let mut timeline = timeline_from_read_view(read_view, ui_state);
     timeline.push_system_message_if_new(status_message.into());
-    timeline.into_items()
+    timeline
 }
 
 #[cfg(test)]
-pub(crate) fn interrupted_blocks_from_read_model_parts(
+pub(crate) fn interrupted_blocks_from_read_view_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
 ) -> Vec<UiTimelineItem> {
-    let read_model = read_model_from_parts(events, messages, tool_calls);
-    let mut timeline = timeline_from_read_model(&read_model, ui_state);
+    let read_view = read_view_from_parts(events, messages, tool_calls);
+    let mut timeline = timeline_from_test_read_view(&read_view, ui_state);
     timeline.push_system_message_if_new(status_message.into());
-    timeline.into_items()
+    timeline.items().to_vec()
 }
 
 #[cfg(test)]
-fn read_model_from_parts(
+fn read_view_from_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
-) -> lash::SessionReadModel {
-    lash::SessionReadModel {
-        active_events: std::sync::Arc::new(events.to_vec()),
-        messages: std::sync::Arc::new(messages.to_vec()),
-        tool_calls: std::sync::Arc::new(tool_calls.to_vec()),
-        rlm_globals: std::sync::Arc::new(serde_json::Map::new()),
-        prompt_render_cache: std::sync::Arc::new(lash::BaseRenderCache::new()),
-    }
+) -> lash::SessionReadView {
+    lash::SessionReadView::from_derived_message_view(
+        lash::SessionStateEnvelope::default(),
+        std::sync::Arc::new(events.to_vec()),
+        std::sync::Arc::new(messages.to_vec()),
+        std::sync::Arc::new(tool_calls.to_vec()),
+    )
 }
 
 fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> UiTimeline {
@@ -390,14 +379,10 @@ fn append_live_projection_items(timeline: &mut UiTimeline, ui_state: &UiProjecti
         let _ = push_assistant_reasoning_item(timeline, text);
     }
     if let Some(text) = ui_state.live_assistant_text.as_deref()
-        && let Some(tail) = interrupted_assistant_tail(&timeline.to_items(), text)
+        && let Some(tail) = interrupted_assistant_tail(timeline.items(), text)
     {
         let _ = push_assistant_text_item(timeline, &tail);
     }
-}
-
-fn append_activity_item(timeline: &mut UiTimeline, activity: ActivityBlock) {
-    timeline.append_activity(activity);
 }
 
 pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {
@@ -595,15 +580,14 @@ fn append_tool_call_record_items(
     if record.tool == "execute_lashlang" {
         return;
     }
-    for activity in activity_state.blocks_for_tool_call(
+    activity_state.append_tool_call_to_timeline(
+        timeline,
         &record.tool,
         record.args.clone(),
         record.result.clone(),
         record.success,
         record.duration_ms,
-    ) {
-        append_activity_item(timeline, activity);
-    }
+    );
 }
 
 /// True when a legacy user-message part carries an RLM exec result.
@@ -635,15 +619,14 @@ fn append_tool_result_items(
         return;
     };
 
-    for activity in activity_state.blocks_for_tool_call(
+    activity_state.append_tool_call_to_timeline(
+        timeline,
         &record.tool,
         record.args.clone(),
         record.result.clone(),
         record.success,
         record.duration_ms,
-    ) {
-        append_activity_item(timeline, activity);
-    }
+    );
 }
 
 fn flush_assistant_prose_items(timeline: &mut UiTimeline, prose: &mut Vec<String>) {

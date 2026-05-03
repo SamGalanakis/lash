@@ -12,7 +12,9 @@ use lash::session_model::Message;
 use lash::session_model::{MessageRole, PartKind};
 use lash::{SessionStateEnvelope, Store, TokenUsage};
 
-use crate::app::{LiveToolOutput, UiTimelineItem, timeline_items_from_read_view};
+#[cfg(test)]
+use crate::app::UiTimelineItem;
+use crate::app::{LiveToolOutput, UiTimeline, timeline_from_read_view};
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -31,7 +33,7 @@ pub struct SessionStart {
 
 pub struct LoadedSession {
     pub messages: Vec<Message>,
-    pub blocks: Vec<UiTimelineItem>,
+    pub blocks: UiTimeline,
     pub last_token_usage: TokenUsage,
     pub plugin_mode_indicators: BTreeMap<String, String>,
     pub live_tool_output: LiveToolOutput,
@@ -314,14 +316,14 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         .and_then(|blob_ref| store.get_checkpoint(blob_ref));
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
-    let blocks = timeline_items_from_read_view(&read_view, &ui_state);
+    let blocks = timeline_from_read_view(&read_view, &ui_state);
     tracing::debug!(
         session_file = filename,
         messages = read_view.messages().len(),
         tool_calls = read_view.tool_calls().len(),
         blocks = blocks.len(),
         plugin_mode_indicators = plugin_mode_indicators.len(),
-        graph_nodes = read_view.session_graph().nodes.len(),
+        graph_nodes = read_view.materialized_session_graph().nodes.len(),
         "loaded persisted session snapshot"
     );
 

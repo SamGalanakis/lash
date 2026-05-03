@@ -1281,7 +1281,7 @@ mod tests {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
-                state: SessionReadView::new(SessionStateEnvelope::default()),
+                state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
                 mode_turn_options: ModeTurnOptions::default(),
             })
             .await

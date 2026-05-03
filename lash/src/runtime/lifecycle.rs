@@ -56,7 +56,7 @@ impl LashRuntime {
         session
             .plugins()
             .emit_runtime_event(crate::PluginRuntimeEvent::SessionRestored(
-                RuntimeReadSnapshot::from_persisted(&state).read_view(),
+                crate::SessionReadView::from_persisted_state(&state),
             ))
             .await;
         let mode_turn_options = state.mode_turn_options.clone();

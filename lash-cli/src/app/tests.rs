@@ -76,12 +76,17 @@ fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     );
 }
 
-fn read_model_from_parts(
-    _events: &[lash::SessionEventRecord],
+fn read_view_from_parts(
+    events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
-) -> lash::SessionReadModel {
-    lash::SessionGraph::from_active_read_state(messages, tool_calls).read_model()
+) -> lash::SessionReadView {
+    lash::SessionReadView::from_derived_message_view(
+        lash::SessionStateEnvelope::default(),
+        std::sync::Arc::new(events.to_vec()),
+        std::sync::Arc::new(messages.to_vec()),
+        std::sync::Arc::new(tool_calls.to_vec()),
+    )
 }
 
 fn other_variant_name(block: &UiTimelineItem) -> &'static str {
@@ -146,7 +151,7 @@ fn text_delta_stays_in_live_assistant_until_committed() {
         content: "Draft answer".into(),
     });
 
-    assert!(matches!(app.blocks.last(), Some(UiTimelineItem::Splash)));
+    assert!(matches!(app.timeline.last(), Some(UiTimelineItem::Splash)));
     assert_eq!(
         app.live_assistant_normalized_text().as_deref(),
         Some("Draft answer")
@@ -236,7 +241,7 @@ fn final_message_never_replaces_visible_streamed_text_with_shorter_text() {
         Some("Visible streamed text")
     );
     assert!(
-        !app.blocks
+        !app.timeline
             .iter()
             .any(|block| matches!(block, UiTimelineItem::AssistantText(_)))
     );
@@ -273,7 +278,7 @@ fn final_message_event_renders_in_live_assistant_lane() {
         Some("final output")
     );
     assert!(
-        !app.blocks
+        !app.timeline
             .iter()
             .any(|block| matches!(block, UiTimelineItem::AssistantText(_)))
     );
@@ -343,7 +348,7 @@ fn llm_request_flushes_intermediate_stream_text() {
     });
 
     assert!(app.live_assistant.normalized_text().is_none());
-    assert!(app.blocks.iter().any(|block| {
+    assert!(app.timeline.iter().any(|block| {
         matches!(block, UiTimelineItem::AssistantText(text) if text == "Let me continue testing.")
     }));
 }
@@ -351,7 +356,7 @@ fn llm_request_flushes_intermediate_stream_text() {
 #[test]
 fn tool_call_flushes_intermediate_stream_text_immediately() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
+    app.timeline.clear();
 
     app.handle_session_event(SessionEvent::TextDelta {
         content: "I’m checking the rendering path first.".into(),
@@ -367,12 +372,12 @@ fn tool_call_flushes_intermediate_stream_text_immediately() {
 
     assert!(app.live_assistant.normalized_text().is_none());
     assert!(matches!(
-        app.blocks.first(),
+        app.timeline.first(),
         Some(UiTimelineItem::AssistantText(text))
             if text == "I’m checking the rendering path first."
     ));
     assert!(matches!(
-        app.blocks.get(1),
+        app.timeline.get(1),
         Some(UiTimelineItem::Activity(_))
     ));
 }
@@ -433,9 +438,9 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
 }
 
 #[test]
-fn finish_turn_from_read_model_rebuilds_current_turn_from_authoritative_state() {
+fn finish_turn_from_read_view_rebuilds_current_turn_from_authoritative_state() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks
+    app.timeline
         .push(UiTimelineItem::SystemMessage("Local note".into()));
     let turn = PreparedTurn::new("What exists now?".into(), Vec::new());
     app.push_prepared_user_input(&turn);
@@ -453,14 +458,14 @@ fn finish_turn_from_read_model_rebuilds_current_turn_from_authoritative_state() 
         ),
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &[]));
 
     assert!(!app.running);
-    assert!(app.blocks.iter().any(|block| {
+    assert!(app.timeline.iter().any(|block| {
         matches!(block, UiTimelineItem::SystemMessage(text) if text == "Local note")
     }));
     let last_block = app
-        .blocks
+        .timeline
         .iter()
         .rev()
         .find_map(|block| match block {
@@ -475,11 +480,12 @@ fn finish_turn_from_read_model_rebuilds_current_turn_from_authoritative_state() 
 }
 
 #[test]
-fn finish_turn_from_read_model_preserves_projected_turns_after_repeated_input() {
+fn finish_turn_from_read_view_preserves_projected_turns_after_repeated_input() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let first_turn = PreparedTurn::new("hi".into(), Vec::new());
     app.push_prepared_user_input(&first_turn);
-    app.blocks.push(UiTimelineItem::AssistantText("Hi.".into()));
+    app.timeline
+        .push(UiTimelineItem::AssistantText("Hi.".into()));
     app.start_turn();
 
     let messages = vec![
@@ -492,15 +498,15 @@ fn finish_turn_from_read_model_preserves_projected_turns_after_repeated_input() 
     ];
     let events = events_from_messages(&messages);
 
-    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &[]));
 
     let user_inputs = app
-        .blocks
+        .timeline
         .iter()
         .filter(|block| matches!(block, UiTimelineItem::UserInput(_)))
         .count();
     let assistant_texts = app
-        .blocks
+        .timeline
         .iter()
         .filter(|block| matches!(block, UiTimelineItem::AssistantText(_)))
         .count();
@@ -509,7 +515,7 @@ fn finish_turn_from_read_model_preserves_projected_turns_after_repeated_input() 
 }
 
 #[test]
-fn finish_turn_from_read_model_does_not_duplicate_assistant_text_after_tool_activity() {
+fn finish_turn_from_read_view_does_not_duplicate_assistant_text_after_tool_activity() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Fix it".into(), Vec::new());
     app.push_prepared_user_input(&turn);
@@ -551,10 +557,10 @@ fn finish_turn_from_read_model_does_not_duplicate_assistant_text_after_tool_acti
         duration_ms: 12,
     }];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &tool_calls));
+    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &tool_calls));
 
     let assistant_texts: Vec<&str> = app
-        .blocks
+        .timeline
         .iter()
         .filter_map(|block| match block {
             UiTimelineItem::AssistantText(text) => Some(text.as_str()),
@@ -565,7 +571,7 @@ fn finish_turn_from_read_model_does_not_duplicate_assistant_text_after_tool_acti
 }
 
 #[test]
-fn finish_turn_from_read_model_uses_authoritative_reasoning_and_text() {
+fn finish_turn_from_read_view_uses_authoritative_reasoning_and_text() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Write a poem".into(), Vec::new());
     app.push_prepared_user_input(&turn);
@@ -600,10 +606,10 @@ fn finish_turn_from_read_model_uses_authoritative_reasoning_and_text() {
         message,
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &[]));
 
     let assistant_texts: Vec<&str> = app
-        .blocks
+        .timeline
         .iter()
         .filter_map(|block| match block {
             UiTimelineItem::AssistantText(text) => Some(text.as_str()),
@@ -613,7 +619,7 @@ fn finish_turn_from_read_model_uses_authoritative_reasoning_and_text() {
     assert_eq!(assistant_texts, vec!["Neon rain on midnight street."]);
 
     let reasoning_blocks: Vec<&str> = app
-        .blocks
+        .timeline
         .iter()
         .filter_map(|block| match block {
             UiTimelineItem::AssistantReasoning(text) => Some(text.as_str()),
@@ -626,7 +632,7 @@ fn finish_turn_from_read_model_uses_authoritative_reasoning_and_text() {
 }
 
 #[test]
-fn read_model_timeline_places_reasoning_before_text() {
+fn read_view_timeline_places_reasoning_before_text() {
     let message = Message {
         id: "a1".into(),
         role: MessageRole::Assistant,
@@ -640,7 +646,7 @@ fn read_model_timeline_places_reasoning_before_text() {
     };
 
     let events = events_from_messages(std::slice::from_ref(&message));
-    let blocks = timeline_items_from_read_model_parts(
+    let blocks = timeline_items_from_read_view_parts(
         &events,
         &[message],
         &[],
@@ -651,7 +657,7 @@ fn read_model_timeline_places_reasoning_before_text() {
 }
 
 #[test]
-fn read_model_timeline_round_trips_to_existing_display_blocks() {
+fn read_view_timeline_round_trips_to_existing_display_blocks() {
     let user = text_message("u1", MessageRole::User, "Summarize this");
     let assistant = text_message("a1", MessageRole::Assistant, "Summary.");
     let events = events_from_messages(&[user.clone(), assistant.clone()]);
@@ -662,8 +668,8 @@ fn read_model_timeline_round_trips_to_existing_display_blocks() {
     };
 
     let timeline =
-        projection::timeline_from_read_model_parts(&events, &[user, assistant], &[], &ui_state);
-    let blocks = timeline_items_from_read_model_parts(
+        projection::timeline_from_read_view_parts(&events, &[user, assistant], &[], &ui_state);
+    let blocks = timeline_items_from_read_view_parts(
         &events,
         &[
             text_message("u1", MessageRole::User, "Summarize this"),
@@ -673,7 +679,7 @@ fn read_model_timeline_round_trips_to_existing_display_blocks() {
         &ui_state,
     );
 
-    assert_eq!(timeline.to_items(), blocks);
+    assert_eq!(timeline.items(), blocks.as_slice());
     let variants = timeline
         .items()
         .iter()
@@ -723,7 +729,7 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
     ))];
 
     let blocks =
-        timeline_items_from_read_model_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_read_view_parts(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 
@@ -754,7 +760,7 @@ fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversat
     ))];
 
     let blocks =
-        timeline_items_from_read_model_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_read_view_parts(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 }
@@ -784,7 +790,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
         conversation_event(assistant.clone()),
     ];
 
-    let blocks = timeline_items_from_read_model_parts(
+    let blocks = timeline_items_from_read_view_parts(
         &events,
         &[user, assistant],
         &[],
@@ -833,7 +839,7 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
     ))];
 
     let blocks =
-        timeline_items_from_read_model_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_read_view_parts(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(
         variants,
@@ -898,7 +904,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
         conversation_event(assistant.clone()),
     ];
 
-    let blocks = timeline_items_from_read_model_parts(
+    let blocks = timeline_items_from_read_view_parts(
         &events,
         &[assistant],
         &[],
@@ -920,7 +926,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
 }
 
 #[test]
-fn finish_turn_from_read_model_uses_authoritative_transcript_even_when_streamed_text_differs() {
+fn finish_turn_from_read_view_uses_authoritative_transcript_even_when_streamed_text_differs() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Shorten it".into(), Vec::new());
     app.push_prepared_user_input(&turn);
@@ -934,10 +940,10 @@ fn finish_turn_from_read_model_uses_authoritative_transcript_even_when_streamed_
         text_message("a1", MessageRole::Assistant, "Visible"),
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &[]));
 
     let last_block = app
-        .blocks
+        .timeline
         .iter()
         .rev()
         .find_map(|block| match block {
@@ -1055,7 +1061,7 @@ fn tool_output_tabs_collapse_to_single_spaces_in_live_preview() {
 #[test]
 fn tool_output_does_not_change_total_content_height() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks = vec![UiTimelineItem::UserInput("inspect this".into())];
+    app.timeline = vec![UiTimelineItem::UserInput("inspect this".into())].into();
     app.start_turn();
 
     let baseline = app.total_content_height(32, 8);
@@ -1093,7 +1099,7 @@ fn update_plan_panel_lights_up_plan_dock() {
     assert_eq!(dock.items[2].status, PlanDockItemStatus::Pending);
     // Event must NOT land as an inline UiTimelineItem::PluginPanel.
     assert!(
-        !app.blocks
+        !app.timeline
             .iter()
             .any(|block| matches!(block, UiTimelineItem::PluginPanel(_))),
         "update_plan panels route to the dock, not the scroll history"
@@ -1103,7 +1109,7 @@ fn update_plan_panel_lights_up_plan_dock() {
 #[test]
 fn rlm_budget_warning_uses_status_not_user_message() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks = vec![UiTimelineItem::AssistantText("working".into())];
+    app.timeline = vec![UiTimelineItem::AssistantText("working".into())].into();
 
     app.handle_session_event(SessionEvent::PluginEvent {
         plugin_id: "mode_rlm".into(),
@@ -1116,7 +1122,7 @@ fn rlm_budget_warning_uses_status_not_user_message() {
     });
 
     assert!(
-        app.blocks
+        app.timeline
             .iter()
             .all(|block| !matches!(block, UiTimelineItem::UserInput(_))),
         "runtime budget warning must not be rendered as user input"
@@ -1143,7 +1149,7 @@ fn plugin_panel_events_upsert_and_clear_blocks() {
         },
     });
     assert!(matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::PluginPanel(panel)) if panel.title == "TASK BOARD"
     ));
     assert!(
@@ -1159,7 +1165,7 @@ fn plugin_panel_events_upsert_and_clear_blocks() {
         },
     });
     assert!(
-        !app.blocks
+        !app.timeline
             .iter()
             .any(|block| matches!(block, UiTimelineItem::PluginPanel(_)))
     );
@@ -1224,7 +1230,7 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
         Some("1. Start implementing now\n\nNote: safe slice first")
     );
     assert!(
-        app.blocks
+        app.timeline
             .iter()
             .all(|block| !matches!(block, UiTimelineItem::UserInput(_)))
     );
@@ -1243,7 +1249,7 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
         duration_ms: 5,
     });
 
-    assert!(app.blocks.iter().all(|block| {
+    assert!(app.timeline.iter().all(|block| {
         !matches!(block, UiTimelineItem::UserInput(text) if text.contains("Start implementing now"))
     }));
 }
@@ -1270,7 +1276,7 @@ fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
 
     assert!(app.take_next_queued_turn().is_none());
     assert!(
-        app.blocks
+        app.timeline
             .iter()
             .all(|block| !matches!(block, UiTimelineItem::UserInput(_))),
         "fresh-context handoff is a runtime transition, not a UI-queued turn"
@@ -1293,7 +1299,7 @@ fn cancelled_error_renders_as_system_message() {
     });
 
     assert!(matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::SystemMessage(msg)) if msg == "Manually interrupted."
     ));
     assert!(!app.running);
@@ -1315,7 +1321,7 @@ fn cancelled_error_without_manual_request_still_stops_immediately() {
     });
 
     assert!(matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::SystemMessage(msg)) if msg == "Cancelled."
     ));
     assert!(!app.running);
@@ -1340,7 +1346,7 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
     app.handle_session_event(cancelled);
 
     let cancelled_blocks = app
-        .blocks
+        .timeline
         .iter()
         .filter(|block| {
             matches!(
@@ -1353,8 +1359,8 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
 }
 
 #[test]
-fn interrupted_read_model_preserves_partial_assistant_text() {
-    let blocks = interrupted_blocks_from_read_model_parts(
+fn interrupted_read_view_preserves_partial_assistant_text() {
+    let blocks = interrupted_blocks_from_read_view_parts(
         &[],
         &[],
         &[],
@@ -1376,7 +1382,7 @@ fn interrupted_read_model_preserves_partial_assistant_text() {
 }
 
 #[test]
-fn interrupted_read_model_does_not_duplicate_already_committed_prose() {
+fn interrupted_read_view_does_not_duplicate_already_committed_prose() {
     // Codex emits multiple prose chunks intermixed with tool calls. Each
     // prose chunk is committed as a separate assistant message, and on
     // interrupt the runtime hands the UI the entire concatenation as
@@ -1388,7 +1394,7 @@ fn interrupted_read_model_does_not_duplicate_already_committed_prose() {
         text_message("m2", MessageRole::Assistant, "second prose"),
     ];
     let events = events_from_messages(&messages);
-    let blocks = interrupted_blocks_from_read_model_parts(
+    let blocks = interrupted_blocks_from_read_view_parts(
         &events,
         &messages,
         &[],
@@ -1410,13 +1416,13 @@ fn interrupted_read_model_does_not_duplicate_already_committed_prose() {
 }
 
 #[test]
-fn interrupted_read_model_appends_only_uncommitted_tail() {
+fn interrupted_read_view_appends_only_uncommitted_tail() {
     // If the streamed text contains everything in the committed messages
     // PLUS a trailing chunk the model was mid-stream on when the abort
     // landed, only that trailing chunk should be appended as a new block.
     let messages = vec![text_message("m0", MessageRole::Assistant, "first prose")];
     let events = events_from_messages(&messages);
-    let blocks = interrupted_blocks_from_read_model_parts(
+    let blocks = interrupted_blocks_from_read_view_parts(
         &events,
         &messages,
         &[],
@@ -1462,7 +1468,7 @@ fn interrupted_assistant_tail_ignores_visible_blocks_already_on_screen() {
 }
 
 #[test]
-fn interrupted_read_model_hides_rlm_execution_result_user_message() {
+fn interrupted_read_view_hides_rlm_execution_result_user_message() {
     let result_message = Message {
         id: "m1".to_string(),
         role: MessageRole::User,
@@ -1500,7 +1506,7 @@ fn interrupted_read_model_hides_rlm_execution_result_user_message() {
     }];
     let messages = vec![text_message("m0", MessageRole::User, "go"), result_message];
     let events = events_from_messages(&messages);
-    let blocks = interrupted_blocks_from_read_model_parts(
+    let blocks = interrupted_blocks_from_read_view_parts(
         &events,
         &messages,
         &tool_calls,
@@ -1712,7 +1718,7 @@ fn accepted_injected_turn_input_renders_matching_pending_steer() {
 
     assert!(app.pending_steers.is_empty());
     assert!(
-        app.blocks
+        app.timeline
             .iter()
             .any(|block| matches!(block, UiTimelineItem::UserInput(text) if text == "follow up"))
     );
@@ -1737,7 +1743,7 @@ fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_tex
     });
 
     assert!(app.pending_steers.is_empty());
-    assert!(app.blocks.iter().any(|block| matches!(
+    assert!(app.timeline.iter().any(|block| matches!(
         block,
         UiTimelineItem::UserInput(text) if text == "/localref lash for context if needed"
     )));
@@ -1778,7 +1784,7 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
     });
 
     let matching_blocks = app
-        .blocks
+        .timeline
         .iter()
         .filter(|block| matches!(block, UiTimelineItem::UserInput(text) if text == "visible text"))
         .count();
@@ -1811,7 +1817,7 @@ fn injected_messages_committed_do_not_duplicate_user_input_after_assistant_work(
     // Regression: when the runtime fires `InjectedMessagesCommitted` after the
     // assistant has already streamed text and tool calls (codex prose-between-
     // tool-calls flow), the existing UserInput block is no longer at the
-    // tail of `app.blocks` — so the old `blocks.last()` dedup let a duplicate
+    // tail of `app.timeline` — so the old `blocks.last()` dedup let a duplicate
     // through. Dedup must scan the whole current turn.
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Why are you still dillydallying".into(), Vec::new());
@@ -1842,7 +1848,7 @@ fn injected_messages_committed_do_not_duplicate_user_input_after_assistant_work(
     });
 
     let matching_blocks = app
-        .blocks
+        .timeline
         .iter()
         .filter(|block| {
             matches!(
@@ -1873,7 +1879,7 @@ fn injected_messages_committed_do_not_duplicate_existing_visible_user_input() {
     });
 
     let matching_blocks = app
-        .blocks
+        .timeline
         .iter()
         .filter(|block| {
             matches!(
@@ -1896,7 +1902,7 @@ fn queued_injection_stays_out_of_history_until_committed() {
 
     assert_eq!(app.pending_steers.len(), 1);
     assert!(!matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::UserInput(_))
     ));
 }
@@ -1909,7 +1915,7 @@ fn regular_queued_turn_stays_out_of_history_until_dispatched() {
 
     assert_eq!(app.queued_turns.len(), 1);
     assert!(!matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::UserInput(_))
     ));
 }
@@ -2069,7 +2075,7 @@ fn take_prompt_response_renders_visible_user_block() {
     assert!(app.prompt_state().is_none());
     assert!(app.dirty);
     assert!(matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::UserInput(text)) if text == "red"
     ));
 }
@@ -2105,12 +2111,12 @@ fn dismiss_prompt_marks_ui_dirty() {
 #[test]
 fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
+    app.timeline.clear();
     for idx in 0..6 {
-        app.blocks
+        app.timeline
             .push(UiTimelineItem::AssistantText(format!("history {idx}")));
     }
-    app.blocks.push(UiTimelineItem::UserInput(
+    app.timeline.push(UiTimelineItem::UserInput(
         [
             "first line",
             "second line",
@@ -2131,7 +2137,7 @@ fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
 
     app.keep_latest_user_block_visible();
 
-    let last_idx = app.blocks.len() - 1;
+    let last_idx = app.timeline.len() - 1;
     let max_scroll = app
         .total_content_height(width, viewport_height)
         .saturating_sub(viewport_height);
@@ -2143,12 +2149,12 @@ fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
 #[test]
 fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
+    app.timeline.clear();
     for idx in 0..6 {
-        app.blocks
+        app.timeline
             .push(UiTimelineItem::AssistantText(format!("history {idx}")));
     }
-    app.blocks
+    app.timeline
         .push(UiTimelineItem::UserInput("short prompt".into()));
     app.running = true;
     app.follow_mode = FollowOutputMode::Contextual;
@@ -2161,7 +2167,7 @@ fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
     app.keep_latest_user_block_visible();
 
     let cache = app.height_cache_snapshot().to_vec();
-    let last_idx = app.blocks.len() - 1;
+    let last_idx = app.timeline.len() - 1;
     let block_end = cache[last_idx];
     assert_eq!(app.scroll_offset, block_end.saturating_sub(viewport_height));
 }
@@ -2169,7 +2175,7 @@ fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
 #[test]
 fn splash_collapses_to_compact_scrollback_height_once_history_exists() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks
+    app.timeline
         .push(UiTimelineItem::UserInput("short prompt".into()));
 
     let width = 32usize;
@@ -2185,23 +2191,23 @@ fn dismiss_splash_removes_empty_state_before_history_content() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.dismiss_splash();
 
-    assert!(app.blocks.is_empty());
+    assert!(app.timeline.is_empty());
 
-    app.blocks.push(UiTimelineItem::UserInput("hello".into()));
+    app.timeline.push(UiTimelineItem::UserInput("hello".into()));
     app.dismiss_splash();
 
-    assert_eq!(app.blocks.len(), 1);
-    assert!(matches!(app.blocks[0], UiTimelineItem::UserInput(_)));
+    assert_eq!(app.timeline.len(), 1);
+    assert!(matches!(app.timeline[0], UiTimelineItem::UserInput(_)));
 }
 
 #[test]
 fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
+    app.timeline.clear();
 
-    app.blocks
+    app.timeline
         .push(UiTimelineItem::UserInput("Message 1".into()));
-    app.blocks.push(UiTimelineItem::AssistantText(
+    app.timeline.push(UiTimelineItem::AssistantText(
         "Line 1\nLine 2\nLine 3\nLine 4\nLine 5".into(),
     ));
 
@@ -2220,11 +2226,11 @@ fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
 #[test]
 fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
+    app.timeline.clear();
 
-    app.blocks
+    app.timeline
         .push(UiTimelineItem::UserInput("Message 1".into()));
-    app.blocks.push(UiTimelineItem::AssistantText(
+    app.timeline.push(UiTimelineItem::AssistantText(
         "Line 1\nLine 2\nLine 3\nLine 4\nLine 5".into(),
     ));
     app.start_turn();
@@ -2252,9 +2258,9 @@ fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
 #[test]
 fn resume_follow_output_reenables_bottom_following() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
-    app.blocks.push(UiTimelineItem::UserInput("hello".into()));
-    app.blocks
+    app.timeline.clear();
+    app.timeline.push(UiTimelineItem::UserInput("hello".into()));
+    app.timeline
         .push(UiTimelineItem::AssistantText("world".into()));
     app.follow_mode = FollowOutputMode::Paused;
     app.scroll_offset = 3;
@@ -2268,9 +2274,9 @@ fn resume_follow_output_reenables_bottom_following() {
 #[test]
 fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
-    app.blocks.push(UiTimelineItem::UserInput("hello".into()));
-    app.blocks.push(UiTimelineItem::AssistantText(
+    app.timeline.clear();
+    app.timeline.push(UiTimelineItem::UserInput("hello".into()));
+    app.timeline.push(UiTimelineItem::AssistantText(
         (0..20)
             .map(|idx| format!("line {idx}"))
             .collect::<Vec<_>>()
@@ -2292,10 +2298,11 @@ fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
 #[test]
 fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
-    app.blocks
+    app.timeline.clear();
+    app.timeline
         .push(UiTimelineItem::AssistantText("older history".into()));
-    app.blocks.push(UiTimelineItem::UserInput("prompt".into()));
+    app.timeline
+        .push(UiTimelineItem::UserInput("prompt".into()));
     app.start_turn();
     app.follow_mode = FollowOutputMode::Contextual;
 
@@ -2333,8 +2340,9 @@ fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
 #[test]
 fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
-    app.blocks.push(UiTimelineItem::UserInput("prompt".into()));
+    app.timeline.clear();
+    app.timeline
+        .push(UiTimelineItem::UserInput("prompt".into()));
     app.start_turn();
     app.follow_mode = FollowOutputMode::Paused;
     app.scroll_offset = 3;
@@ -2350,8 +2358,9 @@ fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
 #[test]
 fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
-    app.blocks.push(UiTimelineItem::UserInput("prompt".into()));
+    app.timeline.clear();
+    app.timeline
+        .push(UiTimelineItem::UserInput("prompt".into()));
     app.start_turn();
     app.follow_mode = FollowOutputMode::Contextual;
 
@@ -2389,7 +2398,7 @@ fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
 #[test]
 fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.push(UiTimelineItem::UserInput(
+    app.timeline.push(UiTimelineItem::UserInput(
         "A long prompt that should stay visible while we are waiting for first token output".into(),
     ));
     app.running = true;
@@ -2409,7 +2418,7 @@ fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
 #[test]
 fn handle_tool_call_merges_contiguous_exploration_activity() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
+    app.timeline.clear();
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc3".into()),
@@ -2428,8 +2437,8 @@ fn handle_tool_call_merges_contiguous_exploration_activity() {
         duration_ms: 5,
     });
 
-    assert_eq!(app.blocks.len(), 1);
-    match &app.blocks[0] {
+    assert_eq!(app.timeline.len(), 1);
+    match &app.timeline[0] {
         UiTimelineItem::Activity(activity) => {
             assert_eq!(activity.call.kind, ActivityKind::Exploration);
             // Multi-op explorations render as `Explored` + an op list.
@@ -2456,7 +2465,7 @@ fn handle_tool_call_merges_contiguous_exploration_activity() {
 #[test]
 fn handle_tool_call_merges_contiguous_edit_activity() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
+    app.timeline.clear();
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc5".into()),
@@ -2497,8 +2506,8 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
         duration_ms: 5,
     });
 
-    assert_eq!(app.blocks.len(), 1);
-    match &app.blocks[0] {
+    assert_eq!(app.timeline.len(), 1);
+    match &app.timeline[0] {
         UiTimelineItem::Activity(activity) => {
             assert_eq!(activity.call.kind, ActivityKind::Edit);
             assert_eq!(activity.call.summary, "Edited 2 files (+3 -1)");
@@ -2729,7 +2738,7 @@ fn take_prompt_response_defers_option_prompt_display() {
         }
     );
     assert!(
-        !app.blocks
+        !app.timeline
             .iter()
             .any(|block| matches!(block, UiTimelineItem::UserInput(_)))
     );
@@ -2763,7 +2772,7 @@ fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
     });
 
     assert!(
-        app.blocks
+        app.timeline
             .iter()
             .any(|block| matches!(block, UiTimelineItem::UserInput(text) if text == "1. red"))
     );
@@ -2808,12 +2817,12 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
     });
 
     assert!(
-        !app.blocks
+        !app.timeline
             .iter()
             .any(|block| matches!(block, UiTimelineItem::UserInput(_)))
     );
     assert!(matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::Activity(activity))
             if matches!(
                 activity.result.artifact.as_ref(),
@@ -2829,7 +2838,7 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
 #[test]
 fn live_batch_tool_call_expands_children_without_parent_batch_block() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.clear();
+    app.timeline.clear();
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: None,
@@ -2855,7 +2864,7 @@ fn live_batch_tool_call_expands_children_without_parent_batch_block() {
     });
 
     let activities = app
-        .blocks
+        .timeline
         .iter()
         .filter_map(|block| match block {
             UiTimelineItem::Activity(activity) => Some(activity),

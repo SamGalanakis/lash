@@ -14,6 +14,16 @@ pub(super) struct ProgressBoundaryCommit {
     pub(super) persisted: bool,
 }
 
+struct ProgressBoundarySnapshot<'a> {
+    policy: SessionPolicy,
+    iteration: usize,
+    messages: MessageSequence,
+    events: Arc<Vec<SessionEventRecord>>,
+    execution_state_snapshot: Option<Option<Vec<u8>>>,
+    plugins: Option<&'a PluginSession>,
+    store: Option<&'a (dyn RuntimePersistence + 'a)>,
+}
+
 pub(super) struct TurnCommitPipeline {
     progress: Option<TurnProgress>,
     final_state: Option<PersistedSessionState>,
@@ -126,28 +136,31 @@ impl TurnCommitPipeline {
         let store = session.history_store();
         let execution_state_snapshot = Self::snapshot_dirty_execution_state(session).await;
         let plugins = Arc::clone(session.plugins());
-        self.progress_boundary_with_snapshot(
+        self.progress_boundary_with_snapshot(ProgressBoundarySnapshot {
             policy,
             iteration,
             messages,
             events,
             execution_state_snapshot,
-            Some(plugins.as_ref()),
-            store.as_ref().map(|store| store.as_ref()),
-        )
+            plugins: Some(plugins.as_ref()),
+            store: store.as_ref().map(|store| store.as_ref()),
+        })
         .await
     }
 
     async fn progress_boundary_with_snapshot(
         &mut self,
-        policy: SessionPolicy,
-        iteration: usize,
-        messages: MessageSequence,
-        events: Arc<Vec<SessionEventRecord>>,
-        execution_state_snapshot: Option<Option<Vec<u8>>>,
-        plugins: Option<&PluginSession>,
-        store: Option<&(dyn RuntimePersistence + '_)>,
+        snapshot: ProgressBoundarySnapshot<'_>,
     ) -> ProgressBoundaryCommit {
+        let ProgressBoundarySnapshot {
+            policy,
+            iteration,
+            messages,
+            events,
+            execution_state_snapshot,
+            plugins,
+            store,
+        } = snapshot;
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return ProgressBoundaryCommit {
                 mirrored_events: Vec::new(),
@@ -577,29 +590,29 @@ mod tests {
         let store = RecordingStore::default();
 
         let boundary = pipeline
-            .progress_boundary_with_snapshot(
-                SessionPolicy::default(),
-                1,
-                MessageSequence::from_base(vec![user.clone(), assistant.clone()].into()),
-                Arc::clone(&events),
-                None,
-                None,
-                Some(&store),
-            )
+            .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
+                policy: SessionPolicy::default(),
+                iteration: 1,
+                messages: MessageSequence::from_base(vec![user.clone(), assistant.clone()].into()),
+                events: Arc::clone(&events),
+                execution_state_snapshot: None,
+                plugins: None,
+                store: Some(&store),
+            })
             .await;
 
         assert!(boundary.persisted);
         assert_eq!(boundary.mirrored_events.len(), 1);
         let second = pipeline
-            .progress_boundary_with_snapshot(
-                SessionPolicy::default(),
-                1,
-                MessageSequence::from_base(vec![user, assistant].into()),
+            .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
+                policy: SessionPolicy::default(),
+                iteration: 1,
+                messages: MessageSequence::from_base(vec![user, assistant].into()),
                 events,
-                None,
-                None,
-                Some(&store),
-            )
+                execution_state_snapshot: None,
+                plugins: None,
+                store: Some(&store),
+            })
             .await;
         assert!(second.mirrored_events.is_empty());
     }
@@ -625,15 +638,15 @@ mod tests {
             .await;
 
         let boundary = pipeline
-            .progress_boundary_with_snapshot(
-                SessionPolicy::default(),
-                1,
-                MessageSequence::from_base(vec![user, assistant].into()),
+            .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
+                policy: SessionPolicy::default(),
+                iteration: 1,
+                messages: MessageSequence::from_base(vec![user, assistant].into()),
                 events,
-                None,
-                None,
-                Some(&store),
-            )
+                execution_state_snapshot: None,
+                plugins: None,
+                store: Some(&store),
+            })
             .await;
 
         assert!(!boundary.persisted);

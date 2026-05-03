@@ -171,7 +171,7 @@ pub(crate) fn task_completion_event(
             };
             agent.last_task_state = Some(status.to_string());
             agent.last_iterations = Some(turn.state.iteration);
-            agent.last_tool_calls = Some(turn.state.read_model().tool_calls.len());
+            agent.last_tool_calls = Some(turn.state.read_view().tool_calls().len());
             agent.last_token_usage = Some(json!({
                 "input_tokens": turn.token_usage.input_tokens,
                 "output_tokens": turn.token_usage.output_tokens,

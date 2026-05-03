@@ -51,3 +51,17 @@ impl HostPromptBridge {
             .map_err(|_| crate::PluginError::Session("prompt response channel closed".to_string()))
     }
 }
+
+impl RuntimeSessionManager {
+    pub(in crate::runtime::session_manager) async fn prompt_user(
+        &self,
+        request: crate::PromptRequest,
+    ) -> Result<crate::PromptResponse, crate::PluginError> {
+        let Some(prompt_bridge) = &self.current.prompt_bridge else {
+            return Err(crate::PluginError::Session(
+                "user prompts are unavailable in this session".to_string(),
+            ));
+        };
+        prompt_bridge.prompt(request).await
+    }
+}

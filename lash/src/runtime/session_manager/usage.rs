@@ -44,6 +44,58 @@ impl ChildUsageEventRelay {
     }
 }
 
+impl RuntimeSessionManager {
+    pub(in crate::runtime::session_manager) fn record_token_usage(
+        &self,
+        source: &str,
+        model: &str,
+        usage: &TokenUsage,
+    ) {
+        record_token_usage_shared(&self.usage.token_ledger, source, model, usage);
+    }
+
+    pub(in crate::runtime::session_manager) fn drain_token_ledger(&self) -> Vec<TokenLedgerEntry> {
+        let mut ledger = self.usage.token_ledger.lock().expect("token ledger lock");
+        std::mem::take(&mut *ledger)
+    }
+
+    pub(in crate::runtime::session_manager) fn merge_drained_token_ledger(
+        &self,
+        state: &mut SessionSnapshot,
+    ) -> Vec<TokenLedgerEntry> {
+        let drained = self.drain_token_ledger();
+        for entry in drained.iter().cloned() {
+            merge_ledger_entry(&mut state.token_ledger, entry);
+        }
+        drained
+    }
+
+    pub(in crate::runtime::session_manager) async fn persist_current_usage_ledger(
+        &self,
+    ) -> Result<(), crate::PluginError> {
+        if !self.usage.persist_to_store {
+            return Ok(());
+        }
+        let Some(store) = &self.current.store else {
+            return Ok(());
+        };
+        let mut state = self.current_snapshot_for_store_write().await;
+        let drained = self.drain_token_ledger();
+        if drained.is_empty() {
+            return Ok(());
+        }
+        for entry in drained.iter().cloned() {
+            merge_ledger_entry(&mut state.token_ledger, entry);
+        }
+        let commit = crate::store::PersistedStateCommit::persisted_state(&state, &drained);
+        match crate::store::apply_runtime_commit(store.as_ref(), commit).await {
+            Ok(result) => state.apply_persisted_commit_result(result),
+            Err(err) => tracing::warn!("failed to persist current usage ledger: {err}"),
+        }
+        Ok(())
+    }
+}
+
 fn usage_has_any_tokens(usage: &TokenUsage) -> bool {
     usage.input_tokens != 0
         || usage.output_tokens != 0

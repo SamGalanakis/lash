@@ -418,13 +418,15 @@ fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) ->
                 duration_ms,
             } => append_history_tool_call(
                 &mut rendered,
-                index,
-                tool,
-                args,
-                result,
-                *success,
-                *duration_ms,
-                max_output_chars,
+                HistoryToolCallRender {
+                    index,
+                    tool,
+                    args,
+                    result,
+                    success: *success,
+                    duration_ms: *duration_ms,
+                    max_output_chars,
+                },
             ),
             RlmHistoryItem::RlmStep {
                 id: _,
@@ -439,33 +441,45 @@ fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) ->
                 final_output,
             } => append_repl_step(
                 &mut rendered,
-                index,
-                *iteration,
-                reasoning,
-                code,
-                observations,
-                output,
-                tool_calls,
-                images,
-                error.as_deref(),
-                final_output.as_ref(),
-                max_output_chars,
+                ReplStepRender {
+                    index,
+                    iteration: *iteration,
+                    reasoning,
+                    code,
+                    observations,
+                    output,
+                    tool_calls,
+                    images,
+                    error: error.as_deref(),
+                    final_output: final_output.as_ref(),
+                    max_output_chars,
+                },
             ),
         }
     }
     rendered
 }
 
-fn append_history_tool_call(
-    out: &mut String,
+struct HistoryToolCallRender<'a> {
     index: usize,
-    tool: &str,
-    args: &serde_json::Value,
-    result: &serde_json::Value,
+    tool: &'a str,
+    args: &'a serde_json::Value,
+    result: &'a serde_json::Value,
     success: bool,
     duration_ms: u64,
     max_output_chars: usize,
-) {
+}
+
+fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
+    let HistoryToolCallRender {
+        index,
+        tool,
+        args,
+        result,
+        success,
+        duration_ms,
+        max_output_chars,
+    } = call;
     let args = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
     let result = serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string());
     let (args_preview, args_raw_len) = head_tail_truncate(&args, max_output_chars);
@@ -559,20 +573,34 @@ fn message_role_label(role: &RlmHistoryRole) -> &'static str {
     }
 }
 
-fn append_repl_step(
-    out: &mut String,
+struct ReplStepRender<'a> {
     index: usize,
     iteration: usize,
-    reasoning: &str,
-    code: &str,
-    observations: &[String],
-    output: &str,
-    tool_calls: &[lash::ToolCallRecord],
-    images: &[RlmImageRef],
-    error: Option<&str>,
-    final_output: Option<&serde_json::Value>,
+    reasoning: &'a str,
+    code: &'a str,
+    observations: &'a [String],
+    output: &'a str,
+    tool_calls: &'a [lash::ToolCallRecord],
+    images: &'a [RlmImageRef],
+    error: Option<&'a str>,
+    final_output: Option<&'a serde_json::Value>,
     max_output_chars: usize,
-) {
+}
+
+fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
+    let ReplStepRender {
+        index,
+        iteration,
+        reasoning,
+        code,
+        observations,
+        output,
+        tool_calls,
+        images,
+        error,
+        final_output,
+        max_output_chars,
+    } = step;
     let reasoning = reasoning_without_first_fence(reasoning).trim().to_string();
     let (reasoning_preview, reasoning_raw_len) = head_tail_truncate(&reasoning, max_output_chars);
     let reasoning_ref = truncated_ref(
@@ -794,7 +822,7 @@ mod tests {
         assert!(history.contains("=== history[1] tool_call ==="));
         assert!(history.contains("Tool: lookup"));
         assert!(history.contains("=== history[2] rlm_step ==="));
-        assert!(history.contains("full: history[1].result") == false);
+        assert!(!history.contains("full: history[1].result"));
     }
 
     #[test]

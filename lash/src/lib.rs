@@ -180,7 +180,7 @@ pub use session::{
 };
 pub use session_graph::{
     PersistedSessionConfig, PersistedTurnState, SessionGraph, SessionMessageTreeNode,
-    SessionNodePayload, SessionNodeRecord, SessionReadModel,
+    SessionNodePayload, SessionNodeRecord,
 };
 pub use session_model::SessionPolicy;
 pub use session_model::context::PreparedContext;

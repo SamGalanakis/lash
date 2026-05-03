@@ -243,21 +243,16 @@ impl ToolDiscoveryMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolOutputContract {
+    #[default]
     Static,
     FromInputSchema {
         input_field: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_schema: Option<serde_json::Value>,
     },
-}
-
-impl Default for ToolOutputContract {
-    fn default() -> Self {
-        Self::Static
-    }
 }
 
 impl ToolOutputContract {
@@ -1324,7 +1319,7 @@ mod tests {
             .with_output_contract(ToolOutputContract::Static);
 
         assert_eq!(
-            ToolDefinition::format_tool_docs(&[tool.clone()]),
+            ToolDefinition::format_tool_docs(std::slice::from_ref(&tool)),
             ToolDefinition::format_tool_docs(&[explicit_static])
         );
         assert_eq!(tool.compact_contract().returns, "str");

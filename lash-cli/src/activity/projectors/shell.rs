@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn exec_command_success_uses_plain_command_summary() {
         let mut state = ActivityState::new();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "exec_command",
             json!({
                 "cmd": "date '+%Y-%m-%d %H:%M:%S %Z'",
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn start_command_running_uses_session_id_handle() {
         let mut state = ActivityState::new();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "start_command",
             json!({
                 "cmd": "python3 -q",

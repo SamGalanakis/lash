@@ -297,7 +297,7 @@ impl LashRuntime {
             })?;
         let turn_ctx = crate::TurnTransformContext {
             session_id: self.state.session_id.clone(),
-            state: self.read_snapshot().read_view(),
+            state: self.read_view(),
             prompt_usage: previous_prompt_usage.clone(),
             max_context_tokens: Some(LashRuntime::max_context_tokens(self)),
             host: manager.clone(),
@@ -403,7 +403,7 @@ impl LashRuntime {
         let prepared = {
             let prepare_turn = plugins.prepare_turn(PrepareTurnRequest {
                 session_id: self.state.session_id.clone(),
-                state: self.read_snapshot().read_view(),
+                state: self.read_view(),
                 messages,
                 host: manager.clone(),
             });
@@ -712,8 +712,9 @@ impl LashRuntime {
                     .emit_runtime_event(crate::PluginRuntimeEvent::TurnPersisted(
                         crate::SessionStateChangedContext {
                             session_id: self.state.session_id.clone(),
-                            state: RuntimeReadSnapshot::from_exported(&returned_turn.state)
-                                .read_view(),
+                            state: crate::SessionReadView::from_exported_state(
+                                &returned_turn.state,
+                            ),
                             host,
                         },
                     ))

@@ -100,7 +100,7 @@ fn enter_on_skill_suggestion_stays_text_completion() {
 #[test]
 fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks.push(UiTimelineItem::UserInput(
+    app.timeline.push(UiTimelineItem::UserInput(
         "(I want future migrations to work though!)".into(),
     ));
     app.queue_pending_steer(PreparedTurn::new("next queued thing".into(), Vec::new()));
@@ -111,7 +111,7 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
     assert!(app.pending_steers.is_empty());
     assert!(app.has_queued_messages());
     assert!(matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::UserInput(text)) if text == "(I want future migrations to work though!)"
     ));
 }

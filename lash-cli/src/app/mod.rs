@@ -15,8 +15,7 @@ use lash_tui::{Line, Rect};
 use lash_ui::UiExtensions;
 
 use crate::activity::{
-    ActivityArtifact, ActivityBlock, ActivityKind, ActivityState, ActivityStatus,
-    is_batch_tool_name, merge_edit_activity, merge_exploration_activity,
+    ActivityArtifact, ActivityBlock, ActivityKind, ActivityState, is_batch_tool_name,
 };
 use crate::assistant_text::{
     MarkdownLane, merge_assistant_reasoning_text, normalize_assistant_text,
@@ -33,11 +32,11 @@ use crate::util::{is_cancelled_error, manual_interrupt_message};
 pub(crate) use self::projection::{
     UiTimeline, UiTimelineItem, interrupted_assistant_tail, interrupted_blocks_from_read_view,
     preview_text_lines, smart_truncate_preview_line, strip_ansi_escape_sequences,
-    timeline_items_from_read_view,
+    timeline_from_read_view,
 };
 #[cfg(test)]
 pub(crate) use self::projection::{
-    interrupted_blocks_from_read_model_parts, timeline_items_from_read_model_parts,
+    interrupted_blocks_from_read_view_parts, timeline_items_from_read_view_parts,
 };
 
 fn user_turn_start_indices(blocks: &[UiTimelineItem]) -> Vec<usize> {
@@ -445,7 +444,7 @@ impl UiProjectionState {
             last_response_usage: app.last_response_usage.clone(),
             plugin_mode_indicators: app.plugin_mode_indicators.clone(),
             plugin_panels: app
-                .blocks
+                .timeline
                 .iter()
                 .filter_map(|block| match block {
                     UiTimelineItem::PluginPanel(panel) => Some(panel.clone()),
@@ -499,7 +498,7 @@ struct BlockRenderCacheEntry {
 }
 
 pub struct App {
-    pub blocks: Vec<UiTimelineItem>,
+    pub timeline: UiTimeline,
     pub scroll_offset: usize,
     pub expand_level: u8,
     pub running: bool,
@@ -613,13 +612,13 @@ impl App {
     }
 
     pub fn finish_turn_from_read_view(&mut self, read_view: &lash::SessionReadView) {
-        let current_turn_starts = user_turn_start_indices(&self.blocks);
+        let current_turn_starts = user_turn_start_indices(self.timeline.items());
         let current_turn_start = current_turn_starts.last().copied();
 
         self.stop_turn();
         let ui_state = UiProjectionState::from_app(self);
-        let projected_blocks = timeline_items_from_read_view(read_view, &ui_state);
-        let projected_turn_starts = user_turn_start_indices(&projected_blocks);
+        let projected_timeline = timeline_from_read_view(read_view, &ui_state);
+        let projected_turn_starts = user_turn_start_indices(projected_timeline.items());
         let projected_turn_start = current_turn_start
             .and_then(|_| {
                 current_turn_starts
@@ -631,12 +630,15 @@ impl App {
 
         match (current_turn_start, projected_turn_start) {
             (Some(current_start), Some(projected_start)) => {
-                self.blocks.truncate(current_start);
-                self.blocks
-                    .extend(projected_blocks.into_iter().skip(projected_start));
+                self.timeline.truncate(current_start);
+                self.timeline.extend(
+                    projected_timeline.items()[projected_start..]
+                        .iter()
+                        .cloned(),
+                );
             }
             _ => {
-                self.blocks = projected_blocks;
+                self.timeline = projected_timeline;
             }
         }
         self.invalidate_height_cache();
@@ -792,12 +794,10 @@ impl App {
 
     fn push_activity_block(&mut self, activity: ActivityBlock) {
         let invalidate_from = self.append_invalidation_start();
-        let prior_len = self.blocks.len();
-        let mut timeline = UiTimeline::from_items(std::mem::take(&mut self.blocks));
-        timeline.append_activity(activity);
-        self.blocks = timeline.into_items();
-        if !self.blocks.is_empty() {
-            let changed_idx = if self.blocks.len() == prior_len {
+        let prior_len = self.timeline.len();
+        ActivityState::append_projected_activity_to_timeline(&mut self.timeline, activity);
+        if !self.timeline.is_empty() {
+            let changed_idx = if self.timeline.len() == prior_len {
                 prior_len.saturating_sub(1)
             } else {
                 prior_len
@@ -805,7 +805,7 @@ impl App {
             self.invalidate_height_cache_from(
                 invalidate_from
                     .min(changed_idx)
-                    .min(self.blocks.len().saturating_sub(1)),
+                    .min(self.timeline.len().saturating_sub(1)),
             );
         }
     }
@@ -821,13 +821,13 @@ impl App {
         if display.trim().is_empty() {
             return;
         }
-        let changed_idx = self.blocks.len();
+        let changed_idx = self.timeline.len();
         let invalidate_from = self.append_invalidation_start();
-        self.blocks.push(UiTimelineItem::UserInput(display));
+        self.timeline.push(UiTimelineItem::UserInput(display));
         self.invalidate_height_cache_from(
             invalidate_from
                 .min(changed_idx)
-                .min(self.blocks.len().saturating_sub(1)),
+                .min(self.timeline.len().saturating_sub(1)),
         );
         self.keep_latest_user_block_visible();
     }
@@ -845,7 +845,7 @@ impl App {
             }
         };
         Self {
-            blocks: vec![UiTimelineItem::Splash],
+            timeline: vec![UiTimelineItem::Splash].into(),
             scroll_offset: 0,
             expand_level: 1,
             running: false,
@@ -952,7 +952,7 @@ impl App {
     }
 
     fn invalidate_height_cache_from(&mut self, idx: usize) {
-        if self.blocks.is_empty() {
+        if self.timeline.is_empty() {
             self.height_cache.clear();
             self.height_cache_dirty_from = 0;
             self.block_render_cache.clear();
@@ -966,16 +966,16 @@ impl App {
         }
         self.height_cache_dirty_from = self
             .height_cache_dirty_from
-            .min(idx.min(self.blocks.len().saturating_sub(1)));
+            .min(idx.min(self.timeline.len().saturating_sub(1)));
     }
 
     fn live_reasoning_tail_index(&self) -> Option<usize> {
         self.running
-            .then(|| self.blocks.len().checked_sub(1))
+            .then(|| self.timeline.len().checked_sub(1))
             .flatten()
             .filter(|&idx| {
                 matches!(
-                    self.blocks.get(idx),
+                    self.timeline.get(idx),
                     Some(UiTimelineItem::AssistantReasoning(_))
                 )
             })
@@ -983,7 +983,7 @@ impl App {
 
     fn append_invalidation_start(&self) -> usize {
         self.live_reasoning_tail_index()
-            .unwrap_or(self.blocks.len())
+            .unwrap_or(self.timeline.len())
     }
 
     fn invalidate_live_reasoning_tail(&mut self) {
@@ -995,23 +995,12 @@ impl App {
     /// Remove the empty-state splash once real conversation content is present.
     #[cfg(test)]
     pub fn dismiss_splash(&mut self) {
-        if !matches!(self.blocks.first(), Some(UiTimelineItem::Splash)) {
+        if !matches!(self.timeline.first(), Some(UiTimelineItem::Splash)) {
             return;
         }
-        self.blocks
+        self.timeline
             .retain(|block| !matches!(block, UiTimelineItem::Splash));
         self.invalidate_height_cache();
-    }
-
-    #[cfg(test)]
-    pub fn finish_turn_from_read_model(&mut self, read_model: &lash::SessionReadModel) {
-        let mut state = lash::SessionStateEnvelope::default();
-        state.session_graph.replace_active_read_state(
-            read_model.messages.as_slice(),
-            read_model.tool_calls.as_slice(),
-        );
-        let read_view = state.read_view();
-        self.finish_turn_from_read_view(&read_view);
     }
 
     fn live_assistant_normalized_text(&self) -> Option<String> {
@@ -1092,7 +1081,7 @@ impl App {
             return 0;
         }
 
-        match self.blocks.last() {
+        match self.timeline.last() {
             Some(
                 UiTimelineItem::AssistantReasoning(_)
                 | UiTimelineItem::Splash
@@ -1111,7 +1100,7 @@ impl App {
             return 0;
         }
 
-        match self.blocks.last() {
+        match self.timeline.last() {
             Some(
                 UiTimelineItem::AssistantText(_)
                 | UiTimelineItem::AssistantReasoning(_)
@@ -1143,7 +1132,7 @@ impl App {
         if self.live_tool_output.height() == 0 {
             return None;
         }
-        self.blocks
+        self.timeline
             .iter()
             .enumerate()
             .rev()
@@ -1178,13 +1167,13 @@ impl App {
     }
 
     fn reconcile_trailing_assistant_block(&mut self, text: &str) -> bool {
-        let Some(UiTimelineItem::AssistantText(existing)) = self.blocks.last_mut() else {
+        let Some(UiTimelineItem::AssistantText(existing)) = self.timeline.last_mut() else {
             return false;
         };
         if text.starts_with(existing.as_str()) {
             if *existing != text {
                 *existing = text.to_string();
-                let idx = self.blocks.len().saturating_sub(1);
+                let idx = self.timeline.len().saturating_sub(1);
                 self.invalidate_height_cache_from(idx);
             }
             return true;
@@ -1223,13 +1212,13 @@ impl App {
             return;
         }
 
-        let changed_idx = self.blocks.len();
+        let changed_idx = self.timeline.len();
         let invalidate_from = self.append_invalidation_start();
-        if push_assistant_text_block(&mut self.blocks, &cleaned) {
+        if push_assistant_text_block(&mut self.timeline, &cleaned) {
             self.invalidate_height_cache_from(
                 invalidate_from
                     .min(changed_idx)
-                    .min(self.blocks.len().saturating_sub(1)),
+                    .min(self.timeline.len().saturating_sub(1)),
             );
             self.mark_visible_output();
         }
@@ -1239,25 +1228,25 @@ impl App {
         let Some(cleaned) = self.live_reasoning.take_normalized_text() else {
             return;
         };
-        let prior_len = self.blocks.len();
-        if push_assistant_reasoning_block(&mut self.blocks, &cleaned) {
-            let changed_idx = if self.blocks.len() == prior_len {
+        let prior_len = self.timeline.len();
+        if push_assistant_reasoning_block(&mut self.timeline, &cleaned) {
+            let changed_idx = if self.timeline.len() == prior_len {
                 prior_len.saturating_sub(1)
             } else {
                 prior_len
             };
-            self.invalidate_height_cache_from(changed_idx.min(self.blocks.len() - 1));
+            self.invalidate_height_cache_from(changed_idx.min(self.timeline.len() - 1));
             self.mark_visible_output();
         }
     }
 
     fn merge_into_trailing_reasoning_block(&mut self, text: &str) -> bool {
-        let Some(UiTimelineItem::AssistantReasoning(existing)) = self.blocks.last_mut() else {
+        let Some(UiTimelineItem::AssistantReasoning(existing)) = self.timeline.last_mut() else {
             return false;
         };
         let changed = merge_assistant_reasoning_text(existing, text);
         if changed {
-            let idx = self.blocks.len().saturating_sub(1);
+            let idx = self.timeline.len().saturating_sub(1);
             self.invalidate_height_cache_from(idx);
             self.mark_visible_output();
         }
@@ -1312,7 +1301,7 @@ impl App {
                     }
                 }
                 MessageRole::System => {
-                    self.blocks
+                    self.timeline
                         .push(UiTimelineItem::SystemMessage(message.content.clone()));
                 }
                 _ => continue,
@@ -1345,7 +1334,7 @@ impl App {
         // last block lets a duplicate slip through. Scan everything since
         // the most recent user TurnStart instead.
         let scan_start = self
-            .blocks
+            .timeline
             .iter()
             .rposition(|block| {
                 matches!(
@@ -1354,21 +1343,19 @@ impl App {
                 )
             })
             .unwrap_or(0);
-        if self.blocks[scan_start..].iter().any(
+        if self.timeline[scan_start..].iter().any(
             |block| matches!(block, UiTimelineItem::UserInput(text) if text.trim() == history_text),
         ) {
             return;
         }
-        let changed_idx = self.blocks.len();
+        let changed_idx = self.timeline.len();
         let invalidate_from = self.append_invalidation_start();
-        let mut timeline = UiTimeline::from_items(std::mem::take(&mut self.blocks));
-        timeline.push_user_turn_start();
-        self.blocks = timeline.into_items();
-        self.blocks.push(UiTimelineItem::UserInput(history_text));
+        self.timeline.push_user_turn_start();
+        self.timeline.push(UiTimelineItem::UserInput(history_text));
         self.invalidate_height_cache_from(
             invalidate_from
                 .min(changed_idx)
-                .min(self.blocks.len().saturating_sub(1)),
+                .min(self.timeline.len().saturating_sub(1)),
         );
     }
 
@@ -1419,7 +1406,7 @@ impl App {
             } => {
                 self.finalize_live_markdown();
                 self.clear_live_tool_output();
-                let activities = self.activity_state.blocks_for_tool_call(
+                let activities = self.activity_state.project_tool_call(
                     &name,
                     args,
                     result,
@@ -1443,7 +1430,7 @@ impl App {
                 for activity in activities {
                     self.push_activity_block(activity);
                 }
-                if !matches!(self.blocks.last(), Some(UiTimelineItem::Splash)) {
+                if !matches!(self.timeline.last(), Some(UiTimelineItem::Splash)) {
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
@@ -1455,13 +1442,13 @@ impl App {
                     // so the renderer can hide it by default and reveal
                     // it when the user hits Alt+O (full expansion).
                     self.finalize_live_markdown();
-                    let changed_idx = self.blocks.len();
+                    let changed_idx = self.timeline.len();
                     let invalidate_from = self.append_invalidation_start();
-                    self.blocks.push(UiTimelineItem::LashlangCode(text));
+                    self.timeline.push(UiTimelineItem::LashlangCode(text));
                     self.invalidate_height_cache_from(
                         invalidate_from
                             .min(changed_idx)
-                            .min(self.blocks.len().saturating_sub(1)),
+                            .min(self.timeline.len().saturating_sub(1)),
                     );
                     self.invalidate_live_tool_output_cache();
                     self.scroll_to_bottom();
@@ -1536,13 +1523,12 @@ impl App {
                 if is_cancelled_error(&message, code) {
                     let manual_interrupt_requested = self.manual_interrupt_requested;
                     self.stop_turn();
-                    let mut timeline = UiTimeline::from_items(std::mem::take(&mut self.blocks));
-                    timeline.push_system_message_if_new(if manual_interrupt_requested {
-                        manual_interrupt_message().to_string()
-                    } else {
-                        "Cancelled.".to_string()
-                    });
-                    self.blocks = timeline.into_items();
+                    self.timeline
+                        .push_system_message_if_new(if manual_interrupt_requested {
+                            manual_interrupt_message().to_string()
+                        } else {
+                            "Cancelled.".to_string()
+                        });
                 } else {
                     self.manual_interrupt_requested = false;
                     self.set_transient_status(
@@ -1550,13 +1536,13 @@ impl App {
                         Some(message.chars().take(96).collect()),
                         std::time::Duration::from_secs(8),
                     );
-                    let changed_idx = self.blocks.len();
+                    let changed_idx = self.timeline.len();
                     let invalidate_from = self.append_invalidation_start();
-                    self.blocks.push(UiTimelineItem::Error(message));
+                    self.timeline.push(UiTimelineItem::Error(message));
                     self.invalidate_height_cache_from(
                         invalidate_from
                             .min(changed_idx)
-                            .min(self.blocks.len().saturating_sub(1)),
+                            .min(self.timeline.len().saturating_sub(1)),
                     );
                 }
                 self.mark_visible_output();
@@ -1583,7 +1569,7 @@ impl App {
                 }
                 let renders_visible_output = plugin_surface_event_renders_visible_output(&event);
                 let mutation = plugin_surface::apply_surface_event(
-                    &mut self.blocks,
+                    &mut self.timeline,
                     &mut self.plugin_mode_indicators,
                     &self.plan_dock,
                     &plugin_id,

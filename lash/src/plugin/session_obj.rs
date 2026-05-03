@@ -717,7 +717,9 @@ impl PluginSession {
                     messages: plugin_messages,
                 } => {
                     let messages = updated_messages.get_or_insert_with(|| {
-                        crate::MessageSequence::from_base(turn.state.read_model().messages)
+                        crate::MessageSequence::from_base(
+                            turn.state.read_view().messages().to_vec().into(),
+                        )
                     });
                     append_plugin_messages(messages, &plugin_messages);
                 }
@@ -761,13 +763,13 @@ impl PluginSession {
             }
         }
         if let Some(messages) = updated_messages.as_ref() {
-            let tool_calls = turn.state.read_model().tool_calls.as_ref().clone();
+            let tool_calls = turn.state.read_view().tool_calls().to_vec();
             turn.state
                 .replace_active_read_state(messages.as_slice(), &tool_calls);
         }
 
         if self.has_runtime_event_hooks() {
-            let mut history_tool_calls = turn.state.read_model().tool_calls.as_ref().clone();
+            let mut history_tool_calls = turn.state.read_view().tool_calls().to_vec();
             let mut history_changed = false;
             for tool_call in &mut history_tool_calls {
                 let projected = self

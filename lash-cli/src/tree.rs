@@ -1,12 +1,12 @@
 use lash::{DynamicStateSnapshot, LashRuntime, Message, MessageRole, SessionMessageTreeNode};
 
-use crate::app::{App, timeline_items_from_read_view};
+use crate::app::{App, timeline_from_read_view};
 use crate::overlay::TreeSelection;
 use crate::persistence::persist_committed_runtime_state;
 use crate::session_log::SessionLogger;
 
 pub fn current_message_tree(runtime: &LashRuntime) -> Vec<SessionMessageTreeNode> {
-    runtime.export_state().session_graph.message_tree()
+    runtime.read_view().message_tree()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -40,7 +40,11 @@ pub async fn switch_to_tree_selection(
     // branch is a no-op. Skip the full `branch_to_node` rebuild —
     // `from_state` walks the plugin host and re-projects the
     // transcript, which is expensive to pay for a visible no-op.
-    let current_leaf = runtime.export_state().session_graph.leaf_node_id.clone();
+    let current_leaf = runtime
+        .read_view()
+        .materialized_session_graph()
+        .leaf_node_id
+        .clone();
     if current_leaf == target_leaf && seeded_input.is_empty() {
         return Ok(());
     }
@@ -53,7 +57,7 @@ pub async fn switch_to_tree_selection(
     *history = read_view.messages().to_vec();
 
     app.stop_turn();
-    app.blocks = timeline_items_from_read_view(&read_view, &app.ui_projection_state());
+    app.timeline = timeline_from_read_view(&read_view, &app.ui_projection_state());
     app.token_usage = state.token_usage.clone();
     app.last_prompt_usage = state.last_prompt_usage.clone();
     // Branching to a different leaf means the handle maps from the

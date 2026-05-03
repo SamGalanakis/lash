@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::session_graph::SessionReadModel;
 use crate::session_graph::tool_call_record_active_read_key;
 use crate::session_model::SessionEventRecord;
 use crate::store::SessionGraphCommit;
 use crate::{
-    BaseRenderCache, Message, MessageSequence, SessionGraph, SessionNodeRecord, SessionReadModel,
-    ToolCallRecord,
+    BaseRenderCache, Message, MessageSequence, SessionGraph, SessionNodeRecord, ToolCallRecord,
 };
 
 #[derive(Debug)]

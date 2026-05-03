@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
-use lash::{ChronologicalEntry, SessionGraph, SessionMeta, Store};
+use lash::{ChronologicalEntry, SessionGraph, SessionMeta, SessionStateEnvelope, Store};
 
 pub mod html;
 pub mod json;
@@ -44,8 +44,11 @@ pub fn load_session_from_path(store_path: &Path) -> Result<LoadedSession> {
         .with_context(|| format!("opening session store at {}", store_path.display()))?;
     let meta = store.load_session_meta();
     let graph = load_graph(&store);
-    let read_model = graph.read_model();
-    let chronological = read_model.chronological_projection().into_entries();
+    let state = SessionStateEnvelope {
+        session_graph: graph,
+        ..SessionStateEnvelope::default()
+    };
+    let chronological = state.read_view().chronological_projection().into_entries();
     Ok(LoadedSession {
         meta,
         chronological,

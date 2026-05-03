@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn update_plan_success_has_no_detail_lines_so_dock_is_the_only_render() {
         let mut state = ActivityState::new();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "update_plan",
             json!({
                 "explanation": "Cooking-show vibes.",
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn update_plan_failure_surfaces_error_before_submitted_plan() {
         let mut state = ActivityState::new();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "update_plan",
             json!({
                 "plan": [

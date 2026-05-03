@@ -5,7 +5,6 @@ mod environment;
 mod host;
 mod io;
 mod lifecycle;
-mod read_snapshot;
 mod session_api;
 mod session_manager;
 mod session_ops;
@@ -50,7 +49,6 @@ use crate::{
 use crate::{Effect, TurnMachine};
 
 use host::*;
-use read_snapshot::*;
 use session_manager::*;
 use turn_commit_pipeline::*;
 use turn_driver::*;

@@ -34,7 +34,7 @@ pub struct SessionStateEnvelope {
 }
 
 impl SessionStateEnvelope {
-    pub fn read_model(&self) -> crate::SessionReadModel {
+    pub(crate) fn read_model(&self) -> crate::session_graph::SessionReadModel {
         self.session_graph.read_model()
     }
 
@@ -61,7 +61,7 @@ impl SessionStateEnvelope {
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
-        super::RuntimeReadSnapshot::from_exported(self).read_view()
+        crate::SessionReadView::from_exported_state(self)
     }
 }
 
@@ -198,7 +198,7 @@ impl PersistedSessionState {
         super::usage::SessionUsageReport::from_entries(&self.token_ledger)
     }
 
-    pub fn read_model(&self) -> crate::SessionReadModel {
+    pub(crate) fn read_model(&self) -> crate::session_graph::SessionReadModel {
         self.session_graph.read_model()
     }
 
@@ -232,7 +232,7 @@ impl PersistedSessionState {
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
-        super::RuntimeReadSnapshot::from_persisted(self).read_view()
+        crate::SessionReadView::from_persisted_state(self)
     }
 
     pub fn session_graph(&self) -> &crate::SessionGraph {

@@ -265,7 +265,7 @@ pub(super) async fn activate_foreground_session_handoff(
     *current_execution_mode = state.policy.execution_mode.clone();
     *current_model_variant = state.policy.model_variant.clone();
     app.set_model_variant(current_model_variant.clone());
-    *history = state.read_model().messages.as_ref().clone();
+    *history = state.read_view().messages().to_vec();
     *turn_counter = state.iteration;
 
     match rt.session_manager() {
@@ -863,7 +863,7 @@ pub(super) async fn handle_key_event(
                             );
                         }
                         Err(err) => {
-                            app.blocks.push(UiTimelineItem::SystemMessage(err));
+                            app.timeline.push(UiTimelineItem::SystemMessage(err));
                             app.invalidate_height_cache();
                             app.scroll_to_bottom();
                         }
@@ -1401,20 +1401,20 @@ pub(super) async fn handle_key_event(
                             } else {
                                 None
                             };
-                            app.blocks.push(UiTimelineItem::ShellOutput {
+                            app.timeline.push(UiTimelineItem::ShellOutput {
                                 command: cmd_str.to_string(),
                                 output: stdout.trim_end().to_string(),
                                 error: error.map(|e| e.trim_end().to_string()),
                             });
                         }
                         Ok(Err(e)) => {
-                            app.blocks.push(UiTimelineItem::Error(format!(
+                            app.timeline.push(UiTimelineItem::Error(format!(
                                 "Failed to run '{}': {}",
                                 cmd_str, e
                             )));
                         }
                         Err(_) => {
-                            app.blocks.push(UiTimelineItem::Error(format!(
+                            app.timeline.push(UiTimelineItem::Error(format!(
                                 "Command '{}' timed out after 30s. Try a narrower command or run it in smaller steps.",
                                 cmd_str
                             )));

@@ -355,7 +355,7 @@ impl SessionPlugin for ObservationalMemoryPlugin {
             let config = config.clone();
             Box::pin(async move {
                 if let PluginRuntimeEvent::TurnPersisted(ctx) = event {
-                    let graph = ctx.state.session_graph().clone();
+                    let graph = ctx.state.to_owned_state().session_graph;
                     if !should_run_async_maintenance(&config, &graph) {
                         return Ok(());
                     }
@@ -402,7 +402,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         ctx: &TurnTransformContext,
         input: PreparedContext,
     ) -> Result<PreparedContext, HistoryError> {
-        let mut graph = ctx.state.session_graph().clone();
+        let mut graph = ctx.state.to_owned_state().session_graph;
         let om_state = build_graph_state(&graph);
         let pending_message_tokens = approx_message_nodes_tokens(&active_unobserved_message_nodes(
             &graph,

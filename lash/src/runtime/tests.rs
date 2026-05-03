@@ -30,17 +30,17 @@ fn stream_fallback_merges_adjacent_display_reasoning_chunks() {
 }
 
 trait ReadModelState {
-    fn read_model(&self) -> crate::SessionReadModel;
+    fn read_model(&self) -> crate::session_graph::SessionReadModel;
 }
 
 impl ReadModelState for SessionStateEnvelope {
-    fn read_model(&self) -> crate::SessionReadModel {
+    fn read_model(&self) -> crate::session_graph::SessionReadModel {
         self.read_model()
     }
 }
 
 impl ReadModelState for PersistedSessionState {
-    fn read_model(&self) -> crate::SessionReadModel {
+    fn read_model(&self) -> crate::session_graph::SessionReadModel {
         self.read_model()
     }
 }

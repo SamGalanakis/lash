@@ -559,8 +559,8 @@ pub(crate) fn find_visible_block(app: &App, scroll_offset: usize) -> (usize, usi
     }
     let cache = app.height_cache_snapshot();
     let idx = cache.partition_point(|&cumulative| cumulative <= scroll_offset);
-    if idx >= app.blocks.len() {
-        return (app.blocks.len(), 0);
+    if idx >= app.timeline.len() {
+        return (app.timeline.len(), 0);
     }
     let block_start = if idx == 0 { 0 } else { cache[idx - 1] };
     (idx, scroll_offset - block_start)
@@ -572,7 +572,7 @@ fn history_content_lines_snapshot(
     viewport_height: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for idx in 0..app.blocks.len() {
+    for idx in 0..app.timeline.len() {
         lines.extend(render_block_lines(
             app,
             idx,
@@ -1003,7 +1003,7 @@ fn render_block(
     viewport_height: usize,
 ) -> Vec<Line<'static>> {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks = blocks.to_vec();
+    app.timeline = blocks.to_vec().into();
     app.expand_level = expand_level;
     render_block_lines(&app, idx, viewport_width, viewport_height)
 }
@@ -1015,7 +1015,7 @@ fn render_block_into(
     viewport_width: usize,
     viewport_height: usize,
 ) {
-    let blocks = &app.blocks;
+    let blocks = &app.timeline;
     let expand_level = app.expand_level;
     match &blocks[idx] {
         UiTimelineItem::TurnStart(turn) => {
