@@ -97,18 +97,7 @@ fn main() {
         .as_deref()
         .map(parse_mode)
         .unwrap_or(Mode::Execute);
-    let scenario = args
-        .next()
-        .as_deref()
-        .map(|value| {
-            Scenario::parse(value).unwrap_or_else(|| {
-                panic!(
-                    "unknown scenario `{value}`; expected {}",
-                    Scenario::expected_values()
-                )
-            })
-        })
-        .unwrap_or(Scenario::Baseline);
+    let scenario_arg = args.next();
     let iterations = args
         .next()
         .and_then(|value| value.parse::<usize>().ok())
@@ -120,6 +109,16 @@ fn main() {
             }
         });
 
+    let scenarios = parse_scenarios(scenario_arg.as_deref());
+    for (index, scenario) in scenarios.iter().copied().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        run_perf(mode, scenario, iterations);
+    }
+}
+
+fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
     let source = benchmark_program(scenario);
     let host = BenchHost;
     let mut scratch = ExecutionScratch::new();
@@ -246,7 +245,7 @@ fn main() {
 
     println!("lashlang perf");
     println!("mode: {mode:?}");
-    println!("scenario: {scenario:?}");
+    println!("scenario: {scenario}");
     println!("iterations: {iterations}");
     println!("program_bytes: {}", source.len());
     let cache_stats = cache.stats();
@@ -273,6 +272,19 @@ fn main() {
         allocs.allocated_bytes as f64 / iterations as f64
     );
     println!("peak_live_bytes: {}", allocs.peak_live_bytes);
+}
+
+fn parse_scenarios(value: Option<&str>) -> Vec<Scenario> {
+    match value {
+        Some("all") => Scenario::ALL.to_vec(),
+        Some(value) => vec![Scenario::parse(value).unwrap_or_else(|| {
+            panic!(
+                "unknown scenario `{value}`; expected {}",
+                Scenario::expected_values()
+            )
+        })],
+        None => vec![Scenario::Baseline],
+    }
 }
 
 fn parse_mode(value: &str) -> Mode {

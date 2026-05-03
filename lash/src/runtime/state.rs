@@ -61,7 +61,7 @@ impl SessionStateEnvelope {
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
-        crate::SessionReadView::from_state(self)
+        super::RuntimeReadSnapshot::from_exported(self).read_view()
     }
 }
 
@@ -232,7 +232,7 @@ impl PersistedSessionState {
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
-        crate::SessionReadView::from_persisted_state(self)
+        super::RuntimeReadSnapshot::from_persisted(self).read_view()
     }
 
     pub fn session_graph(&self) -> &crate::SessionGraph {
@@ -272,6 +272,12 @@ impl PersistedSessionState {
         self.execution_state_ref = result.manifest.execution_state_ref;
         self.persisted_graph_node_count = result.persisted_graph_node_count;
         self.graph_replace_required = false;
+        self.dynamic_state_snapshot = None;
+        self.plugin_snapshot = None;
+        self.execution_state_snapshot = None;
+    }
+
+    pub fn discard_runtime_snapshots(&mut self) {
         self.dynamic_state_snapshot = None;
         self.plugin_snapshot = None;
         self.execution_state_snapshot = None;
@@ -400,55 +406,12 @@ pub(super) fn apply_session_head(
     apply_persisted_session_config(&mut state.policy, &head.config);
 }
 
-pub(super) async fn persist_runtime_state(
-    store: &(dyn crate::store::RuntimePersistence + '_),
-    state: &mut PersistedSessionState,
-) {
-    match commit_runtime_state(store, state, &[]).await {
-        Ok(()) => {}
-        Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
-    }
-}
-
-pub(super) async fn commit_runtime_state(
-    store: &(dyn crate::store::RuntimePersistence + '_),
-    state: &mut PersistedSessionState,
-    usage_deltas: &[crate::TokenLedgerEntry],
-) -> Result<(), crate::store::StoreError> {
-    let commit = crate::store::PersistedStateCommit::persisted_state(state, usage_deltas);
-    let result = crate::store::apply_runtime_commit(store, commit).await?;
-    state.apply_persisted_commit_result(result);
-    Ok(())
-}
-
-pub(super) async fn commit_runtime_state_with_graph_commit(
-    store: &(dyn crate::store::RuntimePersistence + '_),
-    state: &mut PersistedSessionState,
-    graph: crate::store::SessionGraphCommit,
-    usage_deltas: &[crate::TokenLedgerEntry],
-) -> Result<(), crate::store::StoreError> {
-    let commit = crate::store::PersistedStateCommit::persisted_state_with_graph_commit(
-        state,
-        graph,
-        usage_deltas,
-    );
-    let result = crate::store::apply_runtime_commit(store, commit).await?;
-    state.apply_persisted_commit_result(result);
-    Ok(())
-}
-
 pub(super) async fn load_session_checkpoint(
     store: &(dyn crate::store::RuntimePersistence + '_),
     checkpoint_ref: Option<&crate::store::BlobRef>,
 ) -> Option<crate::store::HydratedSessionCheckpoint> {
     let checkpoint_ref = checkpoint_ref?;
     crate::store::get_checkpoint(store, checkpoint_ref).await
-}
-
-pub(super) fn clear_persisted_runtime_caches(state: &mut PersistedSessionState) {
-    state.dynamic_state_snapshot = None;
-    state.plugin_snapshot = None;
-    state.execution_state_snapshot = None;
 }
 
 pub(super) fn append_session_nodes_to_state(

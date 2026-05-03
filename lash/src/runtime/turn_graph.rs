@@ -63,11 +63,8 @@ impl TurnGraphOverlay {
             active_events: Arc::clone(&self.active_events),
             messages: self.active_messages.shared(),
             tool_calls: Arc::clone(&self.read_tool_calls),
-            rlm_globals: Arc::new(lash_rlm_types::project_globals(
-                self.active_events.iter().filter_map(|event| match event {
-                    SessionEventRecord::Mode(event) => event.rlm_event(),
-                    _ => None,
-                }),
+            rlm_globals: Arc::new(crate::chronological::project_rlm_globals_from_events(
+                self.active_events.iter(),
             )),
             prompt_render_cache: Arc::new(BaseRenderCache::new()),
         }
@@ -488,6 +485,7 @@ mod tests {
             output: String::new(),
             observations: Vec::new(),
             tool_calls: vec![tool_call.clone()],
+            images: Vec::new(),
             error: None,
             final_output: Some(serde_json::json!("grep worked")),
             output_raw_len: 0,

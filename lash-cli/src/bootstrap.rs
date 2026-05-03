@@ -581,6 +581,9 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     };
     let host_core = RuntimeCoreConfig::default()
         .with_prompt_template(prompt_template)
+        .with_attachment_store(Arc::new(FileAttachmentStore::new(
+            crate::paths::attachments_dir(),
+        )))
         .with_trace_jsonl_path(trace_path)
         .with_trace_level(trace_level)
         .with_credential_store_path(Some(crate::paths::config_file()));

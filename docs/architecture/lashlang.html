@@ -64,7 +64,8 @@ flowchart LR
             <div class="panel">
               <h3>Values And State</h3>
               <ul>
-                <li>Values: <code>null</code>, booleans, numbers, strings, lists, and records.</li>
+                <li>Values: <code>null</code>, booleans, numbers, strings, lists, records, and immutable <code>Image</code> handles.</li>
+                <li>Images expose read-only metadata fields: <code>.id</code>, <code>.name</code>, <code>.mime</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>. <code>print(image)</code> attaches the actual image to the next model call; <code>submit(image)</code> serializes only the descriptor.</li>
                 <li>Literals: <code>[a, b]</code> and <code>{ a: 1, b: 2 }</code>.</li>
                 <li>Assignment: <code>name = expr</code>, plus variable-rooted path updates like <code>record.field = value</code>, <code>record[key] = value</code>, <code>list[i] = value</code>, and <code>state.groups[g].count = count + 1</code>.</li>
                 <li>Record assignment inserts or replaces fields. Dynamic record indexing reads string-coerced keys and returns <code>null</code> when absent, so <code>counts[g] = counts[g] + 1</code> is a compact histogram pattern.</li>
@@ -162,7 +163,7 @@ print { cargo_ok: fanout.cargo.ok, fmt_ok: fanout.fmt.ok }</code></pre>
           <div class="table compact">
             <table>
               <tbody>
-                <tr><td><code>len(x)</code>, <code>empty(x)</code></td><td>Length and emptiness checks for strings, lists, records, and null.</td></tr>
+                <tr><td><code>len(x)</code>, <code>empty(x)</code></td><td>Length and emptiness checks for strings, lists, records, and null. Use <code>image.size</code> for images.</td></tr>
                 <tr><td><code>slice(s, start, end)</code></td><td>Substring or sublist.</td></tr>
                 <tr><td><code>range(end)</code>, <code>range(start, end)</code></td><td>Integer list, end-exclusive.</td></tr>
                 <tr><td><code>push(list, item)</code></td><td>Returns a new list with one item appended.</td></tr>

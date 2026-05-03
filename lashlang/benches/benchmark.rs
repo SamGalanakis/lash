@@ -17,15 +17,12 @@ fn lashlang_benchmarks(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(60);
 
-    benchmark_full_block_modes(&mut group, &host, Scenario::Baseline);
-    for scenario in [
-        Scenario::AsyncAwait,
-        Scenario::DirectUnwrap,
-        Scenario::GeneralParallel,
-        Scenario::LoopControl,
-        Scenario::IndexedAssignment,
-    ] {
-        benchmark_execute_only(&mut group, &host, scenario);
+    for scenario in Scenario::ALL {
+        if matches!(scenario, Scenario::Baseline | Scenario::LanguageSurface) {
+            benchmark_full_block_modes(&mut group, &host, *scenario);
+        } else {
+            benchmark_execute_only(&mut group, &host, *scenario);
+        }
     }
 
     group.finish();

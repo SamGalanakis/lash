@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
-use lash::session_model::Message;
-use lash::{SessionGraph, SessionMeta, Store, ToolCallRecord};
+use lash::{ChronologicalEntry, SessionGraph, SessionMeta, Store};
 
 pub mod html;
 pub mod json;
@@ -36,8 +35,7 @@ impl ExportFormat {
 /// A loaded session ready to be rendered.
 pub struct LoadedSession {
     pub meta: Option<SessionMeta>,
-    pub messages: Vec<Message>,
-    pub tool_calls: Vec<ToolCallRecord>,
+    pub chronological: Vec<ChronologicalEntry>,
 }
 
 /// Load a session by its SQLite store path (the `.db` file).
@@ -47,12 +45,10 @@ pub fn load_session_from_path(store_path: &Path) -> Result<LoadedSession> {
     let meta = store.load_session_meta();
     let graph = load_graph(&store);
     let read_model = graph.read_model();
-    let messages = read_model.messages.as_ref().clone();
-    let tool_calls = read_model.tool_calls.as_ref().clone();
+    let chronological = read_model.chronological_projection().into_entries();
     Ok(LoadedSession {
         meta,
-        messages,
-        tool_calls,
+        chronological,
     })
 }
 

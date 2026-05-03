@@ -198,15 +198,7 @@ pub fn default_registry(
     registry.add(Arc::new(TierCapability::new(
         "explore",
         model_for("explore"),
-        [
-            "apply_patch".to_string(),
-            "spawn_agent".to_string(),
-            "send_message".to_string(),
-            "followup_task".to_string(),
-            "wait_agent".to_string(),
-            "list_agents".to_string(),
-            "close_agent".to_string(),
-        ],
+        ["apply_patch".to_string(), "spawn_agent".to_string()],
         TierExecutionMode::Explicit(explore_tier_execution_mode),
     )));
     registry.add(Arc::new(TierCapability::new(

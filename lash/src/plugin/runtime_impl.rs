@@ -414,7 +414,7 @@ impl PluginHost {
         session_id: &str,
         name: &str,
         args: serde_json::Value,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn RuntimeSessionHost>,
     ) -> Result<ToolResult, ExternalInvokeError> {
         let session = self.session(session_id)?;
         session

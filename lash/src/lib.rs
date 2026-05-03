@@ -1,3 +1,5 @@
+pub mod attachments;
+pub mod chronological;
 pub mod direct;
 pub mod dynamic;
 pub mod embedded;
@@ -34,6 +36,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 
 // Re-exports
+pub use attachments::{
+    AttachmentStore, AttachmentStoreError, FileAttachmentStore, InMemoryAttachmentStore,
+    StoredAttachment,
+};
+pub use chronological::{
+    ChronologicalEntry, ChronologicalPayload, ChronologicalProjection, chronological_tool_call_key,
+};
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
@@ -44,21 +53,23 @@ pub use dynamic::{
 };
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
+pub use lash_rlm_types::RlmTrajectoryEntry;
 pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 pub use lash_sansio::{
-    BaseRenderCache, CheckpointKind, CompactToolContract, EffectId, ErrorEnvelope, ExecResponse,
-    ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole, MessageSequence,
-    ModeBuildInput, Part, PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt,
-    PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptPanel, PromptRequest,
-    PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, PruneState, RenderedPrompt, Response, SessionEvent,
-    TextProjectionMetadata, TokenUsage, ToolActivation, ToolAvailability, ToolAvailabilityConfig,
-    ToolCallRecord, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolImage,
-    ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride,
-    UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
-    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
-    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, reasoning_part, shared_parts, turn_limit_exhausted_message,
+    AttachmentId, AttachmentMeta, AttachmentRef, BaseRenderCache, CheckpointKind,
+    CompactToolContract, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode, ImageMediaType,
+    LlmCallError, MediaType, Message, MessageOrigin, MessageRole, MessageSequence, ModeBuildInput,
+    Part, PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt, PromptBuildInput,
+    PromptBuiltin, PromptContext, PromptContribution, PromptPanel, PromptRequest, PromptResponse,
+    PromptSelectionMode, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
+    PruneState, RenderedPrompt, Response, SessionEvent, TextProjectionMetadata, TokenUsage,
+    ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition,
+    ToolDiscoveryMetadata, ToolExecutionMode, ToolImage, ToolOutputContract, ToolResult,
+    ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, UserInputProvenance,
+    UserInputTransform, append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
+    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
+    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part, shared_parts,
+    turn_limit_exhausted_message,
 };
 pub use standard_context_approach::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
@@ -123,24 +134,28 @@ pub use monitor::{
 pub use plugin::{
     AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
-    BuiltinToolResultProjectionPluginFactory, CheckpointHookContext, CommandDef, CommandHandler,
-    CommandInvocation, CommandOutcome, CommandRegistrations, DirectCompletion,
-    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, HistoryError,
-    HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState, ModeExtras,
-    MonitorRegistrations, PersistentRuntimeServices, PluginDirective, PluginError, PluginFactory,
-    PluginHost, PluginOwned, PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook,
-    PluginSession, PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact,
-    PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
-    PromptRequestHookContext, RewriteContext, RewriteTrigger, RuntimeServices, SessionAppendNode,
-    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
-    SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
-    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionToolAccess,
-    SessionTurnHandle, SnapshotReader, SnapshotWriter, StandardCreateExtras,
-    SubagentSessionAuthority, ToolDiscoveryContext, ToolDiscoveryContribution,
-    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
-    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
-    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
-    TurnResultHookContext, TurnResultSummary, TurnTransformContext,
+    BuiltinToolResultProjectionPluginFactory, CheckpointHookContext, CheckpointHookHost,
+    CommandDef, CommandHandler, CommandHost, CommandInvocation, CommandOutcome,
+    CommandRegistrations, DirectCompletion, DirectCompletionHost, DynamicToolHost,
+    ExternalInvokeContext, ExternalInvokeError, ExternalInvokeHost, ExternalOpDef, ExternalOpKind,
+    HistoryError, HistoryHost, HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter,
+    HistoryState, ModeExtras, MonitorHost, MonitorRegistrations, PersistentRuntimeServices,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar,
+    PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession, PluginSessionContext,
+    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
+    PluginSpec, PluginSpecFactory, PromptHookContext, PromptHookHost, PromptHost,
+    PromptRequestHookContext, PromptRequestHookHost, RewriteContext, RewriteTrigger,
+    RuntimeServices, RuntimeSessionHost, SessionAppendNode, SessionConfigChangedContext,
+    SessionContextSurface, SessionCreateRequest, SessionGraphHost, SessionHandle,
+    SessionLifecycleHost, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
+    SessionSnapshot, SessionSnapshotHost, SessionStartPoint, SessionStateChangedContext,
+    SessionToolAccess, SessionTurnHandle, SnapshotReader, SnapshotWriter, StandardCreateExtras,
+    SubagentSessionAuthority, TaskHost, ToolCatalogHost, ToolDiscoveryContext,
+    ToolDiscoveryContribution, ToolDiscoveryContributor, ToolDiscoveryToolContribution,
+    ToolHookHost, ToolResultProjectionContext, ToolResultProjectionHook, ToolResultProjectionMode,
+    ToolResultProjectionPluginConfig, ToolResultProjector, ToolSurfaceContribution, TraceHost,
+    TurnContextTransform, TurnHookContext, TurnHookHost, TurnHost, TurnResultHookContext,
+    TurnResultHookHost, TurnResultSummary, TurnTransformContext,
     plugin_surface_event_renders_visible_output,
 };
 pub use provider::{

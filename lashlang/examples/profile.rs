@@ -12,42 +12,64 @@ fn main() {
     let first = args.next();
     let second = args.next();
 
-    let (scenario, iterations) = match (first.as_deref(), second.as_deref()) {
+    let (scenarios, iterations) = match (first.as_deref(), second.as_deref()) {
+        (Some("all"), maybe_iterations) => (
+            Scenario::ALL.to_vec(),
+            maybe_iterations
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(10_000),
+        ),
         (Some(value), maybe_iterations) if Scenario::parse(value).is_some() => (
-            Scenario::parse(value).expect("scenario was checked"),
+            vec![Scenario::parse(value).expect("scenario was checked")],
             maybe_iterations
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(10_000),
         ),
         (Some(iterations), None) => (
-            Scenario::Baseline,
+            vec![Scenario::Baseline],
             iterations.parse::<usize>().ok().unwrap_or(10_000),
         ),
-        _ => (Scenario::Baseline, 10_000),
+        _ => (vec![Scenario::Baseline], 10_000),
     };
 
-    let source = benchmark_program(scenario);
     let host = BenchHost;
-    let program = parse(source).expect("benchmark program should parse");
-    let compiled = compile_program(&program);
     let mut profile = ProfileReport::default();
     let mut scratch = ExecutionScratch::new();
+    let mut program_bytes = 0usize;
 
-    for _ in 0..iterations {
-        let mut state = seeded_state();
-        let (outcome, run_profile) =
-            profile_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
-                .expect("profiled execution");
-        profile.merge(&run_profile);
-        let ExecutionOutcome::Finished(_) = outcome else {
-            panic!("benchmark program must finish");
-        };
+    for scenario in &scenarios {
+        let source = benchmark_program(*scenario);
+        program_bytes += source.len();
+        let program = parse(source).expect("benchmark program should parse");
+        let compiled = compile_program(&program);
+
+        for _ in 0..iterations {
+            let mut state = seeded_state();
+            let (outcome, run_profile) =
+                profile_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
+                    .expect("profiled execution");
+            profile.merge(&run_profile);
+            let ExecutionOutcome::Finished(_) = outcome else {
+                panic!("benchmark program must finish");
+            };
+        }
     }
 
     println!("lashlang profile");
-    println!("scenario: {scenario}");
+    if scenarios.len() == 1 {
+        println!("scenario: {}", scenarios[0]);
+    } else {
+        println!(
+            "scenario: all ({})",
+            scenarios
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     println!("iterations: {iterations}");
-    println!("program_bytes: {}", source.len());
+    println!("program_bytes: {program_bytes}");
     println!();
     println!("instruction_hotspots:");
     for stat in profile.instruction_stats().iter().take(12) {

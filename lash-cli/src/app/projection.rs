@@ -86,11 +86,8 @@ pub(crate) fn timeline_from_read_model(
     read_model: &lash::SessionReadModel,
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
-    let mut timeline = timeline_from_events(
-        read_model.active_events.as_slice(),
-        read_model.messages.as_slice(),
-        read_model.tool_calls.as_slice(),
-    );
+    let projection = read_model.chronological_projection();
+    let mut timeline = timeline_from_chronological(&projection);
     append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
         ui_state
@@ -158,66 +155,51 @@ fn read_model_from_parts(
         active_events: std::sync::Arc::new(events.to_vec()),
         messages: std::sync::Arc::new(messages.to_vec()),
         tool_calls: std::sync::Arc::new(tool_calls.to_vec()),
-        rlm_globals: std::sync::Arc::new(lash_rlm_types::project_globals(
-            events.iter().filter_map(|event| match event {
-                lash::SessionEventRecord::Mode(event) => event.rlm_event(),
-                _ => None,
-            }),
-        )),
+        rlm_globals: std::sync::Arc::new(serde_json::Map::new()),
         prompt_render_cache: std::sync::Arc::new(lash::BaseRenderCache::new()),
     }
 }
 
-fn timeline_from_events(
-    events: &[lash::SessionEventRecord],
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-) -> UiTimeline {
-    if events.is_empty() {
-        return timeline_from_transcript(messages, tool_calls);
-    }
-
+fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> UiTimeline {
     let mut timeline = UiTimeline::new();
     let mut activity_state = ActivityState::default();
-    let tool_call_map = tool_calls
+    let tool_call_map = projection
+        .entries()
         .iter()
-        .filter_map(|record| {
-            record
+        .filter_map(|entry| match &entry.payload {
+            lash::ChronologicalPayload::ToolCall(record) => record
                 .call_id
                 .as_deref()
-                .map(|call_id| (call_id, record.clone()))
+                .map(|call_id| (call_id, record.clone())),
+            lash::ChronologicalPayload::Message(_) | lash::ChronologicalPayload::RlmStep(_) => None,
         })
         .collect::<HashMap<_, _>>();
-    let mut seen_messages = HashSet::new();
+    let mut seen_tool_calls = HashSet::new();
 
-    for event in events {
-        match event {
-            lash::SessionEventRecord::Conversation(record) => {
-                seen_messages.insert(record.id.clone());
-                let message = record.to_message();
+    for entry in projection.entries() {
+        match &entry.payload {
+            lash::ChronologicalPayload::Message(message) => {
                 append_transcript_items(
                     &mut timeline,
-                    &message,
+                    message,
                     &tool_call_map,
                     &mut activity_state,
+                    false,
                 );
             }
-            lash::SessionEventRecord::Mode(event) => {
-                if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
-                    event.rlm_event()
-                {
-                    append_rlm_trajectory_items(&mut timeline, &entry, &mut activity_state);
-                }
+            lash::ChronologicalPayload::ToolCall(record) => {
+                seen_tool_calls.insert(lash::chronological_tool_call_key(record));
+                append_tool_call_record_items(&mut timeline, record, &mut activity_state);
             }
-            _ => {}
+            lash::ChronologicalPayload::RlmStep(entry) => {
+                append_rlm_trajectory_items(
+                    &mut timeline,
+                    entry,
+                    &mut activity_state,
+                    &mut seen_tool_calls,
+                );
+            }
         }
-    }
-
-    for message in messages
-        .iter()
-        .filter(|message| !seen_messages.contains(&message.id))
-    {
-        append_transcript_items(&mut timeline, message, &tool_call_map, &mut activity_state);
     }
 
     timeline
@@ -227,20 +209,15 @@ fn append_rlm_trajectory_items(
     timeline: &mut UiTimeline,
     entry: &lash_rlm_types::RlmTrajectoryEntry,
     activity_state: &mut ActivityState,
+    seen_tool_calls: &mut HashSet<String>,
 ) {
     if let Some(reasoning) = rlm_reasoning_display_text(&entry.reasoning) {
         let _ = push_assistant_reasoning_item(timeline, &reasoning);
     }
     timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
     for record in &entry.tool_calls {
-        for activity in activity_state.blocks_for_tool_call(
-            &record.tool,
-            record.args.clone(),
-            record.result.clone(),
-            record.success,
-            record.duration_ms,
-        ) {
-            append_activity_item(timeline, activity);
+        if seen_tool_calls.insert(lash::chronological_tool_call_key(record)) {
+            append_tool_call_record_items(timeline, record, activity_state);
         }
     }
 }
@@ -378,24 +355,6 @@ pub(crate) fn push_user_turn_start(blocks: &mut Vec<UiTimelineItem>) {
         Some(_) => true,
     };
     blocks.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
-}
-
-fn timeline_from_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> UiTimeline {
-    let mut timeline = UiTimeline::new();
-    let mut activity_state = ActivityState::default();
-    let tool_call_map = tool_calls
-        .iter()
-        .filter_map(|record| {
-            record
-                .call_id
-                .as_deref()
-                .map(|call_id| (call_id, record.clone()))
-        })
-        .collect::<HashMap<_, _>>();
-    for message in messages {
-        append_transcript_items(&mut timeline, message, &tool_call_map, &mut activity_state);
-    }
-    timeline
 }
 
 pub(crate) fn append_activity_block(blocks: &mut Vec<UiTimelineItem>, activity: ActivityBlock) {
@@ -561,14 +520,17 @@ fn append_transcript_items(
     message: &Message,
     tool_calls: &HashMap<&str, ToolCallRecord>,
     activity_state: &mut ActivityState,
+    render_tool_results: bool,
 ) {
     match message.role {
         MessageRole::User => {
             if message.parts.iter().any(|part| {
                 part_is_rlm_exec_result(part) || matches!(part.kind, PartKind::ToolResult)
             }) {
-                for part in message.parts.iter() {
-                    append_tool_result_items(timeline, part, tool_calls, activity_state);
+                if render_tool_results {
+                    for part in message.parts.iter() {
+                        append_tool_result_items(timeline, part, tool_calls, activity_state);
+                    }
                 }
             } else {
                 let text = message
@@ -623,6 +585,22 @@ fn append_transcript_items(
                 timeline.push(UiTimelineItem::SystemMessage(text));
             }
         }
+    }
+}
+
+fn append_tool_call_record_items(
+    timeline: &mut UiTimeline,
+    record: &ToolCallRecord,
+    activity_state: &mut ActivityState,
+) {
+    for activity in activity_state.blocks_for_tool_call(
+        &record.tool,
+        record.args.clone(),
+        record.result.clone(),
+        record.success,
+        record.duration_ms,
+    ) {
+        append_activity_item(timeline, activity);
     }
 }
 

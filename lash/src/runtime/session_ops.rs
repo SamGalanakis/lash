@@ -10,7 +10,7 @@ use crate::{ExternalInvokeError, SessionError};
 use super::LashRuntime;
 use super::state::{
     PersistedSessionState, SessionStateEnvelope, append_session_nodes_to_state,
-    normalize_session_graph, persist_runtime_state,
+    normalize_session_graph,
 };
 
 impl LashRuntime {
@@ -59,7 +59,11 @@ impl LashRuntime {
             .as_ref()
             .and_then(|session| session.history_store())
         {
-            persist_runtime_state(store.as_ref(), &mut self.state).await;
+            let commit = crate::store::PersistedStateCommit::persisted_state(&self.state, &[]);
+            match crate::store::apply_runtime_commit(store.as_ref(), commit).await {
+                Ok(result) => self.state.apply_persisted_commit_result(result),
+                Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
+            }
         }
         Ok(crate::AppendSessionNodesResult::Appended {
             node_ids,
@@ -104,7 +108,7 @@ impl LashRuntime {
 
     /// Promote a managed child session into the foreground runtime.
     ///
-    /// Child sessions created through `SessionManager::create_session` are real
+    /// Child sessions created through `RuntimeSessionHost::create_session` are real
     /// runtimes, not serialized placeholders. Foreground handoff must therefore
     /// claim that runtime instead of reconstructing a new empty state in the UI.
     pub async fn activate_managed_session(&mut self, session_id: &str) -> Result<(), SessionError> {

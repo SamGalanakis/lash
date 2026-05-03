@@ -28,7 +28,7 @@ pub(super) async fn handle_clear(
     active_stream_id: &mut u64,
     current_model_variant: &Option<String>,
     current_execution_mode: &ExecutionMode,
-    session_manager: &mut Arc<dyn SessionManager>,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
     app.clear();
@@ -239,7 +239,7 @@ pub(super) async fn handle_resume(
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn SessionManager>,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_dynamic: &mut DynamicStateSnapshot,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,

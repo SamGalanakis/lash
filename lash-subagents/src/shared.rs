@@ -20,14 +20,6 @@ use lash_rlm_types::RlmTermination;
 use serde_json::{Value, json};
 
 use crate::capability::{CapabilityContext, CapabilityRegistry};
-use crate::routing::truncate_snapshot_to_recent_turns;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ForkTurns {
-    None,
-    All,
-    Recent(usize),
-}
 
 pub(crate) fn fresh_child_request(
     parent_session_id: String,
@@ -99,7 +91,6 @@ pub(crate) async fn build_spawn_create_request(
     registry: &CapabilityRegistry,
     context: &ToolExecutionContext,
     capability_name: &str,
-    fork_turns: ForkTurns,
     output_schema: Option<Value>,
 ) -> Result<SessionCreateRequest, String> {
     let current_snapshot = context
@@ -127,20 +118,11 @@ pub(crate) async fn build_spawn_create_request(
         .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
     }
     normalize_context_policy(&mut policy);
-    let start = match fork_turns {
-        ForkTurns::None => SessionStartPoint::Empty,
-        ForkTurns::All => SessionStartPoint::ExistingSession {
-            session_id: context.session_id.clone(),
-        },
-        ForkTurns::Recent(turns) => SessionStartPoint::Snapshot {
-            snapshot: Box::new(truncate_snapshot_to_recent_turns(current_snapshot, turns)),
-        },
-    };
 
     let hidden_tools = resolve_hidden_tools(registry, &policy, capability_name, 0)?;
     let mut request = fresh_child_request(
         context.session_id.clone(),
-        start,
+        SessionStartPoint::Empty,
         policy,
         mode_extras,
         "subagent",
@@ -169,32 +151,6 @@ pub(crate) fn unknown_capability_message(name: &str, registry: &CapabilityRegist
                 .collect::<Vec<_>>()
                 .join(", ")
         )
-    }
-}
-
-pub(crate) fn parse_fork_turns(value: Option<&Value>) -> Result<ForkTurns, String> {
-    let Some(value) = value else {
-        return Ok(ForkTurns::None);
-    };
-    match value {
-        Value::String(text) if text == "none" => Ok(ForkTurns::None),
-        Value::String(text) if text == "all" => Ok(ForkTurns::All),
-        Value::String(text) => text
-            .parse::<usize>()
-            .ok()
-            .filter(|count| *count > 0)
-            .map(ForkTurns::Recent)
-            .ok_or_else(|| {
-                "invalid fork_turns: use `none`, `all`, or a positive integer string".to_string()
-            }),
-        Value::Number(number) => number
-            .as_u64()
-            .filter(|count| *count > 0)
-            .map(|count| ForkTurns::Recent(count as usize))
-            .ok_or_else(|| {
-                "invalid fork_turns: use `none`, `all`, or a positive integer".to_string()
-            }),
-        _ => Err("invalid fork_turns: use `none`, `all`, or a positive integer string".to_string()),
     }
 }
 
@@ -370,12 +326,6 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
             "agent_name": { "type": "string" },
             "task": { "type": "string" },
             "capability": { "type": "string", "enum": enum_values },
-            "fork_turns": {
-                "oneOf": [
-                    { "type": "string" },
-                    { "type": "integer", "minimum": 1 }
-                ]
-            },
             "output": { "type": "object", "additionalProperties": true }
         },
         "required": ["agent_name", "task", "capability"],
@@ -405,14 +355,7 @@ pub(crate) fn llm_query_input_schema() -> Value {
 pub(crate) const SUBAGENT_INTERACTIVE_DENY: &[&str] =
     &["ask", "show_snippet_to_user", "showcase", "plan_exit"];
 
-pub(crate) const SUBAGENT_SUITE_DENY: &[&str] = &[
-    "spawn_agent",
-    "send_message",
-    "followup_task",
-    "wait_agent",
-    "list_agents",
-    "close_agent",
-];
+pub(crate) const SUBAGENT_SUITE_DENY: &[&str] = &["spawn_agent"];
 
 pub(crate) const MAX_SUBAGENT_DEPTH: u8 = 5;
 
@@ -449,6 +392,7 @@ pub(crate) fn llm_query_tool_definition() -> ToolDefinition {
         Vec::new(),
         ToolExecutionMode::Parallel,
     )
+    .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
 }
 
 pub(crate) fn submit_error_tool_definition() -> ToolDefinition {

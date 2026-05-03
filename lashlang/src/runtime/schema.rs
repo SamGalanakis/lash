@@ -1,4 +1,3 @@
-use super::record::{Symbol, intern_symbol};
 use super::{RuntimeError, Value, unwrap_type_value};
 use smallvec::SmallVec;
 use std::fmt::Write as _;
@@ -26,7 +25,6 @@ enum CompiledSchemaKind {
 
 #[derive(Clone)]
 struct CompiledSchemaField {
-    symbol: Symbol,
     name: Arc<str>,
     schema: CompiledSchema,
 }
@@ -120,7 +118,6 @@ pub(super) fn compile_schema_value(schema: &Value) -> CompiledSchema {
                     .iter()
                     .filter_map(|field| match field {
                         Value::String(name) => Some(CompiledSchemaField {
-                            symbol: intern_symbol(name.as_str()),
                             name: Arc::<str>::from(name.as_str()),
                             schema: CompiledSchema {
                                 kind: CompiledSchemaKind::Any,
@@ -137,7 +134,6 @@ pub(super) fn compile_schema_value(schema: &Value) -> CompiledSchema {
                     .entries
                     .iter()
                     .map(|entry| CompiledSchemaField {
-                        symbol: entry.symbol,
                         name: entry.name.clone(),
                         schema: compile_schema_value(&entry.value),
                     })
@@ -290,11 +286,8 @@ fn validate_compiled_schema_node<'a>(
             properties,
         } => {
             validate_compiled_schema_type(value, SchemaType::Object, path)?;
-            let Value::Record(record) = value else {
-                return Ok(());
-            };
             for field in required.iter() {
-                if record.get_symbol(field.symbol).is_none() {
+                if schema_record_field(value, field.name.as_ref()).is_none() {
                     return Err(format!(
                         "{}: missing required field `{}`",
                         format_schema_path(path),
@@ -303,9 +296,9 @@ fn validate_compiled_schema_node<'a>(
                 }
             }
             for field in properties.iter() {
-                if let Some(field_value) = record.get_symbol(field.symbol) {
+                if let Some(field_value) = schema_record_field(value, field.name.as_ref()) {
                     path.push(PathSegment::Field(field.name.as_ref()));
-                    validate_compiled_schema_node(field_value, &field.schema, path)?;
+                    validate_compiled_schema_node(&field_value, &field.schema, path)?;
                     path.pop();
                 }
             }
@@ -392,25 +385,25 @@ fn validate_schema_node(value: &Value, schema: &Value, path: &mut String) -> Res
     }
 
     if let Some(Value::Record(properties)) = schema_obj.get("properties")
-        && let Value::Record(record) = value
+        && matches!(value, Value::Record(_) | Value::Image(_))
     {
         if let Some(Value::List(required)) = schema_obj.get("required") {
             for field in required.iter().filter_map(|field| match field {
                 Value::String(name) => Some(name.as_str()),
                 _ => None,
             }) {
-                if record.get(field).is_none() {
+                if schema_record_field(value, field).is_none() {
                     return Err(format!("{path}: missing required field `{field}`"));
                 }
             }
         }
 
         for entry in properties.entries.iter() {
-            if let Some(field_value) = record.get_symbol(entry.symbol) {
+            if let Some(field_value) = schema_record_field(value, entry.name.as_ref()) {
                 let base_len = path.len();
                 path.push('.');
                 path.push_str(entry.name.as_ref());
-                validate_schema_node(field_value, &entry.value, path)?;
+                validate_schema_node(&field_value, &entry.value, path)?;
                 path.truncate(base_len);
             }
         }
@@ -439,7 +432,7 @@ fn matches_schema_type(value: &Value, expected: &str) -> bool {
         }
         "boolean" => matches!(value, Value::Bool(_)),
         "array" => matches!(value, Value::List(_)),
-        "object" => matches!(value, Value::Record(_)),
+        "object" => matches!(value, Value::Record(_) | Value::Image(_)),
         "null" => matches!(value, Value::Null),
         _ => true,
     }
@@ -451,7 +444,34 @@ fn schema_value_type_name(value: &Value) -> &'static str {
         Value::Bool(_) => "boolean",
         Value::Number(_) => "number",
         Value::String(_) => "string",
+        Value::Image(_) => "object",
         Value::List(_) => "array",
         Value::Record(_) => "object",
+    }
+}
+
+fn schema_record_field(value: &Value, field: &str) -> Option<Value> {
+    match value {
+        Value::Record(record) => record.get(field).cloned(),
+        Value::Image(image) => match field {
+            "type" => Some(Value::String("image".into())),
+            "id" => Some(Value::String(image.id.clone().into())),
+            "label" => Some(Value::String(image.label.clone().into())),
+            "size" => Some(Value::Number(image.size as f64)),
+            "width" => Some(
+                image
+                    .width
+                    .map(|width| Value::Number(width as f64))
+                    .unwrap_or(Value::Null),
+            ),
+            "height" => Some(
+                image
+                    .height
+                    .map(|height| Value::Number(height as f64))
+                    .unwrap_or(Value::Null),
+            ),
+            _ => None,
+        },
+        _ => None,
     }
 }

@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod llm;
 pub mod mode;
 pub mod plugin;
@@ -10,6 +11,7 @@ pub mod turn;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub use attachment::{AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType};
 pub use mode::{
     ModeBuildInput, ModeConfig, ModePreamble, append_assistant_text_part,
     normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
@@ -34,8 +36,8 @@ pub use session::{
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
     BaseRenderCache, CORE_GUIDANCE_SECTION, ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO,
-    Message, MessageRole, MessageSequence, Part, PartKind, PromptBuiltin, PromptPanel,
-    PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate,
+    Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind, PromptBuiltin,
+    PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate,
     PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, RetryPolicy,
     SessionEvent, SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent,
     default_prompt_template, messages_are_prompt_resume_safe, shared_parts,
@@ -109,7 +111,7 @@ pub fn default_execution_mode() -> ExecutionMode {
 /// Tools that only *read* state (`read_file`, `grep`, `glob`, ...) can run
 /// in parallel safely and should use the default [`ToolExecutionMode::Parallel`].
 /// Tools that *mutate* shared state (`apply_patch`, `exec_command`,
-/// `write_stdin`, `followup_task`) should declare
+/// `write_stdin`) should declare
 /// [`ToolExecutionMode::Serial`] so the dispatcher runs them one-at-a-time
 /// and avoids interleaving with each other.
 ///
@@ -241,6 +243,63 @@ impl ToolDiscoveryMetadata {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolOutputContract {
+    Static,
+    FromInputSchema {
+        input_field: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_schema: Option<serde_json::Value>,
+    },
+}
+
+impl Default for ToolOutputContract {
+    fn default() -> Self {
+        Self::Static
+    }
+}
+
+impl ToolOutputContract {
+    pub fn from_input_schema(
+        input_field: impl Into<String>,
+        default_schema: Option<serde_json::Value>,
+    ) -> Self {
+        Self::FromInputSchema {
+            input_field: input_field.into(),
+            default_schema,
+        }
+    }
+
+    pub fn is_static(&self) -> bool {
+        matches!(self, Self::Static)
+    }
+
+    fn render_returns(&self, static_schema: &serde_json::Value) -> String {
+        match self {
+            Self::Static => compact_schema_label(static_schema),
+            Self::FromInputSchema {
+                input_field,
+                default_schema,
+            } => {
+                let mut out = format!("schema from `{input_field}`");
+                if let Some(default_schema) = default_schema {
+                    out.push_str(", default ");
+                    out.push_str(&compact_schema_label(default_schema));
+                }
+                out
+            }
+        }
+    }
+
+    fn return_fields(&self, static_schema: &serde_json::Value) -> Vec<serde_json::Value> {
+        match self {
+            Self::Static => return_field_metadata(static_schema),
+            Self::FromInputSchema { .. } => Vec::new(),
+        }
+    }
+}
+
 /// A tool definition exposed to the runtime.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
@@ -251,6 +310,8 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
     #[serde(default)]
     pub output_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "ToolOutputContract::is_static")]
+    pub output_contract: ToolOutputContract,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<String>,
     #[serde(default, skip_serializing_if = "is_default_tool_availability_config")]
@@ -373,6 +434,7 @@ impl ToolDefinition {
             description: description.into(),
             input_schema,
             output_schema,
+            output_contract: ToolOutputContract::Static,
             examples: Vec::new(),
             availability: ToolAvailabilityConfig::documented(),
             activation: ToolActivation::Always,
@@ -435,6 +497,22 @@ impl ToolDefinition {
         self
     }
 
+    pub fn with_output_contract(mut self, output_contract: ToolOutputContract) -> Self {
+        self.output_contract = output_contract;
+        self
+    }
+
+    pub fn with_output_from_input_schema(
+        self,
+        input_field: impl Into<String>,
+        default_schema: Option<serde_json::Value>,
+    ) -> Self {
+        self.with_output_contract(ToolOutputContract::from_input_schema(
+            input_field,
+            default_schema,
+        ))
+    }
+
     pub fn default_input_schema() -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -452,7 +530,7 @@ impl ToolDefinition {
     }
 
     pub fn output_summary(&self) -> String {
-        compact_schema_label(&self.output_schema)
+        self.output_contract.render_returns(&self.output_schema)
     }
 
     pub fn signature(&self) -> String {
@@ -469,7 +547,7 @@ impl ToolDefinition {
             signature: self.input_signature(),
             returns: self.output_summary(),
             parameters: self.parameter_metadata(),
-            return_fields: return_field_metadata(&self.output_schema),
+            return_fields: self.output_contract.return_fields(&self.output_schema),
             description: self.description.trim().to_string(),
             examples: compact_examples(&self.examples, example_limit),
         }
@@ -1234,6 +1312,81 @@ mod tests {
     }
 
     #[test]
+    fn static_output_contract_keeps_existing_compact_docs_and_serde_shape() {
+        let tool = ToolDefinition::new(
+            "read_text",
+            "Read text",
+            ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "string" }),
+        );
+        let explicit_static = tool
+            .clone()
+            .with_output_contract(ToolOutputContract::Static);
+
+        assert_eq!(
+            ToolDefinition::format_tool_docs(&[tool.clone()]),
+            ToolDefinition::format_tool_docs(&[explicit_static])
+        );
+        assert_eq!(tool.compact_contract().returns, "str");
+
+        let serialized = serde_json::to_value(&tool).expect("serialize");
+        assert!(serialized.get("output_contract").is_none());
+        let deserialized: ToolDefinition = serde_json::from_value(serialized).expect("deserialize");
+        assert!(deserialized.output_contract.is_static());
+    }
+
+    #[test]
+    fn dynamic_output_contract_renders_schema_from_input_without_return_fields() {
+        let tool = ToolDefinition::new(
+            "spawn_agent",
+            "Run a subagent",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "output": { "type": "object", "additionalProperties": true }
+                }
+            }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+        .with_output_from_input_schema("output", None);
+
+        let contract = tool.compact_contract();
+        assert_eq!(contract.returns, "schema from `output`");
+        assert!(contract.return_fields.is_empty());
+        assert_eq!(contract.render_returns(), "schema from `output`");
+        assert_eq!(
+            ToolDefinition::format_tool_docs(&[tool]),
+            "### `spawn_agent(output?: record)`\nReturns: schema from `output`\nRun a subagent\nParameters:\n- `output?: record`"
+        );
+    }
+
+    #[test]
+    fn dynamic_output_contract_renders_default_schema() {
+        let tool = ToolDefinition::new(
+            "llm_query",
+            "Run a lightweight LLM query",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string" },
+                    "output": { "type": "object", "additionalProperties": true }
+                },
+                "required": ["task"]
+            }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+        .with_output_from_input_schema("output", Some(serde_json::json!({ "type": "string" })));
+
+        let contract = tool.compact_contract();
+        assert_eq!(contract.returns, "schema from `output`, default str");
+        assert!(contract.return_fields.is_empty());
+        assert_eq!(
+            contract.render_returns(),
+            "schema from `output`, default str"
+        );
+    }
+
+    #[test]
     fn json_schema_loaded_contract_matches_hardcoded_renderer() {
         let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
             "name": "mcp__appworld__spotify_search_songs",
@@ -1967,11 +2120,18 @@ fn display_default_value(value: &serde_json::Value) -> String {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolImage {
     pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<AttachmentRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub data: Vec<u8>,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Clone, Debug)]

@@ -184,6 +184,16 @@ pub struct SessionReadModel {
     pub prompt_render_cache: Arc<BaseRenderCache>,
 }
 
+impl SessionReadModel {
+    pub fn chronological_projection(&self) -> crate::ChronologicalProjection {
+        crate::ChronologicalProjection::from_read_model(self)
+    }
+
+    pub fn rlm_history(&self) -> Vec<lash_rlm_types::RlmHistoryItem> {
+        self.chronological_projection().rlm_history()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SessionGraphAppendBuilder {
     existing_ids: HashSet<String>,
@@ -328,16 +338,9 @@ impl SessionGraphCache {
             HashMap::with_capacity(self.active_path_indices.len());
         let mut active_tool_calls = Vec::with_capacity(self.active_path_indices.len());
         let mut active_events = Vec::with_capacity(self.active_path_indices.len());
-        let mut rlm_globals = serde_json::Map::new();
         for idx in &self.active_path_indices {
             let node = &graph.nodes[*idx];
             if let Some(event) = node.event() {
-                if let SessionEventRecord::Mode(mode_event) = event
-                    && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                        mode_event.rlm_event()
-                {
-                    lash_rlm_types::apply_globals_patch(&mut rlm_globals, &patch);
-                }
                 active_events.push(event.clone());
             }
             if let Some(message) = node.message() {
@@ -354,6 +357,8 @@ impl SessionGraphCache {
                 continue;
             }
         }
+        let rlm_globals =
+            crate::chronological::project_rlm_globals_from_events(active_events.iter());
         self.active_messages = Arc::new(active_messages);
         self.active_message_ids = active_message_ids;
         self.active_events = Arc::new(active_events);
@@ -375,13 +380,10 @@ impl SessionGraphCache {
         }
         self.active_path_indices.push(node_index);
         if let Some(event) = node.event() {
-            if let SessionEventRecord::Mode(mode_event) = event
-                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                    mode_event.rlm_event()
-            {
-                lash_rlm_types::apply_globals_patch(Arc::make_mut(&mut self.rlm_globals), &patch);
-            }
             Arc::make_mut(&mut self.active_events).push(event.clone());
+            self.rlm_globals = Arc::new(crate::chronological::project_rlm_globals_from_events(
+                self.active_events.iter(),
+            ));
         }
         if let Some(message) = node.message() {
             if !message.is_transient() && !self.active_message_ids.contains_key(&message.id) {
@@ -1186,8 +1188,14 @@ fn first_message_search_text(message: &Message) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MessageRole, ModeEvent, Part, PartKind, PruneState, ToolCallRecord};
-    use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
+    use crate::session_model::message::PartAttachment;
+    use crate::{
+        AttachmentId, AttachmentRef, ImageMediaType, MediaType, MessageRole, ModeEvent, Part,
+        PartKind, PruneState, SessionNodePayload, ToolCallRecord,
+    };
+    use lash_rlm_types::{
+        RlmDiagnosticEvent, RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTrajectoryEntry,
+    };
 
     fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
         Message {
@@ -1209,6 +1217,31 @@ mod tests {
             .into(),
             user_input: None,
             origin: None,
+        }
+    }
+
+    fn image_part(id: &str) -> Part {
+        Part {
+            id: id.to_string(),
+            kind: PartKind::Image,
+            content: "plot".to_string(),
+            attachment: Some(PartAttachment {
+                reference: AttachmentRef {
+                    id: AttachmentId::new("att-1"),
+                    media_type: MediaType::Image(ImageMediaType::Png),
+                    byte_len: 128,
+                    width: Some(8),
+                    height: Some(8),
+                    label: Some("plot".to_string()),
+                },
+            }),
+            tool_call_id: None,
+            tool_name: None,
+            tool_item_id: None,
+            tool_signature: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
         }
     }
 
@@ -1332,5 +1365,120 @@ mod tests {
             &first.prompt_render_cache,
             &updated.prompt_render_cache
         ));
+    }
+
+    #[test]
+    fn chronological_projection_covers_active_path_without_branch_or_transients() {
+        let mut graph = SessionGraph::default();
+        let mut user = text_message("u1", MessageRole::User, "first");
+        Arc::make_mut(&mut user.parts).push(image_part("u1.p1"));
+        let system = text_message("s1", MessageRole::System, "system");
+        let assistant = text_message("a1", MessageRole::Assistant, "done");
+        let transient = transient_plugin_message("transient", MessageRole::System, "hidden");
+        let tool_call = ToolCallRecord {
+            call_id: Some("call_1".to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({"q": "first"}),
+            result: serde_json::json!({"answer": "done"}),
+            success: true,
+            duration_ms: 9,
+        };
+
+        graph.append_message(user);
+        graph.append_message(system);
+        graph.append_message(transient);
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
+                id: "rlm_step_0".to_string(),
+                iteration: 0,
+                reasoning: "think".to_string(),
+                code: "x = 1".to_string(),
+                output: "1".to_string(),
+                observations: vec!["observed".to_string()],
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                error: None,
+                final_output: None,
+                output_raw_len: 1,
+            }),
+        )));
+        graph.append_event(SessionEventRecord::Tool(ToolEvent::Invocation {
+            stable_key: "call_1".to_string(),
+            record: tool_call.clone(),
+        }));
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
+                set: serde_json::Map::from_iter([(
+                    "topic".to_string(),
+                    serde_json::json!("chronology"),
+                )]),
+                unset: Vec::new(),
+            }),
+        )));
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmDiagnostic(RlmDiagnosticEvent {
+                phase: "ignored".to_string(),
+                payload: serde_json::json!({"debug": true}),
+            }),
+        )));
+        graph.append_message(assistant);
+        graph.push_node_record(SessionNodeRecord {
+            node_id: "inactive".to_string(),
+            parent_node_id: Some("u1".to_string()),
+            timestamp: Utc::now().to_rfc3339(),
+            payload: SessionNodePayload::Event {
+                event: SessionEventRecord::Conversation(ConversationRecord::from_message(
+                    text_message("branch", MessageRole::Assistant, "inactive"),
+                )),
+            },
+        });
+
+        let read_model = graph.read_model();
+        let projection = read_model.chronological_projection();
+        let labels = projection
+            .entries()
+            .iter()
+            .map(|entry| match &entry.payload {
+                crate::ChronologicalPayload::Message(message) => match message.role {
+                    MessageRole::User => format!("message:user:{}", message.id),
+                    MessageRole::System => format!("message:system:{}", message.id),
+                    MessageRole::Assistant => format!("message:assistant:{}", message.id),
+                },
+                crate::ChronologicalPayload::RlmStep(step) => format!("rlm:{}", step.iteration),
+                crate::ChronologicalPayload::ToolCall(record) => format!("tool:{}", record.tool),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "message:user:u1",
+                "message:system:s1",
+                "rlm:0",
+                "tool:lookup",
+                "message:assistant:a1"
+            ]
+        );
+        assert_eq!(
+            projection
+                .entries()
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert_eq!(projection.tool_call_by_call_id("call_1"), Some(&tool_call));
+        let history = projection.rlm_history();
+        assert_eq!(history.len(), projection.entries().len());
+        assert_eq!(
+            read_model.rlm_globals.get("topic"),
+            Some(&serde_json::json!("chronology"))
+        );
+        assert_eq!(
+            read_model.rlm_globals.get("history"),
+            Some(&projection.rlm_history_value())
+        );
+        assert!(!labels.iter().any(|label| label.contains("inactive")));
+        assert!(!labels.iter().any(|label| label.contains("transient")));
     }
 }

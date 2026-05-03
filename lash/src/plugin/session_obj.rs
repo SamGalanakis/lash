@@ -325,7 +325,7 @@ impl PluginSession {
         &self,
         name: &str,
         argument: Option<String>,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn CommandHost>,
     ) -> Result<CommandOutcome, PluginError> {
         let Some(cmd) = self.commands.get(name).cloned() else {
             return Err(PluginError::Session(format!(
@@ -408,7 +408,7 @@ impl PluginSession {
         &self,
         directives: Vec<PluginOwned<PluginDirective>>,
         mut messages: crate::MessageSequence,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn TurnHookHost>,
         allow_abort: bool,
         invalid_context: &'static str,
     ) -> Result<TurnPreparation, PluginError> {
@@ -482,7 +482,7 @@ impl PluginSession {
             .before_turn(TurnHookContext {
                 session_id,
                 state,
-                host: Arc::clone(&host),
+                host: host.clone(),
             })
             .await?;
         self.apply_turn_directives(
@@ -598,7 +598,7 @@ impl PluginSession {
         &self,
         session_id: &str,
         chunk: String,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn ToolHookHost>,
     ) -> Result<Vec<PluginOwned<AssistantStreamTransform>>, PluginError> {
         let mut current = chunk;
         let mut transforms = Vec::new();
@@ -606,7 +606,7 @@ impl PluginSession {
             let transform = (registered.hook)(AssistantStreamHookContext {
                 session_id: session_id.to_string(),
                 chunk: current.clone(),
-                host: Arc::clone(&host),
+                host: host.clone(),
             })
             .await?;
             current = transform.chunk.clone();
@@ -622,7 +622,7 @@ impl PluginSession {
         &self,
         session_id: &str,
         response: crate::llm::types::LlmResponse,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn ToolHookHost>,
     ) -> Result<Vec<PluginOwned<AssistantResponseTransform>>, PluginError> {
         let mut current = response;
         let mut transforms = Vec::new();
@@ -630,7 +630,7 @@ impl PluginSession {
             let transform = (registered.hook)(AssistantResponseHookContext {
                 session_id: session_id.to_string(),
                 response: current.clone(),
-                host: Arc::clone(&host),
+                host: host.clone(),
             })
             .await?;
             current = transform.response.clone();
@@ -690,7 +690,7 @@ impl PluginSession {
     pub async fn finalize_turn(
         &self,
         mut turn: AssembledTurn,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn ToolHookHost>,
     ) -> Result<TurnFinalization, PluginError> {
         let session_id = turn.state.session_id.clone();
         let directives = if self.after_turn_hooks.is_empty() {
@@ -699,7 +699,7 @@ impl PluginSession {
             self.after_turn(TurnResultHookContext {
                 session_id: session_id.clone(),
                 turn: Arc::new(crate::plugin::TurnResultSummary::from_assembled(&turn)),
-                host: Arc::clone(&host),
+                host: host.clone(),
             })
             .await?
         };
@@ -782,7 +782,7 @@ impl PluginSession {
                             images: Vec::new(),
                         },
                         duration_ms: tool_call.duration_ms,
-                        host: Arc::clone(&host),
+                        host: host.clone(),
                     })
                     .await?;
                 history_changed |=
@@ -939,7 +939,7 @@ impl PluginSession {
         args: serde_json::Value,
         session_id: Option<String>,
         default_to_current_session: bool,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn ExternalInvokeHost>,
     ) -> Result<ToolResult, ExternalInvokeError> {
         let Some(op) = self.external_ops.get(name).cloned() else {
             return Err(ExternalInvokeError::Unknown(name.to_string()));

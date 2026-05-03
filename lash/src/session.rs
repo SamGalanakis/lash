@@ -13,8 +13,8 @@ use crate::tool_dispatch::{
     dispatch_tool_call_with_execution_context,
 };
 use crate::{
-    ExecResponse, PluginMessage, PromptContribution, RuntimeServices, SandboxMessage, SessionEvent,
-    SessionManager, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider,
+    ExecResponse, PluginMessage, PromptContribution, RuntimeServices, RuntimeSessionHost,
+    SandboxMessage, SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider,
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
@@ -187,6 +187,7 @@ enum AsyncToolTerminal {
 struct AsyncToolReply {
     success: bool,
     value: serde_json::Value,
+    images: Vec<ToolImage>,
 }
 
 impl AsyncToolReply {
@@ -194,6 +195,15 @@ impl AsyncToolReply {
         Self {
             success: true,
             value,
+            images: Vec::new(),
+        }
+    }
+
+    fn success_with_images(value: serde_json::Value, images: Vec<ToolImage>) -> Self {
+        Self {
+            success: true,
+            value,
+            images,
         }
     }
 
@@ -201,12 +211,13 @@ impl AsyncToolReply {
         Self {
             success: false,
             value,
+            images: Vec::new(),
         }
     }
 
     fn into_lashlang_reply(self) -> LashlangToolReply {
         if self.success {
-            LashlangToolReply::success(self.value)
+            LashlangToolReply::success_with_images(self.value, self.images)
         } else {
             LashlangToolReply::error(self.value)
         }
@@ -319,7 +330,9 @@ impl Session {
         if self.rlm_runtime.is_some() {
             return Ok(());
         }
-        let runtime = LashlangRuntime::start()?;
+        let runtime = LashlangRuntime::start_with_attachment_store(Arc::clone(
+            &self.services.attachment_store,
+        ))?;
         self.rlm_runtime = Some(runtime);
         self.initialize_tool_surface(session_id).await
     }
@@ -778,7 +791,8 @@ impl Session {
             Some(AsyncToolTerminal::Completed(outcome)) => {
                 self.tool_images.extend(outcome.images.clone());
                 if outcome.record.success {
-                    AsyncToolReply::success(outcome.record.result).into_lashlang_reply()
+                    AsyncToolReply::success_with_images(outcome.record.result, outcome.images)
+                        .into_lashlang_reply()
                 } else {
                     AsyncToolReply::error(outcome.record.result).into_lashlang_reply()
                 }
@@ -893,7 +907,7 @@ impl Session {
     pub async fn run_code(
         &mut self,
         session_id: &str,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn RuntimeSessionHost>,
         event_tx: &tokio::sync::mpsc::Sender<SessionEvent>,
         code: &str,
         accept_finish: bool,
@@ -936,6 +950,7 @@ impl Session {
             session_id: session_id.to_string(),
             event_tx: event_tx.clone(),
             turn_injection_bridge: self.turn_injection_bridge().clone(),
+            attachment_store: Arc::clone(&self.services.attachment_store),
         });
         let mut tool_handles: Vec<RlmToolTaskHandle> = Vec::new();
         let mut tool_call_count = 0usize;
@@ -988,7 +1003,10 @@ impl Session {
 
                         // Send the tool result back to the embedded lashlang runtime.
                         let reply = if outcome.record.success {
-                            LashlangToolReply::success(outcome.record.result.clone())
+                            LashlangToolReply::success_with_images(
+                                outcome.record.result.clone(),
+                                outcome.images.clone(),
+                            )
                         } else {
                             LashlangToolReply::error(outcome.record.result.clone())
                         };
@@ -1058,7 +1076,10 @@ impl Session {
                             .iter()
                             .map(|(_, outcome)| {
                                 if outcome.record.success {
-                                    LashlangToolReply::success(outcome.record.result.clone())
+                                    LashlangToolReply::success_with_images(
+                                        outcome.record.result.clone(),
+                                        outcome.images.clone(),
+                                    )
                                 } else {
                                     LashlangToolReply::error(outcome.record.result.clone())
                                 }
@@ -1105,6 +1126,7 @@ impl Session {
                     output,
                     observations,
                     observation_truncation,
+                    images,
                     error,
                     terminal_finish,
                 } => {
@@ -1143,6 +1165,7 @@ impl Session {
                         observation_truncation,
                         tool_calls: self.tool_calls.clone(),
                         images: std::mem::take(&mut self.tool_images),
+                        printed_images: images,
                         error,
                         duration_ms: start.elapsed().as_millis() as u64,
                         terminal_finish,
@@ -1476,7 +1499,11 @@ fn restore_files(root: &Path, files: &HashMap<String, String>) -> std::io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::StaticPluginFactory;
+    use crate::plugin::{
+        DirectCompletionHost, DynamicToolHost, MonitorHost, PromptHost, SessionGraphHost,
+        SessionLifecycleHost, SessionSnapshotHost, StaticPluginFactory, TaskHost, ToolCatalogHost,
+        TraceHost, TurnHost,
+    };
     use crate::{
         PluginError, PluginHost, PluginSpec, SessionHandle, SessionSnapshot, ToolDefinition,
         ToolResult, TurnInput,
@@ -1487,7 +1514,7 @@ mod tests {
     struct NoopManager;
 
     #[async_trait::async_trait]
-    impl SessionManager for NoopManager {
+    impl SessionSnapshotHost for NoopManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Err(PluginError::Session("snapshot unavailable".to_string()))
         }
@@ -1498,14 +1525,22 @@ mod tests {
         ) -> Result<SessionSnapshot, PluginError> {
             Err(PluginError::Session("snapshot unavailable".to_string()))
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ToolCatalogHost for NoopManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
         ) -> Result<Vec<serde_json::Value>, PluginError> {
             Err(PluginError::Session("tool catalog unavailable".to_string()))
         }
+    }
 
+    impl DynamicToolHost for NoopManager {}
+
+    #[async_trait::async_trait]
+    impl SessionLifecycleHost for NoopManager {
         async fn create_session(
             &self,
             _request: crate::SessionCreateRequest,
@@ -1520,7 +1555,10 @@ mod tests {
                 "session close unavailable".to_string(),
             ))
         }
+    }
 
+    #[async_trait::async_trait]
+    impl TurnHost for NoopManager {
         async fn start_turn_stream(
             &self,
             _session_id: &str,
@@ -1539,6 +1577,13 @@ mod tests {
             Err(PluginError::Session("cancel turn unavailable".to_string()))
         }
     }
+
+    impl TaskHost for NoopManager {}
+    impl MonitorHost for NoopManager {}
+    impl SessionGraphHost for NoopManager {}
+    impl PromptHost for NoopManager {}
+    impl DirectCompletionHost for NoopManager {}
+    impl TraceHost for NoopManager {}
 
     #[derive(Clone, Default)]
     struct AsyncToolState {
@@ -1679,7 +1724,7 @@ mod tests {
         .expect("session");
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
 
         let response = session
             .run_code(
@@ -1735,7 +1780,7 @@ submit "ok"
         .expect("session");
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
 
         let response = session
             .run_code(
@@ -1789,7 +1834,7 @@ print match
         .expect("session");
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
 
         let response = session
             .run_code(
@@ -1852,7 +1897,7 @@ print result
         .expect("session");
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
 
         let response = session
             .run_code(
@@ -1909,7 +1954,7 @@ print "cancelled"
         .expect("session");
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
 
         let response = session
             .run_code(

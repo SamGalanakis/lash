@@ -145,6 +145,7 @@ fn run_block(runtime: &LashlangRuntime, id: &str, code: &str) {
                     .send(LashlangToolReply {
                         success: result.is_ok(),
                         result: result.unwrap_or_else(Value::String),
+                        images: Vec::new(),
                     })
                     .expect("send tool reply");
             }
@@ -156,6 +157,7 @@ fn run_block(runtime: &LashlangRuntime, id: &str, code: &str) {
                         LashlangToolReply {
                             success: result.is_ok(),
                             result: result.unwrap_or_else(Value::String),
+                            images: Vec::new(),
                         }
                     })
                     .collect();

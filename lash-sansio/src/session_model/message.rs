@@ -1,6 +1,6 @@
+use crate::AttachmentRef;
 use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, ResponseTextMeta};
 use crate::plugin::UserInputProvenance;
-use base64::Engine;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
@@ -131,10 +131,7 @@ pub enum PartKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartAttachment {
-    pub mime: String,
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filename: Option<String>,
+    pub reference: AttachmentRef,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -165,7 +162,7 @@ impl Part {
             return self
                 .attachment
                 .as_ref()
-                .map(|attachment| attachment.url.len())
+                .map(|attachment| attachment.reference.id.as_str().len())
                 .unwrap_or_else(|| self.render().len());
         }
         self.render().len()
@@ -225,11 +222,6 @@ impl Message {
     }
 }
 
-pub fn data_url_for_bytes(mime: &str, bytes: &[u8]) -> String {
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    format!("data:{mime};base64,{b64}")
-}
-
 fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
     let rendered = part.render();
     match role {
@@ -270,18 +262,7 @@ fn attachment_from_part(part: &Part) -> Option<LlmAttachment> {
         return None;
     }
     let attachment = part.attachment.as_ref()?;
-    let encoded = attachment
-        .url
-        .strip_prefix("data:")
-        .and_then(|rest| rest.split_once(";base64,"))
-        .map(|(_, encoded)| encoded)?;
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
-    Some(LlmAttachment {
-        mime: attachment.mime.clone(),
-        data,
-    })
+    Some(LlmAttachment::reference(attachment.reference.clone()))
 }
 
 fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachment>) -> String {
@@ -836,15 +817,24 @@ mod tests {
         }
     }
 
+    fn test_attachment_ref(byte_len: u64) -> AttachmentRef {
+        AttachmentRef {
+            id: crate::AttachmentId::new("att-test"),
+            media_type: crate::MediaType::Image(crate::ImageMediaType::Png),
+            byte_len,
+            width: None,
+            height: None,
+            label: None,
+        }
+    }
+
     fn image_part(bytes: &[u8]) -> Part {
         Part {
             id: "p0".to_string(),
             kind: PartKind::Image,
             content: String::new(),
             attachment: Some(PartAttachment {
-                mime: "image/png".to_string(),
-                url: data_url_for_bytes("image/png", bytes),
-                filename: None,
+                reference: test_attachment_ref(bytes.len() as u64),
             }),
             tool_call_id: None,
             tool_name: None,

@@ -210,7 +210,7 @@ impl MonitorPlugin {
     async fn ensure_running(
         &self,
         session_id: &str,
-        host: Arc<dyn crate::SessionManager>,
+        host: Arc<dyn crate::TaskHost>,
     ) -> Result<(), PluginError> {
         let to_start = {
             let state = self.lock_state()?;
@@ -233,14 +233,14 @@ impl MonitorPlugin {
     async fn start_task(
         &self,
         session_id: &str,
-        host: Arc<dyn crate::SessionManager>,
+        host: Arc<dyn crate::TaskHost>,
         spec: MonitorSpec,
     ) -> Result<(), PluginError> {
         let task_id = format!("monitor:{}", spec.id);
         let state = Arc::clone(&self.state);
         let session_id_owned = session_id.to_string();
         let spec_clone = spec.clone();
-        let task_host = Arc::clone(&host);
+        let task_host = host.clone();
         let managed_spec = crate::ManagedTaskSpec {
             id: task_id.clone(),
             label: spec.label.clone(),
@@ -321,7 +321,7 @@ impl MonitorPlugin {
         let Some(session_id) = ctx.session_id.as_deref() else {
             return ToolResult::err_fmt("monitor.status requires a session");
         };
-        if let Err(err) = self.ensure_running(session_id, Arc::clone(&ctx.host)).await {
+        if let Err(err) = self.ensure_running(session_id, ctx.host.clone()).await {
             return ToolResult::err_fmt(err.to_string());
         }
         let state = match self.lock_state() {
@@ -335,7 +335,7 @@ impl MonitorPlugin {
         let Some(session_id) = ctx.session_id.as_deref() else {
             return ToolResult::err_fmt("monitor.take_updates requires a session");
         };
-        if let Err(err) = self.ensure_running(session_id, Arc::clone(&ctx.host)).await {
+        if let Err(err) = self.ensure_running(session_id, ctx.host.clone()).await {
             return ToolResult::err_fmt(err.to_string());
         }
         let mut state = match self.lock_state() {
@@ -406,7 +406,7 @@ impl MonitorPlugin {
             entry_spec
         };
         if let Err(err) = self
-            .start_task(session_id, Arc::clone(&ctx.host), entry_spec)
+            .start_task(session_id, ctx.host.clone(), entry_spec)
             .await
         {
             return ToolResult::err_fmt(err.to_string());
@@ -649,7 +649,7 @@ async fn run_monitor_task(
     state: Arc<Mutex<MonitorPluginState>>,
     _session_id: String,
     spec: MonitorSpec,
-    _host: Arc<dyn crate::SessionManager>,
+    _host: Arc<dyn crate::TaskHost>,
 ) -> Result<(), PluginError> {
     let timeout_deadline = (!spec.persistent)
         .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(spec.timeout_ms));
@@ -939,7 +939,7 @@ mod tests {
             ..Default::default()
         };
         let state = seeded_monitor_state(&spec);
-        let host: Arc<dyn crate::SessionManager> = Arc::new(MockSessionManager::default());
+        let host: Arc<dyn crate::RuntimeSessionHost> = Arc::new(MockSessionManager::default());
 
         run_monitor_task(state.clone(), "root".to_string(), spec, host)
             .await

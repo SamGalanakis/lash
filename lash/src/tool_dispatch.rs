@@ -5,7 +5,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::plugin::{
-    PluginDirective, PluginSession, SessionManager, ToolCallHookContext, ToolResultHookContext,
+    PluginDirective, PluginSession, ToolCallHookContext, ToolHookHost, ToolResultHookContext,
     emit_plugin_surface_events,
 };
 use crate::tool_schema::validate_tool_input;
@@ -19,10 +19,11 @@ pub struct ToolDispatchContext {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
     pub surface: Arc<ToolSurface>,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn ToolHookHost>,
     pub session_id: String,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub turn_injection_bridge: TurnInjectionBridge,
+    pub attachment_store: Arc<dyn crate::AttachmentStore>,
 }
 
 #[derive(Clone)]
@@ -270,6 +271,8 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
         Err(err) => ToolResult::err_fmt(err.to_string()),
     };
 
+    let mut result = result;
+    result.images = register_tool_images(result.images, context.attachment_store.as_ref());
     outcome(tool_name, args, result, duration_ms)
 }
 
@@ -378,6 +381,34 @@ fn outcome(
         duration_ms,
     };
     ToolDispatchOutcome { record, images }
+}
+
+fn register_tool_images(
+    images: Vec<ToolImage>,
+    attachment_store: &dyn crate::AttachmentStore,
+) -> Vec<ToolImage> {
+    images
+        .into_iter()
+        .map(|mut image| {
+            if image.reference.is_none()
+                && let Some(media_type) = crate::MediaType::from_mime(&image.mime)
+            {
+                let meta = crate::AttachmentMeta::new(
+                    crate::AttachmentId::new("pending"),
+                    media_type,
+                    image.data.len() as u64,
+                    image.width,
+                    image.height,
+                    Some(image.label.clone()),
+                );
+                if let Ok(reference) = attachment_store.put(std::mem::take(&mut image.data), meta) {
+                    image.mime = reference.canonical_mime().to_string();
+                    image.reference = Some(reference);
+                }
+            }
+            image
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -506,6 +537,7 @@ mod tests {
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         }
     }
 
@@ -533,6 +565,7 @@ mod tests {
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         }
     }
 
@@ -552,6 +585,7 @@ mod tests {
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         }
     }
 
@@ -767,6 +801,7 @@ mod tests {
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         }
     }
 
@@ -886,6 +921,7 @@ mod tests {
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         });
 
         let specs = vec![

@@ -428,10 +428,8 @@ pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use lash_subagents::{
-        AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, FollowupTaskRequest,
-        FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse, SendMessageRequest,
-        SendMessageResponse, SpawnAgentRequest, SpawnAgentResponse, SubagentHost, WaitAgentRequest,
-        WaitAgentResponse,
+        AgentMetadata, CloseAgentRequest, CloseAgentResponse, SpawnAgentRequest,
+        SpawnAgentResponse, SubagentHost, WaitAgentRequest, WaitAgentResponse,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -477,22 +475,6 @@ pub(crate) mod tests {
             unreachable!("MockSubagentHost is read-only")
         }
 
-        async fn send_message(
-            &self,
-            _context: &lash::ToolExecutionContext,
-            _request: SendMessageRequest,
-        ) -> Result<SendMessageResponse, String> {
-            unreachable!("MockSubagentHost is read-only")
-        }
-
-        async fn followup_task(
-            &self,
-            _context: &lash::ToolExecutionContext,
-            _request: FollowupTaskRequest,
-        ) -> Result<FollowupTaskResponse, String> {
-            unreachable!("MockSubagentHost is read-only")
-        }
-
         async fn wait_agent(
             &self,
             _context: &lash::ToolExecutionContext,
@@ -507,16 +489,6 @@ pub(crate) mod tests {
             _request: CloseAgentRequest,
         ) -> Result<CloseAgentResponse, String> {
             unreachable!("MockSubagentHost is read-only")
-        }
-
-        async fn list_agents(
-            &self,
-            _context: &lash::ToolExecutionContext,
-            _request: ListAgentsRequest,
-        ) -> Result<ListAgentsResponse, String> {
-            Ok(ListAgentsResponse {
-                agents: Vec::<AgentSummary>::new(),
-            })
         }
     }
 

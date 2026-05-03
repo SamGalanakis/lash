@@ -2,9 +2,9 @@ pub mod message;
 pub mod prompt;
 
 pub use message::{
-    BaseRenderCache, Message, MessageRole, MessageSequence, Part, PartKind, PruneState,
-    ReasoningMeta, RenderedPrompt, append_rendered_prompt, messages_are_prompt_resume_safe,
-    render_prompt, render_transcript_prompt, shared_parts,
+    BaseRenderCache, Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind,
+    PruneState, ReasoningMeta, RenderedPrompt, append_rendered_prompt,
+    messages_are_prompt_resume_safe, render_prompt, render_transcript_prompt, shared_parts,
 };
 pub use prompt::{
     CORE_GUIDANCE_SECTION, MAIN_AGENT_INTRO, PromptBuiltin, PromptSlot, PromptTemplate,

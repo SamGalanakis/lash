@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use crate::AttachmentRef;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseTextPhase {
@@ -173,6 +177,29 @@ impl LlmMessage {
 pub struct LlmAttachment {
     pub mime: String,
     pub data: Vec<u8>,
+    pub reference: Option<AttachmentRef>,
+}
+
+impl LlmAttachment {
+    pub fn bytes(mime: impl Into<String>, data: Vec<u8>) -> Self {
+        Self {
+            mime: mime.into(),
+            data,
+            reference: None,
+        }
+    }
+
+    pub fn reference(reference: AttachmentRef) -> Self {
+        Self {
+            mime: reference.canonical_mime().to_string(),
+            data: Vec::new(),
+            reference: Some(reference),
+        }
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        !self.data.is_empty() || self.reference.is_none()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -289,4 +316,3 @@ pub struct ModelSelection {
     pub model: &'static str,
     pub variant: Option<&'static str>,
 }
-use std::sync::Arc;

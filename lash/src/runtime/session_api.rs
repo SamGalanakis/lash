@@ -158,7 +158,7 @@ impl LashRuntime {
 
     pub(super) fn runtime_session_manager(
         &self,
-    ) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         self.runtime_session_manager_with_prompt_bridge(None)
     }
 
@@ -166,7 +166,7 @@ impl LashRuntime {
         &self,
         prompt_bridge: Option<HostPromptBridge>,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-    ) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
             prompt_bridge,
@@ -178,7 +178,7 @@ impl LashRuntime {
     pub(super) fn runtime_session_manager_with_prompt_bridge(
         &self,
         prompt_bridge: Option<HostPromptBridge>,
-    ) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
             prompt_bridge,
@@ -187,7 +187,7 @@ impl LashRuntime {
         )?))
     }
 
-    pub fn session_manager(&self) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+    pub fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         self.runtime_session_manager()
     }
 
@@ -213,7 +213,7 @@ impl LashRuntime {
         let ctx = crate::RewriteContext {
             session_id: self.state.session_id.clone(),
             trigger,
-            state: self.state.read_view(),
+            state: self.read_snapshot().read_view(),
             host: manager,
         };
         let input = crate::HistoryState::from_state(&self.state.export_state());

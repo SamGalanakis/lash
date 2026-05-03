@@ -7,38 +7,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::session_model::Message;
-
 use super::{InputItem, NormalizedItem, PathResolver};
-
-pub(super) fn active_read_message_delta_if_base_preserved<'a>(
-    base: &[Message],
-    next: impl IntoIterator<Item = &'a Message>,
-) -> Option<Vec<Message>> {
-    let mut base_index = 0;
-    let mut appended = Vec::new();
-    for message in next.into_iter().filter(|message| !message.is_transient()) {
-        if let Some(base_message) = base.get(base_index) {
-            if base_message.id != message.id {
-                return None;
-            }
-            base_index += 1;
-        } else {
-            appended.push(message.clone());
-        }
-    }
-    if base_index == base.len() {
-        Some(appended)
-    } else {
-        None
-    }
-}
 
 pub(super) fn normalize_input_items(
     items: &[InputItem],
     image_blobs: &HashMap<String, Vec<u8>>,
     base_dir: &Path,
     path_resolver: &dyn PathResolver,
+    attachment_store: &dyn crate::AttachmentStore,
 ) -> Result<Vec<NormalizedItem>, String> {
     let mut out: Vec<NormalizedItem> = Vec::new();
     for item in items {
@@ -65,7 +41,18 @@ pub(super) fn normalize_input_items(
                 let Some(blob) = image_blobs.get(id) else {
                     return Err(format!("Invalid image_ref: missing blob for id '{id}'"));
                 };
-                out.push(NormalizedItem::Image(blob.clone()));
+                let meta = crate::AttachmentMeta::new(
+                    crate::AttachmentId::new("pending"),
+                    crate::MediaType::Image(crate::ImageMediaType::Png),
+                    blob.len() as u64,
+                    None,
+                    None,
+                    Some(id.clone()),
+                );
+                let reference = attachment_store
+                    .put(blob.clone(), meta)
+                    .map_err(|err| format!("Failed to store image_ref '{id}': {err}"))?;
+                out.push(NormalizedItem::Image(reference));
             }
         }
     }

@@ -44,7 +44,7 @@ pub(super) fn handle_surface_input(
     ui_extensions: &UiExtensions,
     event: &TuiInputEvent,
     plugin_host: &PluginHost,
-    session_manager: &Arc<dyn SessionManager>,
+    session_manager: &Arc<dyn RuntimeSessionHost>,
     app: &mut App,
 ) -> bool {
     match ui_extensions.handle_input(
@@ -223,7 +223,7 @@ pub(super) async fn activate_foreground_session_handoff(
     turn_counter: &mut usize,
     current_execution_mode: &mut ExecutionMode,
     current_model_variant: &mut Option<String>,
-    session_manager: &mut Arc<dyn SessionManager>,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
 ) -> bool {
@@ -359,7 +359,7 @@ pub(super) fn handle_mouse_event(
     ui_trace: &mut Option<UiTraceRecorder>,
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
-    session_manager: &Arc<dyn SessionManager>,
+    session_manager: &Arc<dyn RuntimeSessionHost>,
 ) -> anyhow::Result<()> {
     use crossterm::event::{MouseButton, MouseEventKind};
     // Some terminals (notably kitty) can paint transient hover/search
@@ -586,7 +586,7 @@ pub(super) async fn handle_key_event(
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn SessionManager>,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_dynamic: &mut DynamicStateSnapshot,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,

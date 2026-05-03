@@ -3,8 +3,7 @@
 //! Exposes everything the standard provider does plus `continue_as`
 //! (clean-window successor for tail-calling). Examples are written in
 //! lashlang `call <tool> { ... }` syntax. Prompt prose is tuned for
-//! schema-first results, binding subagent output, and chaining
-//! `wait_agent` into the next expression.
+//! schema-first results and binding subagent output.
 
 use std::sync::Arc;
 
@@ -20,9 +19,9 @@ use crate::capability::CapabilityRegistry;
 use crate::host::SubagentHost;
 use crate::shared::{
     self, build_spawn_create_request, capability_list_for_description, example_capability_name,
-    finalise_tool_result, fresh_child_request, normalize_context_policy, parse_fork_turns,
-    parse_output_schema, render_task_prompt, required_string, rlm_seed_initial_nodes,
-    spawn_agent_input_schema, tool_definition, turn_input_for_task, unknown_capability_message,
+    finalise_tool_result, fresh_child_request, normalize_context_policy, parse_output_schema,
+    render_task_prompt, required_string, rlm_seed_initial_nodes, spawn_agent_input_schema,
+    tool_definition, turn_input_for_task, unknown_capability_message,
 };
 use crate::types::{CloseAgentRequest, SpawnAgentRequest, WaitAgentRequest, WaitUntil};
 
@@ -99,13 +98,11 @@ impl RlmSubagentToolsProvider {
         if self.registry.get(&capability_name).is_none() {
             return Err(unknown_capability_message(&capability_name, &self.registry));
         }
-        let fork_turns = parse_fork_turns(args.get("fork_turns"))?;
         let output_schema = parse_output_schema(args.get("output"))?;
         let create_request = build_spawn_create_request(
             &self.registry,
             context,
             &capability_name,
-            fork_turns,
             output_schema.clone(),
         )
         .await?;
@@ -270,7 +267,7 @@ impl ToolProvider for RlmSubagentToolsProvider {
 pub(crate) fn rlm_subagent_prompt_contributions() -> Vec<PromptContribution> {
     vec![PromptContribution::guidance(
         "Subagents and lightweight LLM calls",
-        "`llm_query` is the cheap decomposition primitive: one focused LLM call, no child session, no tools, no REPL loop. Use it for semantic extraction, summarization, classification, judging, or transforming data you already have in variables. Shape it as `call llm_query { task: \"...\", inputs: { text: chunk }, output: { answer: \"str\" } }`. Omit `output` for a plain string. `output` accepts the same record descriptors and `Type { ... }` literals as `spawn_agent`.\n\nUse `spawn_agent` when the subproblem needs tool use, file/repo inspection, shell commands, edits, multi-step exploration, its own context window, cancellation, or recursive subagents. Plain `call spawn_agent { ... }` blocks until the child finishes and returns the child result. For fan-out, use generic lashlang async handles: `h = start call spawn_agent { agent_name: \"auth\", task: \"Summarise auth\", capability: \"explore\", output: { summary: \"str\" } }`, then `result = (await h)?`. Use `parallel` or record-shaped awaits to collect independent handles, and `cancel h` to stop a live child subtree.\n\n`list_async_handles()` returns only live handles, grouped as `subagent.<agent_name>` for normalized subagent names and `tool.<handle_id>` for other async tool calls. Cancel stale subagent handles through those values when the work is no longer needed.\n\nTwo subagent capabilities. `explore` is read-only and cannot recurse. `peer` has full edit + recurse powers. Default to `explore` for parallel investigation; use `peer` only when the subagent must mutate or spawn its own subagents.\n\n`output` defines the typed return shape. Pass either a record of scalar type descriptors (`{ line: \"str\", length: \"int\" }`) or a `Type { ... }` literal. With `output` set the subagent ends with `submit <expr>` and the value flows straight into your bound variable. A child can fail terminally with `call submit_error { reason: \"...\" }`; parent `spawn_agent` returns an error so `?` short-circuits naturally.\n\nCanonical fan-out:\n\n```lashlang\na = start call spawn_agent { agent_name: \"auth\", task: \"Summarise auth flow\", capability: \"explore\", output: { summary: \"str\" } }\nb = start call spawn_agent { agent_name: \"db\", task: \"Summarise migrations\", capability: \"explore\", output: { summary: \"str\" } }\nhandles = (call list_async_handles {})?\nresults = parallel { auth: (await handles.subagent.auth)?, db: (await handles.subagent.db)? }\nsubmit results\n```\n\n`fork_turns` controls inherited context: `none` (default), `all`, or a positive integer string for the most recent N turns. In user-facing prose, call them subagents, not delegates or child agents.",
+        "`llm_query` is the cheap decomposition primitive: one focused LLM call, no child session, no tools, no REPL loop. Use it for semantic extraction, summarization, classification, judging, or transforming data you already have in variables. Shape it as `call llm_query { task: \"...\", inputs: { text: chunk }, output: { answer: \"str\" } }`. Omit `output` for a plain string. `output` accepts the same record descriptors and `Type { ... }` literals as `spawn_agent`.\n\nUse `spawn_agent` when the subproblem needs tool use, file/repo inspection, shell commands, edits, multi-step exploration, its own context window, cancellation, or recursive subagents. Plain `call spawn_agent { ... }` blocks until the child finishes and returns the child result. For fan-out, use generic lashlang async handles: `h = start call spawn_agent { agent_name: \"auth\", task: \"Summarise auth\", capability: \"explore\", output: { summary: \"str\" } }`, then `result = (await h)?`. Use `parallel` or record-shaped awaits to collect independent handles, and `cancel h` to stop a live child subtree.\n\n`list_async_handles()` returns only live handles, grouped as `subagent.<agent_name>` for normalized subagent names and `tool.<handle_id>` for other async tool calls. Cancel stale subagent handles through those values when the work is no longer needed.\n\nTwo subagent capabilities. `explore` is read-only and cannot recurse. `peer` has full edit + recurse powers. Default to `explore` for parallel investigation; use `peer` only when the subagent must mutate or spawn its own subagents.\n\n`output` defines the typed return shape. Pass either a record of scalar type descriptors (`{ line: \"str\", length: \"int\" }`) or a `Type { ... }` literal. With `output` set the subagent ends with `submit <expr>` and the value flows straight into your bound variable. A child can fail terminally with `call submit_error { reason: \"...\" }`; parent `spawn_agent` returns an error so `?` short-circuits naturally.\n\nCanonical fan-out:\n\n```lashlang\na = start call spawn_agent { agent_name: \"auth\", task: \"Summarise auth flow\", capability: \"explore\", output: { summary: \"str\" } }\nb = start call spawn_agent { agent_name: \"db\", task: \"Summarise migrations\", capability: \"explore\", output: { summary: \"str\" } }\nhandles = (call list_async_handles {})?\nresults = parallel { auth: (await handles.subagent.auth)?, db: (await handles.subagent.db)? }\nsubmit results\n```\n\nIn user-facing prose, call them subagents, not delegates or child agents.",
     )]
 }
 
@@ -333,7 +330,7 @@ fn llm_query_definition(examples: Vec<String>) -> ToolDefinition {
 fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) -> ToolDefinition {
     let cap_list = capability_list_for_description(capability_names);
     let description = format!(
-        "Run a subagent and return its final result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes. Use `start call spawn_agent {{ ... }}` for fan-out; it returns a generic lashlang async handle immediately, visible through `list_async_handles`. Pick `capability` from {cap_list}. `explore` is read-only and cannot recurse; `peer` has full edit + recurse powers. `output` defines the typed return shape. A child can fail terminally with `call submit_error {{ reason: \"...\" }}`; this tool returns an error with that reason. `fork_turns` controls inherited parent context: `none` (default), `all`, or a positive integer string. `agent_name` is auto-normalized."
+        "Run a subagent and return its final result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes. Use `start call spawn_agent {{ ... }}` for fan-out; it returns a generic lashlang async handle immediately, visible through `list_async_handles`. Pick `capability` from {cap_list}. `explore` is read-only and cannot recurse; `peer` has full edit + recurse powers. `output` defines the typed return shape. A child can fail terminally with `call submit_error {{ reason: \"...\" }}`; this tool returns an error with that reason. `agent_name` is auto-normalized."
     );
     tool_definition(
         "spawn_agent",
@@ -342,6 +339,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
         examples,
         ToolExecutionMode::Serial,
     )
+    .with_output_from_input_schema("output", None)
 }
 
 fn llm_query_prompt(task: &str, inputs: &Value, output_schema: Option<&Value>) -> String {

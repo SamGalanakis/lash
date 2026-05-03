@@ -1160,12 +1160,14 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     kind: crate::PartKind::Image,
                     content: String::new(),
                     attachment: Some(crate::session_model::message::PartAttachment {
-                        mime: "image/png".to_string(),
-                        url: crate::session_model::message::data_url_for_bytes(
-                            "image/png",
-                            &[9, 8, 7],
-                        ),
-                        filename: None,
+                        reference: crate::AttachmentRef {
+                            id: crate::AttachmentId::new("test-image"),
+                            media_type: crate::MediaType::Image(crate::ImageMediaType::Png),
+                            byte_len: 3,
+                            width: None,
+                            height: None,
+                            label: None,
+                        },
                     }),
                     tool_call_id: None,
                     tool_name: None,
@@ -2590,8 +2592,14 @@ fn normalize_items_resolves_relative_paths_with_base_dir() {
         },
     ];
     let resolver = DefaultPathResolver;
-    let out =
-        normalize_input_items(&items, &HashMap::new(), tmp.path(), &resolver).expect("normalized");
+    let out = normalize_input_items(
+        &items,
+        &HashMap::new(),
+        tmp.path(),
+        &resolver,
+        &crate::InMemoryAttachmentStore::new(),
+    )
+    .expect("normalized");
     assert_eq!(out.len(), 1);
     match &out[0] {
         NormalizedItem::Text(text) => {

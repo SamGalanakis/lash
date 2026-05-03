@@ -5,6 +5,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug)]
 pub enum Scenario {
     Baseline,
+    LanguageSurface,
     AsyncAwait,
     DirectUnwrap,
     GeneralParallel,
@@ -13,10 +14,21 @@ pub enum Scenario {
 }
 
 impl Scenario {
+    pub const ALL: &'static [Self] = &[
+        Self::Baseline,
+        Self::LanguageSurface,
+        Self::AsyncAwait,
+        Self::DirectUnwrap,
+        Self::GeneralParallel,
+        Self::LoopControl,
+        Self::IndexedAssignment,
+    ];
+
     #[allow(dead_code)]
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "baseline" => Self::Baseline,
+            "language_surface" => Self::LanguageSurface,
             "async_await" => Self::AsyncAwait,
             "direct_unwrap" => Self::DirectUnwrap,
             "general_parallel" => Self::GeneralParallel,
@@ -28,7 +40,7 @@ impl Scenario {
 
     #[allow(dead_code)]
     pub fn expected_values() -> &'static str {
-        "baseline, async_await, direct_unwrap, general_parallel, loop_control, or indexed_assignment"
+        "baseline, language_surface, async_await, direct_unwrap, general_parallel, loop_control, indexed_assignment, or all"
     }
 }
 
@@ -36,6 +48,7 @@ impl fmt::Display for Scenario {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Baseline => "baseline",
+            Self::LanguageSurface => "language_surface",
             Self::AsyncAwait => "async_await",
             Self::DirectUnwrap => "direct_unwrap",
             Self::GeneralParallel => "general_parallel",
@@ -106,6 +119,110 @@ summary = format(
   stats_value.index_count
 )
 submit summary
+"#
+        }
+        Scenario::LanguageSurface => {
+            r#"
+source = join(history, ",")
+tokens = split(source, ",")
+trimmed_user = trim(format(" {0} ", ctx.user))
+count = len(tokens)
+empty_tail = empty(slice(tokens, count, count))
+predicates = [
+  contains(source, tokens[1]),
+  starts_with(source, tokens[0]),
+  ends_with(source, tokens[2])
+]
+numeric = {
+  neg: -ctx.attempt,
+  sum: ctx.attempt + count,
+  diff: count - 1,
+  product: count * 2,
+  quotient: count / 2,
+  modulo: count % 2,
+  parsed_int: to_int(ctx.attempt),
+  parsed_float: to_float(ctx.attempt)
+}
+logic = not false and (count > 2 or empty_tail)
+comparisons = [
+  count == 3,
+  count != 4,
+  count < 4,
+  count <= 3,
+  count > 2,
+  count >= 3
+]
+choice = logic ? "yes" : "no"
+json_text = "{\"attempt\":" + to_string(ctx.attempt) + ",\"ok\":true}"
+parsed = json_parse(json_text)
+positional = parallel {
+  format("left:{0}", tokens[0]),
+  call echo { value: tokens[1] },
+  len(tokens)
+}
+named = parallel {
+  lookup: call echo { value: source }
+  summary: format("{0}:{1}", trimmed_user, count)
+}
+cancelled = start call echo { value: "cancelled" }
+cancel cancelled
+handle = start call echo { value: "awaited" }
+awaited = (await handle)?
+direct = (call echo { value: trimmed_user })?
+print direct
+state = {
+  tags: push(tokens, "delta"),
+  counts: {},
+  kept: [],
+  predicates: predicates,
+  comparisons: comparisons,
+  numeric: numeric,
+  parsed: parsed
+}
+state.tags[1] = "beta"
+for token in state.tags {
+  state.counts[token] = state.counts[token] + 1
+}
+for token in keys(state.counts) {
+  if token == "beta" {
+    continue
+  }
+  if token == "delta" {
+    break
+  }
+  state.kept = push(state.kept, token)
+}
+Payload = Type {
+  user: str,
+  choice: enum["yes", "no"],
+  tags: list[str],
+  counts: dict,
+  kept: list[str],
+  maybe: str | null,
+  optional_note: str?
+}
+validated = validate(
+  {
+    user: direct,
+    choice: choice,
+    tags: state.tags,
+    counts: state.counts,
+    kept: state.kept,
+    maybe: null
+  },
+  Payload
+)
+submit {
+  direct: direct,
+  awaited: awaited,
+  positional: positional,
+  lookup: named.lookup?,
+  summary: named.summary,
+  values: values(state.counts),
+  first_two: slice(state.tags, null, 2),
+  validated: validated,
+  stringified: to_string(validated)
+}
 "#
         }
         Scenario::AsyncAwait => {
@@ -208,6 +325,10 @@ impl ToolHost for BenchHost {
             .as_record()
             .ok_or_else(|| ToolHostError::new("expected handle record"))?;
         Ok(record.get("value").cloned().unwrap_or(Value::Null))
+    }
+
+    fn cancel_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
+        Ok(handle.clone())
     }
 }
 

@@ -889,8 +889,8 @@ Format each work step like this:
 Brief reasoning here in plain prose.
 
 ```lashlang
-candidate = (call spawn_agent { task_name: "narrow_candidates", task: "narrow the search to likely sessions", capability: "explore" })?
-result = (call wait_agent { targets: [candidate.path], timeout_ms: 30000 })?
+candidate = start call spawn_agent { agent_name: "narrow_candidates", task: "narrow the search to likely sessions", capability: "explore" }
+result = (await candidate)?
 print result
 ```
 ````

@@ -9,7 +9,7 @@ use crate::SessionPolicy;
 use crate::SessionStateEnvelope;
 use crate::runtime::PersistedSessionState;
 
-use super::{PluginError, SessionManager};
+use super::PluginError;
 
 /// Reason the history pipeline is being invoked.
 #[derive(Clone, Debug)]
@@ -367,7 +367,7 @@ pub struct TurnTransformContext {
     pub state: SessionReadView,
     pub prompt_usage: Option<crate::runtime::PromptUsage>,
     pub max_context_tokens: Option<usize>,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn super::HistoryHost>,
 }
 
 /// Context passed to a history rewriter.
@@ -376,7 +376,7 @@ pub struct RewriteContext {
     pub session_id: String,
     pub trigger: RewriteTrigger,
     pub state: SessionReadView,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn super::HistoryHost>,
 }
 
 #[derive(Debug, thiserror::Error, Clone)]

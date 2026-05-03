@@ -335,11 +335,14 @@ impl PlanModeState {
     }
 }
 
-async fn ensure_plan_path(
+async fn ensure_plan_path<H>(
     state: &Arc<Mutex<PlanModeState>>,
     session_id: &str,
-    host: &Arc<dyn lash::SessionManager>,
-) -> Result<PathBuf, PluginError> {
+    host: &Arc<H>,
+) -> Result<PathBuf, PluginError>
+where
+    H: lash::SessionSnapshotHost + ?Sized,
+{
     if let Some(path) = state
         .lock()
         .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
@@ -359,12 +362,15 @@ async fn ensure_plan_path(
     Ok(path)
 }
 
-async fn ensure_plan_report(
+async fn ensure_plan_report<H>(
     state: &Arc<Mutex<PlanModeState>>,
     session_id: &str,
-    host: &Arc<dyn lash::SessionManager>,
+    host: &Arc<H>,
     seed_if_missing: bool,
-) -> Result<PlanReport, PluginError> {
+) -> Result<PlanReport, PluginError>
+where
+    H: lash::SessionSnapshotHost + ?Sized,
+{
     let path = ensure_plan_path(state, session_id, host).await?;
     if seed_if_missing {
         seed_plan_template(&path).map_err(PluginError::Session)?;
@@ -376,11 +382,14 @@ fn dynamic_tool_state_unavailable(err: &PluginError) -> bool {
     matches!(err, PluginError::Session(message) if message.contains("dynamic tool state"))
 }
 
-async fn sync_plan_exit_tool_state(
-    host: &Arc<dyn lash::SessionManager>,
+async fn sync_plan_exit_tool_state<H>(
+    host: &Arc<H>,
     session_id: &str,
     enabled: bool,
-) -> Result<(), PluginError> {
+) -> Result<(), PluginError>
+where
+    H: lash::DynamicToolHost + ?Sized,
+{
     let availability = if enabled {
         Some(lash::ToolAvailability::Documented)
     } else {
@@ -396,12 +405,15 @@ async fn sync_plan_exit_tool_state(
     }
 }
 
-async fn set_plan_mode_enabled_state(
+async fn set_plan_mode_enabled_state<H>(
     state: &Arc<Mutex<PlanModeState>>,
     session_id: &str,
-    host: &Arc<dyn lash::SessionManager>,
+    host: &Arc<H>,
     enabled: bool,
-) -> Result<bool, PluginError> {
+) -> Result<bool, PluginError>
+where
+    H: lash::DynamicToolHost + ?Sized,
+{
     let previous = {
         let mut guard = state
             .lock()

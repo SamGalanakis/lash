@@ -1,16 +1,18 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 
 use lashlang::{
-    CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ParseError as FlowParseError,
-    Record as FlowRecord, Snapshot as FlowSnapshot, State as FlowState, ToolHost, ToolHostError,
-    Value as FlowValue,
+    CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ImageValue,
+    ParseError as FlowParseError, Record as FlowRecord, Snapshot as FlowSnapshot,
+    State as FlowState, ToolHost, ToolHostError, Value as FlowValue,
 };
 use serde_json::Value;
 
 use crate::plugin::{ToolResultProjectionPluginConfig, project_observation_text};
+use crate::{AttachmentRef, ToolImage};
 
 #[derive(Debug)]
 pub enum LashlangRequest {
@@ -88,6 +90,7 @@ pub enum LashlangResponse {
         output: String,
         observations: Vec<String>,
         observation_truncation: Vec<crate::TextProjectionMetadata>,
+        images: Vec<AttachmentRef>,
         error: Option<String>,
         /// `Some(value)` only when the surrounding session was started
         /// with `accept_finish: true` AND the lashlang program ended
@@ -125,13 +128,24 @@ pub struct LashlangToolBatchItem {
 pub struct LashlangToolReply {
     pub success: bool,
     pub result: Value,
+    pub images: Vec<ToolImage>,
 }
 
 impl LashlangToolReply {
+    #[cfg(test)]
     pub(crate) fn success(result: Value) -> Self {
         Self {
             success: true,
             result,
+            images: Vec::new(),
+        }
+    }
+
+    pub(crate) fn success_with_images(result: Value, images: Vec<ToolImage>) -> Self {
+        Self {
+            success: true,
+            result,
+            images,
         }
     }
 
@@ -139,6 +153,7 @@ impl LashlangToolReply {
         Self {
             success: false,
             result,
+            images: Vec::new(),
         }
     }
 }
@@ -151,12 +166,18 @@ pub struct LashlangRuntime {
 
 impl LashlangRuntime {
     pub fn start() -> Result<Self, std::io::Error> {
+        Self::start_with_attachment_store(Arc::new(crate::InMemoryAttachmentStore::new()))
+    }
+
+    pub fn start_with_attachment_store(
+        attachment_store: Arc<dyn crate::AttachmentStore>,
+    ) -> Result<Self, std::io::Error> {
         let (request_tx, request_rx) = std_mpsc::channel::<LashlangRequest>();
         let (response_tx, response_rx) = std_mpsc::channel::<LashlangResponse>();
 
         let thread = std::thread::Builder::new()
             .name("lashlang-runtime".into())
-            .spawn(move || runtime_thread_main(request_rx, response_tx))?;
+            .spawn(move || runtime_thread_main(request_rx, response_tx, attachment_store))?;
 
         Ok(Self {
             request_tx,
@@ -219,16 +240,23 @@ impl RuntimeConfig {
 struct RuntimeState {
     config: RuntimeConfig,
     rlm: FlowState,
+    attachment_store: Arc<dyn crate::AttachmentStore>,
     program_cache: CompiledProgramCache,
     scratch: ExecutionScratch,
 }
 
 impl RuntimeState {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_attachment_store(Arc::new(crate::InMemoryAttachmentStore::new()))
+    }
+
+    fn with_attachment_store(attachment_store: Arc<dyn crate::AttachmentStore>) -> Self {
         lashlang::prewarm();
         Self {
             config: RuntimeConfig::default(),
             rlm: FlowState::new(),
+            attachment_store,
             program_cache: CompiledProgramCache::default(),
             scratch: ExecutionScratch::new(),
         }
@@ -238,8 +266,9 @@ impl RuntimeState {
 fn runtime_thread_main(
     request_rx: std_mpsc::Receiver<LashlangRequest>,
     response_tx: std_mpsc::Sender<LashlangResponse>,
+    attachment_store: Arc<dyn crate::AttachmentStore>,
 ) {
-    let mut state = RuntimeState::new();
+    let mut state = RuntimeState::with_attachment_store(attachment_store);
 
     while let Ok(request) = request_rx.recv() {
         match request {
@@ -264,6 +293,7 @@ fn runtime_thread_main(
                     output: result.output,
                     observations: result.observations,
                     observation_truncation: result.observation_truncation,
+                    images: result.images,
                     error: result.error,
                     terminal_finish: result.terminal_finish,
                 });
@@ -287,6 +317,7 @@ fn runtime_thread_main(
                     output: String::new(),
                     observations: Vec::new(),
                     observation_truncation: Vec::new(),
+                    images: Vec::new(),
                     error,
                     terminal_finish: None,
                 });
@@ -328,8 +359,78 @@ struct ExecOutcome {
     output: String,
     observations: Vec<String>,
     observation_truncation: Vec<crate::TextProjectionMetadata>,
+    images: Vec<AttachmentRef>,
     error: Option<String>,
     terminal_finish: Option<Value>,
+}
+
+fn register_tool_image(
+    mut image: ToolImage,
+    attachment_store: &dyn crate::AttachmentStore,
+) -> ImageValue {
+    let reference = if let Some(reference) = image.reference.take() {
+        reference
+    } else if let Some(media_type) = crate::MediaType::from_mime(&image.mime) {
+        let meta = crate::AttachmentMeta::new(
+            crate::AttachmentId::new("pending"),
+            media_type,
+            image.data.len() as u64,
+            image.width,
+            image.height,
+            Some(image.label.clone()),
+        );
+        attachment_store
+            .put(std::mem::take(&mut image.data), meta)
+            .unwrap_or_else(|_| crate::AttachmentRef {
+                id: crate::AttachmentId::new(uuid::Uuid::new_v4().to_string()),
+                media_type,
+                byte_len: 0,
+                width: image.width,
+                height: image.height,
+                label: Some(image.label.clone()),
+            })
+    } else {
+        crate::AttachmentRef {
+            id: crate::AttachmentId::new(uuid::Uuid::new_v4().to_string()),
+            media_type: crate::MediaType::Image(crate::ImageMediaType::Png),
+            byte_len: image.data.len() as u64,
+            width: image.width,
+            height: image.height,
+            label: Some(image.label.clone()),
+        }
+    };
+    ImageValue::new(
+        reference.id.to_string(),
+        reference.label.clone().unwrap_or_default(),
+        reference.byte_len,
+        reference.width,
+        reference.height,
+    )
+}
+
+fn stored_attachment_ref(
+    id: &str,
+    attachment_store: &dyn crate::AttachmentStore,
+) -> Option<AttachmentRef> {
+    attachment_store
+        .get(&crate::AttachmentId::new(id.to_string()))
+        .ok()
+        .map(|stored| stored.meta.as_ref())
+}
+
+#[cfg(test)]
+fn stored_tool_image(id: &str, attachment_store: &dyn crate::AttachmentStore) -> Option<ToolImage> {
+    let stored = attachment_store
+        .get(&crate::AttachmentId::new(id.to_string()))
+        .ok()?;
+    Some(ToolImage {
+        mime: stored.meta.media_type.canonical_mime().to_string(),
+        reference: Some(stored.meta.as_ref()),
+        data: stored.bytes,
+        label: stored.meta.label.unwrap_or_default(),
+        width: stored.meta.width,
+        height: stored.meta.height,
+    })
 }
 
 fn execute_code(
@@ -345,6 +446,7 @@ fn execute_code(
                 output: String::new(),
                 observations: Vec::new(),
                 observation_truncation: Vec::new(),
+                images: Vec::new(),
                 error: Some(format_parse_error(code, &err)),
                 terminal_finish: None,
             };
@@ -353,12 +455,15 @@ fn execute_code(
 
     let observations = Mutex::new(Vec::new());
     let observation_truncation = Mutex::new(Vec::new());
+    let printed_images = Mutex::new(Vec::new());
     let host = HostBridge {
         response_tx,
         session_id: state.config.session_id.clone(),
         observe_projection: &state.config.observe_projection,
+        attachment_store: state.attachment_store.as_ref(),
         observations: &observations,
         observation_truncation: &observation_truncation,
+        printed_images: &printed_images,
     };
 
     let _ = accept_finish; // schema validation lives upstream in mode.rs
@@ -372,6 +477,7 @@ fn execute_code(
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
             observation_truncation: observation_truncation.into_inner().unwrap_or_default(),
+            images: printed_images.into_inner().unwrap_or_default(),
             error: None,
             terminal_finish: Some(flow_to_json_value(&value)),
         },
@@ -379,6 +485,7 @@ fn execute_code(
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
             observation_truncation: observation_truncation.into_inner().unwrap_or_default(),
+            images: printed_images.into_inner().unwrap_or_default(),
             error: None,
             terminal_finish: None,
         },
@@ -386,6 +493,7 @@ fn execute_code(
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
             observation_truncation: observation_truncation.into_inner().unwrap_or_default(),
+            images: printed_images.into_inner().unwrap_or_default(),
             error: Some(lashlang::format_runtime_diagnostic(
                 code,
                 &failure.error,
@@ -400,15 +508,17 @@ struct HostBridge<'a> {
     response_tx: &'a std_mpsc::Sender<LashlangResponse>,
     session_id: String,
     observe_projection: &'a ToolResultProjectionPluginConfig,
+    attachment_store: &'a dyn crate::AttachmentStore,
     observations: &'a Mutex<Vec<String>>,
     observation_truncation: &'a Mutex<Vec<crate::TextProjectionMetadata>>,
+    printed_images: &'a Mutex<Vec<AttachmentRef>>,
 }
 
 impl ToolHost for HostBridge<'_> {
     fn call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
         let payload = self.tool_payload(args);
         let result_rx = send_tool_call(self.response_tx, name, payload)?;
-        wait_tool_result(result_rx)
+        wait_tool_result(result_rx, self.attachment_store)
     }
 
     fn call_batch(
@@ -429,7 +539,9 @@ impl ToolHost for HostBridge<'_> {
             });
         }
 
-        match send_tool_batch_call(self.response_tx, batch).and_then(wait_tool_batch_results) {
+        match send_tool_batch_call(self.response_tx, batch)
+            .and_then(|rx| wait_tool_batch_results(rx, self.attachment_store))
+        {
             Ok(results) if results.len() == calls.len() => {
                 for result in results {
                     push_result(result);
@@ -455,32 +567,85 @@ impl ToolHost for HostBridge<'_> {
     fn start_call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
         let payload = self.tool_payload(args);
         let result_rx = send_start_tool_call(self.response_tx, name, payload)?;
-        wait_tool_result(result_rx)
+        wait_tool_result(result_rx, self.attachment_store)
     }
 
     fn await_handle(&self, handle: &FlowValue) -> Result<FlowValue, ToolHostError> {
         let result_rx = send_await_tool_handle(self.response_tx, flow_to_json_value(handle))?;
-        wait_tool_result(result_rx)
+        wait_tool_result(result_rx, self.attachment_store)
     }
 
     fn cancel_handle(&self, handle: &FlowValue) -> Result<FlowValue, ToolHostError> {
         let result_rx = send_cancel_tool_handle(self.response_tx, flow_to_json_value(handle))?;
-        wait_tool_result(result_rx)
+        wait_tool_result(result_rx, self.attachment_store)
     }
 
     fn print(&self, value: &FlowValue) -> Result<(), ToolHostError> {
-        let (text, metadata) =
-            project_observation_text(&format_output_value(value), self.observe_projection);
+        let images = collect_printed_images(value, self.attachment_store)?;
+        let raw_text = format_output_value(value);
+        let (_projected_text, metadata) =
+            project_observation_text(&raw_text, self.observe_projection);
         self.observations
             .lock()
             .map_err(|_| ToolHostError::new("observation buffer poisoned"))?
-            .push(text);
+            .push(raw_text);
         self.observation_truncation
             .lock()
             .map_err(|_| ToolHostError::new("observation metadata buffer poisoned"))?
             .push(metadata);
+        if !images.is_empty() {
+            self.printed_images
+                .lock()
+                .map_err(|_| ToolHostError::new("printed image buffer poisoned"))?
+                .extend(images);
+        }
         Ok(())
     }
+}
+
+fn collect_printed_images(
+    value: &FlowValue,
+    attachment_store: &dyn crate::AttachmentStore,
+) -> Result<Vec<AttachmentRef>, ToolHostError> {
+    let mut seen = HashSet::new();
+    let mut images = Vec::new();
+    collect_printed_images_inner(value, attachment_store, &mut seen, &mut images)?;
+    Ok(images)
+}
+
+fn collect_printed_images_inner(
+    value: &FlowValue,
+    attachment_store: &dyn crate::AttachmentStore,
+    seen: &mut HashSet<String>,
+    images: &mut Vec<AttachmentRef>,
+) -> Result<(), ToolHostError> {
+    match value {
+        FlowValue::Image(image) => {
+            if !seen.insert(image.id.clone()) {
+                return Ok(());
+            }
+            let reference =
+                stored_attachment_ref(&image.id, attachment_store).ok_or_else(|| {
+                    ToolHostError::new(format!(
+                        "image bytes for `{}` are unavailable or were pruned",
+                        image.id
+                    ))
+                })?;
+            images.push(reference);
+        }
+        FlowValue::List(values) => {
+            for value in values.iter() {
+                collect_printed_images_inner(value, attachment_store, seen, images)?;
+            }
+        }
+        FlowValue::Record(record) => {
+            for (_, value) in record.iter() {
+                collect_printed_images_inner(value, attachment_store, seen, images)?;
+            }
+        }
+        FlowValue::Null | FlowValue::Bool(_) | FlowValue::Number(_) | FlowValue::String(_) => {}
+    }
+    Ok(())
 }
 
 impl HostBridge<'_> {
@@ -571,27 +736,87 @@ fn send_cancel_tool_handle(
 
 fn wait_tool_result(
     result_rx: std_mpsc::Receiver<LashlangToolReply>,
+    attachment_store: &dyn crate::AttachmentStore,
 ) -> Result<FlowValue, ToolHostError> {
     let reply = result_rx
         .recv()
         .map_err(|_| ToolHostError::new("tool result channel closed"))?;
-    decode_tool_reply(reply)
+    decode_tool_reply(reply, attachment_store)
 }
 
 fn wait_tool_batch_results(
     result_rx: std_mpsc::Receiver<Vec<LashlangToolReply>>,
+    attachment_store: &dyn crate::AttachmentStore,
 ) -> Result<Vec<Result<FlowValue, ToolHostError>>, ToolHostError> {
     let replies = result_rx
         .recv()
         .map_err(|_| ToolHostError::new("tool batch result channel closed"))?;
-    Ok(replies.into_iter().map(decode_tool_reply).collect())
+    Ok(replies
+        .into_iter()
+        .map(|reply| decode_tool_reply(reply, attachment_store))
+        .collect())
 }
 
-fn decode_tool_reply(reply: LashlangToolReply) -> Result<FlowValue, ToolHostError> {
+fn decode_tool_reply(
+    reply: LashlangToolReply,
+    attachment_store: &dyn crate::AttachmentStore,
+) -> Result<FlowValue, ToolHostError> {
     if reply.success {
-        Ok(json_to_flow_value(reply.result))
+        Ok(lift_tool_result_to_flow_value(
+            reply.result,
+            reply.images,
+            attachment_store,
+        ))
     } else {
         Err(ToolHostError::new(tool_error_message(reply.result)))
+    }
+}
+
+fn lift_tool_result_to_flow_value(
+    result: Value,
+    tool_images: Vec<ToolImage>,
+    attachment_store: &dyn crate::AttachmentStore,
+) -> FlowValue {
+    if tool_images.is_empty() {
+        return json_to_flow_value(result);
+    }
+
+    let image_values = tool_images
+        .into_iter()
+        .map(|image| FlowValue::Image(register_tool_image(image, attachment_store)))
+        .collect::<Vec<_>>();
+
+    if is_image_only_tool_payload(&result) {
+        return if image_values.len() == 1 {
+            image_values.into_iter().next().unwrap_or(FlowValue::Null)
+        } else {
+            FlowValue::List(image_values.into())
+        };
+    }
+
+    let mut value = json_to_flow_value(result);
+    let images_value = FlowValue::List(image_values.into());
+    match &mut value {
+        FlowValue::Record(record) => {
+            Arc::make_mut(record).insert("images".to_string(), images_value);
+            value
+        }
+        _ => {
+            let mut record = FlowRecord::new();
+            record.insert("payload".to_string(), value);
+            record.insert("images".to_string(), images_value);
+            FlowValue::Record(Arc::new(record))
+        }
+    }
+}
+
+fn is_image_only_tool_payload(result: &Value) -> bool {
+    match result {
+        Value::String(text) => text.trim_start().starts_with("[Image:"),
+        Value::Null => true,
+        Value::Array(values) => values.is_empty(),
+        Value::Object(map) => map.is_empty(),
+        _ => false,
     }
 }
 
@@ -651,6 +876,9 @@ fn flow_to_json_value(value: &FlowValue) -> Value {
         FlowValue::Bool(value) => Value::Bool(*value),
         FlowValue::Number(value) => json_number(*value),
         FlowValue::String(value) => Value::String(value.to_string()),
+        FlowValue::Image(image) => {
+            serde_json::to_value(image).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+        }
         FlowValue::List(values) => Value::Array(values.iter().map(flow_to_json_value).collect()),
         FlowValue::Record(record) => flow_record_to_json_value(record),
     }
@@ -690,11 +918,39 @@ fn json_to_flow_value(value: Value) -> FlowValue {
         Value::Array(values) => {
             FlowValue::List(values.into_iter().map(json_to_flow_value).collect())
         }
-        Value::Object(map) => FlowValue::Record(Arc::new(
-            map.into_iter()
-                .map(|(key, value)| (key, json_to_flow_value(value)))
-                .collect::<FlowRecord>(),
-        )),
+        Value::Object(map) => json_map_to_image(&map)
+            .map(FlowValue::Image)
+            .unwrap_or_else(|| {
+                FlowValue::Record(Arc::new(
+                    map.into_iter()
+                        .map(|(key, value)| (key, json_to_flow_value(value)))
+                        .collect::<FlowRecord>(),
+                ))
+            }),
+    }
+}
+
+fn json_map_to_image(map: &serde_json::Map<String, Value>) -> Option<ImageValue> {
+    if map.get("type")?.as_str()? != "image" {
+        return None;
+    }
+    Some(ImageValue::new(
+        map.get("id")?.as_str()?.to_string(),
+        map.get("label")?.as_str()?.to_string(),
+        map.get("size")?.as_u64()?,
+        optional_json_u32(map.get("width")?)?,
+        optional_json_u32(map.get("height")?)?,
+    ))
+}
+
+fn optional_json_u32(value: &Value) -> Option<Option<u32>> {
+    match value {
+        Value::Null => Some(None),
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some),
+        _ => None,
     }
 }
 
@@ -704,7 +960,7 @@ fn format_output_value(value: &FlowValue) -> String {
         FlowValue::String(text) => text.to_string(),
         FlowValue::Bool(value) => value.to_string(),
         FlowValue::Number(value) => value.to_string(),
-        FlowValue::List(_) | FlowValue::Record(_) => {
+        FlowValue::Image(_) | FlowValue::List(_) | FlowValue::Record(_) => {
             serde_json::to_string(&flow_to_json_value(value)).unwrap_or_else(|_| value.to_string())
         }
     }
@@ -789,8 +1045,9 @@ mod tests {
     #[test]
     fn tool_reply_success_round_trips_json() {
         let reply = LashlangToolReply::success(json!({"id": 7, "name": "lash"}));
+        let attachment_store = crate::InMemoryAttachmentStore::new();
 
-        let value = decode_tool_reply(reply).expect("reply should parse");
+        let value = decode_tool_reply(reply, &attachment_store).expect("reply should parse");
         let FlowValue::Record(record) = value else {
             panic!("expected record");
         };
@@ -801,9 +1058,100 @@ mod tests {
     #[test]
     fn tool_reply_error_uses_payload_text() {
         let reply = LashlangToolReply::error(json!("missing path"));
+        let attachment_store = crate::InMemoryAttachmentStore::new();
 
-        let err = decode_tool_reply(reply).expect_err("reply should fail");
+        let err = decode_tool_reply(reply, &attachment_store).expect_err("reply should fail");
         assert_eq!(err.to_string(), "missing path");
+    }
+
+    #[test]
+    fn image_only_tool_reply_lifts_to_image_value() {
+        let attachment_store = crate::InMemoryAttachmentStore::new();
+        let reply = LashlangToolReply::success_with_images(
+            json!("[Image: chart.png]"),
+            vec![ToolImage {
+                mime: "image/png".to_string(),
+                reference: None,
+                data: vec![1, 2, 3, 4],
+                label: "chart.png".to_string(),
+                width: Some(2),
+                height: Some(2),
+            }],
+        );
+
+        let value = decode_tool_reply(reply, &attachment_store).expect("reply should parse");
+        let FlowValue::Image(image) = value else {
+            panic!("expected image");
+        };
+        assert_eq!(image.label, "chart.png");
+        assert_eq!(image.size, 4);
+        assert_eq!(image.width, Some(2));
+        assert!(stored_tool_image(&image.id, &attachment_store).is_some());
+    }
+
+    #[test]
+    fn print_collects_nested_images_once() {
+        let mut state = RuntimeState::new();
+        let image = register_tool_image(
+            ToolImage {
+                mime: "image/png".to_string(),
+                reference: None,
+                data: vec![9, 8, 7],
+                label: "nested.png".to_string(),
+                width: Some(1),
+                height: Some(3),
+            },
+            state.attachment_store.as_ref(),
+        );
+        let mut snapshot = state.rlm.snapshot();
+        snapshot
+            .globals
+            .insert("img".to_string(), FlowValue::Image(image));
+        state.rlm = FlowState::from_snapshot(snapshot);
+        let (tx, _rx) = std_mpsc::channel();
+
+        let result = execute_code(
+            &mut state,
+            "print { a: img, b: [img] }\nsubmit img",
+            true,
+            &tx,
+        );
+
+        assert_eq!(result.error, None);
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].label.as_deref(), Some("nested.png"));
+        assert!(result.observations[0].contains(r#""type":"image""#));
+        assert_eq!(
+            result
+                .terminal_finish
+                .as_ref()
+                .and_then(|value| value.get("type")),
+            Some(&json!("image"))
+        );
+    }
+
+    #[test]
+    fn print_missing_image_bytes_fails_block() {
+        let mut state = RuntimeState::new();
+        let mut snapshot = state.rlm.snapshot();
+        snapshot.globals.insert(
+            "img".to_string(),
+            FlowValue::Image(ImageValue::new("missing", "missing.png", 10, None, None)),
+        );
+        state.rlm = FlowState::from_snapshot(snapshot);
+        let (tx, _rx) = std_mpsc::channel();
+
+        let result = execute_code(&mut state, "print img\nsubmit null", true, &tx);
+
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("image bytes for `missing` are unavailable or were pruned"),
+            "error was {:?}",
+            result.error
+        );
     }
 
     #[test]

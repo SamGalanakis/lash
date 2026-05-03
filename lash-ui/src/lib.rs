@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash::{
-    MonitorSnapshot, MonitorUpdateBatch, PluginHost, SessionEvent, SessionManager, ToolResult,
+    MonitorSnapshot, MonitorUpdateBatch, PluginHost, RuntimeSessionHost, SessionEvent, ToolResult,
 };
 use lash_tui::{Frame, InputEvent, KeyCode as InputKeyCode, Line, Style, TermCapabilities};
 
@@ -161,7 +161,7 @@ pub enum UiHostEffect {
 pub struct UiContext<'a> {
     pub plugin_host: &'a PluginHost,
     pub session_id: &'a str,
-    pub session_manager: Arc<dyn SessionManager>,
+    pub session_manager: Arc<dyn RuntimeSessionHost>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1025,7 +1025,7 @@ fn format_monitor_summary(snapshot: &MonitorSnapshot) -> String {
 async fn monitor_status(
     plugin_host: &PluginHost,
     session_id: &str,
-    session_manager: Arc<dyn SessionManager>,
+    session_manager: Arc<dyn RuntimeSessionHost>,
 ) -> Result<MonitorSnapshot, String> {
     let result = plugin_host
         .invoke_external_for_session(
@@ -1045,7 +1045,7 @@ async fn monitor_status(
 async fn monitor_updates(
     plugin_host: &PluginHost,
     session_id: &str,
-    session_manager: Arc<dyn SessionManager>,
+    session_manager: Arc<dyn RuntimeSessionHost>,
 ) -> Result<MonitorUpdateBatch, String> {
     let result = plugin_host
         .invoke_external_for_session(
@@ -1065,7 +1065,7 @@ async fn monitor_updates(
 async fn monitor_ack_wakes(
     plugin_host: &PluginHost,
     session_id: &str,
-    session_manager: Arc<dyn SessionManager>,
+    session_manager: Arc<dyn RuntimeSessionHost>,
     ids: Vec<String>,
 ) -> Result<(), String> {
     let result = plugin_host
@@ -1087,7 +1087,7 @@ async fn monitor_ack_wakes(
 async fn monitor_stop(
     plugin_host: &PluginHost,
     session_id: &str,
-    session_manager: Arc<dyn SessionManager>,
+    session_manager: Arc<dyn RuntimeSessionHost>,
     id: &str,
 ) -> Result<(), String> {
     let result = plugin_host
@@ -1109,7 +1109,7 @@ async fn monitor_stop(
 async fn monitor_start(
     plugin_host: &PluginHost,
     session_id: &str,
-    session_manager: Arc<dyn SessionManager>,
+    session_manager: Arc<dyn RuntimeSessionHost>,
     spec: lash::MonitorSpec,
 ) -> Result<(), String> {
     let result = plugin_host
@@ -1311,7 +1311,7 @@ mod tests {
         struct UnusedSessionManager;
 
         #[async_trait]
-        impl SessionManager for UnusedSessionManager {
+        impl lash::SessionSnapshotHost for UnusedSessionManager {
             async fn snapshot_current(&self) -> Result<lash::SessionSnapshot, lash::PluginError> {
                 panic!("plan-mode UI sync should not inspect sessions")
             }
@@ -1322,14 +1322,22 @@ mod tests {
             ) -> Result<lash::SessionSnapshot, lash::PluginError> {
                 panic!("plan-mode UI sync should not inspect sessions")
             }
+        }
 
+        #[async_trait]
+        impl lash::ToolCatalogHost for UnusedSessionManager {
             async fn tool_catalog(
                 &self,
                 _session_id: &str,
             ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
                 panic!("plan-mode UI sync should not inspect tool catalogs")
             }
+        }
 
+        impl lash::DynamicToolHost for UnusedSessionManager {}
+
+        #[async_trait]
+        impl lash::SessionLifecycleHost for UnusedSessionManager {
             async fn create_session(
                 &self,
                 _request: lash::SessionCreateRequest,
@@ -1340,7 +1348,10 @@ mod tests {
             async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
                 panic!("plan-mode UI sync should not close sessions")
             }
+        }
 
+        #[async_trait]
+        impl lash::TurnHost for UnusedSessionManager {
             async fn start_turn_stream(
                 &self,
                 _session_id: &str,
@@ -1360,6 +1371,13 @@ mod tests {
                 panic!("plan-mode UI sync should not cancel turns")
             }
         }
+
+        impl lash::TaskHost for UnusedSessionManager {}
+        impl lash::MonitorHost for UnusedSessionManager {}
+        impl lash::SessionGraphHost for UnusedSessionManager {}
+        impl lash::PromptHost for UnusedSessionManager {}
+        impl lash::DirectCompletionHost for UnusedSessionManager {}
+        impl lash::TraceHost for UnusedSessionManager {}
 
         let extensions =
             UiExtensions::new(vec![Arc::new(PlanModeUiExtension)]).expect("extensions");

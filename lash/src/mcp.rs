@@ -664,8 +664,11 @@ fn tool_result_from_value(value: Value) -> Result<ToolResult, McpError> {
                     .unwrap_or("MCP image");
                 images.push(ToolImage {
                     mime: mime.to_string(),
+                    reference: None,
                     data: base64::engine::general_purpose::STANDARD.decode(data)?,
                     label: label.to_string(),
+                    width: None,
+                    height: None,
                 });
             }
             _ => passthrough_items.push(item),

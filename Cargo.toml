@@ -2,6 +2,7 @@
 members = [
     "lash-sansio",
     "lash-trace",
+    "lash-trace-viewer",
     "lash-rlm-types",
     "lash",
     "lash-default-tools",

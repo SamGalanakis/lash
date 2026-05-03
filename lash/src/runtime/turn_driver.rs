@@ -19,23 +19,12 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) policy: SessionPolicy,
     pub(super) host: RuntimeHost,
     pub(super) session_id: String,
-    pub(super) progress_graph: TurnGraphOverlay,
-    pub(super) progress_state: PersistedSessionState,
+    pub(super) turn_pipeline: TurnCommitPipeline,
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
-    pub(super) session_manager: Arc<dyn SessionManager>,
+    pub(super) session_manager: Arc<dyn RuntimeSessionHost>,
     pub(super) prompt_bridge: HostPromptBridge,
     pub(super) mode_turn_options: crate::ModeTurnOptions,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
-    /// Count of sansio events already mirrored into `progress_graph`.
-    /// Tracked separately because `progress_graph` also receives
-    /// `Tool::Invocation` records appended directly by the runtime
-    /// (`Effect::ExecCode`), which sansio doesn't know about — using
-    /// `progress_graph.len()` as the diff offset would skip
-    /// driver-emitted events whenever a tool ran first in the same
-    /// turn (e.g. RLM's lashlang exec → trajectory entry). Initialized
-    /// to the base events count and advanced after each successful
-    /// `persist_progress_boundary`.
-    pub(super) sansio_events_synced: usize,
 }
 
 struct PreparedExecutionSurface {
@@ -136,66 +125,19 @@ impl RuntimeTurnDriver {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return;
         }
-        let Some(store) = self.session.history_store() else {
-            return;
-        };
-
-        self.progress_state.policy = self.policy.clone();
-        self.progress_state.iteration = iteration;
-        // Sansio's events array and `progress_graph.active_events` are
-        // separate streams: the runtime appends `Tool::Invocation`
-        // records directly into `progress_graph` from `Effect::ExecCode`,
-        // while the driver appends mode/conversation events into sansio
-        // via `AppendEvents`. Diffing by `progress_graph` length skips
-        // driver-emitted events whose index in sansio happens to fall
-        // before any same-turn `Tool::Invocation` records. Track sansio's
-        // own committed offset instead so each new sansio event is
-        // appended exactly once.
-        if events.len() > self.sansio_events_synced {
-            for event in &events[self.sansio_events_synced..] {
+        let boundary = self
+            .turn_pipeline
+            .progress_boundary(
+                &mut self.session,
+                self.policy.clone(),
+                iteration,
+                messages,
+                events,
+            )
+            .await;
+        if boundary.persisted {
+            for event in &boundary.mirrored_events {
                 self.emit_mode_event_trace(iteration, event);
-            }
-            self.progress_graph
-                .append_events(events[self.sansio_events_synced..].iter().cloned());
-            self.sansio_events_synced = events.len();
-        }
-        if let Some(appended_messages) = self
-            .progress_graph
-            .message_delta_if_current_preserved(messages.iter())
-        {
-            self.progress_graph
-                .append_active_conversation_messages(&appended_messages);
-        } else {
-            let read_messages = messages.shared();
-            let tool_calls = self.progress_graph.tool_calls_arc();
-            self.progress_graph
-                .replace_active_read_state(read_messages.as_slice(), tool_calls.as_slice());
-        }
-
-        if self.session.execution_state_dirty()
-            && let Ok(snapshot) = self.session.snapshot_execution_state().await
-        {
-            self.progress_state.set_execution_state_snapshot(snapshot);
-        }
-        let plugins = self.session.plugins();
-        self.progress_state
-            .refresh_plugin_snapshots(plugins.as_ref());
-
-        let graph = self.progress_graph.graph_commit(
-            self.progress_state.persisted_graph_node_count,
-            self.progress_state.graph_replace_required,
-        );
-        match commit_runtime_state_with_graph_commit(
-            store.as_ref(),
-            &mut self.progress_state,
-            graph,
-            &[],
-        )
-        .await
-        {
-            Ok(()) => {}
-            Err(err) => {
-                tracing::warn!("failed to persist runtime progress boundary: {err}");
             }
         }
     }
@@ -256,8 +198,8 @@ impl RuntimeTurnDriver {
                             usage, cumulative, ..
                         } = &event
                         {
-                            self.progress_state.token_usage = cumulative.clone();
-                            self.progress_state.last_prompt_usage =
+                            self.turn_pipeline.state_mut().token_usage = cumulative.clone();
+                            self.turn_pipeline.state_mut().last_prompt_usage =
                                 normalize_prompt_usage(self.policy.provider.as_dyn(), usage);
                         }
                         emit!(event)
@@ -291,7 +233,7 @@ impl RuntimeTurnDriver {
                                 cached_input_tokens: response.usage.cached_input_tokens,
                                 reasoning_tokens: response.usage.reasoning_tokens,
                             };
-                            self.progress_state.last_prompt_usage =
+                            self.turn_pipeline.state_mut().last_prompt_usage =
                                 normalize_prompt_usage(self.policy.provider.as_dyn(), &usage);
                         }
                         machine.handle_response(Response::LlmComplete {
@@ -357,7 +299,7 @@ impl RuntimeTurnDriver {
                                 self.emit_tool_call_trace(machine.iteration(), &record);
                             }
                         }
-                        self.progress_graph
+                        self.turn_pipeline
                             .record_tool_calls(results.iter().map(|outcome| ToolCallRecord {
                                 call_id: Some(outcome.call_id.clone()),
                                 tool: outcome.tool_name.clone(),
@@ -426,7 +368,7 @@ impl RuntimeTurnDriver {
                                     self.emit_tool_call_trace(iteration, record);
                                 }
                             }
-                            self.progress_graph
+                            self.turn_pipeline
                                 .record_tool_calls(output.tool_calls.iter().cloned());
                         } else if let Err(error) = &result
                             && self.host.core.trace_sink.is_some()
@@ -510,7 +452,7 @@ impl RuntimeTurnDriver {
             model,
             mode: execution_surface.execution_mode,
             messages,
-            events: self.progress_state.read_model().active_events,
+            events: self.turn_pipeline.active_events(),
             run_offset,
             tool_surface: execution_surface.tool_surface,
             mode_preamble: execution_surface.mode_preamble,
@@ -594,20 +536,17 @@ impl RuntimeTurnDriver {
         let mode_preamble = self
             .session
             .mode_preamble(&self.session_id, execution_mode.clone());
-        let mut prompt_state = self.progress_state.export_state();
-        prompt_state.policy = session_policy.clone();
-        prompt_state.iteration = iteration;
         let plugin_prompt_contributions = self
             .session
             .plugins()
             .collect_prompt_contributions(PromptHookContext {
                 session_id: self.session_id.clone(),
-                host: Arc::clone(&self.session_manager),
-                state: crate::SessionReadView::from_graph_message_sequence(
-                    &prompt_state,
-                    self.progress_graph.base_graph(),
+                host: self.session_manager.clone(),
+                state: self.turn_pipeline.read_view(
+                    session_policy.clone(),
+                    iteration,
+                    self.mode_turn_options.clone(),
                     messages,
-                    self.progress_graph.tool_calls_arc(),
                 ),
                 mode_turn_options: self.mode_turn_options.clone(),
             })
@@ -646,15 +585,11 @@ impl RuntimeTurnDriver {
         messages: crate::MessageSequence,
         iteration: usize,
     ) -> crate::SessionReadView {
-        let mut state = self.progress_state.export_state();
-        state.policy = self.policy.clone();
-        state.iteration = iteration;
-        state.mode_turn_options = self.mode_turn_options.clone();
-        crate::SessionReadView::from_graph_message_sequence(
-            &state,
-            self.progress_graph.base_graph(),
+        self.turn_pipeline.read_view(
+            self.policy.clone(),
+            iteration,
+            self.mode_turn_options.clone(),
             messages,
-            self.progress_graph.tool_calls_arc(),
         )
     }
 }

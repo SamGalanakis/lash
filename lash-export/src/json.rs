@@ -18,9 +18,38 @@ pub fn render(session: &LoadedSession) -> String {
 
     let document = json!({
         "meta": meta,
-        "messages": session.messages,
-        "tool_calls": session.tool_calls,
+        "chronological": session.chronological,
     });
 
     serde_json::to_string_pretty(&document).unwrap_or_else(|_| document.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
+
+    #[test]
+    fn json_export_uses_chronological_entries() {
+        let session = LoadedSession {
+            meta: None,
+            chronological: vec![ChronologicalEntry {
+                index: 0,
+                payload: ChronologicalPayload::ToolCall(ToolCallRecord {
+                    call_id: Some("call_1".to_string()),
+                    tool: "lookup".to_string(),
+                    args: serde_json::json!({"q": "x"}),
+                    result: serde_json::json!({"answer": "y"}),
+                    success: true,
+                    duration_ms: 4,
+                }),
+            }],
+        };
+
+        let rendered = render(&session);
+        assert!(rendered.contains("\"chronological\""));
+        assert!(rendered.contains("\"kind\": \"tool_call\""));
+        assert!(!rendered.contains("\"messages\""));
+        assert!(!rendered.contains("\"tool_calls\""));
+    }
 }

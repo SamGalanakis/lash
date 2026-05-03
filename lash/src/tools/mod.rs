@@ -172,7 +172,7 @@ where
             } else {
                 String::new()
             };
-            serde_json::json!({
+            let mut projected = serde_json::json!({
                 "name": definition.name,
                 "namespace": definition.discovery.namespace,
                 "description": definition.description,
@@ -188,7 +188,16 @@ where
                 "activation": definition.activation,
                 "loadable": loadable,
                 "activation_hint": activation_hint,
-            })
+            });
+            if !definition.output_contract.is_static()
+                && let Some(object) = projected.as_object_mut()
+            {
+                object.insert(
+                    "output_contract".to_string(),
+                    serde_json::json!(definition.output_contract),
+                );
+            }
+            projected
         })
         .collect()
 }
@@ -420,5 +429,25 @@ mod tests {
         assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
         assert_eq!(catalog[0]["documented"], serde_json::json!(true));
         assert_eq!(catalog[1]["callable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn project_tool_catalog_preserves_dynamic_output_contracts() {
+        let catalog = project_tool_catalog([crate::ToolSurfaceEntry {
+            definition: dummy_tool("llm_query").with_output_from_input_schema(
+                "output",
+                Some(serde_json::json!({ "type": "string" })),
+            ),
+            availability: crate::ToolAvailability::Discoverable,
+        }]);
+
+        assert_eq!(
+            catalog[0]["output_contract"],
+            serde_json::json!({
+                "kind": "from_input_schema",
+                "input_field": "output",
+                "default_schema": { "type": "string" }
+            })
+        );
     }
 }

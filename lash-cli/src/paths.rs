@@ -56,6 +56,10 @@ pub fn config_file() -> PathBuf {
     lash_home().join("config.json")
 }
 
+pub fn attachments_dir() -> PathBuf {
+    lash_home().join("attachments")
+}
+
 /// Path to the CLI's model catalog cache.
 pub fn model_catalog_cache_file() -> PathBuf {
     lash_cache_dir().join("models.json")

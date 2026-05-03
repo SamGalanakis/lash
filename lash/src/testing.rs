@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{
-    PluginError, SessionCreateRequest, SessionHandle, SessionManager, SessionSnapshot,
-    SessionTurnHandle,
+    DynamicToolHost, PluginError, SessionCreateRequest, SessionHandle, SessionLifecycleHost,
+    SessionSnapshot, SessionSnapshotHost, ToolCatalogHost, TurnHost,
 };
 use crate::provider::{AgentModelSelection, ProviderHandle, VariantRequestConfig};
 use crate::session_model::{ConversationRecord, SessionEventRecord};
@@ -312,7 +312,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
     }
 }
 
-/// Configurable mock for the [`SessionManager`] trait. Tests override
+/// Configurable mock for host capability traits. Tests override
 /// the snapshot, tool catalog, and turn outcome via the builder
 /// methods; mutations (`create_session`, `cancel_turn`, `close_session`)
 /// are recorded so tests can assert against them.
@@ -371,7 +371,7 @@ impl MockSessionManager {
 }
 
 #[async_trait::async_trait]
-impl SessionManager for MockSessionManager {
+impl SessionSnapshotHost for MockSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
         Ok(self.snapshot.clone())
     }
@@ -379,11 +379,17 @@ impl SessionManager for MockSessionManager {
     async fn snapshot_session(&self, _session_id: &str) -> Result<SessionSnapshot, PluginError> {
         Ok(self.snapshot.clone())
     }
+}
 
+#[async_trait::async_trait]
+impl ToolCatalogHost for MockSessionManager {
     async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
         Ok(self.tool_catalog.clone())
     }
+}
 
+#[async_trait::async_trait]
+impl DynamicToolHost for MockSessionManager {
     async fn dynamic_tool_state(
         &self,
         _session_id: &str,
@@ -412,7 +418,10 @@ impl SessionManager for MockSessionManager {
             .apply_state(snapshot)
             .map_err(|err| PluginError::Session(err.to_string()))
     }
+}
 
+#[async_trait::async_trait]
+impl SessionLifecycleHost for MockSessionManager {
     async fn create_session(
         &self,
         request: SessionCreateRequest,
@@ -438,14 +447,17 @@ impl SessionManager for MockSessionManager {
             .push(session_id.to_string());
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl TurnHost for MockSessionManager {
     async fn start_turn_stream(
         &self,
         session_id: &str,
         _input: TurnInput,
-    ) -> Result<SessionTurnHandle, PluginError> {
+    ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        Ok(SessionTurnHandle {
+        Ok(crate::plugin::SessionTurnHandle {
             turn_id: format!("{session_id}-turn"),
             session_id: session_id.to_string(),
             policy: mock_session_policy(),
@@ -465,6 +477,13 @@ impl SessionManager for MockSessionManager {
         Ok(())
     }
 }
+
+impl crate::plugin::TaskHost for MockSessionManager {}
+impl crate::plugin::MonitorHost for MockSessionManager {}
+impl crate::plugin::SessionGraphHost for MockSessionManager {}
+impl crate::plugin::PromptHost for MockSessionManager {}
+impl crate::plugin::DirectCompletionHost for MockSessionManager {}
+impl crate::plugin::TraceHost for MockSessionManager {}
 
 // ─────────────────────────────────────────────────────────────────────
 // Minimal in-tree plugin fake advertising support for a given

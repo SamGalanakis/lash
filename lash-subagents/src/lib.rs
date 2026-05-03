@@ -18,12 +18,9 @@ use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
 use lash::{PluginSpec, PluginSpecFactory, PromptContribution, SessionPolicy, ToolProvider};
 
 pub use host::{
-    AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode,
-    FollowupTaskRequest, FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse,
-    LocalSubagentHost, SendMessageRequest, SendMessageResponse, SpawnAgentRequest,
+    AgentMetadata, CloseAgentRequest, CloseAgentResponse, LocalSubagentHost, SpawnAgentRequest,
     SpawnAgentResponse, SubagentHost, WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent,
-    WaitAgentMessage, WaitAgentRequest, WaitAgentResponse, WaitUntil,
-    truncate_snapshot_to_recent_turns,
+    WaitAgentRequest, WaitAgentResponse, WaitUntil, truncate_snapshot_to_recent_turns,
 };
 
 pub struct SubagentsPluginFactory {
@@ -136,17 +133,18 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Mutex;
 
-    use crate::shared::{
-        ForkTurns, build_session_policy, build_spawn_create_request, parse_fork_turns,
-        parse_output_schema,
-    };
+    use crate::shared::{build_session_policy, build_spawn_create_request, parse_output_schema};
     use async_trait::async_trait;
     use lash::PersistedSessionState;
-    use lash::plugin::{PluginError, SessionHandle, SessionManager, SessionTurnHandle};
+    use lash::plugin::{
+        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, PromptHost,
+        SessionGraphHost, SessionHandle, SessionLifecycleHost, SessionSnapshotHost,
+        SessionTurnHandle, TaskHost, ToolCatalogHost, TraceHost, TurnHost,
+    };
     use lash::session_model::SessionEventRecord;
     use lash::{
         SessionAppendNode, SessionCreateRequest, SessionPluginMode, SessionStartPoint,
-        ToolDefinition, ToolExecutionContext, TurnInput,
+        ToolDefinition, ToolExecutionContext, ToolOutputContract, TurnInput,
     };
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
     use serde_json::{Value, json};
@@ -205,22 +203,6 @@ mod tests {
         assert_eq!(schema["type"], json!("array"));
     }
 
-    #[test]
-    fn fork_turns_defaults_to_none() {
-        assert!(matches!(
-            parse_fork_turns(None).expect("fork"),
-            ForkTurns::None
-        ));
-        assert!(matches!(
-            parse_fork_turns(Some(&json!("all"))).expect("fork"),
-            ForkTurns::All
-        ));
-        assert!(matches!(
-            parse_fork_turns(Some(&json!(3))).expect("fork"),
-            ForkTurns::Recent(3)
-        ));
-    }
-
     #[derive(Default)]
     struct DirectCompletionManager {
         snapshot: PersistedSessionState,
@@ -229,7 +211,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl SessionManager for DirectCompletionManager {
+    impl SessionSnapshotHost for DirectCompletionManager {
         async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
@@ -240,14 +222,22 @@ mod tests {
         ) -> Result<PersistedSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
+    }
 
+    #[async_trait]
+    impl ToolCatalogHost for DirectCompletionManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
         ) -> Result<Vec<serde_json::Value>, PluginError> {
             Ok(Vec::new())
         }
+    }
 
+    impl DynamicToolHost for DirectCompletionManager {}
+
+    #[async_trait]
+    impl SessionLifecycleHost for DirectCompletionManager {
         async fn create_session(
             &self,
             _request: SessionCreateRequest,
@@ -258,7 +248,10 @@ mod tests {
         async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
+    }
 
+    #[async_trait]
+    impl TurnHost for DirectCompletionManager {
         async fn start_turn_stream(
             &self,
             _session_id: &str,
@@ -274,7 +267,10 @@ mod tests {
         async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
+    }
 
+    #[async_trait]
+    impl DirectCompletionHost for DirectCompletionManager {
         async fn direct_completion(
             &self,
             request: lash::DirectRequest,
@@ -291,6 +287,12 @@ mod tests {
         }
     }
 
+    impl TaskHost for DirectCompletionManager {}
+    impl MonitorHost for DirectCompletionManager {}
+    impl SessionGraphHost for DirectCompletionManager {}
+    impl PromptHost for DirectCompletionManager {}
+    impl TraceHost for DirectCompletionManager {}
+
     #[test]
     fn rlm_definitions_expose_spawn_without_mini_api() {
         let registry = default_registry(&BTreeMap::new(), lash::ExecutionMode::standard());
@@ -299,20 +301,36 @@ mod tests {
         assert!(rlm_defs.iter().any(|tool| tool.name == "llm_query"));
         assert!(rlm_defs.iter().any(|tool| tool.name == "continue_as"));
         assert!(rlm_defs.iter().any(|tool| tool.name == "spawn_agent"));
-        assert!(rlm_defs.iter().all(|tool| !matches!(
-            tool.name.as_str(),
-            "send_message" | "followup_task" | "wait_agent" | "close_agent" | "list_agents"
-        )));
+        assert_eq!(
+            rlm_defs
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["llm_query", "spawn_agent", "continue_as"]
+        );
 
         let rlm_spawn = rlm_defs
             .iter()
             .find(|tool| tool.name == "spawn_agent")
             .expect("rlm spawn_agent");
+        assert_eq!(
+            rlm_spawn.output_contract,
+            ToolOutputContract::from_input_schema("output", None)
+        );
         assert!(
             rlm_spawn
                 .examples
                 .iter()
                 .any(|example| example.contains("start call spawn_agent"))
+        );
+
+        let llm_query = rlm_defs
+            .iter()
+            .find(|tool| tool.name == "llm_query")
+            .expect("rlm llm_query");
+        assert_eq!(
+            llm_query.output_contract,
+            ToolOutputContract::from_input_schema("output", Some(json!({ "type": "string" })))
         );
     }
 
@@ -323,7 +341,7 @@ mod tests {
         }
 
         #[async_trait]
-        impl SessionManager for SnapshotManager {
+        impl SessionSnapshotHost for SnapshotManager {
             async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
                 Ok(self.snapshot.clone())
             }
@@ -334,14 +352,22 @@ mod tests {
             ) -> Result<PersistedSessionState, PluginError> {
                 Ok(self.snapshot.clone())
             }
+        }
 
+        #[async_trait]
+        impl ToolCatalogHost for SnapshotManager {
             async fn tool_catalog(
                 &self,
                 _session_id: &str,
             ) -> Result<Vec<serde_json::Value>, PluginError> {
                 Ok(Vec::new())
             }
+        }
 
+        impl DynamicToolHost for SnapshotManager {}
+
+        #[async_trait]
+        impl SessionLifecycleHost for SnapshotManager {
             async fn create_session(
                 &self,
                 _request: SessionCreateRequest,
@@ -352,7 +378,10 @@ mod tests {
             async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
                 Ok(())
             }
+        }
 
+        #[async_trait]
+        impl TurnHost for SnapshotManager {
             async fn start_turn_stream(
                 &self,
                 _session_id: &str,
@@ -369,6 +398,13 @@ mod tests {
                 Ok(())
             }
         }
+
+        impl TaskHost for SnapshotManager {}
+        impl MonitorHost for SnapshotManager {}
+        impl SessionGraphHost for SnapshotManager {}
+        impl PromptHost for SnapshotManager {}
+        impl DirectCompletionHost for SnapshotManager {}
+        impl TraceHost for SnapshotManager {}
 
         // Two distinct stub providers so we can verify that spawn
         // resolves against the *live* policy, not the factory's stale
@@ -424,10 +460,9 @@ mod tests {
             async_task_id: None,
         };
 
-        let request =
-            build_spawn_create_request(&registry, &context, "explore", ForkTurns::None, None)
-                .await
-                .expect("spawn request");
+        let request = build_spawn_create_request(&registry, &context, "explore", None)
+            .await
+            .expect("spawn request");
         let child_policy = request.policy.expect("child policy");
 
         // The capability looked up the live policy's provider, not
@@ -468,7 +503,6 @@ mod tests {
             &registry,
             &context,
             "explore",
-            ForkTurns::None,
             Some(json!({
                 "type": "object",
                 "properties": { "ok": { "type": "boolean" } },
@@ -627,7 +661,7 @@ mod tests {
         }
 
         #[async_trait]
-        impl SessionManager for BatonManager {
+        impl SessionSnapshotHost for BatonManager {
             async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
                 Ok(self.snapshot.clone())
             }
@@ -638,14 +672,22 @@ mod tests {
             ) -> Result<PersistedSessionState, PluginError> {
                 Ok(self.snapshot.clone())
             }
+        }
 
+        #[async_trait]
+        impl ToolCatalogHost for BatonManager {
             async fn tool_catalog(
                 &self,
                 _session_id: &str,
             ) -> Result<Vec<serde_json::Value>, PluginError> {
                 Ok(Vec::new())
             }
+        }
 
+        impl DynamicToolHost for BatonManager {}
+
+        #[async_trait]
+        impl SessionLifecycleHost for BatonManager {
             async fn create_session(
                 &self,
                 request: SessionCreateRequest,
@@ -661,7 +703,10 @@ mod tests {
             async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
                 Ok(())
             }
+        }
 
+        #[async_trait]
+        impl TurnHost for BatonManager {
             async fn start_turn_stream(
                 &self,
                 _session_id: &str,
@@ -678,6 +723,13 @@ mod tests {
                 Ok(())
             }
         }
+
+        impl TaskHost for BatonManager {}
+        impl MonitorHost for BatonManager {}
+        impl SessionGraphHost for BatonManager {}
+        impl PromptHost for BatonManager {}
+        impl DirectCompletionHost for BatonManager {}
+        impl TraceHost for BatonManager {}
 
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {

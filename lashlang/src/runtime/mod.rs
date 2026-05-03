@@ -6,7 +6,8 @@ use crate::lexer::Span;
 use compact_str::CompactString;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -36,6 +37,81 @@ pub use state::{Snapshot, State};
 /// is the JSON-Schema representation of the type.
 pub const LASH_TYPE_KEY: &str = "$lash_type";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageValue {
+    pub id: String,
+    pub label: String,
+    pub size: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+impl ImageValue {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        size: u64,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            size,
+            width,
+            height,
+        }
+    }
+}
+
+impl Serialize for ImageValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(6))?;
+        map.serialize_entry("type", "image")?;
+        map.serialize_entry("id", &self.id)?;
+        map.serialize_entry("label", &self.label)?;
+        map.serialize_entry("size", &self.size)?;
+        map.serialize_entry("width", &self.width)?;
+        map.serialize_entry("height", &self.height)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ImageDescriptor {
+            #[serde(rename = "type")]
+            kind: String,
+            id: String,
+            label: String,
+            size: u64,
+            #[serde(default)]
+            width: Option<u32>,
+            #[serde(default)]
+            height: Option<u32>,
+        }
+
+        let descriptor = ImageDescriptor::deserialize(deserializer)?;
+        if descriptor.kind != "image" {
+            return Err(serde::de::Error::custom("expected image descriptor"));
+        }
+        Ok(Self {
+            id: descriptor.id,
+            label: descriptor.label,
+            size: descriptor.size,
+            width: descriptor.width,
+            height: descriptor.height,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
@@ -43,6 +119,7 @@ pub enum Value {
     Bool(bool),
     Number(f64),
     String(CompactString),
+    Image(ImageValue),
     List(Arc<[Value]>),
     Record(Arc<Record>),
 }
@@ -63,7 +140,7 @@ impl fmt::Display for Value {
             Self::Bool(value) => write!(f, "{value}"),
             Self::Number(value) => write_number(f, *value),
             Self::String(value) => write!(f, "{value}"),
-            Self::List(_) | Self::Record(_) => {
+            Self::Image(_) | Self::List(_) | Self::Record(_) => {
                 write!(
                     f,
                     "{}",
@@ -129,6 +206,11 @@ pub fn prewarm() {
         "required",
         "items",
         "enum",
+        "id",
+        "label",
+        "size",
+        "width",
+        "height",
     ] {
         intern_symbol(name);
     }
@@ -1135,7 +1217,10 @@ impl Compiler {
             Stmt::Assign { target, expr } if target.is_simple() => {
                 let name = &target.root;
                 let slot = self.push_slot(name);
-                let const_value = if contains_type_literal(expr) {
+                let has_type_literal = contains_type_literal(expr);
+                let const_value = if let Expr::TypeLiteral(ty) = expr {
+                    fold_type(ty).map(wrap_type_schema_value)
+                } else if has_type_literal {
                     None
                 } else {
                     self.fold_compile_time_expr(expr)
@@ -1161,7 +1246,9 @@ impl Compiler {
                     return;
                 }
 
-                if let Some(value) = const_value.clone() {
+                if let Some(value) = const_value.clone()
+                    && !has_type_literal
+                {
                     let constant = self.push_const(value);
                     self.code.push(Instruction::StoreConst { slot, constant });
                     self.set_const_slot(slot, const_value);
@@ -1910,9 +1997,7 @@ impl Compiler {
         self.compile_stats.borrow_mut().type_literals_total += 1;
 
         if let Some(schema) = fold_type(ty) {
-            let mut wrapper = record_with_capacity(1);
-            wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
-            let idx = self.push_const(Value::Record(Arc::new(wrapper)));
+            let idx = self.push_const(wrap_type_schema_value(schema));
             self.code.push(Instruction::PushConst(idx));
             self.compile_stats.borrow_mut().type_literals_const_folded += 1;
             return;
@@ -3636,6 +3721,12 @@ fn fold_type(ty: &TypeExpr) -> Option<Value> {
     }
 }
 
+fn wrap_type_schema_value(schema: Value) -> Value {
+    let mut wrapper = record_with_capacity(1);
+    wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
+    Value::Record(Arc::new(wrapper))
+}
+
 #[derive(Clone, Copy)]
 enum ScalarSchemaKind {
     Any,
@@ -3972,7 +4063,8 @@ fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
         Value::Record(record) => Ok(Value::Number(record.len() as f64)),
         Value::Null => Ok(Value::Number(0.0)),
         _ => Err(RuntimeError::TypeError {
-            message: "`len` requires a string, list, record, or null".to_string(),
+            message: "`len` requires a string, list, record, or null; use `.size` for images"
+                .to_string(),
         }),
     }
 }
@@ -4065,6 +4157,7 @@ fn read_field_ref(value: &Value, field: &Name) -> Result<Value, RuntimeError> {
             .get_symbol(field.symbol)
             .cloned()
             .unwrap_or(Value::Null)),
+        Value::Image(image) => read_image_field(image, field),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!(
@@ -4119,6 +4212,7 @@ fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
             .get_symbol(field.symbol)
             .cloned()
             .unwrap_or(Value::Null)),
+        Value::Image(image) => read_image_field(&image, field),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!(
@@ -4127,6 +4221,23 @@ fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
                 value_type_name(&value)
             ),
         }),
+    }
+}
+
+fn read_image_field(image: &ImageValue, field: &Name) -> Result<Value, RuntimeError> {
+    match field.text.as_ref() {
+        "id" => Ok(Value::String(image.id.clone().into())),
+        "label" => Ok(Value::String(image.label.clone().into())),
+        "size" => Ok(Value::Number(image.size as f64)),
+        "width" => Ok(image
+            .width
+            .map(|width| Value::Number(width as f64))
+            .unwrap_or(Value::Null)),
+        "height" => Ok(image
+            .height
+            .map(|height| Value::Number(height as f64))
+            .unwrap_or(Value::Null)),
+        _ => Ok(Value::Null),
     }
 }
 
@@ -4219,6 +4330,9 @@ fn assign_record_field(target: &mut Value, field: &Name, value: Value) -> Result
             Arc::make_mut(record).insert_symbolized(field.symbol, field.text.clone(), value);
             Ok(())
         }
+        Value::Image(_) => Err(RuntimeError::TypeError {
+            message: "can't assign image fields; images are immutable".to_string(),
+        }),
         _ => Err(RuntimeError::TypeError {
             message: format!(
                 "can't assign `.{}` on {}",
@@ -4239,6 +4353,9 @@ fn descend_record_field<'a>(
             .ok_or_else(|| RuntimeError::ValueError {
                 message: format!("can't assign through missing field `.{}`", field.text),
             }),
+        Value::Image(_) => Err(RuntimeError::TypeError {
+            message: "can't assign through image fields; images are immutable".to_string(),
+        }),
         _ => Err(RuntimeError::TypeError {
             message: format!(
                 "can't assign through `.{}` on {}",
@@ -4261,6 +4378,9 @@ fn assign_index(target: &mut Value, index: &Value, value: Value) -> Result<(), R
             Arc::make_mut(record).insert_str(key.as_ref(), value);
             Ok(())
         }
+        Value::Image(_) => Err(RuntimeError::TypeError {
+            message: "can't assign image fields; images are immutable".to_string(),
+        }),
         _ => Err(RuntimeError::TypeError {
             message: format!("can't assign index on {}", value_type_name(target)),
         }),
@@ -4284,6 +4404,9 @@ fn descend_index<'a>(target: &'a mut Value, index: &Value) -> Result<&'a mut Val
                 })
             }
         }
+        Value::Image(_) => Err(RuntimeError::TypeError {
+            message: "can't assign through image fields; images are immutable".to_string(),
+        }),
         _ => Err(RuntimeError::TypeError {
             message: format!("can't assign through index on {}", value_type_name(target)),
         }),
@@ -4333,7 +4456,7 @@ fn coerce_string(value: &Value) -> Result<Cow<'_, str>, RuntimeError> {
         Value::Null => Ok(Cow::Borrowed("null")),
         Value::Bool(value) => Ok(Cow::Owned(value.to_string())),
         Value::Number(value) => Ok(Cow::Owned(value.to_string())),
-        Value::List(_) | Value::Record(_) => Err(RuntimeError::TypeError {
+        Value::Image(_) | Value::List(_) | Value::Record(_) => Err(RuntimeError::TypeError {
             message: format!("expected text, got {}", value_type_name(value)),
         }),
     }
@@ -4405,7 +4528,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Bool(value) => *value,
         Value::Number(value) => *value != 0.0 && !value.is_nan(),
         Value::String(value) => !value.is_empty(),
-        Value::List(_) | Value::Record(_) => true,
+        Value::Image(_) | Value::List(_) | Value::Record(_) => true,
     }
 }
 
@@ -4455,7 +4578,7 @@ fn append_stringified_value(output: &mut String, value: &Value) -> Result<(), Ru
         Value::Number(value) => {
             write_number(output, *value).expect("string writes should not fail")
         }
-        Value::List(_) | Value::Record(_) => output.push_str(
+        Value::Image(_) | Value::List(_) | Value::Record(_) => output.push_str(
             &serde_json::to_string(&to_json(value))
                 .expect("value json serialization should succeed"),
         ),
@@ -4469,6 +4592,7 @@ fn value_type_name(value: &Value) -> &'static str {
         Value::Bool(_) => "bool",
         Value::Number(_) => "number",
         Value::String(_) => "string",
+        Value::Image(_) => "image",
         Value::List(_) => "list",
         Value::Record(_) => "record",
     }
@@ -4486,23 +4610,6 @@ fn write_number(output: &mut impl fmt::Write, value: f64) -> fmt::Result {
         }
     }
     write!(output, "{value}")
-}
-
-fn json_number(value: f64) -> Option<serde_json::Number> {
-    if !value.is_finite() {
-        return None;
-    }
-    if value.is_finite() && value.fract() == 0.0 {
-        let as_i64 = value as i64 as f64;
-        if as_i64 == value {
-            return Some(serde_json::Number::from(value as i64));
-        }
-        let as_u64 = value as u64 as f64;
-        if as_u64 == value {
-            return Some(serde_json::Number::from(value as u64));
-        }
-    }
-    serde_json::Number::from_f64(value)
 }
 
 fn resolve_index(index: &Value, len: usize) -> Result<Option<usize>, RuntimeError> {
@@ -4847,6 +4954,23 @@ fn slice_string(value: &str, start: Option<isize>, end: Option<isize>) -> String
     value[byte_start..byte_end].to_string()
 }
 
+fn json_number(value: f64) -> Option<serde_json::Number> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value.is_finite() && value.fract() == 0.0 {
+        let as_i64 = value as i64 as f64;
+        if as_i64 == value {
+            return Some(serde_json::Number::from(value as i64));
+        }
+        let as_u64 = value as u64 as f64;
+        if as_u64 == value {
+            return Some(serde_json::Number::from(value as u64));
+        }
+    }
+    serde_json::Number::from_f64(value)
+}
+
 fn to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
@@ -4855,6 +4979,7 @@ fn to_json(value: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(value) => serde_json::Value::String(value.to_string()),
+        Value::Image(image) => image_to_json(image),
         Value::List(values) => serde_json::Value::Array(values.iter().map(to_json).collect()),
         Value::Record(record) => serde_json::Value::Object(
             record
@@ -4863,6 +4988,41 @@ fn to_json(value: &Value) -> serde_json::Value {
                 .collect(),
         ),
     }
+}
+
+fn image_to_json(image: &ImageValue) -> serde_json::Value {
+    let mut object = serde_json::Map::with_capacity(7);
+    object.insert(
+        "type".to_string(),
+        serde_json::Value::String("image".to_string()),
+    );
+    object.insert(
+        "id".to_string(),
+        serde_json::Value::String(image.id.clone()),
+    );
+    object.insert(
+        "label".to_string(),
+        serde_json::Value::String(image.label.clone()),
+    );
+    object.insert(
+        "size".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(image.size)),
+    );
+    object.insert(
+        "width".to_string(),
+        image
+            .width
+            .map(|width| serde_json::Value::Number(serde_json::Number::from(width)))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert(
+        "height".to_string(),
+        image
+            .height
+            .map(|height| serde_json::Value::Number(serde_json::Number::from(height)))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    serde_json::Value::Object(object)
 }
 
 fn from_json(value: serde_json::Value) -> Value {
@@ -4874,11 +5034,39 @@ fn from_json(value: serde_json::Value) -> Value {
         serde_json::Value::Array(values) => {
             Value::List(values.into_iter().map(from_json).collect::<Vec<_>>().into())
         }
-        serde_json::Value::Object(map) => Value::Record(Arc::new(
-            map.into_iter()
-                .map(|(key, value)| (key, from_json(value)))
-                .collect(),
-        )),
+        serde_json::Value::Object(map) => image_from_json_map(&map)
+            .map(Value::Image)
+            .unwrap_or_else(|| {
+                Value::Record(Arc::new(
+                    map.into_iter()
+                        .map(|(key, value)| (key, from_json(value)))
+                        .collect(),
+                ))
+            }),
+    }
+}
+
+fn image_from_json_map(map: &serde_json::Map<String, serde_json::Value>) -> Option<ImageValue> {
+    if map.get("type")?.as_str()? != "image" {
+        return None;
+    }
+    Some(ImageValue {
+        id: map.get("id")?.as_str()?.to_string(),
+        label: map.get("label")?.as_str()?.to_string(),
+        size: map.get("size")?.as_u64()?,
+        width: optional_u32_field(map.get("width")?)?,
+        height: optional_u32_field(map.get("height")?)?,
+    })
+}
+
+fn optional_u32_field(value: &serde_json::Value) -> Option<Option<u32>> {
+    match value {
+        serde_json::Value::Null => Some(None),
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some),
+        _ => None,
     }
 }
 

@@ -17,8 +17,8 @@ use lash::session_model::{
     SessionEventRecord, fresh_message_id, make_error_event, shared_parts,
 };
 use lash::{
-    CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart, LlmResponse,
-    ToolCallRecord, append_assistant_text_part, normalized_response_parts,
+    AttachmentRef, CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart,
+    LlmResponse, ToolCallRecord, append_assistant_text_part, normalized_response_parts,
 };
 use lash_rlm_types::{RlmDiagnosticEvent, RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
@@ -63,7 +63,8 @@ submit "The bound version is 0.2.61."
 
 pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
 
-- Values: null, booleans, numbers, strings, lists, records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
+- Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
+- Images: image-producing tools such as `read_file` on a PNG/JPEG return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ "type": "image", "id": ..., "label": ..., "size": ..., "width": ..., "height": ... }`. `len(image)` is invalid; use `.size`.
 - Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` is raw multiline and preserves content exactly. Use raw multiline strings for patches, scripts, JSON, Markdown, and other payloads with braces, backslashes, or `@@` hunk markers.
 - Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
@@ -77,7 +78,7 @@ pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
 
 Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bounds mean start/end; negative bounds count from the end.
 
-- `len(x)` — length of string/list/record (0 for null)
+- `len(x)` — length of string/list/record (0 for null); use `image.size` for images
 - `empty(x)` — true if length is 0
 - `slice(s, start, end)` — substring or sublist
 - `range(end)` / `range(start, end)` — integer list, end-exclusive
@@ -177,59 +178,11 @@ pub fn rlm_execution_section() -> String {
 
 pub struct RlmDriver;
 
-const MAX_TASK_CONTEXT_USER_MESSAGES: usize = 4;
-
-pub fn build_task_context(messages: &[Message]) -> String {
-    let mut user_chunks: Vec<&str> = Vec::new();
-    for message in messages {
-        if !matches!(message.role, MessageRole::User) {
-            continue;
-        }
-        for part in message.parts.iter() {
-            if matches!(part.kind, PartKind::Text | PartKind::Prose) {
-                let trimmed = part.content.trim();
-                if !trimmed.is_empty() {
-                    user_chunks.push(trimmed);
-                }
-            }
-        }
-    }
-    if user_chunks.is_empty() {
-        return "No user task context is available.".to_string();
-    }
-
-    let total_user_chunks = user_chunks.len();
-    let mut selected: Vec<&str> = Vec::new();
-    if total_user_chunks <= MAX_TASK_CONTEXT_USER_MESSAGES {
-        selected = user_chunks;
-    } else {
-        selected.push(user_chunks[0]);
-        let tail_count = MAX_TASK_CONTEXT_USER_MESSAGES.saturating_sub(1);
-        selected.extend(
-            user_chunks[user_chunks.len().saturating_sub(tail_count)..]
-                .iter()
-                .copied(),
-        );
-    }
-
-    let mut out = String::with_capacity(selected.iter().map(|s| s.len() + 8).sum());
-    for (idx, chunk) in selected.iter().enumerate() {
-        if idx == 1 && total_user_chunks > MAX_TASK_CONTEXT_USER_MESSAGES {
-            let hidden = total_user_chunks.saturating_sub(MAX_TASK_CONTEXT_USER_MESSAGES);
-            use std::fmt::Write as _;
-            let _ = write!(out, "[{hidden} earlier user messages omitted]\n\n");
-        }
-        out.push_str("User: ");
-        out.push_str(chunk);
-        out.push_str("\n\n");
-    }
-    out
-}
-
 #[derive(Default)]
 struct RlmDriverState {
     reasoning: String,
     tool_calls: Vec<ToolCallRecord>,
+    images: Vec<AttachmentRef>,
     observations: Vec<String>,
     combined_output: String,
     exec_error: Option<String>,
@@ -394,7 +347,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     }));
                 }
                 state.tool_calls.extend(response.tool_calls);
-                let _ = response.images;
+                state.images.extend(response.printed_images);
                 if !response.output.is_empty() {
                     state.combined_output.push_str(&response.output);
                 }
@@ -536,6 +489,7 @@ fn trajectory_entry(
         output,
         observations: state.observations.clone(),
         tool_calls: state.tool_calls.clone(),
+        images: state.images.clone(),
         error: validation_error.or_else(|| state.exec_error.clone()),
         final_output,
         output_raw_len,
@@ -668,7 +622,7 @@ fn submit_required_reminder_message(requires_schema: bool, include_submit_prompt
     };
     Message {
         id: id.clone(),
-        role: MessageRole::User,
+        role: MessageRole::System,
         parts: shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
@@ -683,7 +637,10 @@ fn submit_required_reminder_message(requires_schema: bool, include_submit_prompt
             response_meta: None,
         }]),
         user_input: None,
-        origin: None,
+        origin: Some(lash::MessageOrigin::Plugin {
+            plugin_id: "mode_rlm".to_string(),
+            transient: false,
+        }),
     }
 }
 
@@ -691,7 +648,7 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
     let id = fresh_message_id();
     Message {
         id: id.clone(),
-        role: MessageRole::User,
+        role: MessageRole::System,
         parts: shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
@@ -708,7 +665,10 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
             response_meta: None,
         }]),
         user_input: None,
-        origin: None,
+        origin: Some(lash::MessageOrigin::Plugin {
+            plugin_id: "mode_rlm".to_string(),
+            transient: false,
+        }),
     }
 }
 

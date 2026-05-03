@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::llm::types::{
     LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmToolChoice, LlmToolSpec,
 };
-use crate::session_model::message::{MessageOrigin, PartAttachment, data_url_for_bytes};
+use crate::session_model::message::MessageOrigin;
 use crate::session_model::{
     Message, MessageRole, MessageSequence, Part, PartKind, PruneState, RetryPolicy, SessionEvent,
     SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, fresh_message_id,
@@ -841,28 +841,6 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 } else {
                     message.parts.clone()
                 };
-                let has_image_parts = parts
-                    .iter()
-                    .any(|part| matches!(part.kind, PartKind::Image));
-                if matches!(message.role, MessageRole::User) && !has_image_parts {
-                    parts.extend(message.images.iter().map(|bytes| Part {
-                        id: String::new(),
-                        kind: PartKind::Image,
-                        content: String::new(),
-                        attachment: Some(PartAttachment {
-                            mime: "image/png".to_string(),
-                            url: data_url_for_bytes("image/png", bytes),
-                            filename: None,
-                        }),
-                        tool_call_id: None,
-                        tool_name: None,
-                        tool_item_id: None,
-                        tool_signature: None,
-                        prune_state: PruneState::Intact,
-                        reasoning_meta: None,
-                        response_meta: None,
-                    }));
-                }
                 reassign_part_ids(&message_id, &mut parts);
                 Message {
                     id: message_id.clone(),

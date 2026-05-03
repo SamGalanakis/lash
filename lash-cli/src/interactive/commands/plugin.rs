@@ -14,7 +14,7 @@ pub(super) async fn handle_plugin(
     app: &mut App,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
-    session_manager: &Arc<dyn SessionManager>,
+    session_manager: &Arc<dyn RuntimeSessionHost>,
 ) -> anyhow::Result<bool> {
     // `/compact` is a built-in plugin command but its handler needs
     // to mutate the live runtime state, which the in-tree plugin
@@ -58,7 +58,7 @@ pub(super) async fn handle_plugin(
         return Ok(false);
     };
     match plugin_session
-        .invoke_command(&name, argument, Arc::clone(session_manager))
+        .invoke_command(&name, argument, session_manager.clone())
         .await
     {
         Ok(outcome) => {

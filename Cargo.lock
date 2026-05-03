@@ -2409,7 +2409,6 @@ dependencies = [
 name = "lash-sansio"
 version = "0.2.83"
 dependencies = [
- "base64 0.22.1",
  "schemars",
  "serde",
  "serde_json",
@@ -2443,6 +2442,16 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "lash-trace-viewer"
+version = "0.2.83"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lash-trace",
+ "serde_json",
 ]
 
 [[package]]

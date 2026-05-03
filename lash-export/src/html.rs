@@ -3,11 +3,11 @@
 //! The output is a single HTML document with inlined CSS — no external
 //! assets, safe to attach to an email or drop on a static host.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use lash::ToolCallRecord;
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
+use lash::{ChronologicalPayload, RlmTrajectoryEntry, ToolCallRecord};
 
 use crate::LoadedSession;
 
@@ -58,37 +58,35 @@ fn render_header(out: &mut String, session: &LoadedSession) {
     }
     let _ = writeln!(
         out,
-        "  <div class=\"counts\">{} messages · {} tool calls</div>",
-        session.messages.len(),
-        session.tool_calls.len()
+        "  <div class=\"counts\">{} chronological entries</div>",
+        session.chronological.len()
     );
     out.push_str("</header>\n");
 }
 
 fn render_transcript(out: &mut String, session: &LoadedSession) {
-    let tool_index = index_tool_calls(&session.tool_calls);
     out.push_str("<main class=\"transcript\">\n");
-    for message in &session.messages {
-        if message.is_transient() {
-            continue;
+    let mut seen_tool_calls = HashSet::new();
+    for entry in &session.chronological {
+        match &entry.payload {
+            ChronologicalPayload::Message(message) => {
+                if !message.is_transient() {
+                    render_message(out, message);
+                }
+            }
+            ChronologicalPayload::ToolCall(record) => {
+                seen_tool_calls.insert(lash::chronological_tool_call_key(record));
+                render_tool_call_record(out, record);
+            }
+            ChronologicalPayload::RlmStep(step) => {
+                render_rlm_step(out, step, &mut seen_tool_calls);
+            }
         }
-        render_message(out, message, &tool_index);
     }
     out.push_str("</main>\n");
 }
 
-fn index_tool_calls(records: &[ToolCallRecord]) -> HashMap<&str, &ToolCallRecord> {
-    records
-        .iter()
-        .filter_map(|record| record.call_id.as_deref().map(|id| (id, record)))
-        .collect()
-}
-
-fn render_message(
-    out: &mut String,
-    message: &Message,
-    tool_index: &HashMap<&str, &ToolCallRecord>,
-) {
+fn render_message(out: &mut String, message: &Message) {
     let (role_class, role_label) = match message.role {
         MessageRole::User => ("user", "User"),
         MessageRole::Assistant => ("assistant", "Assistant"),
@@ -108,18 +106,13 @@ fn render_message(
     }
 
     for part in message.parts.iter() {
-        render_part(out, message.role, part, tool_index);
+        render_part(out, part);
     }
 
     out.push_str("    </div>\n  </article>\n");
 }
 
-fn render_part(
-    out: &mut String,
-    role: MessageRole,
-    part: &Part,
-    tool_index: &HashMap<&str, &ToolCallRecord>,
-) {
+fn render_part(out: &mut String, part: &Part) {
     if matches!(part.prune_state, PruneState::Cleared) {
         out.push_str("      <div class=\"part part--pruned\">[tool result cleared]</div>\n");
         return;
@@ -139,12 +132,8 @@ fn render_part(
         PartKind::Output => render_pre_block(out, "output", &part.content),
         PartKind::Error => render_pre_block(out, "error", &part.content),
         PartKind::Image => render_image(out, part),
-        PartKind::ToolCall => render_tool_call(out, part, tool_index),
-        PartKind::ToolResult => {
-            if !matches!(role, MessageRole::Assistant) {
-                render_pre_block(out, "tool-result-inline", &part.content);
-            }
-        }
+        PartKind::ToolCall => render_tool_call_part(out, part),
+        PartKind::ToolResult => {}
         // Reasoning summaries render as a muted/italic block in exported
         // HTML for parity with the TUI presentation.
         PartKind::Reasoning => render_text_block(out, "reasoning", &part.content),
@@ -182,8 +171,8 @@ fn render_image(out: &mut String, part: &Part) {
         };
         let _ = writeln!(
             out,
-            "      <div class=\"part part--image\"><img src=\"{}\" alt=\"{}\"></div>",
-            escape_attr(&attachment.url),
+            "      <div class=\"part part--image\" data-attachment-id=\"{}\">[image: {}]</div>",
+            escape_attr(attachment.reference.id.as_str()),
             escape_attr(alt)
         );
     } else {
@@ -191,58 +180,98 @@ fn render_image(out: &mut String, part: &Part) {
     }
 }
 
-fn render_tool_call(out: &mut String, part: &Part, tool_index: &HashMap<&str, &ToolCallRecord>) {
+fn render_tool_call_part(out: &mut String, part: &Part) {
     let tool_name = part.tool_name.as_deref().unwrap_or("tool");
-    let record = part
-        .tool_call_id
-        .as_deref()
-        .and_then(|id| tool_index.get(id).copied());
-
-    let success = record.map(|record| record.success).unwrap_or(true);
-    let duration = record
-        .map(|record| format!("{} ms", record.duration_ms))
-        .unwrap_or_else(|| "—".to_string());
-    let status_class = if success { "ok" } else { "err" };
-    let status_label = if success { "ok" } else { "error" };
-
     let _ = writeln!(
         out,
-        "      <details class=\"part part--tool-call tool--{status_class}\">"
+        "      <details class=\"part part--tool-call tool--pending\">"
     );
     let _ = writeln!(
         out,
-        "        <summary><span class=\"tool-name\">{}</span> <span class=\"tool-meta\">{} · {}</span></summary>",
+        "        <summary><span class=\"tool-name\">{}</span> <span class=\"tool-meta\">call</span></summary>",
         escape(tool_name),
-        escape(&duration),
-        status_label
     );
 
-    let args_json = if part.content.trim().is_empty() || part.content.trim() == "{}" {
-        record.map(|record| pretty_json(&record.args))
-    } else {
-        Some(pretty_or_raw(&part.content))
-    };
-    if let Some(args) = args_json {
+    if !part.content.trim().is_empty() && part.content.trim() != "{}" {
         out.push_str("        <div class=\"tool-section\">\n");
         out.push_str("          <div class=\"tool-section-label\">arguments</div>\n");
         let _ = writeln!(
             out,
             "          <pre class=\"tool-args\">{}</pre>",
-            escape(&args)
-        );
-        out.push_str("        </div>\n");
-    }
-    if let Some(record) = record {
-        out.push_str("        <div class=\"tool-section\">\n");
-        out.push_str("          <div class=\"tool-section-label\">result</div>\n");
-        let _ = writeln!(
-            out,
-            "          <pre class=\"tool-result\">{}</pre>",
-            escape(&pretty_json(&record.result))
+            escape(&pretty_or_raw(&part.content))
         );
         out.push_str("        </div>\n");
     }
     out.push_str("      </details>\n");
+}
+
+fn render_tool_call_record(out: &mut String, record: &ToolCallRecord) {
+    let status_class = if record.success { "ok" } else { "err" };
+    let status_label = if record.success { "ok" } else { "error" };
+    let _ = writeln!(
+        out,
+        "  <article class=\"msg msg--tool\"><details class=\"part part--tool-call tool--{status_class}\" open>"
+    );
+    let _ = writeln!(
+        out,
+        "    <summary><span class=\"tool-name\">{}</span> <span class=\"tool-meta\">{} ms · {status_label}</span></summary>",
+        escape(&record.tool),
+        record.duration_ms
+    );
+    out.push_str("    <div class=\"tool-section\">\n");
+    out.push_str("      <div class=\"tool-section-label\">arguments</div>\n");
+    let _ = writeln!(
+        out,
+        "      <pre class=\"tool-args\">{}</pre>",
+        escape(&pretty_json(&record.args))
+    );
+    out.push_str("    </div>\n");
+    out.push_str("    <div class=\"tool-section\">\n");
+    out.push_str("      <div class=\"tool-section-label\">result</div>\n");
+    let _ = writeln!(
+        out,
+        "      <pre class=\"tool-result\">{}</pre>",
+        escape(&pretty_json(&record.result))
+    );
+    out.push_str("    </div>\n");
+    out.push_str("  </details></article>\n");
+}
+
+fn render_rlm_step(
+    out: &mut String,
+    step: &RlmTrajectoryEntry,
+    seen_tool_calls: &mut HashSet<String>,
+) {
+    out.push_str("  <article class=\"msg msg--rlm-step\">\n");
+    let _ = writeln!(
+        out,
+        "    <div class=\"role\">RLM step {}</div>",
+        step.iteration
+    );
+    out.push_str("    <div class=\"parts\">\n");
+    render_text_block(
+        out,
+        "reasoning",
+        &strip_first_lashlang_fence(&step.reasoning),
+    );
+    render_pre_block(out, "code", &step.code);
+    for observation in &step.observations {
+        render_pre_block(out, "output", observation);
+    }
+    render_pre_block(out, "output", &step.output);
+    if let Some(error) = &step.error {
+        render_pre_block(out, "error", error);
+    }
+    if let Some(final_output) = &step.final_output {
+        render_pre_block(out, "output", &pretty_json(final_output));
+    }
+    out.push_str("    </div>\n  </article>\n");
+
+    for record in &step.tool_calls {
+        if seen_tool_calls.insert(lash::chronological_tool_call_key(record)) {
+            render_tool_call_record(out, record);
+        }
+    }
 }
 
 fn pretty_json(value: &serde_json::Value) -> String {
@@ -257,6 +286,37 @@ fn pretty_or_raw(content: &str) -> String {
         Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| content.to_string()),
         Err(_) => content.to_string(),
     }
+}
+
+fn strip_first_lashlang_fence(text: &str) -> String {
+    let Some(open_rel) = text.find("```") else {
+        return text.to_string();
+    };
+    let after_open = open_rel + 3;
+    let rest = &text[after_open..];
+    let Some(lang_end_rel) = rest.find('\n') else {
+        return text[..open_rel].to_string();
+    };
+    let lang = rest[..lang_end_rel].trim();
+    if !matches!(lang, "lashlang" | "rlm" | "lash") {
+        return text.to_string();
+    }
+    let body_start = after_open + lang_end_rel + 1;
+    let close = text[body_start..]
+        .find("```")
+        .map(|rel| body_start + rel)
+        .unwrap_or(text.len());
+    let after_close = (close + 3).min(text.len());
+    let mut out = String::new();
+    out.push_str(text[..open_rel].trim_end());
+    let tail = text[after_close..].trim_start();
+    if !tail.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(tail);
+    }
+    out
 }
 
 fn escape(input: &str) -> String {
@@ -410,3 +470,51 @@ pre.tool-args, pre.tool-result {
   word-break: break-word;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
+
+    #[test]
+    fn html_export_renders_chronological_tool_and_rlm_step() {
+        let session = LoadedSession {
+            meta: None,
+            chronological: vec![
+                ChronologicalEntry {
+                    index: 0,
+                    payload: ChronologicalPayload::RlmStep(RlmTrajectoryEntry {
+                        id: "rlm_step_0".to_string(),
+                        iteration: 0,
+                        reasoning: "thinking".to_string(),
+                        code: "x = 1".to_string(),
+                        output: "1".to_string(),
+                        observations: Vec::new(),
+                        tool_calls: Vec::new(),
+                        images: Vec::new(),
+                        error: None,
+                        final_output: None,
+                        output_raw_len: 1,
+                    }),
+                },
+                ChronologicalEntry {
+                    index: 1,
+                    payload: ChronologicalPayload::ToolCall(ToolCallRecord {
+                        call_id: Some("call_1".to_string()),
+                        tool: "lookup".to_string(),
+                        args: serde_json::json!({"q": "x"}),
+                        result: serde_json::json!({"answer": "y"}),
+                        success: true,
+                        duration_ms: 4,
+                    }),
+                },
+            ],
+        };
+
+        let rendered = render(&session);
+        assert!(rendered.contains("RLM step 0"));
+        assert!(rendered.contains("x = 1"));
+        assert!(rendered.contains("lookup"));
+        assert!(rendered.contains("chronological entries"));
+    }
+}

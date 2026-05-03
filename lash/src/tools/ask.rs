@@ -215,10 +215,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    use crate::plugin::SessionTurnHandle;
-    use crate::{
-        PluginError, PromptResponse, SessionHandle, SessionManager, SessionSnapshot, TurnInput,
+    use crate::plugin::{
+        DirectCompletionHost, DynamicToolHost, MonitorHost, PromptHost, SessionGraphHost,
+        SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
+        TraceHost, TurnHost,
     };
+    use crate::{PluginError, PromptResponse, SessionHandle, SessionSnapshot, TurnInput};
 
     #[derive(Default)]
     struct PromptingManager {
@@ -227,7 +229,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl SessionManager for PromptingManager {
+    impl SessionSnapshotHost for PromptingManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Err(PluginError::Session("snapshot unavailable".to_string()))
         }
@@ -238,14 +240,22 @@ mod tests {
         ) -> Result<SessionSnapshot, PluginError> {
             Err(PluginError::Session("snapshot unavailable".to_string()))
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ToolCatalogHost for PromptingManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
         ) -> Result<Vec<serde_json::Value>, PluginError> {
             Err(PluginError::Session("tool catalog unavailable".to_string()))
         }
+    }
 
+    impl DynamicToolHost for PromptingManager {}
+
+    #[async_trait::async_trait]
+    impl SessionLifecycleHost for PromptingManager {
         async fn create_session(
             &self,
             _request: crate::SessionCreateRequest,
@@ -260,7 +270,10 @@ mod tests {
                 "session close unavailable".to_string(),
             ))
         }
+    }
 
+    #[async_trait::async_trait]
+    impl TurnHost for PromptingManager {
         async fn start_turn_stream(
             &self,
             _session_id: &str,
@@ -278,7 +291,10 @@ mod tests {
         async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Err(PluginError::Session("cancel turn unavailable".to_string()))
         }
+    }
 
+    #[async_trait::async_trait]
+    impl PromptHost for PromptingManager {
         async fn prompt_user(&self, request: PromptRequest) -> Result<PromptResponse, PluginError> {
             self.requests.lock().expect("requests").push(request);
             self.response
@@ -288,6 +304,12 @@ mod tests {
                 .ok_or_else(|| PluginError::Session("prompt response missing".to_string()))
         }
     }
+
+    impl TaskHost for PromptingManager {}
+    impl MonitorHost for PromptingManager {}
+    impl SessionGraphHost for PromptingManager {}
+    impl DirectCompletionHost for PromptingManager {}
+    impl TraceHost for PromptingManager {}
 
     #[tokio::test]
     async fn ask_tool_returns_structured_user_selection() {

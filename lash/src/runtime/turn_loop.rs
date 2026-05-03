@@ -35,61 +35,10 @@ impl LashRuntime {
         }
     }
 
-    async fn persist_progress_boundary(
-        &mut self,
-        messages: &crate::MessageSequence,
-        tool_calls: &[ToolCallRecord],
-        iteration: usize,
-    ) -> Result<(), RuntimeError> {
-        if !crate::messages_are_prompt_resume_safe(messages.iter()) {
-            return Ok(());
-        }
-        let Some(store) = self
-            .session
-            .as_ref()
-            .and_then(|session| session.history_store())
-        else {
-            return Ok(());
-        };
-
-        self.state.policy = self.policy.clone();
-        self.state.iteration = iteration;
-        let state_read_model = self.state.read_model();
-        if let Some(appended_messages) = active_read_message_delta_if_base_preserved(
-            state_read_model.messages.as_slice(),
-            messages.iter(),
-        ) {
-            self.state
-                .append_active_conversation_messages(&appended_messages);
-        } else {
-            let read_messages = messages.shared();
-            self.state
-                .replace_active_read_state(read_messages.as_slice(), tool_calls);
-        }
-
-        if let Some(session) = self.session.as_mut() {
-            if session.execution_state_dirty()
-                && let Ok(snapshot) = session.snapshot_execution_state().await
-            {
-                self.state.set_execution_state_snapshot(snapshot);
-            }
-            let plugins = session.plugins();
-            self.state.refresh_plugin_snapshots(plugins.as_ref());
-        }
-
-        commit_runtime_state(store.as_ref(), &mut self.state, &[])
-            .await
-            .map_err(|err| RuntimeError {
-                code: "store_commit_failed".to_string(),
-                message: err.to_string(),
-            })?;
-        Ok(())
-    }
-
     async fn handle_pending_prompt(
         prompt: PendingPrompt,
         plugins: Option<&Arc<crate::PluginSession>>,
-        manager: &Arc<dyn SessionManager>,
+        manager: &Arc<dyn RuntimeSessionHost>,
         events: &dyn EventSink,
         assembler: &mut TurnAssembler,
     ) {
@@ -98,7 +47,7 @@ impl LashRuntime {
                 .on_prompt_request(crate::PromptRequestHookContext {
                     session_id: plugins.session_id().to_string(),
                     request: prompt.request.clone(),
-                    host: Arc::clone(manager),
+                    host: manager.clone(),
                 })
                 .await
             {
@@ -289,18 +238,13 @@ impl LashRuntime {
                         response_meta: None,
                     });
                 }
-                NormalizedItem::Image(bytes) => {
+                NormalizedItem::Image(reference) => {
                     user_parts.push(Part {
                         id: format!("{}.p{}", user_id, user_parts.len()),
                         kind: PartKind::Image,
                         content: String::new(),
                         attachment: Some(crate::session_model::message::PartAttachment {
-                            mime: "image/png".to_string(),
-                            url: crate::session_model::message::data_url_for_bytes(
-                                "image/png",
-                                &bytes,
-                            ),
-                            filename: None,
+                            reference,
                         }),
                         tool_call_id: None,
                         tool_name: None,
@@ -353,10 +297,10 @@ impl LashRuntime {
             })?;
         let turn_ctx = crate::TurnTransformContext {
             session_id: self.state.session_id.clone(),
-            state: self.state.read_view(),
+            state: self.read_snapshot().read_view(),
             prompt_usage: previous_prompt_usage.clone(),
             max_context_tokens: Some(LashRuntime::max_context_tokens(self)),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         };
         self.mark_phase_begin(RuntimeTurnPhase::ContextTransform);
         let prepared_context = plugin_session
@@ -435,7 +379,7 @@ impl LashRuntime {
             })?;
         let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PendingPrompt>();
         prompt_bridge.set_sender(prompt_tx);
-        let prompt_hook_manager = Arc::clone(&manager);
+        let prompt_hook_manager = manager.clone();
         let prompt_plugins = self
             .session
             .as_ref()
@@ -459,9 +403,9 @@ impl LashRuntime {
         let prepared = {
             let prepare_turn = plugins.prepare_turn(PrepareTurnRequest {
                 session_id: self.state.session_id.clone(),
-                state: self.state.read_view(),
+                state: self.read_snapshot().read_view(),
                 messages,
-                host: Arc::clone(&manager),
+                host: manager.clone(),
             });
             tokio::pin!(prepare_turn);
 
@@ -507,17 +451,9 @@ impl LashRuntime {
             prompt_bridge.clear_sender();
             drop(event_tx);
 
-            let mut state = self.state.clone();
-            let state_read_model = state.read_model();
-            if let Some(appended_messages) = active_read_message_delta_if_base_preserved(
-                state_read_model.messages.as_slice(),
-                prepared.messages.as_slice(),
-            ) {
-                state.append_active_conversation_messages(&appended_messages);
-            } else {
-                let tool_calls = state_read_model.tool_calls.as_ref().clone();
-                state.replace_active_read_state(prepared.messages.as_slice(), &tool_calls);
-            }
+            let mut turn_pipeline = TurnCommitPipeline::from_state(self.state.clone());
+            turn_pipeline.apply_prepared_messages(&prepared.messages);
+            let state = turn_pipeline.into_final_state();
             let issue = TurnIssue {
                 kind: "plugin".to_string(),
                 code: Some(abort.code),
@@ -545,29 +481,35 @@ impl LashRuntime {
                 &self.host.core.termination,
             ));
         }
-        let current_read_model = self.state.session_graph.read_model();
-        self.persist_progress_boundary(
-            &prepared.messages,
-            current_read_model.tool_calls.as_slice(),
-            self.state.iteration,
-        )
-        .await?;
+        let mut turn_pipeline = TurnCommitPipeline::from_state(self.state.clone());
+        let store = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store());
+        turn_pipeline
+            .prepared_checkpoint(
+                store.as_ref().map(|store| store.as_ref()),
+                self.policy.clone(),
+                self.state.iteration,
+                &prepared.messages,
+                self.session.as_mut(),
+            )
+            .await
+            .map_err(|err| RuntimeError {
+                code: "store_commit_failed".to_string(),
+                message: err.to_string(),
+            })?;
         let cancel_state = cancel.clone();
         let session = self
             .session
             .take()
             .expect("lash runtime session must be available");
-        let base_read_model = self.state.session_graph.read_model();
-        let sansio_events_synced = base_read_model.active_events.len();
-        let progress_graph =
-            TurnGraphOverlay::new(Arc::new(self.state.session_graph.clone()), base_read_model);
         let mut driver = RuntimeTurnDriver {
             session,
             policy: self.policy.clone(),
             host: self.host.clone(),
             session_id: self.state.session_id.clone(),
-            progress_graph,
-            progress_state: self.state.clone(),
+            turn_pipeline,
             llm_stream_summaries: HashMap::new(),
             session_manager: manager,
             prompt_bridge,
@@ -575,7 +517,6 @@ impl LashRuntime {
                 .clone()
                 .unwrap_or_else(|| self.mode_turn_options.clone()),
             turn_phase_probe: self.turn_phase_probe.clone(),
-            sansio_events_synced,
         };
         let run_offset = self.state.iteration;
         let run_task = tokio::spawn(async move {
@@ -662,61 +603,30 @@ impl LashRuntime {
         let RuntimeTurnDriver {
             session,
             policy,
-            progress_graph,
-            progress_state,
+            mut turn_pipeline,
             ..
         } = driver;
-        let mut progress_graph = progress_graph;
         self.session = Some(session);
         self.policy = policy;
-        self.state = progress_state;
-        self.state.policy = self.policy.clone();
-        self.state.iteration = new_iteration;
+        turn_pipeline.state_mut().policy = self.policy.clone();
+        turn_pipeline.state_mut().iteration = new_iteration;
         let mut turn_usage_delta = child_ledger.clone();
-        for entry in child_ledger {
-            merge_ledger_entry(&mut self.state.token_ledger, entry);
-        }
         if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             let entry = TokenLedgerEntry {
                 source: "turn".to_string(),
                 model: self.policy.model.clone(),
                 usage: assembler.token_usage.clone(),
             };
-            merge_ledger_entry(&mut self.state.token_ledger, entry.clone());
             turn_usage_delta.push(entry);
         }
         let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
-        let projected_new_messages = (new_messages.is_empty() && cancel_state.is_cancelled())
-            .then(|| progress_graph.message_sequence().shared());
-        let appended_messages =
-            if let Some(projected_new_messages) = projected_new_messages.as_ref() {
-                progress_graph.message_delta_if_current_preserved(projected_new_messages.iter())
-            } else {
-                progress_graph.message_delta_if_current_preserved(new_messages.iter())
-            };
-        if let Some(appended_messages) = appended_messages {
-            if assembler.tool_calls.is_empty() {
-                progress_graph.append_active_conversation_messages(&appended_messages);
-            } else {
-                progress_graph.append_active_read_delta(&appended_messages, &assembler.tool_calls);
-            }
-        } else {
-            let mut next_tool_calls = progress_graph.graph_tool_calls().to_vec();
-            if !assembler.tool_calls.is_empty() {
-                next_tool_calls.extend(assembler.tool_calls.clone());
-            }
-            let projected_new_messages =
-                projected_new_messages.unwrap_or_else(|| new_messages.shared());
-            progress_graph
-                .replace_active_read_state(projected_new_messages.as_slice(), &next_tool_calls);
-        }
-        // Drop the pre-turn graph clone before consuming the overlay so
-        // `TurnGraphOverlay` can take ownership of the base graph and append
-        // its node tail without cloning the full graph at finalization.
-        drop(std::mem::take(&mut self.state.session_graph));
-        self.state.session_graph = progress_graph.into_session_graph();
+        turn_pipeline.finalize_turn_read_state(
+            new_messages,
+            &assembler.tool_calls,
+            cancel_state.is_cancelled(),
+        );
         if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
-            self.state.token_usage = assembler.token_usage.clone();
+            turn_pipeline.state_mut().token_usage = assembler.token_usage.clone();
         }
 
         let last_prompt_usage = assembler
@@ -735,15 +645,15 @@ impl LashRuntime {
         };
         tracing::debug!(
             rss_kb = debug_rss_kb(),
-            state_message_count = self.state.read_model().messages.len(),
-            graph_node_count = self.state.session_graph.nodes.len(),
-            token_ledger_entries = self.state.token_ledger.len(),
+            state_message_count = turn_pipeline.state_mut().read_model().messages.len(),
+            graph_node_count = turn_pipeline.state_mut().session_graph.nodes.len(),
+            token_ledger_entries = turn_pipeline.state_mut().token_ledger.len(),
             "runtime before assembler.finish"
         );
-        let mut assembled_state = std::mem::take(&mut self.state);
-        assembled_state.last_prompt_usage = last_prompt_usage.clone();
+        turn_pipeline.state_mut().last_prompt_usage = last_prompt_usage.clone();
+        let assembled_state = turn_pipeline.export_state_for_assembly();
         let assembled = assembler.finish(
-            assembled_state.export_state(),
+            assembled_state,
             cancel_state.is_cancelled(),
             None,
             &self.host.core.sanitizer,
@@ -776,38 +686,24 @@ impl LashRuntime {
             let mut returned_turn = finalized.turn;
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                dynamic_state_present = assembled_state.dynamic_state_ref.is_some()
-                    || assembled_state.dynamic_state_snapshot.is_some(),
-                plugin_snapshot_present = assembled_state.plugin_snapshot_ref.is_some()
-                    || assembled_state.plugin_snapshot.is_some(),
+                dynamic_state_present = turn_pipeline.state_mut().dynamic_state_ref.is_some()
+                    || turn_pipeline.state_mut().dynamic_state_snapshot.is_some(),
+                plugin_snapshot_present = turn_pipeline.state_mut().plugin_snapshot_ref.is_some()
+                    || turn_pipeline.state_mut().plugin_snapshot.is_some(),
                 "runtime before stamp_runtime_state"
             );
             self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
-            assembled_state.apply_exported_state(&returned_turn.state);
-            assembled_state.refresh_plugin_snapshots(plugins.as_ref());
+            turn_pipeline
+                .final_commit(&mut returned_turn, self.session.as_mut(), &turn_usage_delta)
+                .await?;
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                persisted_graph_node_count = assembled_state.session_graph.nodes.len(),
-                persisted_message_count = assembled_state.read_model().messages.len(),
+                persisted_graph_node_count = returned_turn.state.session_graph.nodes.len(),
+                persisted_message_count = returned_turn.state.read_model().messages.len(),
                 "runtime after stamp_runtime_state"
             );
-            if let Some(store) = self
-                .session
-                .as_ref()
-                .and_then(|session| session.history_store())
-            {
-                commit_runtime_state(store.as_ref(), &mut assembled_state, &turn_usage_delta)
-                    .await
-                    .map_err(|err| RuntimeError {
-                        code: "store_commit_failed".to_string(),
-                        message: err.to_string(),
-                    })?;
-            } else {
-                clear_persisted_runtime_caches(&mut assembled_state);
-            }
-            returned_turn.state = assembled_state.export_state();
             emit_session_events_to_sink(events, finalized.events).await;
-            self.state = assembled_state;
+            self.state = turn_pipeline.into_final_state();
             if let Some(session) = self.session.as_ref()
                 && let Ok(host) = self.runtime_session_manager()
             {
@@ -816,7 +712,8 @@ impl LashRuntime {
                     .emit_runtime_event(crate::PluginRuntimeEvent::TurnPersisted(
                         crate::SessionStateChangedContext {
                             session_id: self.state.session_id.clone(),
-                            state: returned_turn.state.read_view(),
+                            state: RuntimeReadSnapshot::from_exported(&returned_turn.state)
+                                .read_view(),
                             host,
                         },
                     ))
@@ -876,6 +773,7 @@ impl LashRuntime {
             image_blobs,
             self.host.core.base_dir.as_path(),
             self.host.core.path_resolver.as_ref(),
+            self.host.core.attachment_store.as_ref(),
         )
     }
 }
