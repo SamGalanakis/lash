@@ -10,6 +10,7 @@ use crate::{
     ToolProvider, ToolResult, TurnInput,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use tokio::sync::mpsc;
 
 pub use lash_sansio::{
@@ -168,6 +169,10 @@ pub struct SessionCreateRequest {
     /// `SessionManager::take_first_turn_input`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_turn_input: Option<PluginMessage>,
+    #[serde(default)]
+    pub tool_access: SessionToolAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubagentSessionAuthority>,
     #[serde(skip)]
     pub context_surface: SessionContextSurface,
     /// Per-execution-mode "extras" that configure mode-specific
@@ -181,6 +186,29 @@ pub struct SessionCreateRequest {
     /// `"compaction"`. Defaults to `"child"` if unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SessionToolAccess {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDefinition>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub hidden_tools: BTreeSet<String>,
+}
+
+impl SessionToolAccess {
+    pub fn hides(&self, name: &str) -> bool {
+        self.hidden_tools.contains(name)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubagentSessionAuthority {
+    pub agent_name: String,
+    pub parent_session_id: String,
+    pub capability: String,
+    pub depth: u8,
+    pub max_depth: u8,
 }
 
 /// Per-execution-mode configuration carried on a `SessionCreateRequest`.
@@ -222,6 +250,8 @@ pub struct ToolSurfaceContext {
     pub session_id: String,
     pub mode: ExecutionMode,
     pub tools: Vec<ToolDefinition>,
+    pub tool_access: SessionToolAccess,
+    pub subagent: Option<SubagentSessionAuthority>,
 }
 
 #[derive(Clone, Debug)]
@@ -522,6 +552,7 @@ pub trait SessionManager: Send + Sync {
             "background task registry is unavailable in this session".to_string(),
         ))
     }
+    async fn unregister_background_task(&self, _session_id: &str, _task_id: &str) {}
     async fn complete_background_task(
         &self,
         _session_id: &str,
@@ -933,7 +964,7 @@ pub use registrar::{
     ToolResultRegistrations, TurnRegistrations,
 };
 pub(crate) use registrar::{RegisteredCommand, RegisteredExclusiveHook, RegisteredHook};
-pub use runtime_impl::PluginHost;
+pub use runtime_impl::{PluginHost, SessionAuthorityContext};
 pub(crate) use services::NoopSessionManager;
 pub use services::{ExternalInvokeError, PersistentRuntimeServices, RuntimeServices};
 pub use session_obj::PluginSession;

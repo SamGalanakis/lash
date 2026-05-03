@@ -14,14 +14,39 @@ use lash::llm::timeouts::{
 };
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmToolChoice, LlmUsage,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
+    LlmRequest, LlmResponse, LlmRole, LlmToolChoice, LlmUsage,
 };
 use lash::provider::{
     AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
 };
 
 pub mod oauth;
+
+fn emit_provider_trace(
+    tx: Option<&lash::llm::types::LlmProviderTraceSender>,
+    provider: &'static str,
+    raw: &str,
+) {
+    let Some(tx) = tx else {
+        return;
+    };
+    let event_name = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .or_else(|| value.get("event"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "provider_event".to_string());
+    tx.send(LlmProviderTraceEvent {
+        provider,
+        event_name,
+        raw: raw.to_string(),
+    });
+}
 
 const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION: &str = "v1internal";
@@ -859,6 +884,7 @@ impl GoogleOAuthProvider {
         access_token: &str,
         request: Value,
         stream_events: Option<lash::llm::types::LlmEventSender>,
+        provider_trace: Option<lash::llm::types::LlmProviderTraceSender>,
     ) -> Result<LlmResponse, LlmTransportError> {
         let request_body = serde_json::to_string(&request).ok();
         let method = if stream_events.is_some() {
@@ -912,6 +938,7 @@ impl GoogleOAuthProvider {
                 "Cloud Code response body timed out",
             )
             .await?;
+            emit_provider_trace(provider_trace.as_ref(), "google", &text);
             let value: Value = serde_json::from_str(&text).map_err(|e| {
                 LlmTransportError::new(format!("Invalid Cloud Code response JSON: {e}"))
                     .with_raw(text.clone())
@@ -955,6 +982,7 @@ impl GoogleOAuthProvider {
             self.options.llm_timeouts().chunk_timeout,
             "Cloud Code stream chunk timed out",
             |raw| {
+                emit_provider_trace(provider_trace.as_ref(), "google", raw);
                 let prev_len = deltas.len();
                 let prev_usage = usage.clone();
                 Self::process_sse_event(
@@ -1168,6 +1196,7 @@ impl Provider for GoogleOAuthProvider {
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
+        let provider_trace = req.provider_trace.clone();
         let access_token = self.access_token.clone();
         let project_id = self.project_id.clone();
 
@@ -1191,14 +1220,19 @@ impl Provider for GoogleOAuthProvider {
         let request = Self::build_request(self, &req, contents, project_id.as_deref());
 
         match self
-            .execute_request(&access_token, request, stream_events.clone())
+            .execute_request(
+                &access_token,
+                request,
+                stream_events.clone(),
+                provider_trace.clone(),
+            )
             .await
         {
             Ok(response) => Ok(response),
             Err(err) if used_uploaded_files && Self::should_retry_inline(&err) => {
                 let inline_request =
                     Self::build_request(self, &req, inline_contents, project_id.as_deref());
-                self.execute_request(&access_token, inline_request, stream_events)
+                self.execute_request(&access_token, inline_request, stream_events, provider_trace)
                     .await
             }
             Err(err) => Err(err),

@@ -113,20 +113,35 @@ fn single_op_exploration_renders_as_one_line() {
 
 #[test]
 fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
+    use lash_subagents::AgentMetadata;
+    let host = std::sync::Arc::new(crate::activity::tests::MockSubagentHost::default());
+    host.insert(
+        "root",
+        "probe_repo_shape",
+        AgentMetadata {
+            session_id: "child".to_string(),
+            parent_session_id: Some("root".to_string()),
+            capability: Some("explore".to_string()),
+            run_state: "running".to_string(),
+            model: "gpt-5.4-mini".to_string(),
+            model_variant: Some("low".to_string()),
+            last_iterations: None,
+            last_tool_calls: None,
+            last_token_usage: None,
+        },
+    );
     let mut state = crate::activity::ActivityState::default();
+    state.set_subagent_host(host);
     let blocks = state.blocks_for_tool_call(
         "spawn_agent",
         serde_json::json!({
-            "task_name":"probe_repo_shape",
-            "task":"In /home/sam/code/lash, inspect the repo shape only. Reply with 1) top-level directories/files summary and 2) whether the workspace looks healthy."
+            "agent_name":"probe_repo_shape",
+            "task":"In /home/sam/code/lash, inspect the repo shape only. Reply with 1) top-level directories/files summary and 2) whether the workspace looks healthy.",
+            "capability":"explore"
         }),
         serde_json::json!({
-            "task_name":"probe_repo_shape",
-            "target":"/root/probe_repo_shape",
-            "capability":"low",
-            "model":"gpt-5.4-mini",
-            "model_variant":"low"
-        }),
+            "agent_name":"probe_repo_shape",
+            }),
         true,
         0,
     );
@@ -156,12 +171,12 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
     assert!(
         rendered
             .iter()
-            .any(|line| line == "    Target /root/probe_repo_shape")
+            .any(|line| line == "    Agent probe_repo_shape")
     );
     assert!(
         rendered
             .iter()
-            .any(|line| line == "    Profile low capability · gpt-5.4-mini")
+            .any(|line| line == "    Profile explore capability")
     );
 }
 
@@ -872,7 +887,7 @@ fn plugin_panel_renders_as_section_header_without_box() {
 }
 
 #[test]
-fn plan_dock_renders_as_checklist_without_header_or_scribe_rule() {
+fn plan_dock_renders_as_checklist_with_dim_plan_header() {
     use crate::app::{App, PlanDockItem, PlanDockItemStatus, PlanDockState};
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.plan_dock = Some(PlanDockState {
@@ -906,19 +921,12 @@ fn plan_dock_renders_as_checklist_without_header_or_scribe_rule() {
         })
         .collect();
 
-    // Gutter row + 3 items = 4 rows. No `PLAN` header. No scribe rule.
-    assert_eq!(text.len(), 4, "expected 1 gutter + 3 items, got {text:?}");
-    assert!(
-        text[0].trim().is_empty(),
-        "first row should be gutter blank"
-    );
+    // Header row + 3 items = 4 rows. No scribe rule.
+    assert_eq!(text.len(), 4, "expected 1 header + 3 items, got {text:?}");
+    assert!(text[0].contains("Plan"));
     assert!(text[1].contains("✓") && text[1].contains("already done"));
     assert!(text[2].contains("▶") && text[2].contains("in flight"));
     assert!(text[3].contains("□") && text[3].contains("not yet"));
-    assert!(
-        !text.iter().any(|line| line.contains("PLAN")),
-        "no PLAN header expected, got {text:?}",
-    );
     assert!(
         !text.iter().any(|line| line.contains("─")),
         "no scribe rule expected, got {text:?}",

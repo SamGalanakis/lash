@@ -131,6 +131,8 @@ pub struct PluginSession {
     pub(super) tools: Arc<dyn ToolProvider>,
     pub(super) dynamic_tools: Option<Arc<crate::DynamicToolProvider>>,
     pub(super) tool_surface_overlay: ToolSurfaceContribution,
+    pub(super) tool_access: SessionToolAccess,
+    pub(super) subagent: Option<SubagentSessionAuthority>,
     pub(super) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(super) prompt_request_hooks: Vec<RegisteredHook<PromptRequestHook>>,
     pub(super) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
@@ -162,6 +164,14 @@ impl PluginSession {
 
     pub fn execution_mode(&self) -> ExecutionMode {
         self.execution_mode.clone()
+    }
+
+    pub fn tool_access(&self) -> &SessionToolAccess {
+        &self.tool_access
+    }
+
+    pub fn subagent_authority(&self) -> Option<&SubagentSessionAuthority> {
+        self.subagent.as_ref()
     }
 
     pub fn host(&self) -> &PluginHost {
@@ -208,6 +218,8 @@ impl PluginSession {
                 session_id: session_id.to_string(),
                 mode: mode.clone(),
                 tools: tools.clone(),
+                tool_access: self.tool_access.clone(),
+                subagent: self.subagent.clone(),
             })
             .unwrap_or_else(|err| {
                 tracing::warn!("failed to resolve tool surface: {err}");
@@ -250,6 +262,8 @@ impl PluginSession {
                 session_id: ctx.session_id.clone(),
                 mode: ctx.mode.clone(),
                 tools: ctx.tools.clone(),
+                tool_access: ctx.tool_access.clone(),
+                subagent: ctx.subagent.clone(),
             },
             |hook, ctx| hook(ctx),
         )?
@@ -257,8 +271,30 @@ impl PluginSession {
         .map(|owned| owned.value)
         .collect::<Vec<_>>();
         contributions.push(self.tool_surface_overlay.clone());
+        let tools = if ctx.tool_access.tools.is_empty() {
+            ctx.tools
+        } else {
+            ctx.tool_access.tools.clone()
+        };
+        let authority_hidden_tools = tools
+            .iter()
+            .filter(|tool| ctx.tool_access.hides(&tool.name))
+            .map(|tool| tool.name.clone())
+            .collect::<BTreeSet<_>>();
+        if !authority_hidden_tools.is_empty() {
+            contributions.push(ToolSurfaceContribution {
+                overrides: authority_hidden_tools
+                    .into_iter()
+                    .map(|tool_name| ToolSurfaceOverride {
+                        tool_name,
+                        availability: Some(crate::ToolAvailability::Hidden),
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
         Ok(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
-            tools: ctx.tools,
+            tools,
             mode: ctx.mode,
             contributions,
         }))
@@ -864,6 +900,7 @@ impl PluginSession {
         parent_session_id: Option<String>,
         execution_mode: ExecutionMode,
         standard_context_approach: Option<crate::StandardContextApproach>,
+        authority: super::SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_parent_and_surface(
@@ -874,6 +911,7 @@ impl PluginSession {
             Some(&snapshot),
             self.tool_surface_overlay.clone(),
             self.tools.dynamic_snapshot(),
+            authority,
         )
     }
 

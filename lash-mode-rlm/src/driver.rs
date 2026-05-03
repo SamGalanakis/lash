@@ -370,6 +370,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
             session_id: ctx.config.run_session_id.clone(),
             output_spec: None,
             stream_events: None,
+            provider_trace: None,
         }
     }
 }

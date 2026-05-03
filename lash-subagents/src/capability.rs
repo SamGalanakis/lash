@@ -176,38 +176,44 @@ impl CapabilityRegistry {
     }
 }
 
-/// Build the historic `low` / `medium` / `high` registry. `tier_models`
-/// supplies optional explicit model overrides keyed by tier name; absent
-/// tiers fall back to the provider's default agent model and then to the
-/// parent session's model. `low_tier_execution_mode` pins the spawn mode
-/// for the `low` tier (used to coerce light-weight subagents to Standard
-/// mode while leaving Medium/High to inherit).
+/// Build the default `explore` / `peer` registry. `tier_models` supplies
+/// optional explicit model overrides keyed by tier name; absent tiers fall
+/// back to the provider's default agent model and then to the parent
+/// session's model. `explore_tier_execution_mode` pins the spawn mode for
+/// the `explore` tier (used to coerce read-only subagents to Standard mode
+/// while leaving `peer` to inherit).
+///
+/// The `explore` tier is read-only and cannot recurse: investigative
+/// subagents that scan, summarise, or verify without mutating state. The
+/// `peer` tier is a parallel-self with the parent's full affordances:
+/// edits, recursion, anything the parent can do, in a fresh window.
+/// Interactive-only tools (`ask`, `show_snippet_to_user`, `showcase`,
+/// `plan_exit`) are stripped from every subagent surface regardless of
+/// capability — see `subagent_surface_contribution`.
 pub fn default_registry(
     tier_models: &BTreeMap<String, String>,
-    low_tier_execution_mode: ExecutionMode,
+    explore_tier_execution_mode: ExecutionMode,
 ) -> CapabilityRegistry {
     let model_for = |name: &str| tier_models.get(name).cloned();
     let mut registry = CapabilityRegistry::new();
     registry.add(Arc::new(TierCapability::new(
-        "low",
-        model_for("low"),
+        "explore",
+        model_for("explore"),
         [
             "apply_patch".to_string(),
-            "ask".to_string(),
             "spawn_agent".to_string(),
+            "send_message".to_string(),
+            "followup_task".to_string(),
+            "wait_agent".to_string(),
+            "list_agents".to_string(),
+            "close_agent".to_string(),
         ],
-        TierExecutionMode::Explicit(low_tier_execution_mode),
+        TierExecutionMode::Explicit(explore_tier_execution_mode),
     )));
     registry.add(Arc::new(TierCapability::new(
-        "medium",
-        model_for("medium"),
-        ["ask".to_string()],
-        TierExecutionMode::Inherit,
-    )));
-    registry.add(Arc::new(TierCapability::new(
-        "high",
-        model_for("high"),
-        ["ask".to_string()],
+        "peer",
+        model_for("peer"),
+        Vec::<String>::new(),
         TierExecutionMode::Inherit,
     )));
     registry

@@ -41,6 +41,8 @@ fn project_exec_command(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     let exit_code = shell_result_exit_code(&ctx.result);
     let status = if !ctx.success || exit_code.is_some_and(|value| value != 0) {
         ActivityStatus::Failed
+    } else if running_handle.is_some() {
+        ActivityStatus::Running
     } else {
         ActivityStatus::Completed
     };
@@ -104,6 +106,8 @@ fn project_write_stdin(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     }
     let status = if !ctx.success || exit_code.is_some_and(|value| value != 0) {
         ActivityStatus::Failed
+    } else if running {
+        ActivityStatus::Running
     } else {
         ActivityStatus::Completed
     };

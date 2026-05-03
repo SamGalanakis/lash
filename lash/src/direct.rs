@@ -303,6 +303,7 @@ pub(crate) fn build_llm_request(
         session_id,
         output_spec,
         stream_events,
+        provider_trace: None,
     }
 }
 

@@ -199,6 +199,7 @@ pub struct LlmRequest {
     pub session_id: Option<String>,
     pub output_spec: Option<LlmOutputSpec>,
     pub stream_events: Option<LlmEventSender>,
+    pub provider_trace: Option<LlmProviderTraceSender>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -233,6 +234,36 @@ impl LlmEventSender {
 
     pub fn send(&self, event: LlmStreamEvent) {
         (self.0)(event);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LlmProviderTraceEvent {
+    pub provider: &'static str,
+    pub event_name: String,
+    pub raw: String,
+}
+
+#[derive(Clone)]
+pub struct LlmProviderTraceSender(Arc<dyn Fn(LlmProviderTraceEvent) + Send + Sync>);
+
+impl LlmProviderTraceSender {
+    pub fn new<F>(send: F) -> Self
+    where
+        F: Fn(LlmProviderTraceEvent) + Send + Sync + 'static,
+    {
+        Self(Arc::new(send))
+    }
+
+    pub fn send(&self, event: LlmProviderTraceEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for LlmProviderTraceSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmProviderTraceSender")
+            .finish_non_exhaustive()
     }
 }
 

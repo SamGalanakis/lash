@@ -12,8 +12,9 @@ use lash::llm::timeouts::{
 };
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmToolChoice, LlmUsage,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
+    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta,
+    ResponseTextPhase,
 };
 use lash::provider::{
     AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
@@ -22,6 +23,31 @@ use lash::provider::{
 pub mod oauth;
 
 const OPENAI_GPT5_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"];
+
+fn emit_provider_trace(
+    tx: Option<&lash::llm::types::LlmProviderTraceSender>,
+    provider: &'static str,
+    raw: &str,
+) {
+    let Some(tx) = tx else {
+        return;
+    };
+    let event_name = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .or_else(|| value.get("event"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "provider_event".to_string());
+    tx.send(LlmProviderTraceEvent {
+        provider,
+        event_name,
+        raw: raw.to_string(),
+    });
+}
 const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 const OPENAI_GPT55_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
@@ -69,6 +95,8 @@ struct CodexStreamState {
     usage: LlmUsage,
     final_response: Option<Value>,
     current_text_part: Option<usize>,
+    current_message_item_id: Option<String>,
+    message_parts: HashMap<String, usize>,
     /// Index of the reasoning-summary `LlmOutputPart` currently receiving
     /// deltas. Each `response.reasoning_summary_part.added` starts a new
     /// entry; the server groups reasoning output into multiple "parts"
@@ -83,48 +111,28 @@ struct CodexStreamState {
 }
 
 impl CodexStreamState {
-    fn begin_message(&mut self) {
-        // When a new message item follows a previous one with existing text,
-        // emit a paragraph break so the UI renders separate items as separate
-        // paragraphs instead of concatenating their sentences (e.g. progress
-        // summaries that land as "blocks it.Next I'm fetching...").
-        let prev_has_text = self
-            .parts
-            .iter()
-            .rev()
-            .find_map(|part| match part {
-                LlmOutputPart::Text { text, .. } if !text.is_empty() => Some(true),
-                LlmOutputPart::Text { .. } => None,
-                _ => None,
-            })
-            .unwrap_or(false);
-        if prev_has_text {
-            if let Some(idx) = self.parts.iter().rposition(
-                |part| matches!(part, LlmOutputPart::Text { text, .. } if !text.is_empty()),
-            ) && let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(idx)
-                && !text.ends_with("\n\n")
-            {
-                text.push_str("\n\n");
-            }
-            self.deltas.push("\n\n".to_string());
-            self.recompute_full_text();
-        }
-        let index = self.parts.len();
-        self.parts.push(LlmOutputPart::Text {
-            text: String::new(),
-            response_meta: None,
-        });
+    fn begin_message(&mut self, item: Option<&Value>) {
+        let item_id = item
+            .and_then(CodexProvider::message_item_id)
+            .map(str::to_string);
+        let meta = item.map(CodexProvider::response_text_meta_from_message_item);
+        let index = self.message_part_index(item_id.as_deref(), meta);
         self.current_text_part = Some(index);
+        self.current_message_item_id = item_id;
     }
 
     fn finish_message(&mut self, item: Option<&Value>) {
         if let Some(item) = item {
             let text = CodexProvider::message_text_from_item(item);
+            let meta = CodexProvider::response_text_meta_from_message_item(item);
+            let item_id = meta.id.clone();
+            let index = self.message_part_index(item_id.as_deref(), Some(meta));
             if !text.is_empty() {
-                self.reconcile_current_message_text(&text);
+                self.reconcile_text_part(index, &text);
             }
         }
         self.current_text_part = None;
+        self.current_message_item_id = None;
     }
 
     fn push_text_delta(&mut self, piece: &str) {
@@ -134,18 +142,13 @@ impl CodexStreamState {
 
         let part_index = self.ensure_text_part_index();
 
-        if let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(part_index) {
-            text.push_str(piece);
-        }
-        self.deltas.push(piece.to_string());
-        self.recompute_full_text();
+        self.append_text_delta_to_part(part_index, piece);
     }
 
-    fn reconcile_current_message_text(&mut self, text: &str) {
+    fn reconcile_text_part(&mut self, part_index: usize, text: &str) {
         if text.is_empty() {
             return;
         }
-        let part_index = self.ensure_text_part_index();
         let existing = self
             .parts
             .get(part_index)
@@ -159,27 +162,77 @@ impl CodexStreamState {
             return;
         }
         if let Some(suffix) = text.strip_prefix(existing.as_str()) {
-            self.push_text_delta(suffix);
+            self.append_text_delta_to_part(part_index, suffix);
             return;
         }
         self.set_text_part(part_index, text.to_string());
     }
 
-    fn reconcile_final_response_text(&mut self, text: &str) {
-        if text.is_empty() || self.full_text == text {
-            return;
+    fn merge_final_response(&mut self, response: &Value) {
+        let structured_message_text = CodexProvider::has_structured_message_text(response);
+        for part in CodexProvider::response_parts_from_value(response) {
+            match part {
+                LlmOutputPart::Text {
+                    text,
+                    response_meta,
+                } => {
+                    let item_id = response_meta.as_ref().and_then(|meta| meta.id.clone());
+                    if item_id.is_none()
+                        && !structured_message_text
+                        && self.parts.iter().any(|part| {
+                            matches!(part, LlmOutputPart::Text { text, .. } if !text.is_empty())
+                        })
+                    {
+                        continue;
+                    }
+                    let index = self.message_part_index(item_id.as_deref(), response_meta);
+                    self.reconcile_text_part(index, &text);
+                }
+                part @ LlmOutputPart::Reasoning { .. } => {
+                    let part_item_id = match &part {
+                        LlmOutputPart::Reasoning { item_id, .. } => item_id.as_deref(),
+                        _ => None,
+                    };
+                    if let Some(id) = part_item_id
+                        && let Some(existing) =
+                            self.parts.iter_mut().find(|existing| {
+                                matches!(existing, LlmOutputPart::Reasoning { item_id: existing_id, .. } if existing_id.as_deref() == Some(id))
+                            })
+                    {
+                        *existing = part;
+                        continue;
+                    }
+                    if !self.parts.iter().any(|existing| existing == &part) {
+                        self.parts.push(part);
+                    }
+                }
+                part @ LlmOutputPart::ToolCall { .. } => {
+                    let (part_item_id, part_call_id) = match &part {
+                        LlmOutputPart::ToolCall {
+                            item_id, call_id, ..
+                        } => (item_id.as_deref(), call_id.as_str()),
+                        _ => (None, ""),
+                    };
+                    let duplicate = self.parts.iter().any(|existing| match existing {
+                        LlmOutputPart::ToolCall {
+                            item_id: existing_item_id,
+                            call_id: existing_call_id,
+                            ..
+                        } => {
+                            part_item_id
+                                .zip(existing_item_id.as_deref())
+                                .is_some_and(|(a, b)| a == b)
+                                || (!part_call_id.is_empty() && part_call_id == existing_call_id)
+                        }
+                        _ => false,
+                    });
+                    if !duplicate {
+                        self.parts.push(part);
+                    }
+                }
+            }
         }
-        if let Some(suffix) = text.strip_prefix(self.full_text.as_str()) {
-            self.push_text_delta(suffix);
-            return;
-        }
-        if self.full_text.is_empty() {
-            let part_index = self.ensure_text_part_index();
-            self.set_text_part(part_index, text.to_string());
-            self.deltas.push(text.to_string());
-            return;
-        }
-        self.replace_text_output(text);
+        self.recompute_full_text();
     }
 
     fn ensure_text_part_index(&mut self) -> usize {
@@ -202,6 +255,45 @@ impl CodexStreamState {
         index
     }
 
+    fn message_part_index(
+        &mut self,
+        item_id: Option<&str>,
+        response_meta: Option<ResponseTextMeta>,
+    ) -> usize {
+        let index = if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+            if let Some(index) = self.message_parts.get(item_id).copied() {
+                index
+            } else {
+                let index = self.parts.len();
+                self.parts.push(LlmOutputPart::Text {
+                    text: String::new(),
+                    response_meta: response_meta.clone(),
+                });
+                self.message_parts.insert(item_id.to_string(), index);
+                index
+            }
+        } else if let Some(index) = self.current_text_part {
+            index
+        } else {
+            let index = self.parts.len();
+            self.parts.push(LlmOutputPart::Text {
+                text: String::new(),
+                response_meta: response_meta.clone(),
+            });
+            index
+        };
+
+        if let Some(response_meta) = response_meta
+            && let Some(LlmOutputPart::Text {
+                response_meta: existing_meta,
+                ..
+            }) = self.parts.get_mut(index)
+        {
+            *existing_meta = Some(response_meta);
+        }
+        index
+    }
+
     fn set_text_part(&mut self, part_index: usize, text: String) {
         if let Some(LlmOutputPart::Text { text: existing, .. }) = self.parts.get_mut(part_index) {
             *existing = text;
@@ -209,30 +301,14 @@ impl CodexStreamState {
         self.recompute_full_text();
     }
 
-    fn replace_text_output(&mut self, text: &str) {
-        let mut replaced = false;
-        let mut parts = Vec::with_capacity(self.parts.len().max(1));
-        for part in self.parts.drain(..) {
-            match part {
-                LlmOutputPart::Text { .. } if !replaced => {
-                    parts.push(LlmOutputPart::Text {
-                        text: text.to_string(),
-                        response_meta: None,
-                    });
-                    replaced = true;
-                }
-                LlmOutputPart::Text { .. } => {}
-                other => parts.push(other),
-            }
+    fn append_text_delta_to_part(&mut self, part_index: usize, piece: &str) {
+        if piece.is_empty() {
+            return;
         }
-        if !replaced {
-            parts.push(LlmOutputPart::Text {
-                text: text.to_string(),
-                response_meta: None,
-            });
+        if let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(part_index) {
+            text.push_str(piece);
         }
-        self.parts = parts;
-        self.current_text_part = None;
+        self.deltas.push(piece.to_string());
         self.recompute_full_text();
     }
 
@@ -1057,27 +1133,51 @@ impl CodexProvider {
             return s.to_string();
         }
         if let Some(arr) = value.get("output").and_then(|v| v.as_array()) {
-            // Concatenate items with a paragraph break so this stays in sync
-            // with `begin_message`, which injects "\n\n" between streamed
-            // message items. Mismatched separators would otherwise trigger
-            // `reconcile_final_response_text` to replace the live buffer.
             let mut items_text: Vec<String> = Vec::new();
             for item in arr {
-                if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
-                    let mut item_text = String::new();
-                    for part in content {
-                        if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                            item_text.push_str(text);
-                        }
-                    }
-                    if !item_text.is_empty() {
-                        items_text.push(item_text);
-                    }
+                let text = Self::message_text_from_item(item);
+                if !text.is_empty() {
+                    items_text.push(text);
                 }
             }
-            return items_text.join("\n\n");
+            return items_text.join("");
         }
         String::new()
+    }
+
+    fn message_item_id(item: &Value) -> Option<&str> {
+        item.get("id").and_then(|v| v.as_str())
+    }
+
+    fn response_text_meta_from_message_item(item: &Value) -> ResponseTextMeta {
+        ResponseTextMeta {
+            id: Self::message_item_id(item).map(str::to_string),
+            status: item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| Some("completed".to_string())),
+            phase: item
+                .get("phase")
+                .and_then(|v| v.as_str())
+                .and_then(|phase| match phase {
+                    "commentary" => Some(ResponseTextPhase::Commentary),
+                    "final_answer" => Some(ResponseTextPhase::FinalAnswer),
+                    _ => None,
+                }),
+        }
+    }
+
+    fn has_structured_message_text(value: &Value) -> bool {
+        value
+            .get("output")
+            .and_then(|v| v.as_array())
+            .is_some_and(|output| {
+                output.iter().any(|item| {
+                    item.get("type").and_then(|v| v.as_str()) == Some("message")
+                        && !Self::message_text_from_item(item).is_empty()
+                })
+            })
     }
 
     fn parse_i64(v: Option<&Value>) -> i64 {
@@ -1135,7 +1235,6 @@ impl CodexProvider {
             target: "lash::llm::codex_oauth",
             event_type,
             raw_len = raw.len(),
-            raw_preview = %raw.chars().take(240).collect::<String>(),
             delta_count = added_deltas.len(),
             delta_lens = ?added_deltas.iter().map(|d| d.len()).collect::<Vec<_>>(),
             full_len,
@@ -1227,7 +1326,7 @@ impl CodexProvider {
             "response.output_item.added" => {
                 if let Some(item) = event.get("item") {
                     match item.get("type").and_then(|v| v.as_str()) {
-                        Some("message") => state.begin_message(),
+                        Some("message") => state.begin_message(Some(item)),
                         Some("function_call") => {
                             let _ = state.update_tool_call_from_item(item);
                         }
@@ -1310,8 +1409,7 @@ impl CodexProvider {
             }
             "response.completed" => {
                 if let Some(resp_value) = event.get("response") {
-                    let final_text = Self::extract_text(resp_value);
-                    state.reconcile_final_response_text(&final_text);
+                    state.merge_final_response(resp_value);
                 }
             }
             "response.failed" => {
@@ -1382,18 +1480,40 @@ impl CodexProvider {
         if let Some(output) = value.get("output").and_then(|v| v.as_array()) {
             for item in output {
                 match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                    "reasoning" => {
+                        let summary = item
+                            .get("summary")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|entry| {
+                                        entry.get("text").and_then(|v| v.as_str()).map(String::from)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let text = summary.join("\n\n");
+                        parts.push(LlmOutputPart::Reasoning {
+                            text,
+                            signature: None,
+                            redacted: false,
+                            item_id: item.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                            encrypted_content: item
+                                .get("encrypted_content")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            summary,
+                        });
+                    }
                     "message" => {
-                        if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
-                            for block in content {
-                                if let Some(text) = block.get("text").and_then(|v| v.as_str())
-                                    && !text.is_empty()
-                                {
-                                    parts.push(LlmOutputPart::Text {
-                                        text: text.to_string(),
-                                        response_meta: None,
-                                    });
-                                }
-                            }
+                        let text = Self::message_text_from_item(item);
+                        if !text.is_empty() {
+                            parts.push(LlmOutputPart::Text {
+                                text,
+                                response_meta: Some(Self::response_text_meta_from_message_item(
+                                    item,
+                                )),
+                            });
                         }
                     }
                     "function_call" => {
@@ -1424,7 +1544,9 @@ impl CodexProvider {
                 }
             }
         }
-        if parts.is_empty()
+        if !parts
+            .iter()
+            .any(|part| matches!(part, LlmOutputPart::Text { text, .. } if !text.is_empty()))
             && let Some(text) = value.get("output_text").and_then(|v| v.as_str())
             && !text.is_empty()
         {
@@ -1492,6 +1614,10 @@ impl Provider for CodexProvider {
 
     fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
         match tier {
+            "explore" => Some(AgentModelSelection {
+                model: "gpt-5.5".to_string(),
+                variant: Some("low".to_string()),
+            }),
             "low" => Some(AgentModelSelection {
                 model: "gpt-5.4-mini".to_string(),
                 variant: Some("low".to_string()),
@@ -1548,6 +1674,7 @@ impl Provider for CodexProvider {
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
+        let provider_trace = req.provider_trace.clone();
         let access_token = self.access_token.clone();
         let account_id = self.account_id.clone();
         let timeouts = self.options.llm_timeouts();
@@ -1713,6 +1840,7 @@ impl Provider for CodexProvider {
             .map_err(|err| {
                 Self::non_sse_body_read_error(status.as_u16(), content_type.as_deref(), err)
             })?;
+            emit_provider_trace(provider_trace.as_ref(), "codex", &text);
             if Self::looks_like_sse_payload(&text) {
                 let mut state = CodexStreamState::default();
                 Self::parse_sse_payload(&text, &mut state)?;
@@ -1789,6 +1917,7 @@ impl Provider for CodexProvider {
             timeouts.chunk_timeout,
             "Codex stream chunk timed out",
             |raw| {
+                emit_provider_trace(provider_trace.as_ref(), "codex", raw);
                 let prev_len = state.deltas.len();
                 let prev_usage = state.usage.clone();
                 let mut emitted_parts = Vec::new();
@@ -1933,6 +2062,22 @@ mod tests {
         }
     }
 
+    fn process_event(state: &mut CodexStreamState, event: Value) {
+        CodexProvider::process_sse_event(&event.to_string(), state, None).unwrap();
+    }
+
+    fn process_event_with_parts(
+        state: &mut CodexStreamState,
+        event: Value,
+        emitted_parts: &mut Vec<LlmOutputPart>,
+    ) {
+        CodexProvider::process_sse_event(&event.to_string(), state, Some(emitted_parts)).unwrap();
+    }
+
+    fn response_from_state(state: CodexStreamState) -> LlmResponse {
+        CodexProvider::response_from_stream_state(state, None, "test".to_string())
+    }
+
     #[test]
     fn gpt_55_variants_match_codex_catalog() {
         let provider = provider();
@@ -1953,6 +2098,186 @@ mod tests {
         assert_eq!(
             provider.supported_variants("openai/gpt-5.5"),
             ["low", "medium", "high", "xhigh"]
+        );
+    }
+
+    #[test]
+    fn codex_stream_assembles_single_message_item_once() {
+        let mut state = CodexStreamState::default();
+
+        process_event(
+            &mut state,
+            json!({"type":"response.output_item.added","item":{"type":"message","id":"msg_1","status":"in_progress","phase":"commentary"}}),
+        );
+        process_event(
+            &mut state,
+            json!({"type":"response.output_text.delta","item_id":"msg_1","delta":"Hel"}),
+        );
+        process_event(
+            &mut state,
+            json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_1","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Hello"}]}}),
+        );
+
+        let response = response_from_state(state);
+        assert_eq!(response.full_text, "Hello");
+        assert_eq!(response.deltas, ["Hel", "lo"]);
+        assert_eq!(response.parts.len(), 1);
+        assert_eq!(
+            response.parts[0],
+            LlmOutputPart::Text {
+                text: "Hello".to_string(),
+                response_meta: Some(ResponseTextMeta {
+                    id: Some("msg_1".to_string()),
+                    status: Some("completed".to_string()),
+                    phase: Some(ResponseTextPhase::Commentary),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn codex_stream_replayed_message_item_does_not_duplicate_text() {
+        let mut state = CodexStreamState::default();
+
+        for event in [
+            json!({"type":"response.output_item.added","item":{"type":"message","id":"msg_1"}}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","delta":"The sentence."}),
+            json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_1","status":"completed","content":[{"type":"output_text","text":"The sentence."}]}}),
+            json!({"type":"response.output_item.added","item":{"type":"message","id":"msg_1"}}),
+            json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_1","status":"completed","content":[{"type":"output_text","text":"The sentence."}]}}),
+        ] {
+            process_event(&mut state, event);
+        }
+
+        let response = response_from_state(state);
+        assert_eq!(response.full_text, "The sentence.");
+        assert_eq!(
+            response
+                .parts
+                .iter()
+                .filter(|part| matches!(part, LlmOutputPart::Text { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn codex_stream_completed_response_merges_existing_message_by_id() {
+        let mut state = CodexStreamState::default();
+
+        for event in [
+            json!({"type":"response.output_item.added","item":{"type":"message","id":"msg_1"}}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","delta":"Final answer."}),
+            json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_1","status":"completed","content":[{"type":"output_text","text":"Final answer."}]}}),
+            json!({"type":"response.completed","response":{"id":"resp_1","output_text":"Final answer.","output":[{"type":"message","id":"msg_1","status":"completed","content":[{"type":"output_text","text":"Final answer."}]}]}}),
+        ] {
+            process_event(&mut state, event);
+        }
+
+        let response = response_from_state(state);
+        assert_eq!(response.full_text, "Final answer.");
+        assert_eq!(response.parts.len(), 1);
+        assert_eq!(response.deltas, ["Final answer."]);
+    }
+
+    #[test]
+    fn codex_stream_distinct_message_ids_stay_separate_without_inserted_separator() {
+        let mut state = CodexStreamState::default();
+
+        for event in [
+            json!({"type":"response.output_item.added","item":{"type":"message","id":"msg_1"}}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","delta":"One."}),
+            json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_1","status":"completed","content":[{"type":"output_text","text":"One."}]}}),
+            json!({"type":"response.output_item.added","item":{"type":"message","id":"msg_2"}}),
+            json!({"type":"response.output_text.delta","item_id":"msg_2","delta":"Two."}),
+            json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_2","status":"completed","content":[{"type":"output_text","text":"Two."}]}}),
+        ] {
+            process_event(&mut state, event);
+        }
+
+        let response = response_from_state(state);
+        assert_eq!(response.full_text, "One.Two.");
+        assert_eq!(response.deltas, ["One.", "Two."]);
+        assert_eq!(response.parts.len(), 2);
+        assert_eq!(
+            response.parts,
+            vec![
+                LlmOutputPart::Text {
+                    text: "One.".to_string(),
+                    response_meta: Some(ResponseTextMeta {
+                        id: Some("msg_1".to_string()),
+                        status: Some("completed".to_string()),
+                        phase: None,
+                    }),
+                },
+                LlmOutputPart::Text {
+                    text: "Two.".to_string(),
+                    response_meta: Some(ResponseTextMeta {
+                        id: Some("msg_2".to_string()),
+                        status: Some("completed".to_string()),
+                        phase: None,
+                    }),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_stream_preserves_reasoning_message_and_tool_call_once() {
+        let mut state = CodexStreamState::default();
+        let mut emitted_parts = Vec::new();
+
+        for event in [
+            json!({"type":"response.reasoning_summary_part.added"}),
+            json!({"type":"response.reasoning_summary_text.delta","delta":"Think"}),
+            json!({"type":"response.reasoning_summary_part.done"}),
+            json!({"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Think"}],"encrypted_content":"enc"}}),
+            json!({"type":"response.output_item.added","item":{"type":"message","id":"msg_1","phase":"final_answer"}}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","delta":"Hi"}),
+            json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_1","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Hi"}]}}),
+            json!({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"tool","arguments":""}}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"x\""}),
+            json!({"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"x\":1}"}),
+            json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"tool","arguments":"{\"x\":1}","status":"completed"}}),
+        ] {
+            process_event_with_parts(&mut state, event, &mut emitted_parts);
+        }
+        process_event_with_parts(
+            &mut state,
+            json!({"type":"response.completed","response":{"id":"resp_1","output":[
+                {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Think"}],"encrypted_content":"enc"},
+                {"type":"message","id":"msg_1","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Hi"}]},
+                {"type":"function_call","id":"fc_1","call_id":"call_1","name":"tool","arguments":"{\"x\":1}","status":"completed"}
+            ],"output_text":"Hi"}}),
+            &mut emitted_parts,
+        );
+
+        let response = response_from_state(state);
+        assert_eq!(response.full_text, "Hi");
+        assert_eq!(emitted_parts.len(), 1);
+        assert_eq!(
+            response
+                .parts
+                .iter()
+                .filter(|part| matches!(part, LlmOutputPart::Reasoning { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            response
+                .parts
+                .iter()
+                .filter(|part| matches!(part, LlmOutputPart::Text { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            response
+                .parts
+                .iter()
+                .filter(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+                .count(),
+            1
         );
     }
 }

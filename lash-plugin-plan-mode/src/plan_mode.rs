@@ -814,6 +814,8 @@ impl SessionPlugin for PlanModePlugin {
                                 plugin_mode: SessionPluginMode::Fresh,
                                 initial_nodes: Vec::new(),
                                 first_turn_input: Some(seed),
+                                tool_access: lash::SessionToolAccess::default(),
+                                subagent: None,
                                 context_surface: SessionContextSurface::default(),
                                 mode_extras: lash::ModeExtras::default(),
                                 usage_source: Some("plan_execution".to_string()),

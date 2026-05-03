@@ -235,17 +235,6 @@ pub(super) fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "spawn_agent" => tool_arg_str(args, "task")
             .map(|task| format!("spawn subagent · {}", inline_text(task)))
             .unwrap_or_else(|| "spawn subagent".to_string()),
-        "send_message" => tool_arg_str(args, "target")
-            .map(|target| format!("message subagent · {}", inline_text(target)))
-            .unwrap_or_else(|| "message subagent".to_string()),
-        "followup_task" => tool_arg_str(args, "target")
-            .map(|target| format!("follow up subagent · {}", inline_text(target)))
-            .unwrap_or_else(|| "follow up subagent".to_string()),
-        "wait_agent" => "waited on subagents".to_string(),
-        "close_agent" => tool_arg_str(args, "target")
-            .map(|target| format!("close subagent · {}", inline_text(target)))
-            .unwrap_or_else(|| "close subagent".to_string()),
-        "list_agents" => "list subagents".to_string(),
         "show_snippet_to_user" => tool_arg_str(args, "path")
             .map(|path| {
                 let start = args

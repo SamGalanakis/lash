@@ -15,9 +15,9 @@ use super::{
     BeforeToolCallHook, BeforeTurnHook, CheckpointHook, CommandDef, CommandHandler,
     ExternalInvokeHandler, ExternalOpDef, HistoryRewriter, PluginError, PluginHost,
     PluginRegistrar, PluginRuntimeEventHook, PluginSnapshotMeta, PromptContributor,
-    PromptRequestHook, SessionConfigMutator, SnapshotReader, SnapshotWriter,
-    ToolDiscoveryContributor, ToolResultProjectionHook, ToolResultProjector,
-    ToolSurfaceContributor, TurnContextTransform,
+    PromptRequestHook, SessionConfigMutator, SessionToolAccess, SnapshotReader, SnapshotWriter,
+    SubagentSessionAuthority, ToolDiscoveryContributor, ToolResultProjectionHook,
+    ToolResultProjector, ToolSurfaceContributor, TurnContextTransform,
 };
 use crate::{ExecutionMode, StandardContextApproachKind, ToolProvider};
 
@@ -165,6 +165,8 @@ pub struct PluginSessionContext {
     pub session_id: String,
     pub execution_mode: ExecutionMode,
     pub standard_context_approach: Option<crate::StandardContextApproach>,
+    pub tool_access: SessionToolAccess,
+    pub subagent: Option<SubagentSessionAuthority>,
     /// Session id of the caller that created this one. `None` identifies
     /// a root session; any subagent / compaction / forked-child session
     /// carries the parent here so plugin factories can gate themselves

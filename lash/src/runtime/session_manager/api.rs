@@ -119,6 +119,10 @@ impl SessionManager for RuntimeSessionManager {
             policy.session_id = Some(session_id.clone());
         }
         let state = self.build_runtime_state(session_id.clone(), &request, snapshot, &policy);
+        let authority = crate::plugin::SessionAuthorityContext {
+            tool_access: request.tool_access.clone(),
+            subagent: request.subagent.clone(),
+        };
         let plugins = match request.plugin_mode {
             crate::SessionPluginMode::Fresh => self
                 .current_plugins
@@ -129,6 +133,7 @@ impl SessionManager for RuntimeSessionManager {
                     policy.execution_mode.clone(),
                     policy.standard_context_approach.clone(),
                     None,
+                    authority,
                 )
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
             crate::SessionPluginMode::InheritCurrent => self
@@ -138,6 +143,7 @@ impl SessionManager for RuntimeSessionManager {
                     request.parent_session_id.clone(),
                     policy.execution_mode.clone(),
                     policy.standard_context_approach.clone(),
+                    authority,
                 )
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
         };
@@ -516,6 +522,15 @@ impl SessionManager for RuntimeSessionManager {
         executor
             .register_external(&self.background_scope_key(session_id), spec, cancel)
             .await
+    }
+
+    async fn unregister_background_task(&self, session_id: &str, task_id: &str) {
+        let Some(executor) = &self.current_host.session_task_executor else {
+            return;
+        };
+        executor
+            .unregister_external(&self.background_scope_key(session_id), task_id)
+            .await;
     }
 
     async fn complete_background_task(

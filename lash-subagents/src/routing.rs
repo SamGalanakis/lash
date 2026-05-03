@@ -1,56 +1,41 @@
-//! Event routing and path utilities for the subagent host.
-//!
-//! Responsibilities:
-//!   * Translate parent/child paths between absolute and relative forms,
-//!     validate segment shape, and slugify names.
-//!   * Decide which events in the per-tree queue a given `wait_agent`
-//!     caller is allowed to see, based on the caller's current path,
-//!     target filters, and `until` mode.
-//!   * Build the final `WaitAgentResponse` from a collected event batch.
-//!   * Trim a session snapshot down to the N most recent user turns
-//!     when forking a child session with bounded history.
-//!
-//! Everything here is a pure function — no `Arc`, no lock acquisition,
-//! no async. Keeping it separate makes the live orchestrator in
-//! `local.rs` easier to read and lets the routing rules be tested
-//! without spinning up a `LocalSubagentHost`.
+//! Pure helpers for subagent name normalization, event filtering, wait
+//! response construction, and snapshot truncation.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::types::{
-    WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent, WaitAgentMessage, WaitAgentResponse,
-    WaitUntil,
+    WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent, WaitAgentMessage, WaitAgentPending,
+    WaitAgentResponse, WaitUntil,
 };
 
 pub(crate) fn event_matches(
     event: &WaitAgentEvent,
-    current_path: &str,
-    targets: &[String],
+    parent_session_id: &str,
+    agents: &[String],
 ) -> bool {
-    if targets.is_empty() {
-        return match event {
-            WaitAgentEvent::TaskStarted { target, .. }
-            | WaitAgentEvent::TaskCompleted { target, .. }
-            | WaitAgentEvent::AgentClosed { target } => is_same_or_descendant(target, current_path),
-            WaitAgentEvent::Message { from, to, .. } => {
-                to == current_path || is_descendant(from, current_path)
-            }
-        };
+    if agents.is_empty() {
+        return false;
     }
-
-    targets.iter().any(|target| match event {
+    agents.iter().any(|name| match event {
         WaitAgentEvent::TaskStarted {
-            target: event_target,
+            agent_name,
+            parent_session_id: event_parent,
             ..
         }
         | WaitAgentEvent::TaskCompleted {
-            target: event_target,
+            agent_name,
+            parent_session_id: event_parent,
             ..
         }
         | WaitAgentEvent::AgentClosed {
-            target: event_target,
-        } => event_target == target,
-        WaitAgentEvent::Message { from, .. } => from == target,
+            agent_name,
+            parent_session_id: event_parent,
+        } => event_parent == parent_session_id && agent_name == name,
+        WaitAgentEvent::Message {
+            from_agent,
+            parent_session_id: event_parent,
+            ..
+        } => event_parent == parent_session_id && from_agent == name,
     })
 }
 
@@ -78,84 +63,78 @@ pub(crate) fn event_visible_for_until(event: &WaitAgentEvent, until: WaitUntil) 
                     | WaitAgentEvent::AgentClosed { .. }
             )
         }
-        WaitUntil::AnyEvent => true,
     }
 }
 
 pub(crate) fn wait_response(
     timed_out: bool,
     events: Vec<WaitAgentEvent>,
-    pending: Vec<String>,
+    pending: BTreeMap<String, WaitAgentPending>,
 ) -> WaitAgentResponse {
-    let completed = events
-        .iter()
-        .filter_map(|event| {
-            if let WaitAgentEvent::TaskCompleted {
-                target,
+    let mut completed = BTreeMap::new();
+    let mut messages: BTreeMap<String, Vec<WaitAgentMessage>> = BTreeMap::new();
+    let mut closed = BTreeMap::new();
+    for event in events {
+        match event {
+            WaitAgentEvent::TaskCompleted {
+                agent_name,
+                parent_session_id: _,
                 task,
                 status,
                 result,
                 error,
-                session,
-            } = event
-            {
-                Some(WaitAgentCompletion {
-                    target: target.clone(),
-                    task: task.clone(),
-                    status: status.clone(),
-                    result: result.clone(),
-                    error: error.clone(),
-                    session: session.clone(),
-                })
-            } else {
-                None
+            } => {
+                completed.insert(
+                    agent_name.clone(),
+                    WaitAgentCompletion {
+                        agent_name,
+                        task,
+                        status,
+                        result,
+                        error,
+                    },
+                );
             }
-        })
-        .collect();
-    let messages = events
-        .iter()
-        .filter_map(|event| {
-            if let WaitAgentEvent::Message { from, to, message } = event {
-                Some(WaitAgentMessage {
-                    from: from.clone(),
-                    to: to.clone(),
-                    message: message.clone(),
-                })
-            } else {
-                None
+            WaitAgentEvent::Message {
+                from_agent,
+                parent_session_id: _,
+                message,
+                ..
+            } => {
+                messages
+                    .entry(from_agent.clone())
+                    .or_default()
+                    .push(WaitAgentMessage {
+                        from_agent,
+                        message,
+                    });
             }
-        })
-        .collect();
-    let closed = events
-        .iter()
-        .filter_map(|event| {
-            if let WaitAgentEvent::AgentClosed { target } = event {
-                Some(WaitAgentClosed {
-                    target: target.clone(),
-                })
-            } else {
-                None
+            WaitAgentEvent::AgentClosed {
+                agent_name,
+                parent_session_id: _,
+            } => {
+                closed.insert(agent_name.clone(), WaitAgentClosed { agent_name });
             }
-        })
-        .collect();
+            WaitAgentEvent::TaskStarted { .. } => {}
+        }
+    }
     WaitAgentResponse {
         timed_out,
         completed,
         pending,
         messages,
         closed,
-        events,
     }
 }
 
-pub(crate) fn completed_targets(events: &[WaitAgentEvent]) -> HashSet<String> {
+pub(crate) fn completed_agents(events: &[WaitAgentEvent]) -> HashSet<String> {
     events
         .iter()
         .filter_map(|event| {
-            if let WaitAgentEvent::TaskCompleted { target, .. }
-            | WaitAgentEvent::AgentClosed { target } = event
+            if let WaitAgentEvent::TaskCompleted { agent_name, .. }
+            | WaitAgentEvent::AgentClosed { agent_name, .. } = event
             {
-                Some(target.clone())
+                Some(agent_name.clone())
             } else {
                 None
             }
@@ -163,20 +142,8 @@ pub(crate) fn completed_targets(events: &[WaitAgentEvent]) -> HashSet<String> {
         .collect()
 }
 
-pub(crate) fn normalize_relative_path(value: &str) -> Result<String, String> {
-    let segments = value
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(validate_segment)
-        .collect::<Result<Vec<_>, _>>()?;
-    if segments.is_empty() {
-        return Err("path must not be empty".to_string());
-    }
-    Ok(segments.join("/"))
-}
-
-pub(crate) fn normalize_absolute_path(value: &str) -> Result<String, String> {
-    Ok(format!("/{}", normalize_relative_path(value)?))
+pub(crate) fn normalize_agent_name(value: &str) -> Result<String, String> {
+    validate_segment(value)
 }
 
 pub(crate) fn validate_segment(segment: &str) -> Result<String, String> {
@@ -196,27 +163,11 @@ pub(crate) fn validate_segment(segment: &str) -> Result<String, String> {
     }
     if out.is_empty() {
         Err(format!(
-            "task name segment `{segment}` has no usable characters — use letters or digits"
+            "agent_name `{segment}` has no usable characters - use letters or digits"
         ))
     } else {
         Ok(out)
     }
-}
-
-pub(crate) fn join_path(parent: &str, relative: &str) -> String {
-    if parent == "/root" {
-        format!("/root/{relative}")
-    } else {
-        format!("{parent}/{relative}")
-    }
-}
-
-pub(crate) fn is_same_or_descendant(path: &str, prefix: &str) -> bool {
-    path == prefix || path.starts_with(&format!("{prefix}/"))
-}
-
-pub(crate) fn is_descendant(path: &str, prefix: &str) -> bool {
-    path.starts_with(&format!("{prefix}/"))
 }
 
 pub fn truncate_snapshot_to_recent_turns(

@@ -20,7 +20,7 @@ use lash::{
     CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart, LlmResponse,
     ToolCallRecord, append_assistant_text_part, normalized_response_parts,
 };
-use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
+use lash_rlm_types::{RlmDiagnosticEvent, RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
 
 pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Tools listed under **Showcased Tools** and catalogued tools found with `search_tools` are invoked as `call tool_name { ... }` from inside a fenced `lashlang` block. Emit a block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value. Plain prose is for direct conversational replies that need no action.
@@ -108,21 +108,19 @@ Your turn's REPL trace is your working memory. Keep it small, decision-sized, an
 
 Two ways to keep your context lean while still making progress:
 
-- `spawn_agent` — branch a subagent that does focused work in parallel and returns a value. You stay alive, collect results, decide. Use it whenever the inputs would balloon your trace if you read them yourself: bulk reads, scans, validations, deep dives into one section. Prefer `output: { ... }` so the subagent returns typed facts, not prose. Use `start`/`await` (especially with `wait_agent`) so multiple subagents progress at once; record-shaped fanout (`await { a: h1, b: h2 }`) gives named results.
+- `spawn_agent` — branch a subagent that does focused work and returns its final value. A plain call blocks; use `start call spawn_agent` plus `await` for parallel fanout. Use it whenever the inputs would balloon your trace if you read them yourself: bulk reads, scans, validations, deep dives into one section. Prefer `output: { ... }` so the subagent returns typed facts, not prose. Use `list_async_handles` to inspect live await/cancel handles.
 - `continue_as` — tail-call to a fresh successor. Your turn ends; the successor inherits the same tools and a clean window. Use it when most of your trace has gone stale (failed attempts, large observations you've already extracted from) or you're approaching the context limit. The successor sees only `task` + `seed` — pack the goal, concrete IDs and paths, partial results, and next steps; leave dead ends behind.
 
-Rule of thumb: many independent subproblems → spawn fanout, then `wait_agent`. One thread outgrowing its window → `continue_as`. Small enough to keep in your head → just do it inline.
+Rule of thumb: many independent subproblems → `start call spawn_agent`, then `await` the handles. One thread outgrowing its window → `continue_as`. Small enough to keep in your head → just do it inline.
 
 Example fanout to two subagents (use `?` for fail-fast unwrapping):
 
 ```lashlang
-a = (call spawn_agent { task_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "low", output: { claim: "str" } })?
-b = (call spawn_agent { task_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "low", output: { claim: "str" } })?
-events = await {
-  a: start call wait_agent { targets: [a.target], timeout_ms: 30000 },
-  b: start call wait_agent { targets: [b.target], timeout_ms: 30000 },
-}
-submit [events.a?.completed[0].result, events.b?.completed[0].result]
+a = start call spawn_agent { agent_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "low", output: { claim: "str" } }
+b = start call spawn_agent { agent_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "low", output: { claim: "str" } }
+handles = (call list_async_handles {})?
+results = parallel { one: (await handles.subagent.read_chunk_1)?, two: (await handles.subagent.read_chunk_2)? }
+submit [results.one.claim, results.two.claim]
 ```"#;
 
 pub fn rlm_execution_section() -> String {
@@ -253,6 +251,16 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
         let Some(fence) = extraction else {
             match ctx.termination().rlm_termination() {
                 RlmTermination::ProseWithoutFence => {
+                    actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
+                        "llm_extraction",
+                        serde_json::json!({
+                            "found_lashlang_fence": false,
+                            "prose_only_ends_turn": true,
+                            "assistant_text_chars": assistant_text.chars().count(),
+                            "reasoning_chars": reasoning_text.chars().count(),
+                            "finalization_reason": "prose_without_fence",
+                        }),
+                    )]));
                     if !assistant_text.trim().is_empty() {
                         actions.push(DriverAction::AppendEvents(vec![conversation_event(
                             assistant_prose_message(assistant_text),
@@ -267,6 +275,16 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     include_submit_prompt,
                     ..
                 } => {
+                    actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
+                        "llm_extraction",
+                        serde_json::json!({
+                            "found_lashlang_fence": false,
+                            "prose_only_ends_turn": false,
+                            "assistant_text_chars": assistant_text.chars().count(),
+                            "reasoning_chars": reasoning_text.chars().count(),
+                            "finalization_reason": "submit_required",
+                        }),
+                    )]));
                     let mut events = Vec::new();
                     if !assistant_text.trim().is_empty() {
                         events.push(conversation_event(assistant_prose_message(assistant_text)));
@@ -293,7 +311,17 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             return actions;
         };
 
-        let _ = fence.had_extra_fences;
+        actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
+            "llm_extraction",
+            serde_json::json!({
+                "found_lashlang_fence": true,
+                "had_extra_fences": fence.had_extra_fences,
+                "code_chars": fence.code.chars().count(),
+                "assistant_text_chars": assistant_text.chars().count(),
+                "reasoning_chars": reasoning_text.chars().count(),
+                "decision": "execute_lashlang",
+            }),
+        )]));
 
         let mut state = waiting
             .take_driver_state::<RlmDriverState>()
@@ -510,6 +538,15 @@ fn conversation_event(message: Message) -> SessionEventRecord {
 
 fn trajectory_event(entry: RlmTrajectoryEntry) -> SessionEventRecord {
     SessionEventRecord::Mode(ModeEvent::rlm(RlmModeEvent::RlmTrajectoryEntry(entry)))
+}
+
+fn diagnostic_event(phase: &str, payload: Value) -> SessionEventRecord {
+    SessionEventRecord::Mode(ModeEvent::rlm(RlmModeEvent::RlmDiagnostic(
+        RlmDiagnosticEvent {
+            phase: phase.to_string(),
+            payload,
+        },
+    )))
 }
 
 // ─────────────────────────────────────────────────────────────────────

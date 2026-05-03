@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::llm::transport::LlmTransportError;
-use crate::llm::types::LlmUsage;
+use crate::llm::types::{LlmProviderTraceEvent, LlmUsage};
 use crate::plugin::StaticPluginFactory;
 use crate::testing::TestProvider;
 use tokio_util::sync::CancellationToken;
@@ -220,7 +220,7 @@ fn test_host_config_with_trace_path_and_stream_events(path: PathBuf) -> Embedded
     EmbeddedRuntimeHost::new(
         RuntimeCoreConfig::default()
             .with_trace_jsonl_path(Some(path))
-            .with_trace_stream_events(true),
+            .with_trace_level(lash_trace::TraceLevel::Extended),
     )
 }
 
@@ -1450,7 +1450,9 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                             ),
                                         )],
                                         first_turn_input: None,
-                                        context_surface: crate::SessionContextSurface::default(),
+                                        tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
+            context_surface: crate::SessionContextSurface::default(),
                                         mode_extras: crate::ModeExtras::default(),
                                         usage_source: None,
                                     })
@@ -1566,6 +1568,8 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
             first_turn_input: None,
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -1657,6 +1661,8 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
             first_turn_input: None,
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -1698,6 +1704,8 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
             first_turn_input: None,
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -1714,6 +1722,8 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
             first_turn_input: None,
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -1739,6 +1749,8 @@ async fn runtime_can_activate_managed_child_session() {
                 crate::MessageRole::User,
                 "run child",
             )),
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: Some("test".to_string()),
@@ -1829,6 +1841,8 @@ impl crate::ToolProvider for ChildSessionTool {
                 plugin_mode: crate::SessionPluginMode::InheritCurrent,
                 initial_nodes: Vec::new(),
                 first_turn_input: None,
+                tool_access: crate::SessionToolAccess::default(),
+                subagent: None,
                 context_surface: crate::SessionContextSurface::default(),
                 mode_extras: crate::ModeExtras::default(),
                 usage_source: Some("subagent".to_string()),
@@ -1893,6 +1907,8 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
             plugin_mode: crate::SessionPluginMode::Fresh,
             initial_nodes: Vec::new(),
             first_turn_input: None,
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
             context_surface: crate::SessionContextSurface {
                 include_base_tools: false,
                 tool_providers: vec![Arc::new(MemoryProbeTool)],
@@ -1957,6 +1973,8 @@ async fn inherited_child_session_carries_parent_dynamic_tool_state() {
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
             initial_nodes: Vec::new(),
             first_turn_input: None,
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
             context_surface: crate::SessionContextSurface::default(),
             mode_extras: crate::ModeExtras::default(),
             usage_source: None,
@@ -3108,37 +3126,37 @@ async fn standard_runtime_trace_records_stream_event_entries() {
         .collect::<Vec<_>>();
 
     assert!(
-        entries.iter().any(
-            |entry| entry.get("type").and_then(|v| v.as_str()) == Some("custom")
-                && entry.get("name").and_then(|v| v.as_str()) == Some("runtime.stream_event")
+        entries
+            .iter()
+            .any(|entry| entry.get("type").and_then(|v| v.as_str())
+                == Some("runtime_stream_event")
                 && entry
-                    .get("payload")
-                    .and_then(|payload| payload.get("event"))
+                    .get("event")
+                    .and_then(|payload| payload.get("event_name"))
                     .and_then(|v| v.as_str())
                     == Some("delta")
                 && entry
-                    .get("payload")
+                    .get("event")
                     .and_then(|payload| payload.get("raw_text"))
                     .and_then(|v| v.as_str())
-                    == Some("Hello ")
-        ),
+                    == Some("Hello ")),
         "expected delta stream event in trace: {entries:?}"
     );
     assert!(
-        entries.iter().any(
-            |entry| entry.get("type").and_then(|v| v.as_str()) == Some("custom")
-                && entry.get("name").and_then(|v| v.as_str()) == Some("runtime.stream_event")
+        entries
+            .iter()
+            .any(|entry| entry.get("type").and_then(|v| v.as_str())
+                == Some("runtime_stream_event")
                 && entry
-                    .get("payload")
-                    .and_then(|payload| payload.get("event"))
+                    .get("event")
+                    .and_then(|payload| payload.get("event_name"))
                     .and_then(|v| v.as_str())
                     == Some("text_part")
                 && entry
-                    .get("payload")
+                    .get("event")
                     .and_then(|payload| payload.get("raw_text"))
                     .and_then(|v| v.as_str())
-                    == Some("world")
-        ),
+                    == Some("world")),
         "expected text_part stream event in trace: {entries:?}"
     );
     assert!(
@@ -3187,6 +3205,107 @@ async fn standard_runtime_trace_records_stream_event_entries() {
         stream_summary
             .get("stream_duration_ms")
             .is_some_and(|value| !value.is_null())
+    );
+
+    let _ = std::fs::remove_file(&trace_path);
+}
+
+#[tokio::test]
+async fn extended_runtime_trace_records_provider_stream_events() {
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .default_model("mock-model")
+        .requires_streaming(true)
+        .complete(|req| async move {
+            if let Some(tx) = req.provider_trace.as_ref() {
+                tx.send(LlmProviderTraceEvent {
+                    provider: "codex",
+                    event_name: "response.output_item.done".to_string(),
+                    raw: serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": { "id": "msg_1" }
+                    })
+                    .to_string(),
+                });
+                tx.send(LlmProviderTraceEvent {
+                    provider: "codex",
+                    event_name: "response.output_item.done".to_string(),
+                    raw: serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": 1,
+                        "item": { "id": "msg_2" }
+                    })
+                    .to_string(),
+                });
+            }
+            Ok(LlmResponse {
+                full_text: "Hello".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Hello".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            })
+        })
+        .build();
+    let trace_path = std::env::temp_dir().join(format!(
+        "lash-provider-trace-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let mut runtime = standard_runtime_with_transport_and_host(
+        transport,
+        test_host_config_with_trace_path_and_stream_events(trace_path.clone()),
+    )
+    .await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+                mode_turn_options: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert_eq!(turn.status, TurnStatus::Completed);
+
+    let logged = std::fs::read_to_string(&trace_path).expect("read trace");
+    let entries = logged
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json log entry"))
+        .collect::<Vec<_>>();
+    let provider_events = entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("provider_stream_event"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        provider_events.len(),
+        2,
+        "provider trace entries: {entries:?}"
+    );
+    assert_eq!(provider_events[0]["event"]["item_id"], "msg_1");
+    assert_eq!(provider_events[0]["event"]["output_index"], 0);
+    assert_eq!(provider_events[1]["event"]["item_id"], "msg_2");
+    assert_eq!(
+        provider_events[1]["event"]["raw_json"]["item"]["id"],
+        "msg_2"
+    );
+    assert!(
+        provider_events[1]["event"]["raw_sha256"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty())
     );
 
     let _ = std::fs::remove_file(&trace_path);
@@ -3251,8 +3370,7 @@ async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
 
     assert!(
         !entries.iter().any(
-            |entry| entry.get("type").and_then(|v| v.as_str()) == Some("custom")
-                && entry.get("name").and_then(|v| v.as_str()) == Some("runtime.stream_event")
+            |entry| entry.get("type").and_then(|v| v.as_str()) == Some("runtime_stream_event")
         ),
         "stream event entries should be opt-in: {entries:?}"
     );

@@ -1,449 +1,30 @@
 mod capability;
 mod host;
 mod local;
-mod policy;
 mod queue;
+mod rlm;
 mod routing;
+mod shared;
 mod types;
+
+use std::sync::Arc;
 
 pub use capability::{
     Capability, CapabilityContext, CapabilityRegistry, CapabilitySpec, DenyList, TierCapability,
     TierExecutionMode, default_registry,
 };
 
-use std::collections::HashSet;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use lash::plugin::{PluginError, PluginFactory, PluginSessionContext, ToolSurfaceOverride};
-use lash::session_model::{ModeEvent, SessionEventRecord};
-use lash::{
-    InputItem, MessageRole, ModeExtras, PluginMessage, PluginSpec, PluginSpecFactory,
-    ProgressSender, SessionAppendNode, SessionCreateRequest, SessionPluginMode, SessionPolicy,
-    SessionStartPoint, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
-    ToolSurfaceContribution, TurnInput,
-};
-use lash_rlm_types::{RlmCreateExtras, RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination};
-use serde_json::{Value, json};
+use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
+use lash::{PluginSpec, PluginSpecFactory, PromptContribution, SessionPolicy, ToolProvider};
 
 pub use host::{
-    AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode, FollowupTaskRequest,
-    FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse, LocalSubagentHost,
-    SendMessageRequest, SendMessageResponse, SessionAgentInfo, SpawnAgentRequest,
+    AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode,
+    FollowupTaskRequest, FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse,
+    LocalSubagentHost, SendMessageRequest, SendMessageResponse, SpawnAgentRequest,
     SpawnAgentResponse, SubagentHost, WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent,
-    WaitAgentMessage, WaitAgentRequest, WaitAgentResponse, WaitAgentSessionSummary, WaitUntil,
+    WaitAgentMessage, WaitAgentRequest, WaitAgentResponse, WaitUntil,
     truncate_snapshot_to_recent_turns,
 };
-use policy::{subagent_prompt_contributions, subagent_tool_definitions};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ForkTurns {
-    None,
-    All,
-    Recent(usize),
-}
-
-struct SubagentToolsProvider {
-    execution_mode: lash::ExecutionMode,
-    registry: Arc<CapabilityRegistry>,
-    host: Arc<dyn SubagentHost>,
-}
-
-impl SubagentToolsProvider {
-    fn fresh_child_request(
-        parent_session_id: String,
-        start: SessionStartPoint,
-        policy: SessionPolicy,
-        mode_extras: ModeExtras,
-        usage_source: impl Into<String>,
-    ) -> SessionCreateRequest {
-        SessionCreateRequest {
-            session_id: Some(uuid::Uuid::new_v4().to_string()),
-            parent_session_id: Some(parent_session_id),
-            start,
-            policy: Some(policy),
-            plugin_mode: SessionPluginMode::Fresh,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            context_surface: lash::SessionContextSurface::default(),
-            mode_extras,
-            usage_source: Some(usage_source.into()),
-        }
-    }
-
-    fn finish_mode_extras(
-        mode: &lash::ExecutionMode,
-        termination: RlmTermination,
-    ) -> Result<ModeExtras, String> {
-        match mode.plugin_id() {
-            "rlm" => ModeExtras::typed(
-                lash::ExecutionMode::new("rlm"),
-                RlmCreateExtras { termination },
-            )
-            .map_err(|err| format!("failed to encode rlm mode extras: {err}")),
-            other => Err(format!("unsupported RLM finish mode extras for {other}")),
-        }
-    }
-
-    fn build_session_policy(
-        &self,
-        current_policy: &SessionPolicy,
-        capability_name: &str,
-    ) -> Result<SessionPolicy, String> {
-        let capability = self
-            .registry
-            .get(capability_name)
-            .ok_or_else(|| unknown_capability_message(capability_name, &self.registry))?;
-        // Subagent denylist semantics today never read the parent's denylist
-        // (TierCapability returns DenyList::Replace), so passing an empty
-        // parent set is correct. When a future Capability uses
-        // DenyList::AddTo, this is the right hook to thread the parent's
-        // actual denylist through.
-        let parent_denied: HashSet<String> = HashSet::new();
-        let spec = capability.resolve(&CapabilityContext {
-            parent_policy: current_policy,
-            parent_denied_tools: &parent_denied,
-        });
-        Ok(SessionPolicy {
-            model: spec
-                .model
-                .clone()
-                .unwrap_or_else(|| current_policy.model.clone()),
-            model_variant: spec
-                .model_variant
-                .clone()
-                .or_else(|| current_policy.model_variant.clone()),
-            provider: current_policy.provider.clone(),
-            max_context_tokens: current_policy.max_context_tokens,
-            max_turns: None,
-            execution_mode: spec
-                .execution_mode
-                .unwrap_or_else(|| current_policy.execution_mode.clone()),
-            ..Default::default()
-        })
-    }
-
-    fn normalize_context_policy(policy: &mut SessionPolicy) {
-        if policy.execution_mode != lash::ExecutionMode::standard() {
-            policy.standard_context_approach = None;
-        }
-    }
-
-    async fn build_spawn_create_request(
-        &self,
-        context: &ToolExecutionContext,
-        capability_name: &str,
-        fork_turns: ForkTurns,
-        output_schema: Option<Value>,
-    ) -> Result<SessionCreateRequest, String> {
-        let current_snapshot = context
-            .host
-            .snapshot_session(&context.session_id)
-            .await
-            .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-        let mut policy = self.build_session_policy(&current_snapshot.policy, capability_name)?;
-        let mut mode_extras = ModeExtras::default();
-        if let Some(schema) = output_schema.clone() {
-            let termination = RlmTermination::Finish {
-                schema: Some(schema),
-                include_submit_prompt: true,
-            };
-            policy.execution_mode = lash::ExecutionMode::new("rlm");
-            mode_extras = Self::finish_mode_extras(&policy.execution_mode, termination)?;
-        }
-        Self::normalize_context_policy(&mut policy);
-        let start = match fork_turns {
-            ForkTurns::None => SessionStartPoint::Empty,
-            ForkTurns::All => SessionStartPoint::ExistingSession {
-                session_id: context.session_id.clone(),
-            },
-            ForkTurns::Recent(turns) => SessionStartPoint::Snapshot {
-                snapshot: Box::new(truncate_snapshot_to_recent_turns(current_snapshot, turns)),
-            },
-        };
-
-        Ok(Self::fresh_child_request(
-            context.session_id.clone(),
-            start,
-            policy,
-            mode_extras,
-            "subagent",
-        ))
-    }
-
-    async fn spawn_agent(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
-        let task_name = required_string(args, "task_name")?;
-        let task = required_string(args, "task")?;
-        let capability_name = required_string(args, "capability")?;
-        if self.registry.get(&capability_name).is_none() {
-            return Err(unknown_capability_message(&capability_name, &self.registry));
-        }
-        let fork_turns = parse_fork_turns(args.get("fork_turns"))?;
-        let output_schema = parse_output_schema(args.get("output"))?;
-        let create_request = self
-            .build_spawn_create_request(
-                context,
-                &capability_name,
-                fork_turns,
-                output_schema.clone(),
-            )
-            .await?;
-        let turn_input = TurnInput {
-            items: vec![InputItem::Text {
-                text: render_task_prompt(&task, output_schema.as_ref()),
-            }],
-            image_blobs: std::collections::HashMap::new(),
-            user_input: None,
-            mode: None,
-            mode_turn_options: None,
-        };
-        let response = self
-            .host
-            .spawn_agent(
-                context,
-                SpawnAgentRequest {
-                    task_name,
-                    task,
-                    capability: capability_name,
-                    create_request,
-                    turn_input,
-                },
-            )
-            .await?;
-        serde_json::to_value(response).map_err(|err| err.to_string())
-    }
-
-    async fn continue_as(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
-        if self.execution_mode != lash::ExecutionMode::new("rlm") {
-            return Err("continue_as is only available in rlm mode".to_string());
-        }
-
-        let task = required_string(args, "task")?;
-        let seed = match args.get("seed") {
-            None | Some(Value::Null) => serde_json::Map::new(),
-            Some(Value::Object(map)) => map.clone(),
-            Some(_) => return Err("continue_as `seed` must be a record/dict".to_string()),
-        };
-
-        let current_snapshot = context
-            .host
-            .snapshot_session(&context.session_id)
-            .await
-            .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-        let termination = current_snapshot.mode_turn_options.rlm_termination();
-        let mut policy = current_snapshot.policy.clone();
-        policy.execution_mode = lash::ExecutionMode::new("rlm");
-        Self::normalize_context_policy(&mut policy);
-
-        let mut initial_nodes = Vec::new();
-        if !seed.is_empty() {
-            initial_nodes.push(SessionAppendNode::event(SessionEventRecord::Mode(
-                ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
-                    set: seed,
-                    unset: Vec::new(),
-                })),
-            )));
-        }
-
-        let mode_extras = Self::finish_mode_extras(&policy.execution_mode, termination)?;
-        let mut request = Self::fresh_child_request(
-            context.session_id.clone(),
-            SessionStartPoint::Empty,
-            policy,
-            mode_extras,
-            "continue_as",
-        );
-        request.plugin_mode = SessionPluginMode::InheritCurrent;
-        let successor_session_id = request
-            .session_id
-            .clone()
-            .expect("fresh child request sets session id");
-        request.initial_nodes = initial_nodes;
-        request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task.clone()));
-        context
-            .host
-            .create_session(request)
-            .await
-            .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
-
-        Ok(json!({
-            "ok": true,
-            "_continue_as": successor_session_id,
-            "task": task,
-        }))
-    }
-
-    async fn send_message(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
-        let response = self
-            .host
-            .send_message(
-                context,
-                SendMessageRequest {
-                    target: required_string(args, "target")?,
-                    message: required_string(args, "message")?,
-                    delivery: DeliveryMode::parse(args.get("delivery").and_then(Value::as_str))?,
-                },
-            )
-            .await?;
-        serde_json::to_value(response).map_err(|err| err.to_string())
-    }
-
-    async fn followup_task(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
-        let task = required_string(args, "task")?;
-        let output_schema = parse_output_schema(args.get("output"))?;
-        // Always set an override for follow-ups so the per-turn
-        // termination contract matches what the prompt tells the
-        // subagent. When `output` is omitted, the follow-up explicitly
-        // drops any inherited schema by running with
-        // `ProseWithoutFence`.
-        let mode_turn_options = Some(lash::ModeTurnOptions::rlm(match output_schema.clone() {
-            Some(schema) => RlmTermination::Finish {
-                schema: Some(schema),
-                include_submit_prompt: true,
-            },
-            None => RlmTermination::ProseWithoutFence,
-        }));
-        let response = self
-            .host
-            .followup_task(
-                context,
-                FollowupTaskRequest {
-                    target: required_string(args, "target")?,
-                    turn_input: TurnInput {
-                        items: vec![InputItem::Text {
-                            text: render_task_prompt_with_kind(
-                                &task,
-                                output_schema.as_ref(),
-                                TaskPromptKind::Followup,
-                            ),
-                        }],
-                        image_blobs: std::collections::HashMap::new(),
-                        user_input: None,
-                        mode: None,
-                        mode_turn_options,
-                    },
-                    task,
-                    delivery: DeliveryMode::parse(args.get("delivery").and_then(Value::as_str))?,
-                },
-            )
-            .await?;
-        serde_json::to_value(response).map_err(|err| err.to_string())
-    }
-
-    async fn wait_agent(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
-        let response = self
-            .host
-            .wait_agent(
-                context,
-                WaitAgentRequest {
-                    targets: optional_string_list(args, "targets")?,
-                    until: WaitUntil::parse(args.get("until").and_then(|value| value.as_str()))?,
-                    timeout_ms: optional_u64(args, "timeout_ms")?,
-                },
-            )
-            .await?;
-        serde_json::to_value(response).map_err(|err| err.to_string())
-    }
-
-    async fn close_agent(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
-        let response = self
-            .host
-            .close_agent(
-                context,
-                CloseAgentRequest {
-                    target: required_string(args, "target")?,
-                },
-            )
-            .await?;
-        serde_json::to_value(response).map_err(|err| err.to_string())
-    }
-
-    async fn list_agents(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
-        let response = self
-            .host
-            .list_agents(
-                context,
-                ListAgentsRequest {
-                    path_prefix: optional_string(args, "path_prefix"),
-                },
-            )
-            .await?;
-        serde_json::to_value(response).map_err(|err| err.to_string())
-    }
-}
-
-#[async_trait]
-impl ToolProvider for SubagentToolsProvider {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        subagent_tool_definitions(self.execution_mode.clone(), &self.registry)
-    }
-
-    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
-        ToolResult::err_fmt(format_args!(
-            "`{name}` requires session context and cannot run without it"
-        ))
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        let result = match name {
-            "spawn_agent" => self.spawn_agent(args, context).await,
-            "continue_as" => self.continue_as(args, context).await,
-            "send_message" => self.send_message(args, context).await,
-            "followup_task" => self.followup_task(args, context).await,
-            "wait_agent" => self.wait_agent(args, context).await,
-            "close_agent" => self.close_agent(args, context).await,
-            "list_agents" => self.list_agents(args, context).await,
-            _ => Err(format!("Unknown tool: {name}")),
-        };
-        match result {
-            Ok(value) => ToolResult::ok(value),
-            Err(err) => ToolResult::err(json!(err)),
-        }
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-        _progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.execute_with_context(name, args, context).await
-    }
-}
 
 pub struct SubagentsPluginFactory {
     policy: SessionPolicy,
@@ -476,300 +57,99 @@ impl PluginFactory for SubagentsPluginFactory {
     ) -> Result<Arc<dyn lash::SessionPlugin>, PluginError> {
         let mut policy = self.policy.clone();
         policy.execution_mode = ctx.execution_mode.clone();
-        let provider = Arc::new(SubagentToolsProvider {
-            execution_mode: ctx.execution_mode.clone(),
-            registry: Arc::clone(&self.registry),
-            host: Arc::clone(&self.host),
-        });
-        let prompt_contributions = subagent_prompt_contributions();
-        let host = Arc::clone(&self.host);
+
         let registry = Arc::clone(&self.registry);
+        let host = Arc::clone(&self.host);
+        let execution_mode = ctx.execution_mode.clone();
+
+        let is_rlm = execution_mode == lash::ExecutionMode::new("rlm");
+        let provider: Option<Arc<dyn ToolProvider>> = if is_rlm {
+            Some(Arc::new(rlm::RlmSubagentToolsProvider {
+                registry: Arc::clone(&registry),
+                host: Arc::clone(&host),
+            }))
+        } else {
+            None
+        };
+
+        let prompt_contributions = if is_rlm {
+            rlm::rlm_subagent_prompt_contributions()
+        } else {
+            Vec::new()
+        };
+        let continue_as_prompt_contributions = if is_rlm {
+            rlm::rlm_continue_as_prompt_contributions()
+        } else {
+            Vec::new()
+        };
+
         PluginSpecFactory::new(
             "subagents",
-            Arc::new(move |_ctx| {
-                let provider = Arc::clone(&provider);
-                let host = Arc::clone(&host);
-                let registry = Arc::clone(&registry);
-                let contributions = prompt_contributions.clone();
-                Ok(PluginSpec::new()
-                    .with_tool_provider(provider as Arc<dyn ToolProvider>)
+            Arc::new(move |ctx| {
+                let contributions = subagent_prompt_contributions_for_context(
+                    &ctx,
+                    &prompt_contributions,
+                    &continue_as_prompt_contributions,
+                );
+                let mut spec = PluginSpec::new()
                     .with_prompt_contributor(Arc::new(move |_ctx| {
                         let contributions = contributions.clone();
                         Box::pin(async move { Ok(contributions) })
                     }))
                     .with_tool_surface_contributor(Arc::new(move |ctx| {
-                        subagent_surface_contribution(&host, &registry, ctx)
-                    })))
+                        shared::subagent_surface_contribution(ctx)
+                    }));
+                if let Some(provider) = provider.as_ref() {
+                    spec = spec.with_tool_provider(Arc::clone(provider));
+                }
+                Ok(spec)
             }),
         )
         .build(ctx)
     }
 }
 
-fn subagent_surface_contribution(
-    host: &Arc<dyn SubagentHost>,
-    registry: &Arc<CapabilityRegistry>,
-    ctx: lash::plugin::ToolSurfaceContext,
-) -> Result<ToolSurfaceContribution, PluginError> {
-    let Some(info) = host.session_info(&ctx.session_id) else {
-        return Ok(ToolSurfaceContribution::default());
-    };
-    let Some(capability_name) = info.capability else {
-        return Ok(ToolSurfaceContribution::default());
-    };
-    let Some(capability) = registry.get(&capability_name) else {
-        return Ok(ToolSurfaceContribution::default());
-    };
-    // Resolve only to read denied_tools; we don't have a parent policy
-    // here (we're shaping this subagent's own surface) so use a minimal
-    // dummy policy. If a future Capability needs the parent for surface
-    // shaping, this is the place to thread it through.
-    let dummy_policy = SessionPolicy::default();
-    let parent_denied: HashSet<String> = HashSet::new();
-    let spec = capability.resolve(&CapabilityContext {
-        parent_policy: &dummy_policy,
-        parent_denied_tools: &parent_denied,
-    });
-    let denied = spec.denied_tools.apply(&parent_denied);
-    let overrides = ctx
-        .tools
-        .iter()
-        .filter(|tool| denied.contains(tool.name.as_str()))
-        .map(|tool| ToolSurfaceOverride {
-            tool_name: tool.name.clone(),
-            availability: Some(lash::ToolAvailability::Hidden),
-        })
-        .collect::<Vec<_>>();
-    let tool_list_notes = vec![format!(
-        "Subagent target: {}. Capability: {}.",
-        info.path, capability_name
-    )];
-    Ok(ToolSurfaceContribution {
-        overrides,
-        tool_list_notes,
-    })
-}
-
-fn unknown_capability_message(name: &str, registry: &CapabilityRegistry) -> String {
-    let known = registry.names();
-    if known.is_empty() {
-        format!("unknown capability `{name}`: no capabilities registered")
+fn subagent_prompt_contributions_for_context(
+    ctx: &lash::plugin::PluginSessionContext,
+    full: &[PromptContribution],
+    continue_only: &[PromptContribution],
+) -> Vec<PromptContribution> {
+    if tool_callable_from_authority(&ctx.tool_access, "spawn_agent") {
+        full.to_vec()
+    } else if tool_callable_from_authority(&ctx.tool_access, "continue_as") {
+        continue_only.to_vec()
     } else {
-        format!(
-            "unknown capability `{name}`: expected one of {}",
-            known
-                .iter()
-                .map(|n| format!("`{n}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        Vec::new()
     }
 }
 
-fn parse_fork_turns(value: Option<&Value>) -> Result<ForkTurns, String> {
-    let Some(value) = value else {
-        return Ok(ForkTurns::None);
-    };
-    match value {
-        Value::String(text) if text == "none" => Ok(ForkTurns::None),
-        Value::String(text) if text == "all" => Ok(ForkTurns::All),
-        Value::String(text) => text
-            .parse::<usize>()
-            .ok()
-            .filter(|count| *count > 0)
-            .map(ForkTurns::Recent)
-            .ok_or_else(|| {
-                "invalid fork_turns: use `none`, `all`, or a positive integer string".to_string()
-            }),
-        Value::Number(number) => number
-            .as_u64()
-            .filter(|count| *count > 0)
-            .map(|count| ForkTurns::Recent(count as usize))
-            .ok_or_else(|| {
-                "invalid fork_turns: use `none`, `all`, or a positive integer".to_string()
-            }),
-        _ => Err("invalid fork_turns: use `none`, `all`, or a positive integer string".to_string()),
+fn tool_callable_from_authority(access: &lash::SessionToolAccess, name: &str) -> bool {
+    if access.hides(name) {
+        return false;
     }
-}
-
-fn parse_output_schema(value: Option<&Value>) -> Result<Option<Value>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let output = value.as_object().ok_or_else(|| {
-        "invalid `output`: expected a record describing the typed shape".to_string()
-    })?;
-    if output.is_empty() {
-        return Err("at least one output field is required".to_string());
-    }
-
-    // Fast path: lashlang `Type { ... }` literals are delivered wrapped with a
-    // single `$lash_type` key whose value is already a JSON Schema. Pass it
-    // through directly so richer types (enums, nested records, optional fields,
-    // `list[<composite>]`) are preserved end-to-end.
-    if output.len() == 1
-        && let Some(schema) = output.get(lashlang::LASH_TYPE_KEY)
-    {
-        validate_schema(schema)?;
-        return Ok(Some(schema.clone()));
-    }
-
-    let mut properties = serde_json::Map::new();
-    let mut required = Vec::new();
-    for (name, descriptor) in output {
-        let type_str = descriptor
-            .as_str()
-            .ok_or_else(|| format!("field `{name}`: type descriptor must be a string"))?;
-        properties.insert(name.clone(), type_descriptor_to_json_schema(type_str)?);
-        required.push(Value::String(name.clone()));
-    }
-    Ok(Some(json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })))
-}
-
-/// Lightweight sanity check for a JSON Schema handed to us by the runtime.
-/// We only reject shapes that would produce a useless prompt; the provider's
-/// structured-output path does the full enforcement.
-fn validate_schema(schema: &Value) -> Result<(), String> {
-    let object = schema
-        .as_object()
-        .ok_or_else(|| "Type schema must be a JSON object".to_string())?;
-    let kind = object
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Type schema missing `type` field".to_string())?;
-    match kind {
-        "object" | "array" | "string" | "integer" | "number" | "boolean" => Ok(()),
-        other => Err(format!("unsupported Type schema kind `{other}`")),
-    }
-}
-
-fn type_descriptor_to_json_schema(descriptor: &str) -> Result<Value, String> {
-    let scalar = |ty: &str| -> Result<Value, String> {
-        match ty {
-            "str" | "string" => Ok(json!({"type": "string"})),
-            "int" | "integer" => Ok(json!({"type": "integer"})),
-            "float" | "number" => Ok(json!({"type": "number"})),
-            "bool" | "boolean" => Ok(json!({"type": "boolean"})),
-            "record" | "dict" | "object" => {
-                Ok(json!({"type": "object", "additionalProperties": true}))
-            }
-            other => Err(format!("unknown scalar type `{other}`")),
-        }
-    };
-    let trimmed = descriptor.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix("list[")
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return Ok(json!({
-            "type": "array",
-            "items": scalar(inner.trim())?,
-        }));
-    }
-    scalar(trimmed)
-}
-
-fn render_task_prompt(task: &str, output_schema: Option<&Value>) -> String {
-    render_task_prompt_with_kind(task, output_schema, TaskPromptKind::Initial)
-}
-
-#[derive(Clone, Copy)]
-enum TaskPromptKind {
-    Initial,
-    Followup,
-}
-
-fn render_task_prompt_with_kind(
-    task: &str,
-    output_schema: Option<&Value>,
-    kind: TaskPromptKind,
-) -> String {
-    let mut sections = vec![task.to_string()];
-    if let Some(schema) = output_schema {
-        let schema_pretty =
-            serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
-        let replaces_note = match kind {
-            TaskPromptKind::Initial => "",
-            TaskPromptKind::Followup => {
-                "\n\nThis replaces any output schema from earlier tasks in this session."
-            }
-        };
-        sections.push(format!(
-            "## Required output\n\nWhen done, end the task by calling `submit <expr>` from inside a fenced ```lashlang block. The value MUST match this JSON Schema exactly:\n\n```json\n{schema_pretty}\n```{replaces_note}"
-        ));
-    } else if matches!(kind, TaskPromptKind::Followup) {
-        sections.push(
-            "## Required output\n\nNo structured output schema is required for this follow-up task. `submit <expr>` may return any value (a string, a record, etc.); it will not be schema-validated. This overrides any output schema from earlier tasks in this session.".to_string(),
-        );
-    }
-    sections.join("\n\n")
-}
-
-fn required_string(args: &Value, key: &str) -> Result<String, String> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("missing required parameter: {key}"))
-}
-
-fn optional_string(args: &Value, key: &str) -> Option<String> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn optional_string_list(args: &Value, key: &str) -> Result<Vec<String>, String> {
-    let Some(value) = args.get(key) else {
-        return Ok(Vec::new());
-    };
-    let items = value
-        .as_array()
-        .ok_or_else(|| format!("invalid `{key}`: expected a list of strings"))?;
-    items
-        .iter()
-        .map(|item| {
-            item.as_str()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| format!("invalid `{key}`: expected a list of strings"))
-        })
-        .collect()
-}
-
-fn optional_u64(args: &Value, key: &str) -> Result<Option<u64>, String> {
-    let Some(value) = args.get(key) else {
-        return Ok(None);
-    };
-    value
-        .as_u64()
-        .map(Some)
-        .ok_or_else(|| format!("invalid `{key}`: expected a positive integer"))
+    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name == name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
 
+    use crate::shared::{
+        ForkTurns, build_session_policy, build_spawn_create_request, parse_fork_turns,
+        parse_output_schema,
+    };
     use async_trait::async_trait;
     use lash::PersistedSessionState;
     use lash::plugin::{PluginError, SessionHandle, SessionManager, SessionTurnHandle};
-    // Provider/ProviderOptions imports were used by inline Codex/Google
-    // enum constructions, which the refactor replaced with test-only
-    // stub providers defined inside each test.
+    use lash::session_model::SessionEventRecord;
+    use lash::{
+        SessionAppendNode, SessionCreateRequest, SessionPluginMode, SessionStartPoint,
+        ToolDefinition, ToolExecutionContext, TurnInput,
+    };
+    use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
+    use serde_json::{Value, json};
 
     #[test]
     fn output_schema_supports_scalars_and_lists() {
@@ -842,82 +222,27 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_are_mode_specific_but_mode_neutral_in_description() {
-        let registry = default_registry(
-            &std::collections::BTreeMap::new(),
-            lash::ExecutionMode::standard(),
-        );
-        let standard = subagent_tool_definitions(lash::ExecutionMode::standard(), &registry);
-        let rlm = subagent_tool_definitions(lash::ExecutionMode::new("rlm"), &registry);
+    fn rlm_definitions_expose_spawn_without_mini_api() {
+        let registry = default_registry(&BTreeMap::new(), lash::ExecutionMode::standard());
+        let rlm_defs = rlm::rlm_subagent_tool_definitions(&registry.names());
 
-        let standard_spawn = standard
-            .iter()
-            .find(|tool| tool.name == "spawn_agent")
-            .expect("standard spawn_agent");
-        let rlm_spawn = rlm
+        assert!(rlm_defs.iter().any(|tool| tool.name == "continue_as"));
+        assert!(rlm_defs.iter().any(|tool| tool.name == "spawn_agent"));
+        assert!(rlm_defs.iter().all(|tool| !matches!(
+            tool.name.as_str(),
+            "send_message" | "followup_task" | "wait_agent" | "close_agent" | "list_agents"
+        )));
+
+        let rlm_spawn = rlm_defs
             .iter()
             .find(|tool| tool.name == "spawn_agent")
             .expect("rlm spawn_agent");
-
-        assert_eq!(standard_spawn.description, rlm_spawn.description);
-        assert!(!standard_spawn.description.contains("RLM"));
-        assert!(!standard_spawn.description.contains("standard mode"));
-
-        assert!(
-            standard_spawn
-                .examples
-                .iter()
-                .any(|example| example.contains("spawn_agent("))
-        );
         assert!(
             rlm_spawn
                 .examples
                 .iter()
-                .any(|example| example.contains("call spawn_agent"))
+                .any(|example| example.contains("start call spawn_agent"))
         );
-
-        let standard_send = standard
-            .iter()
-            .find(|tool| tool.name == "send_message")
-            .expect("standard send_message");
-        let rlm_send = rlm
-            .iter()
-            .find(|tool| tool.name == "send_message")
-            .expect("rlm send_message");
-        assert!(
-            standard_send
-                .examples
-                .iter()
-                .all(|example| !example.contains("call "))
-        );
-        assert!(
-            rlm_send
-                .examples
-                .iter()
-                .all(|example| example.contains("call "))
-        );
-
-        let rlm_wait = rlm
-            .iter()
-            .find(|tool| tool.name == "wait_agent")
-            .expect("rlm wait_agent");
-        assert!(
-            rlm_wait.output_schema["properties"]
-                .get("completed")
-                .is_some()
-        );
-        assert!(
-            rlm_wait.output_schema["properties"]
-                .get("pending")
-                .is_some()
-        );
-        assert!(
-            rlm_wait.output_schema["properties"]
-                .get("completion")
-                .is_none()
-        );
-        assert!(rlm_wait.description.contains("completed"));
-        assert!(rlm_wait.description.contains("pending"));
     }
 
     #[tokio::test]
@@ -980,18 +305,18 @@ mod tests {
         // `default_agent_model` so the final child policy's model shows
         // which provider the capability lookup resolved against.
         fn tiered_provider(tag: &'static str) -> lash::testing::TestProvider {
-            let (kind, default_model, low_model) = match tag {
-                "stale" => ("stale-stub", "stale-model", "stale-low"),
-                "live" => ("live-stub", "live-model", "live-low"),
-                _ => ("stub", "mock-model", "mock-low"),
+            let (kind, default_model, explore_model) = match tag {
+                "stale" => ("stale-stub", "stale-model", "stale-explore"),
+                "live" => ("live-stub", "live-model", "live-explore"),
+                _ => ("stub", "mock-model", "mock-explore"),
             };
             lash::testing::TestProvider::builder()
                 .kind(kind)
                 .default_model(default_model)
                 .default_agent_model(move |tier| {
-                    if tier == "low" {
+                    if tier == "explore" {
                         Some(lash::AgentModelSelection {
-                            model: low_model.to_string(),
+                            model: explore_model.to_string(),
                             variant: None,
                         })
                     } else {
@@ -1013,14 +338,9 @@ mod tests {
             ..SessionPolicy::default()
         };
         let registry = Arc::new(default_registry(
-            &std::collections::BTreeMap::new(),
-            lash::ExecutionMode::standard(),
+            &BTreeMap::new(),
+            lash::ExecutionMode::new("rlm"),
         ));
-        let provider = SubagentToolsProvider {
-            execution_mode: lash::ExecutionMode::standard(),
-            registry: Arc::clone(&registry),
-            host: Arc::new(LocalSubagentHost::default()),
-        };
         let context = ToolExecutionContext {
             session_id: "root".to_string(),
             host: Arc::new(SnapshotManager {
@@ -1033,18 +353,17 @@ mod tests {
             async_task_id: None,
         };
 
-        let request = provider
-            .build_spawn_create_request(&context, "low", ForkTurns::None, None)
-            .await
-            .expect("spawn request");
+        let request =
+            build_spawn_create_request(&registry, &context, "explore", ForkTurns::None, None)
+                .await
+                .expect("spawn request");
         let child_policy = request.policy.expect("child policy");
 
-        // The capability looked up the live policy's provider (Google), not
-        // the stale Codex policy. This pins the behaviour where the spawn
+        // The capability looked up the live policy's provider, not
+        // the stale one. This pins the behaviour where the spawn
         // pipeline always resolves models against the *current* session
         // policy snapshot, even when the factory was built earlier.
-        let stale_choice = provider
-            .build_session_policy(&stale_policy, "low")
+        let stale_choice = build_session_policy(&registry, &stale_policy, "explore")
             .expect("stale policy")
             .model;
         assert_eq!(child_policy.provider, live_policy.provider);
@@ -1053,29 +372,52 @@ mod tests {
             live_policy.max_context_tokens
         );
         assert_ne!(child_policy.model, stale_choice);
-        assert_eq!(child_policy.model, "live-low");
+        assert_eq!(child_policy.model, "live-explore");
+        assert_eq!(
+            request
+                .tool_access
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "read_file",
+                "grep",
+                "search_web",
+                "fetch_url",
+                "exec_command",
+                "start_command",
+                "write_stdin",
+                "continue_as"
+            ]
+        );
 
-        let structured_request = provider
-            .build_spawn_create_request(
-                &context,
-                "low",
-                ForkTurns::None,
-                Some(json!({
-                    "type": "object",
-                    "properties": { "ok": { "type": "boolean" } },
-                    "required": ["ok"]
-                })),
-            )
-            .await
-            .expect("structured spawn request");
+        let structured_request = build_spawn_create_request(
+            &registry,
+            &context,
+            "explore",
+            ForkTurns::None,
+            Some(json!({
+                "type": "object",
+                "properties": { "ok": { "type": "boolean" } },
+                "required": ["ok"]
+            })),
+        )
+        .await
+        .expect("structured spawn request");
         let structured_policy = structured_request.policy.expect("structured child policy");
         assert_eq!(
             structured_policy.execution_mode,
-            lash::ExecutionMode::new("rlm")
+            lash::ExecutionMode::new("rlm"),
+            "explore runs in RLM so typed output uses native submit"
         );
         assert_eq!(
-            structured_policy.standard_context_approach, None,
-            "RLM child sessions must not inherit standard-only context policy"
+            structured_request
+                .tool_access
+                .tools
+                .last()
+                .map(|tool| tool.name.as_str()),
+            Some("continue_as")
         );
     }
 
@@ -1162,11 +504,10 @@ mod tests {
             created: Mutex::new(Vec::new()),
         });
         let registry = Arc::new(default_registry(
-            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
             lash::ExecutionMode::new("rlm"),
         ));
-        let provider = SubagentToolsProvider {
-            execution_mode: lash::ExecutionMode::new("rlm"),
+        let provider = rlm::RlmSubagentToolsProvider {
             registry,
             host: Arc::new(LocalSubagentHost::default()),
         };
@@ -1241,5 +582,188 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn standard_provider_does_not_expose_continue_as() {
+        struct StubManager;
+
+        #[async_trait]
+        impl SessionManager for StubManager {
+            async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
+                Ok(PersistedSessionState::default())
+            }
+            async fn snapshot_session(
+                &self,
+                _session_id: &str,
+            ) -> Result<PersistedSessionState, PluginError> {
+                Ok(PersistedSessionState::default())
+            }
+            async fn tool_catalog(
+                &self,
+                _session_id: &str,
+            ) -> Result<Vec<serde_json::Value>, PluginError> {
+                Ok(Vec::new())
+            }
+            async fn create_session(
+                &self,
+                _request: SessionCreateRequest,
+            ) -> Result<SessionHandle, PluginError> {
+                Err(PluginError::Session("stub".to_string()))
+            }
+            async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
+                Ok(())
+            }
+            async fn start_turn_stream(
+                &self,
+                _session_id: &str,
+                _input: TurnInput,
+            ) -> Result<SessionTurnHandle, PluginError> {
+                Err(PluginError::Session("stub".to_string()))
+            }
+            async fn await_turn(&self, _turn_id: &str) -> Result<lash::AssembledTurn, PluginError> {
+                Err(PluginError::Session("stub".to_string()))
+            }
+            async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
+                Ok(())
+            }
+        }
+
+        let factory = SubagentsPluginFactory::new(
+            SessionPolicy::default(),
+            Arc::new(default_registry(
+                &BTreeMap::new(),
+                lash::ExecutionMode::standard(),
+            )),
+            Arc::new(LocalSubagentHost::default()),
+        );
+        let ctx = PluginSessionContext {
+            session_id: "parent".to_string(),
+            execution_mode: lash::ExecutionMode::standard(),
+            standard_context_approach: None,
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: None,
+            parent_session_id: None,
+        };
+        let plugin = factory.build(&ctx).expect("plugin");
+        assert_eq!(plugin.id(), "subagents");
+    }
+
+    fn dummy_tool(name: &str) -> ToolDefinition {
+        ToolDefinition::new(
+            name,
+            format!("{name} description"),
+            ToolDefinition::default_input_schema(),
+            json!({ "type": "null" }),
+        )
+    }
+
+    fn plugin_session_context_with_access(access: lash::SessionToolAccess) -> PluginSessionContext {
+        PluginSessionContext {
+            session_id: "child".to_string(),
+            execution_mode: lash::ExecutionMode::new("rlm"),
+            standard_context_approach: None,
+            tool_access: access,
+            subagent: None,
+            parent_session_id: Some("parent".to_string()),
+        }
+    }
+
+    #[test]
+    fn rlm_prompt_uses_continue_only_guidance_when_spawn_is_unavailable() {
+        let mut hidden_tools = BTreeSet::new();
+        hidden_tools.insert("spawn_agent".to_string());
+        let ctx = plugin_session_context_with_access(lash::SessionToolAccess {
+            tools: vec![dummy_tool("read_file"), dummy_tool("continue_as")],
+            hidden_tools,
+        });
+
+        let contributions = subagent_prompt_contributions_for_context(
+            &ctx,
+            &rlm::rlm_subagent_prompt_contributions(),
+            &rlm::rlm_continue_as_prompt_contributions(),
+        );
+
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions[0].title.as_deref(), Some("Exploration"));
+        assert!(contributions[0].content.contains("`continue_as`"));
+        assert!(contributions[0].content.contains("submit <expr>"));
+        assert!(!contributions[0].content.contains("subagent"));
+        assert!(!contributions[0].content.contains("spawn"));
+        assert!(!contributions[0].content.contains("wait_agent"));
+    }
+
+    #[test]
+    fn rlm_prompt_uses_full_subagent_guidance_when_spawn_is_available() {
+        let ctx = plugin_session_context_with_access(lash::SessionToolAccess {
+            tools: vec![dummy_tool("spawn_agent"), dummy_tool("continue_as")],
+            hidden_tools: BTreeSet::new(),
+        });
+
+        let contributions = subagent_prompt_contributions_for_context(
+            &ctx,
+            &rlm::rlm_subagent_prompt_contributions(),
+            &rlm::rlm_continue_as_prompt_contributions(),
+        );
+
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions[0].title.as_deref(), Some("Subagents"));
+        assert!(contributions[0].content.contains("spawn_agent"));
+        assert!(contributions[0].content.contains("list_async_handles"));
+        assert!(!contributions[0].content.contains("wait_agent"));
+    }
+
+    #[test]
+    fn rlm_prompt_omits_subagent_guidance_when_spawn_and_continue_are_unavailable() {
+        let mut hidden_tools = BTreeSet::new();
+        hidden_tools.insert("spawn_agent".to_string());
+        hidden_tools.insert("continue_as".to_string());
+        let ctx = plugin_session_context_with_access(lash::SessionToolAccess {
+            tools: vec![dummy_tool("read_file")],
+            hidden_tools,
+        });
+
+        let contributions = subagent_prompt_contributions_for_context(
+            &ctx,
+            &rlm::rlm_subagent_prompt_contributions(),
+            &rlm::rlm_continue_as_prompt_contributions(),
+        );
+
+        assert!(contributions.is_empty());
+    }
+
+    #[test]
+    fn subagent_surface_reports_authority_notes() {
+        use lash::plugin::ToolSurfaceContext;
+
+        let ctx = ToolSurfaceContext {
+            session_id: "child".to_string(),
+            mode: lash::ExecutionMode::standard(),
+            tools: vec![
+                dummy_tool("read_file"),
+                dummy_tool("ask"),
+                dummy_tool("show_snippet_to_user"),
+                dummy_tool("showcase"),
+                dummy_tool("plan_exit"),
+                dummy_tool("apply_patch"),
+                dummy_tool("spawn_agent"),
+            ],
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: Some(lash::SubagentSessionAuthority {
+                agent_name: "probe".to_string(),
+                parent_session_id: "root".to_string(),
+                capability: "explore".to_string(),
+                depth: 1,
+                max_depth: 5,
+            }),
+        };
+
+        let contribution =
+            shared::subagent_surface_contribution(ctx).expect("surface contribution");
+        assert!(contribution.overrides.is_empty());
+        assert_eq!(
+            contribution.tool_list_notes,
+            vec!["Subagent agent_name: probe. Capability: explore."]
+        );
     }
 }

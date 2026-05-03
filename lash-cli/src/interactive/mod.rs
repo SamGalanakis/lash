@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossterm::event::Event as TermEvent;
 use lash::session_model::Message;
 use lash::*;
+use lash_subagents::SubagentHost;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_ui::{UiCommandInvocation, UiContext, UiExtensions};
 use tokio::sync::mpsc;
@@ -83,9 +84,11 @@ pub(crate) async fn run_app(
     initial_model_variant: Option<String>,
     initial_execution_mode: ExecutionMode,
     startup_system_message: Option<String>,
+    subagent_host: Arc<dyn SubagentHost>,
 ) -> anyhow::Result<()> {
     let initial_session_id = runtime.session_id().to_string();
     let mut app = App::new(model, session_name, initial_session_id);
+    app.activity_state.set_subagent_host(subagent_host);
     let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeUiExtension::new();
     let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = vec![
         Arc::new(lash_autoresearch::AutoresearchUiExtension::default()),

@@ -6,9 +6,10 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use lash::{
-    Message, MessageRole, PartKind, PluginMessage, PluginSurfaceEvent, PromptUsage, SessionEvent,
-    SkillCatalog, TokenUsage, ToolCallRecord, UserInputProvenance, UserInputTransform,
-    append_skill_blocks, collect_skill_mentions, plugin_surface_event_renders_visible_output,
+    ManagedRunState, ManagedTaskKind, ManagedTaskStatus, Message, MessageRole, PartKind,
+    PluginMessage, PluginSurfaceEvent, PromptUsage, SessionEvent, SkillCatalog, TokenUsage,
+    ToolCallRecord, UserInputProvenance, UserInputTransform, append_skill_blocks,
+    collect_skill_mentions, plugin_surface_event_renders_visible_output,
 };
 use lash_tui::{Line, Rect};
 use lash_ui::UiExtensions;
@@ -116,6 +117,36 @@ pub struct PlanDockState {
 impl PlanDockState {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty() && self.title.trim().is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundTaskView {
+    pub task_id: String,
+    pub kind: ManagedTaskKind,
+    pub label: String,
+    pub run_state: ManagedRunState,
+    pub started_at: std::time::SystemTime,
+    pub transient_until: Option<std::time::Instant>,
+}
+
+impl BackgroundTaskView {
+    fn from_status(status: ManagedTaskStatus, transient_until: Option<std::time::Instant>) -> Self {
+        Self {
+            task_id: status.id,
+            kind: status.kind,
+            label: status.label,
+            run_state: status.run_state,
+            started_at: status.started_at,
+            transient_until,
+        }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        !self.run_state.is_terminal()
+            || self
+                .transient_until
+                .is_some_and(|until| until > std::time::Instant::now())
     }
 }
 
@@ -547,6 +578,8 @@ pub struct App {
     /// renders as a sticky dock between the history viewport and the
     /// input row instead of as an inline panel in the scroll.
     pub plan_dock: Option<PlanDockState>,
+    /// Snapshot of background tasks registered for this session.
+    pub background_tasks: Vec<BackgroundTaskView>,
     /// UI extension registry used for slash-command completion and host actions.
     ui_extensions: Arc<UiExtensions>,
     /// Shared state for the lash-cli chrome UI extension. The scratch-tui
@@ -701,6 +734,22 @@ impl App {
             self.dirty = true;
         }
 
+        let before_tasks = self.background_tasks.len();
+        self.background_tasks.retain(BackgroundTaskView::is_visible);
+        if self.background_tasks.len() != before_tasks {
+            self.invalidate_height_cache();
+            self.dirty = true;
+        }
+        // The background dock renders a live `started_at.elapsed()` per
+        // task. Without this nudge, the dock freezes between session
+        // events: the tick task wakes us up but `dirty` never flips, so
+        // the second-floor `Mm Ss` reading sticks until the next event
+        // (often tens of seconds for slow subagents). Re-mark dirty
+        // whenever we still have at least one visible background task.
+        if !self.background_tasks.is_empty() {
+            self.dirty = true;
+        }
+
         if self.live_turn.as_ref().is_some_and(|turn| {
             turn.transient_until
                 .is_some_and(|until| until <= std::time::Instant::now())
@@ -835,6 +884,7 @@ impl App {
                 .and_then(|cwd| crate::repo_status::detect_repo_status(&cwd)),
             plugin_mode_indicators: BTreeMap::new(),
             plan_dock: None,
+            background_tasks: Vec::new(),
             ui_extensions: Arc::new(UiExtensions::default()),
             chrome_state: Arc::new(Mutex::new(crate::chrome_ui::ChromeUiState::default())),
             cwd,
@@ -1669,6 +1719,34 @@ impl App {
         }
         self.plugin_mode_indicators.clear();
         self.dirty = true;
+    }
+
+    pub fn update_background_tasks(&mut self, tasks: Vec<ManagedTaskStatus>) {
+        let now = std::time::Instant::now();
+        let previous: HashMap<String, BackgroundTaskView> = self
+            .background_tasks
+            .iter()
+            .cloned()
+            .map(|task| (task.task_id.clone(), task))
+            .collect();
+        let mut next = Vec::new();
+        for task in tasks {
+            let old_state = previous.get(&task.id).map(|item| item.run_state);
+            let transient_until = if task.run_state.is_terminal()
+                && old_state.is_some_and(|state| state != task.run_state)
+            {
+                Some(now + std::time::Duration::from_secs(8))
+            } else {
+                previous.get(&task.id).and_then(|item| item.transient_until)
+            };
+            next.push(BackgroundTaskView::from_status(task, transient_until));
+        }
+        next.retain(BackgroundTaskView::is_visible);
+        if self.background_tasks != next {
+            self.background_tasks = next;
+            self.invalidate_height_cache();
+            self.dirty = true;
+        }
     }
 
     pub fn set_model_variant(&mut self, model_variant: Option<String>) {

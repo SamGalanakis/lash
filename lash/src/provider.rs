@@ -161,12 +161,12 @@ impl ProviderOptions {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub low_tier_subagent_execution_mode: Option<crate::ExecutionMode>,
+    pub explore_tier_subagent_execution_mode: Option<crate::ExecutionMode>,
 }
 
 impl RuntimeSettings {
     fn is_default(&self) -> bool {
-        self.low_tier_subagent_execution_mode.is_none()
+        self.explore_tier_subagent_execution_mode.is_none()
     }
 }
 

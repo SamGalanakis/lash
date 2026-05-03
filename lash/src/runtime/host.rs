@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use lash_trace::{JsonlTraceSink, TraceContext, TraceSink};
+use lash_trace::{JsonlTraceSink, TraceContext, TraceLevel, TraceSink};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -150,6 +150,8 @@ pub trait SessionTaskExecutor: Send + Sync {
         spec: ManagedTaskSpec,
         cancel: Option<ManagedTaskCancel>,
     ) -> Result<(), PluginError>;
+
+    async fn unregister_external(&self, session_id: &str, task_id: &str);
 
     /// Update the run_state of a registered task to a terminal value.
     /// No-op if the task is unknown or already terminal.
@@ -319,6 +321,16 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
         Ok(())
     }
 
+    async fn unregister_external(&self, session_id: &str, task_id: &str) {
+        let mut managed = self.managed.lock().await;
+        if let Some(tasks) = managed.get_mut(session_id) {
+            tasks.remove(task_id);
+            if tasks.is_empty() {
+                managed.remove(session_id);
+            }
+        }
+    }
+
     async fn mark_terminal(&self, session_id: &str, task_id: &str, run_state: ManagedRunState) {
         if !run_state.is_terminal() {
             return;
@@ -400,7 +412,7 @@ pub struct RuntimeCoreConfig {
     pub path_resolver: Arc<dyn PathResolver>,
     pub prompt_template: crate::PromptTemplate,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
-    pub trace_stream_events: bool,
+    pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
@@ -420,7 +432,7 @@ impl Default for RuntimeCoreConfig {
             path_resolver: Arc::new(DefaultPathResolver),
             prompt_template: crate::default_prompt_template(),
             trace_sink: None,
-            trace_stream_events: false,
+            trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
@@ -457,8 +469,8 @@ impl RuntimeCoreConfig {
         self
     }
 
-    pub fn with_trace_stream_events(mut self, enabled: bool) -> Self {
-        self.trace_stream_events = enabled;
+    pub fn with_trace_level(mut self, level: TraceLevel) -> Self {
+        self.trace_level = level;
         self
     }
 

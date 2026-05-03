@@ -1,47 +1,31 @@
 //! Request, response, and event types exposed by the subagent host API.
-//!
-//! These are pure data definitions with no behavior beyond parsing a few
-//! string-valued enums. Keeping them in a dedicated module keeps
-//! `host.rs` focused on trait definitions and the `local.rs`
-//! orchestrator focused on behavior.
 
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lash::{SessionCreateRequest, TurnInput};
 
 #[derive(Clone, Debug)]
-pub struct SessionAgentInfo {
-    pub path: String,
-    /// Registered capability name this agent was spawned with. `None` for
-    /// the implicit `/root` agent which is created on demand and has no
-    /// spawn-time capability binding.
-    pub capability: Option<String>,
-}
-
-#[derive(Clone, Debug)]
 pub struct SpawnAgentRequest {
-    pub task_name: String,
+    pub agent_name: String,
     pub task: String,
-    /// Name of the capability the spawn was made with. The capability
-    /// itself is resolved by the caller via the registry; the host just
-    /// records the name for diagnostics, surfacing in the agent tree, and
-    /// the tool-surface deny path.
     pub capability: String,
+    pub hidden_tools: BTreeSet<String>,
     pub create_request: SessionCreateRequest,
     pub turn_input: TurnInput,
 }
 
 #[derive(Clone, Debug)]
 pub struct SendMessageRequest {
-    pub target: String,
+    pub agent_name: String,
     pub message: String,
     pub delivery: DeliveryMode,
 }
 
 #[derive(Clone, Debug)]
 pub struct FollowupTaskRequest {
-    pub target: String,
+    pub agent_name: String,
     pub task: String,
     pub turn_input: TurnInput,
     pub delivery: DeliveryMode,
@@ -49,36 +33,26 @@ pub struct FollowupTaskRequest {
 
 #[derive(Clone, Debug)]
 pub struct WaitAgentRequest {
-    pub targets: Vec<String>,
+    pub agents: Vec<String>,
     pub until: WaitUntil,
     pub timeout_ms: Option<u64>,
+    pub all: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct CloseAgentRequest {
-    pub target: String,
+    pub agent_name: String,
 }
 
 #[derive(Clone, Debug)]
-pub struct ListAgentsRequest {
-    pub path_prefix: Option<String>,
-}
+pub struct ListAgentsRequest {}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SpawnAgentResponse {
-    pub task_name: String,
-    pub target: String,
+    pub agent_name: String,
     pub task_id: String,
-    pub session_id: String,
-    pub run_state: String,
-    pub capability: String,
-    pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
-    /// Populated when the requested `task_name` was normalized (e.g.
-    /// hyphens/spaces converted to underscores, uppercase lowered).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_name_note: Option<String>,
+    pub agent_name_note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -92,7 +66,7 @@ pub struct SendMessageResponse {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FollowupTaskResponse {
-    pub target: String,
+    pub agent_name: String,
     pub task_id: String,
     pub delivery: String,
     pub status: String,
@@ -101,11 +75,10 @@ pub struct FollowupTaskResponse {
 #[derive(Clone, Debug, Serialize)]
 pub struct WaitAgentResponse {
     pub timed_out: bool,
-    pub completed: Vec<WaitAgentCompletion>,
-    pub pending: Vec<String>,
-    pub messages: Vec<WaitAgentMessage>,
-    pub closed: Vec<WaitAgentClosed>,
-    pub events: Vec<WaitAgentEvent>,
+    pub completed: BTreeMap<String, WaitAgentCompletion>,
+    pub pending: BTreeMap<String, WaitAgentPending>,
+    pub messages: BTreeMap<String, Vec<WaitAgentMessage>>,
+    pub closed: BTreeMap<String, WaitAgentClosed>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,11 +93,11 @@ pub struct ListAgentsResponse {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentSummary {
-    pub target: String,
+    pub agent_name: String,
     pub task_id: String,
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_target: Option<String>,
+    pub parent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability: Option<String>,
     pub agent_state: String,
@@ -176,7 +149,6 @@ pub enum WaitUntil {
     Terminal,
     Message,
     AnyResult,
-    AnyEvent,
 }
 
 impl WaitUntil {
@@ -186,78 +158,85 @@ impl WaitUntil {
             "terminal" => Ok(Self::Terminal),
             "message" => Ok(Self::Message),
             "any_result" => Ok(Self::AnyResult),
-            "any_event" => Ok(Self::AnyEvent),
             other => Err(format!(
-                "invalid until: expected `task_completed`, `terminal`, `message`, `any_result`, or `any_event`, got `{other}`"
+                "invalid until: expected `task_completed`, `terminal`, `message`, or `any_result`, got `{other}`"
             )),
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct WaitAgentSessionSummary {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
-    pub task: String,
-    pub iterations: usize,
-    pub tool_calls: usize,
-    pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
-    pub token_usage: Value,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct WaitAgentCompletion {
-    pub target: String,
+    pub agent_name: String,
     pub task: String,
     pub status: String,
     pub result: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    pub session: WaitAgentSessionSummary,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WaitAgentPending {
+    pub agent_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    pub status: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentMetadata {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub capability: Option<String>,
+    pub run_state: String,
+    pub model: String,
+    pub model_variant: Option<String>,
+    pub last_iterations: Option<usize>,
+    pub last_tool_calls: Option<usize>,
+    pub last_token_usage: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct WaitAgentMessage {
-    pub from: String,
-    pub to: String,
+    pub from_agent: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct WaitAgentClosed {
-    pub target: String,
+    pub agent_name: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WaitAgentEvent {
     TaskStarted {
-        target: String,
+        agent_name: String,
+        #[serde(skip)]
+        parent_session_id: String,
         task: String,
         session_id: String,
-        capability: String,
-        model: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        model_variant: Option<String>,
     },
     Message {
-        from: String,
-        to: String,
+        from_agent: String,
+        to_agent: String,
+        #[serde(skip)]
+        parent_session_id: String,
         message: String,
     },
     TaskCompleted {
-        target: String,
+        agent_name: String,
+        #[serde(skip)]
+        parent_session_id: String,
         task: String,
         status: String,
         result: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
-        session: WaitAgentSessionSummary,
     },
     AgentClosed {
-        target: String,
+        agent_name: String,
+        #[serde(skip)]
+        parent_session_id: String,
     },
 }

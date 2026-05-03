@@ -47,10 +47,10 @@ pub(super) struct LlmDebugToolCall<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) struct LlmStreamEventLog<'a> {
-    pub(super) session_id: &'a str,
     pub(super) iteration: usize,
     pub(super) event_type: &'a str,
     pub(super) text: LlmDebugText<'a>,
+    pub(super) item_id: Option<&'a str>,
     pub(super) usage: Option<&'a LlmUsage>,
     pub(super) tool_call: Option<LlmDebugToolCall<'a>>,
 }

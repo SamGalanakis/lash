@@ -860,7 +860,7 @@ fn build_plugin_session(
     ));
     // Single capability `default` that inherits the root session's
     // model, variant, and execution mode. We deliberately drop the
-    // `low` / `medium` / `high` tiers: the benchmark should only use
+    // standard `explore` / `peer` tiers: the benchmark should only use
     // one model so subagent fanout is an amplification of the same
     // frontier model, not a quality-tiered delegation. An empty model
     // override on `TierCapability` falls back to the parent policy's

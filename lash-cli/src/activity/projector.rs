@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use lash_subagents::SubagentHost;
 use serde_json::Value;
 
 use super::ActivityBlock;
@@ -46,4 +48,9 @@ pub struct ProjectCtx<'a> {
     /// `exec_command` (insert on running start) and `write_stdin`
     /// (remove on exit, or_insert if still running).
     pub shell_handles: &'a mut HashMap<String, String>,
+    /// Optional handle to the live subagent host, used by the subagent
+    /// projectors to fetch display metadata (capability, model, run_state,
+    /// per-completion stats) by target path. Wire shapes don't carry these
+    /// fields anymore — the host owns them.
+    pub subagent_host: Option<&'a Arc<dyn SubagentHost>>,
 }

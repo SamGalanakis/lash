@@ -288,7 +288,7 @@ impl ToolProvider for Grep {
                             "type": "string",
                             "description": "Optional file or directory to search within. Accepts absolute paths or paths relative to the workspace root. A directory becomes the search root; a file searches that one file only. When omitted, searches the current workspace."
                         },
-                        "maxResults": {
+                        "limit": {
                             "type": "integer",
                             "minimum": 1,
                             "default": DEFAULT_MAX_RESULTS,
@@ -337,7 +337,7 @@ impl Grep {
             Ok(query) => query,
             Err(err) => return err,
         };
-        let max_results = match parse_max_results(args) {
+        let max_results = match parse_limit(args) {
             Ok(max_results) => max_results,
             Err(err) => return err,
         };
@@ -1050,8 +1050,8 @@ fn looks_like_definition_line(line: &str) -> bool {
     .any(|prefix| trimmed.starts_with(prefix))
 }
 
-fn parse_max_results(args: &serde_json::Value) -> Result<usize, ToolResult> {
-    match args.get("maxResults") {
+fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {
+    match args.get("limit") {
         None => Ok(DEFAULT_MAX_RESULTS),
         Some(value) if value.is_null() => Ok(DEFAULT_MAX_RESULTS),
         Some(value) => {
@@ -1060,11 +1060,11 @@ fn parse_max_results(args: &serde_json::Value) -> Result<usize, ToolResult> {
                 .map(|number| number as usize)
                 .or_else(|| value.as_f64().map(|number| number as usize))
                 .ok_or_else(|| {
-                    ToolResult::err_fmt(format_args!("Invalid maxResults: expected number"))
+                    ToolResult::err_fmt(format_args!("Invalid limit: expected number"))
                 })?;
             if parsed == 0 {
                 return Err(ToolResult::err_fmt(format_args!(
-                    "Invalid maxResults: must be >= 1"
+                    "Invalid limit: must be >= 1"
                 )));
             }
             Ok(parsed)
@@ -1408,6 +1408,24 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    #[test]
+    fn grep_uses_limit_argument_in_model_contract() {
+        let definition = Grep::new()
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == "grep")
+            .expect("grep definition");
+        let properties = definition
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("object properties");
+
+        assert!(properties.contains_key("limit"));
+        assert!(!properties.contains_key("maxResults"));
+        assert_eq!(properties["limit"]["default"], serde_json::json!(20));
+    }
+
     #[tokio::test]
     async fn test_grep_matches_with_query() {
         let dir = TempDir::new().unwrap();
@@ -1591,7 +1609,7 @@ mod tests {
                 &json!({
                     "query": "header cookie static_file abort redirect request response",
                     "path": "bottle.py",
-                    "maxResults": 80,
+                    "limit": 80,
                 }),
             )
             .await;

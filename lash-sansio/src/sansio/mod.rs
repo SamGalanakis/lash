@@ -364,6 +364,7 @@ impl<M: ModeProtocol> ContextProjector<M> for ChatContextProjector {
             session_id: ctx.config.run_session_id.clone(),
             output_spec: None,
             stream_events: None,
+            provider_trace: None,
         }
     }
 }

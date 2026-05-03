@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use lash_trace::{TraceContext, TraceError, TraceEvent};
+use lash_trace::{
+    TraceContext, TraceError, TraceEvent, TraceProviderStreamEvent, TraceRuntimeStreamEvent,
+};
 
 use super::*;
 
@@ -135,8 +137,11 @@ impl RuntimeTurnDriver {
         }
         let (llm_stream_tx, mut llm_stream_rx) =
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
+        let mut debug = LlmStreamDebugState::new();
+        let provider_trace = self.provider_trace_sender(iteration, &debug);
         let llm_request = LlmRequest {
             stream_events: transport_stream_events(&self.policy.provider, Some(llm_stream_tx)),
+            provider_trace,
             ..request
         };
 
@@ -149,7 +154,6 @@ impl RuntimeTurnDriver {
         let mut text_streamed = false;
         let mut streamed_usage = LlmUsage::default();
         let mut streamed_output = StandardStreamFallback::default();
-        let mut debug = LlmStreamDebugState::new();
         let mut abort_requested = false;
         let buffer_stream_fallback = self.policy.provider.requires_streaming()
             || self.session.plugins().has_assistant_stream_hooks();
@@ -403,66 +407,32 @@ impl RuntimeTurnDriver {
                 .record_text_chunk(log.text.visible, elapsed_ms);
         }
 
-        if !self.host.core.trace_stream_events {
+        if !self.host.core.trace_level.is_extended() {
             return;
         }
 
-        let mut entry = serde_json::json!({
-            "kind": "stream_event",
-            "turn": log.iteration,
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "session_id": log.session_id,
-            "sequence": debug.next_sequence(),
-            "elapsed_ms": elapsed_ms,
-            "event": log.event_type,
-        });
+        let mut event = TraceRuntimeStreamEvent {
+            sequence: debug.next_sequence(),
+            elapsed_ms,
+            event_name: log.event_type.to_string(),
+            raw_text: log.text.raw.map(str::to_string),
+            visible_text: log.text.visible.map(str::to_string),
+            item_id: log.item_id.map(str::to_string),
+            output_index: None,
+            call_id: None,
+            tool_name: None,
+            input_json: None,
+            usage: log.usage.map(crate::trace::trace_usage_from_llm),
+        };
 
-        if let Some(object) = entry.as_object_mut() {
-            if let Some(text) = log.text.raw {
-                object.insert(
-                    "raw_text".to_string(),
-                    serde_json::Value::String(text.to_string()),
-                );
-                object.insert(
-                    "raw_chars".to_string(),
-                    serde_json::Value::from(text.chars().count() as u64),
-                );
-            }
-            if let Some(text) = log.text.visible {
-                object.insert(
-                    "visible_text".to_string(),
-                    serde_json::Value::String(text.to_string()),
-                );
-                object.insert(
-                    "visible_chars".to_string(),
-                    serde_json::Value::from(text.chars().count() as u64),
-                );
-            }
-            if let Some(usage) = log.usage {
-                object.insert(
-                    "usage".to_string(),
-                    serde_json::json!({
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                        "cached_input_tokens": usage.cached_input_tokens,
-                        "reasoning_tokens": usage.reasoning_tokens,
-                    }),
-                );
-            }
-            if let Some(tool_call) = log.tool_call {
-                object.insert(
-                    "call_id".to_string(),
-                    serde_json::Value::String(tool_call.call_id.to_string()),
-                );
-                object.insert(
-                    "tool_name".to_string(),
-                    serde_json::Value::String(tool_call.tool_name.to_string()),
-                );
-                object.insert(
-                    "input_json".to_string(),
-                    serde_json::Value::String(tool_call.input_json.to_string()),
-                );
-            }
+        if let Some(tool_call) = log.tool_call {
+            event.call_id = Some(tool_call.call_id.to_string());
+            event.tool_name = Some(tool_call.tool_name.to_string());
+            event.input_json = Some(
+                serde_json::from_str(tool_call.input_json).unwrap_or_else(|_| {
+                    serde_json::Value::String(tool_call.input_json.to_string())
+                }),
+            );
         }
 
         crate::trace::emit_trace(
@@ -472,11 +442,54 @@ impl RuntimeTurnDriver {
                 .for_session(self.session_id.clone())
                 .for_iteration(log.iteration)
                 .for_llm_call(format!("{}:{}", self.session_id, log.iteration)),
-            TraceEvent::Custom {
-                name: "runtime.stream_event".to_string(),
-                payload: entry,
-            },
+            TraceEvent::RuntimeStreamEvent { event },
         );
+    }
+
+    fn provider_trace_sender(
+        &self,
+        iteration: usize,
+        debug: &LlmStreamDebugState,
+    ) -> Option<LlmProviderTraceSender> {
+        if !self.host.core.trace_level.is_extended() || self.host.core.trace_sink.is_none() {
+            return None;
+        }
+
+        let sink = self.host.core.trace_sink.clone();
+        let base_context = self.host.core.trace_context.clone();
+        let session_id = self.session_id.clone();
+        let llm_call_id = format!("{}:{iteration}", self.session_id);
+        let started_at = debug.started_at;
+        let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        Some(LlmProviderTraceSender::new(
+            move |provider_event: LlmProviderTraceEvent| {
+                let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let raw_json = serde_json::from_str::<serde_json::Value>(&provider_event.raw).ok();
+                let item_id = raw_json.as_ref().and_then(provider_item_id);
+                let output_index = raw_json.as_ref().and_then(provider_output_index);
+                let event = TraceProviderStreamEvent {
+                    provider: provider_event.provider.to_string(),
+                    sequence,
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    event_name: provider_event.event_name,
+                    item_id,
+                    output_index,
+                    raw_len: provider_event.raw.len(),
+                    raw_sha256: lash_trace::sha256_hex(provider_event.raw.as_bytes()),
+                    raw_json,
+                };
+                crate::trace::emit_trace(
+                    &sink,
+                    &base_context,
+                    TraceContext::default()
+                        .for_session(session_id.clone())
+                        .for_iteration(iteration)
+                        .for_llm_call(llm_call_id.clone()),
+                    TraceEvent::ProviderStreamEvent { event },
+                );
+            },
+        ))
     }
 
     async fn forward_standard_stream_event(
@@ -517,13 +530,13 @@ impl RuntimeTurnDriver {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            session_id: &self.session_id,
                             iteration: state.iteration,
                             event_type: "delta",
                             text: LlmDebugText {
                                 raw: raw_delta.as_deref(),
                                 visible: Some(&delta),
                             },
+                            item_id: None,
                             usage: None,
                             tool_call: None,
                         },
@@ -542,13 +555,13 @@ impl RuntimeTurnDriver {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            session_id: &self.session_id,
                             iteration: state.iteration,
                             event_type: "reasoning_delta",
                             text: LlmDebugText {
                                 raw: None,
                                 visible: Some(&delta),
                             },
+                            item_id: None,
                             usage: None,
                             tool_call: None,
                         },
@@ -565,9 +578,13 @@ impl RuntimeTurnDriver {
                         .await;
                 }
             }
-            LlmStreamEvent::Part(LlmOutputPart::Text { text, .. }) => {
+            LlmStreamEvent::Part(LlmOutputPart::Text {
+                text,
+                response_meta,
+            }) => {
                 if !text.is_empty() {
                     *state.text_streamed = true;
+                    let item_id = response_meta.as_ref().and_then(|meta| meta.id.as_deref());
                     let raw_text = self.host.core.trace_sink.as_ref().map(|_| text.clone());
                     let outcome = self
                         .transform_assistant_stream_chunk(event_tx, text)
@@ -596,13 +613,13 @@ impl RuntimeTurnDriver {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            session_id: &self.session_id,
                             iteration: state.iteration,
                             event_type: "text_part",
                             text: LlmDebugText {
                                 raw: raw_text.as_deref(),
                                 visible: Some(&text),
                             },
+                            item_id,
                             usage: None,
                             tool_call: None,
                         },
@@ -626,13 +643,13 @@ impl RuntimeTurnDriver {
                 self.log_llm_stream_event(
                     state.debug,
                     LlmStreamEventLog {
-                        session_id: &self.session_id,
                         iteration: state.iteration,
                         event_type: "tool_call_part",
                         text: LlmDebugText {
                             raw: None,
                             visible: None,
                         },
+                        item_id: item_id.as_deref(),
                         usage: None,
                         tool_call: Some(LlmDebugToolCall {
                             call_id: &call_id,
@@ -659,13 +676,13 @@ impl RuntimeTurnDriver {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            session_id: &self.session_id,
                             iteration: state.iteration,
                             event_type: "reasoning_part",
                             text: LlmDebugText {
                                 raw: None,
                                 visible: Some(&text),
                             },
+                            item_id: item_id.as_deref(),
                             usage: None,
                             tool_call: None,
                         },
@@ -688,13 +705,13 @@ impl RuntimeTurnDriver {
                 self.log_llm_stream_event(
                     state.debug,
                     LlmStreamEventLog {
-                        session_id: &self.session_id,
                         iteration: state.iteration,
                         event_type: "usage",
                         text: LlmDebugText {
                             raw: None,
                             visible: None,
                         },
+                        item_id: None,
                         usage: Some(&usage),
                         tool_call: None,
                     },
@@ -724,6 +741,27 @@ fn response_usage_is_empty(usage: &LlmUsage) -> bool {
         && usage.output_tokens == 0
         && usage.cached_input_tokens == 0
         && usage.reasoning_tokens == 0
+}
+
+fn provider_item_id(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("item_id")
+        .or_else(|| value.get("item").and_then(|item| item.get("id")))
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("id"))
+        })
+        .or_else(|| value.get("id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn provider_output_index(value: &serde_json::Value) -> Option<i64> {
+    value
+        .get("output_index")
+        .or_else(|| value.get("index"))
+        .and_then(|value| value.as_i64())
 }
 
 pub(in crate::runtime) fn llm_response_has_content(response: &LlmResponse) -> bool {

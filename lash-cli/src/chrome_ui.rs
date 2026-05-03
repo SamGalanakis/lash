@@ -21,18 +21,22 @@ pub const TURN_STATUS_KEY: &str = "turn_status";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnStatusLabel {
-    Working,
+    Idle,
+    RunningTool,
     Thinking,
     Responding,
+    Waiting,
     Error,
 }
 
 impl TurnStatusLabel {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Working => "Working",
+            Self::Idle => "Idle",
+            Self::RunningTool => "Running tool",
             Self::Thinking => "Thinking",
             Self::Responding => "Responding",
+            Self::Waiting => "Waiting",
             Self::Error => "Error",
         }
     }
@@ -41,7 +45,8 @@ impl TurnStatusLabel {
 #[derive(Clone, Debug)]
 pub struct TurnStatusSnapshot {
     pub label: TurnStatusLabel,
-    pub turn_started_at: Instant,
+    pub turn_started_at: Option<Instant>,
+    pub detail: Option<String>,
 }
 
 #[derive(Default)]
@@ -113,15 +118,24 @@ impl UiExtension for ChromeUiExtension {
             return;
         }
 
-        let elapsed_dur = turn.turn_started_at.elapsed();
-        let elapsed =
-            format_duration_ms_if_visible(elapsed_dur.as_millis() as u64).unwrap_or_default();
+        let elapsed_dur = turn
+            .turn_started_at
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let elapsed = turn
+            .turn_started_at
+            .and_then(|_| format_duration_ms_if_visible(elapsed_dur.as_millis() as u64))
+            .unwrap_or_default();
         let mut spans = animated_lash_word(elapsed_dur);
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             turn.label.as_str().to_string(),
             theme::turn_status_state(),
         ));
+        if let Some(detail) = turn.detail.as_deref().filter(|detail| !detail.is_empty()) {
+            spans.push(Span::styled(" · ", theme::text_faint_style()));
+            spans.push(Span::styled(detail.to_string(), theme::text_subtle_style()));
+        }
         if !elapsed.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(elapsed, theme::turn_status_elapsed()));

@@ -68,6 +68,7 @@ struct ShellOutputSpill {
 
 const MAX_OUTPUT: usize = 512_000;
 const SPILL_OUTPUT_THRESHOLD: usize = 50 * 1024;
+const DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 const DEFAULT_START_COMMAND_POLL_MS: u64 = 250;
 const DEFAULT_WRITE_STDIN_POLL_MS: u64 = 250;
 const OUTPUT_QUIET_PERIOD_MS: u64 = 75;
@@ -95,7 +96,7 @@ struct ExecCommandParams {
     shell_path: String,
     login: bool,
     allow_failure: bool,
-    timeout_ms: Option<u64>,
+    timeout_ms: u64,
     max_output_tokens: Option<usize>,
 }
 
@@ -928,7 +929,8 @@ impl StandardShell {
         let timeout_ms = args
             .get("timeout_ms")
             .and_then(|value| value.as_u64())
-            .filter(|value| *value > 0);
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_EXEC_COMMAND_TIMEOUT_MS);
 
         Ok(ExecCommandParams {
             cmd: common.cmd,
@@ -979,7 +981,7 @@ impl StandardShell {
                 &params.workdir,
                 params.login,
                 &params.shell_path,
-                params.timeout_ms.map(Duration::from_millis),
+                Some(Duration::from_millis(params.timeout_ms)),
                 progress,
                 params.max_output_tokens,
                 cancel,
@@ -997,7 +999,7 @@ impl StandardShell {
                 original_token_count,
                 full_output_path.as_deref(),
                 started.elapsed().as_secs_f64(),
-                params.timeout_ms.unwrap_or_default(),
+                params.timeout_ms,
             ),
             Ok(PollOutcome::Exited {
                 output,
@@ -1228,13 +1230,14 @@ impl ToolProvider for StandardShell {
         vec![
             ToolDefinition::new(
                 "exec_command",
-                "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Use `timeout_ms` as a hard timeout; timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 {
                     let mut properties = command_common("Shell command to execute.");
                     properties["timeout_ms"] = json!({
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Hard timeout in milliseconds. If reached before the command exits, the process is killed and the tool call fails with `status: \"timed_out\"`. Omit for no tool-level timeout."
+                        "default": DEFAULT_EXEC_COMMAND_TIMEOUT_MS,
+                        "description": "Hard timeout in milliseconds. If reached before the command exits, the process is killed and the tool call fails with `status: \"timed_out\"`. Defaults to 600000 ms."
                     });
                     object_schema(properties, &["cmd"])
                 },
@@ -1244,14 +1247,14 @@ impl ToolProvider for StandardShell {
             .with_execution_mode(ToolExecutionMode::Serial),
             ToolDefinition::new(
                 "start_command",
-                "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. Continue the session with `write_stdin`. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.",
+                "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. Continue the session with `write_stdin`. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. Use `poll_ms` only to choose the initial observation window; use `exec_command.timeout_ms` for bounded one-shot commands. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.",
                 {
                     let mut properties = command_common("Shell command to start.");
                     properties["poll_ms"] = json!({
                         "type": "integer",
                         "minimum": 1,
                         "default": DEFAULT_START_COMMAND_POLL_MS,
-                        "description": "Initial poll window in milliseconds before returning a running `session_id` if the process has not exited. Defaults to 250."
+                        "description": "Initial observation window in milliseconds before returning a running `session_id` if the process has not exited. Defaults to 250. This is not a hard timeout."
                     });
                     object_schema(properties, &["cmd"])
                 },
@@ -2131,6 +2134,31 @@ mod tests {
     }
 
     #[test]
+    fn start_command_contract_distinguishes_poll_from_timeout() {
+        let shell = StandardShell::default();
+        let definition = shell
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == "start_command")
+            .expect("start_command definition");
+        let properties = definition
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("properties");
+
+        assert!(properties.contains_key("poll_ms"));
+        assert!(!properties.contains_key("timeout_ms"));
+        assert!(definition.description.contains("exec_command.timeout_ms"));
+        assert!(
+            properties["poll_ms"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("not a hard timeout")
+        );
+    }
+
+    #[test]
     fn exec_command_defaults_to_non_login_shell() {
         let shell = StandardShell::default();
         let params = shell
@@ -2138,6 +2166,41 @@ mod tests {
             .expect("params");
 
         assert!(!params.login);
+    }
+
+    #[test]
+    fn exec_command_defaults_to_generous_timeout() {
+        let shell = StandardShell::default();
+        let params = shell
+            .parse_exec_command_params(&json!({"cmd": "echo hello"}))
+            .expect("params");
+
+        assert_eq!(params.timeout_ms, DEFAULT_EXEC_COMMAND_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn exec_command_timeout_schema_documents_default() {
+        let shell = StandardShell::default();
+        let definition = shell
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == "exec_command")
+            .expect("exec_command definition");
+        let properties = definition
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("properties");
+
+        assert_eq!(
+            properties["timeout_ms"]["default"],
+            DEFAULT_EXEC_COMMAND_TIMEOUT_MS
+        );
+        assert!(
+            definition
+                .description
+                .contains("Commands time out after 600000 ms by default")
+        );
     }
 
     #[test]

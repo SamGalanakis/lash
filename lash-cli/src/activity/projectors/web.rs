@@ -54,7 +54,7 @@ impl ToolProjector for WebProjector {
             }
             "fetch_url" => {
                 let url = tool_arg_str(&ctx.args, "url").unwrap_or("url").to_string();
-                let artifact = text_preview_artifact(Some("Fetched content"), &ctx.result);
+                let artifact = fetch_url_artifact(&ctx.result);
                 let args = std::mem::replace(&mut ctx.args, Value::Null);
                 let result = std::mem::replace(&mut ctx.result, Value::Null);
                 vec![
@@ -122,6 +122,18 @@ fn web_search_detail_lines(result: &Value) -> Vec<String> {
     lines
 }
 
+fn fetch_url_artifact(result: &Value) -> Option<ActivityArtifact> {
+    result
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|content| !content.trim().is_empty())
+        .map(|content| ActivityArtifact::TextPreview {
+            title: Some("Fetched content".to_string()),
+            text: content.to_string(),
+        })
+        .or_else(|| text_preview_artifact(Some("Fetched content"), result))
+}
+
 /// Strip `http(s)://` + trailing slash from a URL for display. Also
 /// called from `shared::semantic_tool_summary` for the `fetch_url`
 /// fallback summary, so it's `pub(crate)` rather than module-private.
@@ -130,4 +142,35 @@ pub(crate) fn display_url(url: &str) -> String {
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::activity::{ActivityArtifact, ActivityState};
+    use serde_json::json;
+
+    #[test]
+    fn fetch_url_projects_content_field_not_raw_record() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "fetch_url",
+            json!({ "url": "https://example.com" }),
+            json!({
+                "url": "https://example.com",
+                "content": "Example body",
+            }),
+            true,
+            10,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].call.summary, "fetch example.com");
+        assert_eq!(
+            blocks[0].result.artifact,
+            Some(ActivityArtifact::TextPreview {
+                title: Some("Fetched content".to_string()),
+                text: "Example body".to_string(),
+            })
+        );
+    }
 }

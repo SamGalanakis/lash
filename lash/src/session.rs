@@ -155,6 +155,20 @@ struct AsyncToolHandleEntry {
     done_notify: Arc<Notify>,
     progress_notify: Arc<Notify>,
     cancellation: CancellationToken,
+    metadata: AsyncToolHandleMetadata,
+}
+
+#[derive(Clone)]
+struct AsyncToolHandleMetadata {
+    tool_name: String,
+    namespace: AsyncToolHandleNamespace,
+    identifier: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum AsyncToolHandleNamespace {
+    Subagent,
+    Tool,
 }
 
 struct AsyncToolHandleState {
@@ -395,6 +409,8 @@ impl Session {
                     session_id: session_id.to_string(),
                     mode: mode.clone(),
                     tools,
+                    tool_access: self.plugins().tool_access().clone(),
+                    subagent: self.plugins().subagent_authority().cloned(),
                 })
                 .unwrap_or_else(|err| {
                     tracing::warn!("failed to resolve tool surface: {err}");
@@ -503,6 +519,46 @@ impl Session {
         })
     }
 
+    fn async_tool_handle_metadata(
+        id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> AsyncToolHandleMetadata {
+        if tool_name == "spawn_agent"
+            && let Some(agent_name) = args.get("agent_name").and_then(|value| value.as_str())
+            && let Some(normalized) = Self::normalize_async_subagent_name(agent_name)
+        {
+            return AsyncToolHandleMetadata {
+                tool_name: tool_name.to_string(),
+                namespace: AsyncToolHandleNamespace::Subagent,
+                identifier: normalized,
+            };
+        }
+        AsyncToolHandleMetadata {
+            tool_name: tool_name.to_string(),
+            namespace: AsyncToolHandleNamespace::Tool,
+            identifier: id.to_string(),
+        }
+    }
+
+    fn normalize_async_subagent_name(agent_name: &str) -> Option<String> {
+        let mut out = String::new();
+        let mut last_was_sep = false;
+        for ch in agent_name.chars().flat_map(char::to_lowercase) {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch);
+                last_was_sep = false;
+            } else if !last_was_sep && !out.is_empty() {
+                out.push('_');
+                last_was_sep = true;
+            }
+        }
+        while out.ends_with('_') {
+            out.pop();
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     fn parse_async_tool_handle(
         handle: &serde_json::Value,
     ) -> Result<(String, Option<String>), String> {
@@ -563,6 +619,7 @@ impl Session {
             done_notify: Arc::clone(&done_notify),
             progress_notify: Arc::clone(&progress_notify),
             cancellation: cancellation.clone(),
+            metadata: Self::async_tool_handle_metadata(&handle_id, &tool_name, &args),
         };
         self.async_tool_handles
             .lock()
@@ -627,6 +684,43 @@ impl Session {
             duration_ms: 0,
         });
         AsyncToolReply::success(handle_value).into_lashlang_reply()
+    }
+
+    fn list_async_handles(&self) -> LashlangToolReply {
+        let entries = self
+            .async_tool_handles
+            .lock()
+            .expect("async tool handle map lock")
+            .iter()
+            .filter_map(|(id, entry)| {
+                let is_terminal = entry
+                    .state
+                    .lock()
+                    .expect("async tool state lock")
+                    .terminal
+                    .is_some();
+                (!is_terminal).then(|| (id.clone(), entry.metadata.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        let mut subagent = serde_json::Map::new();
+        let mut tool = serde_json::Map::new();
+        for (id, metadata) in entries {
+            let value = Self::async_tool_handle_value(&id, &metadata.tool_name);
+            match metadata.namespace {
+                AsyncToolHandleNamespace::Subagent => {
+                    subagent.insert(metadata.identifier, value);
+                }
+                AsyncToolHandleNamespace::Tool => {
+                    tool.insert(metadata.identifier, value);
+                }
+            }
+        }
+        AsyncToolReply::success(json!({
+            "subagent": subagent,
+            "tool": tool,
+        }))
+        .into_lashlang_reply()
     }
 
     async fn await_async_tool_handle(
@@ -859,6 +953,11 @@ impl Session {
                     args,
                     result_tx,
                 } => {
+                    if name == "list_async_handles" {
+                        let reply = self.list_async_handles();
+                        let _ = result_tx.send(reply);
+                        continue;
+                    }
                     let tc_num = tool_call_count;
                     tool_call_count += 1;
                     tracing::info!(
@@ -1471,6 +1570,17 @@ mod tests {
                     ToolDefinition::default_input_schema(),
                     serde_json::json!({ "type": "object", "additionalProperties": true }),
                 ),
+                ToolDefinition::new(
+                    "spawn_agent",
+                    "Test-only spawn stand-in.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "agent_name": { "type": "string" } },
+                        "required": ["agent_name"],
+                        "additionalProperties": true
+                    }),
+                    serde_json::json!({ "type": "object", "additionalProperties": true }),
+                ),
             ]
         }
 
@@ -1495,6 +1605,14 @@ mod tests {
                     ToolResult::ok(json!({ "echo": text }))
                 }
                 "wait_for_cancel" => {
+                    let Some(token) = context.cancellation_token.clone() else {
+                        return ToolResult::err_fmt("missing cancellation token");
+                    };
+                    token.cancelled().await;
+                    self.state.cancelled.store(true, Ordering::SeqCst);
+                    ToolResult::ok(json!({ "cancelled": true }))
+                }
+                "spawn_agent" => {
                     let Some(token) = context.cancellation_token.clone() else {
                         return ToolResult::err_fmt("missing cancellation token");
                     };
@@ -1772,6 +1890,74 @@ print "cancelled"
                 .observations
                 .iter()
                 .any(|text| text.contains("cancelled")),
+            "observations were: {:?}",
+            response.observations
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rlm_run_code_lists_live_async_handles_by_namespace() {
+        let async_state = AsyncToolState::default();
+        let async_tools: Arc<dyn crate::ToolProvider> = Arc::new(AsyncTestToolProvider {
+            state: async_state.clone(),
+        });
+        let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
+            "async_tools",
+            PluginSpec::new().with_tool_provider(Arc::clone(&async_tools)),
+        ))]);
+        let plugin_session = plugin_host
+            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
+            .expect("plugin session");
+        let mut session = Session::new(
+            crate::RuntimeServices::new(plugin_session),
+            "root",
+            crate::ExecutionMode::new("rlm"),
+        )
+        .await
+        .expect("session");
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+
+        let response = session
+            .run_code(
+                "root",
+                manager,
+                &event_tx,
+                r#"
+agent = start call spawn_agent { agent_name: "Auth Worker" }
+tool = start call wait_for_cancel {}
+handles = (call list_async_handles {})?
+print handles
+cancel handles.subagent.auth_worker
+cancel handles.tool[tool.id]
+after = (call list_async_handles {})?
+print after
+"#,
+                false,
+            )
+            .await
+            .expect("exec response");
+
+        assert!(
+            response.error.is_none(),
+            "unexpected rlm error: {:?}",
+            response.error
+        );
+        assert!(async_state.cancelled.load(Ordering::SeqCst));
+        assert!(
+            response
+                .observations
+                .iter()
+                .any(|text| text.contains("\"auth_worker\"") && text.contains("\"tool\"")),
+            "observations were: {:?}",
+            response.observations
+        );
+        assert!(
+            response
+                .observations
+                .iter()
+                .any(|text| text.contains("\"subagent\":{}") && text.contains("\"tool\":{}")),
             "observations were: {:?}",
             response.observations
         );

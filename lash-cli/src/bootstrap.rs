@@ -56,9 +56,12 @@ struct PluginFactorySurfaceInput<'a> {
     host_docs_dir: std::path::PathBuf,
 }
 
-fn plugin_factories_for_surface(
-    input: PluginFactorySurfaceInput<'_>,
-) -> Vec<Arc<dyn PluginFactory>> {
+struct PluginFactoriesForSurface {
+    factories: Vec<Arc<dyn PluginFactory>>,
+    subagent_host: Arc<dyn SubagentHost>,
+}
+
+fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginFactoriesForSurface {
     let PluginFactorySurfaceInput {
         tool_surface,
         autonomous,
@@ -74,7 +77,7 @@ fn plugin_factories_for_surface(
     if tool_surface == CliToolSurface::AppWorld {
         let bundles = vec![DefaultToolBundle::CoreRuntime];
         let mut capability_registry = CapabilityRegistry::new();
-        for name in ["low", "medium", "high"] {
+        for name in ["explore", "peer"] {
             capability_registry.add(Arc::new(TierCapability::new(
                 name,
                 None,
@@ -96,19 +99,22 @@ fn plugin_factories_for_surface(
         plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
             session_policy,
             Arc::new(capability_registry),
-            subagent_host,
+            Arc::clone(&subagent_host),
         )));
-        return plugin_factories;
+        return PluginFactoriesForSurface {
+            factories: plugin_factories,
+            subagent_host,
+        };
     }
 
-    let low_tier_execution_mode = lash_config
+    let explore_tier_execution_mode = lash_config
         .runtime
-        .low_tier_subagent_execution_mode
+        .explore_tier_subagent_execution_mode
         .clone()
-        .unwrap_or(ExecutionMode::standard());
+        .unwrap_or(ExecutionMode::new("rlm"));
     let capability_registry = Arc::new(default_registry(
         &lash_config.agent_models,
-        low_tier_execution_mode,
+        explore_tier_execution_mode,
     ));
 
     let profile = DefaultToolSurfaceProfile::for_runtime(
@@ -156,9 +162,12 @@ fn plugin_factories_for_surface(
     plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy,
         capability_registry,
-        subagent_host,
+        Arc::clone(&subagent_host),
     )));
-    plugin_factories
+    PluginFactoriesForSurface {
+        factories: plugin_factories,
+        subagent_host,
+    }
 }
 
 fn autonomous_tool_allowed(name: &str) -> bool {
@@ -422,15 +431,17 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         lash_config.set_model_default(active_provider.kind(), model.clone(), model_variant.clone());
         lash_config.save(&crate::paths::config_file())?;
     }
-    let trace_path = if crate::detailed_debug_logging_enabled(args.debug) {
-        let dir = crate::paths::lash_home().join("sessions");
-        Some(dir.join(format!(
-            "{}.trace.jsonl",
-            chrono::Local::now().format("%Y%m%d_%H%M%S")
-        )))
-    } else {
-        None
-    };
+    let trace_level = lash::TraceLevel::from(args.trace_level);
+    let trace_path =
+        if crate::detailed_debug_logging_enabled(args.debug) || trace_level.is_extended() {
+            let dir = crate::paths::lash_home().join("sessions");
+            Some(dir.join(format!(
+                "{}.trace.jsonl",
+                chrono::Local::now().format("%Y%m%d_%H%M%S")
+            )))
+        } else {
+            None
+        };
 
     let session_bootstrap =
         SessionBootstrap::open(SessionBootstrapSource::from_resume_arg(args.resume.clone()))?;
@@ -571,14 +582,17 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     let host_core = RuntimeCoreConfig::default()
         .with_prompt_template(prompt_template)
         .with_trace_jsonl_path(trace_path)
-        .with_trace_stream_events(args.debug_trace_stream_events)
+        .with_trace_level(trace_level)
         .with_credential_store_path(Some(crate::paths::config_file()));
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let turn_injection_bridge = TurnInjectionBridge::new();
     let turn_input_injection_bridge = TurnInputInjectionBridge::new();
 
-    let plugin_factories = plugin_factories_for_surface(PluginFactorySurfaceInput {
+    let PluginFactoriesForSurface {
+        factories: plugin_factories,
+        subagent_host,
+    } = plugin_factories_for_surface(PluginFactorySurfaceInput {
         tool_surface,
         autonomous,
         execution_mode: execution_mode.clone(),
@@ -744,6 +758,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         initial_model_variant,
         execution_mode,
         startup_system_message,
+        subagent_host,
     )
     .await
 }

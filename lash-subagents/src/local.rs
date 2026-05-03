@@ -24,14 +24,15 @@
 //! and path helpers live in [`crate::routing`]; API-facing types live
 //! in [`crate::types`]. The trait itself is in [`crate::host`].
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash::{
     AssembledTurn, ManagedRunState, ManagedTaskKind, ManagedTaskSpec, MessageRole, PluginMessage,
-    SessionManager,
+    SessionManager, SessionToolAccess, SubagentSessionAuthority,
 };
+use std::collections::BTreeSet;
 
 use crate::host::SubagentHost;
 use crate::queue::{
@@ -40,19 +41,37 @@ use crate::queue::{
     message_turn_input, task_completion_event,
 };
 use crate::routing::{
-    completed_targets, event_matches, event_visible_for_until, is_same_or_descendant, join_path,
-    normalize_absolute_path, normalize_relative_path, wait_response, wait_until_satisfied,
+    completed_agents, event_matches, event_visible_for_until, normalize_agent_name, wait_response,
+    wait_until_satisfied,
 };
+use crate::shared::{MAX_SUBAGENT_DEPTH, SUBAGENT_SUITE_DENY};
 use crate::types::{
-    AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode, FollowupTaskRequest,
-    FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse, SendMessageRequest,
-    SendMessageResponse, SessionAgentInfo, SpawnAgentRequest, SpawnAgentResponse, WaitAgentEvent,
-    WaitAgentRequest, WaitAgentResponse,
+    AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode,
+    FollowupTaskRequest, FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse,
+    SendMessageRequest, SendMessageResponse, SpawnAgentRequest, SpawnAgentResponse, WaitAgentEvent,
+    WaitAgentPending, WaitAgentRequest, WaitAgentResponse, WaitUntil,
 };
 
 #[derive(Clone, Default)]
 pub struct LocalSubagentHost {
     state: Arc<std::sync::Mutex<HostState>>,
+}
+
+fn wait_agent_satisfied(
+    events: &[WaitAgentEvent],
+    pending: &BTreeMap<String, WaitAgentPending>,
+    until: WaitUntil,
+    all: bool,
+) -> bool {
+    if all {
+        pending.is_empty()
+    } else {
+        wait_until_satisfied(events, until)
+    }
+}
+
+fn is_same_or_descendant(path: &str, prefix: &str) -> bool {
+    path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
 impl LocalSubagentHost {
@@ -114,8 +133,8 @@ impl LocalSubagentHost {
             .entry(path.clone())
             .or_insert_with(|| AgentRecord {
                 session_id: session_id.to_string(),
+                agent_name: "root".to_string(),
                 parent_session_id: None,
-                parent_path: None,
                 capability: None,
                 model: String::new(),
                 model_variant: None,
@@ -123,11 +142,16 @@ impl LocalSubagentHost {
                 queued_turns: VecDeque::new(),
                 closing: false,
                 last_task_state: None,
+                last_iterations: None,
+                last_tool_calls: None,
+                last_token_usage: None,
                 owner_session_id: session_id.to_string(),
             });
         let locator = AgentLocator {
             root_session_id,
             path,
+            agent_name: None,
+            depth: 0,
         };
         state
             .session_agents
@@ -143,24 +167,45 @@ impl LocalSubagentHost {
         crate::queue::queue_event(tree, event);
     }
 
-    fn resolve_target(current_path: &str, target: &str) -> Result<String, String> {
-        let target = target.trim();
-        if target.is_empty() {
-            return Err("target must not be empty".to_string());
+    fn resolve_direct_child_locked(
+        state: &HostState,
+        parent_session_id: &str,
+        agent_name: &str,
+    ) -> Result<(String, String), String> {
+        let normalized = normalize_agent_name(agent_name)?;
+        let child_session_id = state
+            .children_by_parent_session
+            .get(parent_session_id)
+            .and_then(|children| children.get(&normalized))
+            .cloned()
+            .ok_or_else(|| format!("unknown agent_name `{normalized}`"))?;
+        let locator = state
+            .session_agents
+            .get(&child_session_id)
+            .ok_or_else(|| format!("unknown agent_name `{normalized}`"))?;
+        Ok((locator.root_session_id.clone(), locator.path.clone()))
+    }
+
+    fn internal_child_path(parent_path: &str, agent_name: &str) -> String {
+        if parent_path == "/root" {
+            format!("/root/{agent_name}")
+        } else {
+            format!("{parent_path}/{agent_name}")
         }
-        if target == "root" || target == "/root" {
-            return Ok("/root".to_string());
-        }
-        if let Some(rest) = target.strip_prefix('/') {
-            return normalize_absolute_path(rest);
-        }
-        let relative = normalize_relative_path(target)?;
-        Ok(join_path(current_path, &relative))
     }
 
     fn remove_agent_locked(state: &mut HostState, root_session_id: &str, path: &str) {
         if let Some(tree) = state.trees.get_mut(root_session_id) {
             if let Some(agent) = tree.agents.remove(path) {
+                if let Some(parent_session_id) = &agent.parent_session_id
+                    && let Some(children) =
+                        state.children_by_parent_session.get_mut(parent_session_id)
+                {
+                    children.remove(&agent.agent_name);
+                    if children.is_empty() {
+                        state.children_by_parent_session.remove(parent_session_id);
+                    }
+                }
                 state.session_agents.remove(&agent.session_id);
             }
             if tree.agents.is_empty() {
@@ -192,29 +237,48 @@ impl LocalSubagentHost {
                 .any(|turn| matches!(turn, QueuedTurn::Task(_)))
     }
 
-    fn pending_task_targets(
+    fn pending_task_agents(
         tree: &AgentTree,
-        current_path: &str,
-        targets: &[String],
+        parent_session_id: &str,
+        agents: &[String],
         events: &[WaitAgentEvent],
-    ) -> Vec<String> {
-        let finished = completed_targets(events);
-        let candidates = if targets.is_empty() {
+    ) -> BTreeMap<String, WaitAgentPending> {
+        let finished = completed_agents(events);
+        let candidates = if agents.is_empty() {
             tree.agents
-                .keys()
-                .filter(|path| is_same_or_descendant(path, current_path))
-                .cloned()
+                .values()
+                .filter(|agent| agent.parent_session_id.as_deref() == Some(parent_session_id))
+                .map(|agent| agent.agent_name.clone())
                 .collect::<Vec<_>>()
         } else {
-            targets.to_vec()
+            agents.to_vec()
         };
         candidates
             .into_iter()
-            .filter(|target| !finished.contains(target))
-            .filter(|target| {
-                tree.agents
-                    .get(target)
-                    .is_some_and(Self::agent_has_pending_task)
+            .filter(|agent_name| !finished.contains(agent_name))
+            .filter_map(|agent_name| {
+                let agent = tree.agents.values().find(|agent| {
+                    agent.parent_session_id.as_deref() == Some(parent_session_id)
+                        && agent.agent_name == agent_name
+                })?;
+                Self::agent_has_pending_task(agent).then(|| {
+                    let task = agent.active_turn.as_ref().and_then(|turn| match &turn.kind {
+                        ActiveTurnKind::Task { task } => Some(task.clone()),
+                        ActiveTurnKind::Message { .. } => None,
+                    });
+                    (
+                        agent_name.clone(),
+                        WaitAgentPending {
+                            agent_name,
+                            task,
+                            status: if agent.active_turn.is_some() {
+                                "running".to_string()
+                            } else {
+                                "queued".to_string()
+                            },
+                        },
+                    )
+                })
             })
             .collect()
     }
@@ -270,10 +334,19 @@ impl LocalSubagentHost {
             {
                 let mut state = self.state_lock()?;
                 if let Some(tree) = state.trees.get_mut(root_session_id) {
-                    Self::queue_event(
+                    LocalSubagentHost::queue_event(
                         tree,
                         WaitAgentEvent::AgentClosed {
-                            target: path.clone(),
+                            agent_name: tree
+                                .agents
+                                .get(path)
+                                .map(|a| a.agent_name.clone())
+                                .unwrap_or_else(|| path.to_string()),
+                            parent_session_id: tree
+                                .agents
+                                .get(path)
+                                .and_then(|a| a.parent_session_id.clone())
+                                .unwrap_or_default(),
                         },
                     );
                 }
@@ -318,15 +391,10 @@ impl LocalSubagentHost {
                     .ok_or_else(|| "subagent disappeared".to_string())?;
                 let event = match &launch.kind {
                     ActiveTurnKind::Task { task } => Some(WaitAgentEvent::TaskStarted {
-                        target: path.clone(),
+                        agent_name: agent.agent_name.clone(),
+                        parent_session_id: agent.parent_session_id.clone().unwrap_or_default(),
                         task: task.clone(),
                         session_id: launch.session_id.clone(),
-                        capability: agent
-                            .capability
-                            .clone()
-                            .unwrap_or_else(|| "root".to_string()),
-                        model: agent.model.clone(),
-                        model_variant: agent.model_variant.clone(),
                     }),
                     ActiveTurnKind::Message { .. } => None,
                 };
@@ -337,7 +405,7 @@ impl LocalSubagentHost {
                 event
             };
             if let Some(event) = event {
-                Self::queue_event(tree, event);
+                LocalSubagentHost::queue_event(tree, event);
             }
         }
         launch.notify.notify_waiters();
@@ -391,10 +459,15 @@ impl LocalSubagentHost {
                 let active = agent.active_turn.take();
                 let events = match active.map(|active| active.kind) {
                     Some(ActiveTurnKind::Task { task }) => {
-                        vec![task_completion_event(agent, &path, task, &outcome)]
+                        vec![task_completion_event(agent, task, &outcome)]
                     }
                     Some(ActiveTurnKind::Message { from }) => {
-                        vec![message_response_event(&path, from, &outcome)]
+                        vec![message_response_event(
+                            &agent.agent_name,
+                            agent.parent_session_id.as_deref().unwrap_or_default(),
+                            from,
+                            &outcome,
+                        )]
                     }
                     None => Vec::new(),
                 };
@@ -407,7 +480,7 @@ impl LocalSubagentHost {
             };
 
             for event in events {
-                Self::queue_event(tree, event);
+                LocalSubagentHost::queue_event(tree, event);
             }
             close_session_id = closing_session_id;
             start_next = close_session_id.is_none() && queued_more;
@@ -419,10 +492,19 @@ impl LocalSubagentHost {
                 if let Ok(mut state) = self.state_lock() {
                     let owner = Self::owner_session_id_for_path(&state, &root_session_id, &path);
                     if let Some(tree) = state.trees.get_mut(&root_session_id) {
-                        Self::queue_event(
+                        LocalSubagentHost::queue_event(
                             tree,
                             WaitAgentEvent::AgentClosed {
-                                target: path.clone(),
+                                agent_name: tree
+                                    .agents
+                                    .get(&path)
+                                    .map(|a| a.agent_name.clone())
+                                    .unwrap_or_else(|| path.clone()),
+                                parent_session_id: tree
+                                    .agents
+                                    .get(&path)
+                                    .and_then(|a| a.parent_session_id.clone())
+                                    .unwrap_or_default(),
                             },
                         );
                     }
@@ -474,13 +556,13 @@ impl LocalSubagentHost {
 
     fn drain_matching_events(
         tree: &mut AgentTree,
-        current_path: &str,
-        targets: &[String],
+        parent_session_id: &str,
+        agents: &[String],
     ) -> Vec<WaitAgentEvent> {
         let mut drained = Vec::new();
         let mut kept = VecDeque::new();
         while let Some(event) = tree.events.pop_front() {
-            if event_matches(&event, current_path, targets) {
+            if event_matches(&event, parent_session_id, agents) {
                 drained.push(event);
             } else {
                 kept.push_back(event);
@@ -519,53 +601,95 @@ impl LocalSubagentHost {
 
 #[async_trait]
 impl SubagentHost for LocalSubagentHost {
-    fn session_info(&self, session_id: &str) -> Option<SessionAgentInfo> {
+    fn agent_metadata(&self, session_id: &str, agent_name: &str) -> Option<AgentMetadata> {
         let state = self.state.lock().ok()?;
-        let locator = state.session_agents.get(session_id)?;
-        let tree = state.trees.get(&locator.root_session_id)?;
-        let agent = tree.agents.get(&locator.path)?;
-        Some(SessionAgentInfo {
-            path: locator.path.clone(),
+        let (_, path) = Self::resolve_direct_child_locked(&state, session_id, agent_name).ok()?;
+        let agent = state
+            .trees
+            .values()
+            .find_map(|tree| tree.agents.get(&path))?;
+        let run_state = if agent.closing {
+            "closed"
+        } else if agent.active_turn.is_some() {
+            "running"
+        } else {
+            "idle"
+        };
+        Some(AgentMetadata {
+            session_id: agent.session_id.clone(),
+            parent_session_id: agent.parent_session_id.clone(),
             capability: agent.capability.clone(),
+            run_state: run_state.to_string(),
+            model: agent.model.clone(),
+            model_variant: agent.model_variant.clone(),
+            last_iterations: agent.last_iterations,
+            last_tool_calls: agent.last_tool_calls,
+            last_token_usage: agent.last_token_usage.clone(),
         })
     }
 
     async fn spawn_agent(
         &self,
         context: &lash::ToolExecutionContext,
-        request: SpawnAgentRequest,
+        mut request: SpawnAgentRequest,
     ) -> Result<SpawnAgentResponse, String> {
+        if context
+            .host
+            .tool_catalog(&context.session_id)
+            .await
+            .ok()
+            .is_some_and(|catalog| {
+                catalog.iter().all(|tool| {
+                    tool.get("name").and_then(serde_json::Value::as_str) != Some("spawn_agent")
+                })
+            })
+        {
+            return Err("subagent spawning is unavailable in this session".to_string());
+        }
         let session_id = request
             .create_request
             .session_id
             .clone()
             .ok_or_else(|| "child session id is required".to_string())?;
 
-        let normalized_task_name = normalize_relative_path(&request.task_name)?;
-        let task_name_note = (normalized_task_name != request.task_name).then(|| {
+        let normalized_agent_name = normalize_agent_name(&request.agent_name)?;
+        let agent_name_note = (normalized_agent_name != request.agent_name).then(|| {
             format!(
-                "task_name `{original}` was normalized to `{normalized}` (lowercase letters, digits, and underscores only)",
-                original = request.task_name,
-                normalized = normalized_task_name,
+                "agent_name `{original}` was normalized to `{normalized}` (lowercase letters, digits, and underscores only)",
+                original = request.agent_name,
+                normalized = normalized_agent_name,
             )
         });
-        let (root_session_id, path) = {
+        let (root_session_id, path, child_depth, parent_session_id) = {
             let mut state = self.state_lock()?;
             let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let path = join_path(&locator.path, &normalized_task_name);
+            let parent_depth = locator.depth;
+            let child_depth = parent_depth.saturating_add(1);
+            if child_depth > MAX_SUBAGENT_DEPTH {
+                return Err(format!(
+                    "subagent recursion depth exceeded: max depth is {MAX_SUBAGENT_DEPTH}"
+                ));
+            }
+            if state
+                .children_by_parent_session
+                .get(&context.session_id)
+                .is_some_and(|children| children.contains_key(&normalized_agent_name))
+            {
+                return Err(format!(
+                    "agent_name `{normalized_agent_name}` already exists for this parent"
+                ));
+            }
+            let path = Self::internal_child_path(&locator.path, &normalized_agent_name);
             let tree = state
                 .trees
                 .get_mut(&locator.root_session_id)
                 .ok_or_else(|| "subagent tree missing".to_string())?;
-            if tree.agents.contains_key(&path) {
-                return Err(format!("agent path `{path}` already exists"));
-            }
             tree.agents.insert(
                 path.clone(),
                 AgentRecord {
                     session_id: session_id.clone(),
-                    parent_session_id: request.create_request.parent_session_id.clone(),
-                    parent_path: Some(locator.path.clone()),
+                    agent_name: normalized_agent_name.clone(),
+                    parent_session_id: Some(context.session_id.clone()),
                     capability: Some(request.capability.clone()),
                     model: request
                         .create_request
@@ -582,11 +706,39 @@ impl SubagentHost for LocalSubagentHost {
                     queued_turns: VecDeque::new(),
                     closing: false,
                     last_task_state: None,
+                    last_iterations: None,
+                    last_tool_calls: None,
+                    last_token_usage: None,
                     owner_session_id: context.session_id.clone(),
                 },
             );
-            (locator.root_session_id.clone(), path.clone())
+            state
+                .children_by_parent_session
+                .entry(context.session_id.clone())
+                .or_default()
+                .insert(normalized_agent_name.clone(), session_id.clone());
+            (
+                locator.root_session_id.clone(),
+                path.clone(),
+                child_depth,
+                context.session_id.clone(),
+            )
         };
+        let mut hidden_tools = request.hidden_tools.clone();
+        if child_depth >= MAX_SUBAGENT_DEPTH {
+            hidden_tools.extend(SUBAGENT_SUITE_DENY.iter().map(|name| name.to_string()));
+        }
+        request.create_request.tool_access = SessionToolAccess {
+            tools: request.create_request.tool_access.tools.clone(),
+            hidden_tools: hidden_tools.into_iter().collect::<BTreeSet<_>>(),
+        };
+        request.create_request.subagent = Some(SubagentSessionAuthority {
+            agent_name: normalized_agent_name.clone(),
+            parent_session_id: parent_session_id.clone(),
+            capability: request.capability.clone(),
+            depth: child_depth,
+            max_depth: MAX_SUBAGENT_DEPTH,
+        });
 
         let session = match context.host.create_session(request.create_request).await {
             Ok(session) => session,
@@ -596,47 +748,6 @@ impl SubagentHost for LocalSubagentHost {
                 return Err(format!("failed to create child session: {err}"));
             }
         };
-
-        {
-            let mut state = self.state_lock()?;
-            let tree = state
-                .trees
-                .get_mut(&root_session_id)
-                .ok_or_else(|| "subagent tree disappeared".to_string())?;
-            let agent = tree
-                .agents
-                .get_mut(&path)
-                .ok_or_else(|| "subagent disappeared".to_string())?;
-            agent.session_id = session.session_id.clone();
-            agent.parent_session_id = session.parent_session_id.clone();
-            agent.model = session.policy.model.clone();
-            agent.model_variant = session.policy.model_variant.clone();
-            agent.queued_turns.push_back(QueuedTurn::Task(QueuedTask {
-                task: request.task.clone(),
-                turn_input: request.turn_input,
-            }));
-            state.session_agents.insert(
-                session.session_id.clone(),
-                AgentLocator {
-                    root_session_id: root_session_id.clone(),
-                    path: path.clone(),
-                },
-            );
-        }
-
-        if let Err(err) = self
-            .start_next_turn(
-                Arc::clone(&context.host),
-                root_session_id.clone(),
-                path.clone(),
-            )
-            .await
-        {
-            let _ = context.host.close_session(&session.session_id).await;
-            let mut state = self.state_lock()?;
-            Self::remove_agent_locked(&mut state, &root_session_id, &path);
-            return Err(err);
-        }
 
         // Register with the parent session's background task registry so it
         // shows up in `tasks_list` and can be cancelled via `tasks_stop`.
@@ -665,7 +776,7 @@ impl SubagentHost for LocalSubagentHost {
                 &context.session_id,
                 ManagedTaskSpec {
                     id: format!("subagent:{path}"),
-                    label: request.task_name.clone(),
+                    label: normalized_agent_name.clone(),
                     kind: ManagedTaskKind::Subagent,
                     producer: "subagent",
                 },
@@ -673,23 +784,65 @@ impl SubagentHost for LocalSubagentHost {
             )
             .await
         {
-            tracing::warn!(
-                error = %err,
-                agent_path = %path,
-                "failed to register subagent with background task registry"
+            let _ = context.host.close_session(&session.session_id).await;
+            let mut state = self.state_lock()?;
+            Self::remove_agent_locked(&mut state, &root_session_id, &path);
+            return Err(format!(
+                "failed to register subagent background task: {err}"
+            ));
+        }
+
+        {
+            let mut state = self.state_lock()?;
+            let tree = state
+                .trees
+                .get_mut(&root_session_id)
+                .ok_or_else(|| "subagent tree disappeared".to_string())?;
+            let agent = tree
+                .agents
+                .get_mut(&path)
+                .ok_or_else(|| "subagent disappeared".to_string())?;
+            agent.session_id = session.session_id.clone();
+            agent.parent_session_id = session.parent_session_id.clone();
+            agent.model = session.policy.model.clone();
+            agent.model_variant = session.policy.model_variant.clone();
+            agent.queued_turns.push_back(QueuedTurn::Task(QueuedTask {
+                task: request.task.clone(),
+                turn_input: request.turn_input,
+            }));
+            state.session_agents.insert(
+                session.session_id.clone(),
+                AgentLocator {
+                    root_session_id: root_session_id.clone(),
+                    path: path.clone(),
+                    agent_name: Some(normalized_agent_name.clone()),
+                    depth: child_depth,
+                },
             );
         }
 
+        if let Err(err) = self
+            .start_next_turn(
+                Arc::clone(&context.host),
+                root_session_id.clone(),
+                path.clone(),
+            )
+            .await
+        {
+            context
+                .host
+                .unregister_background_task(&context.session_id, &format!("subagent:{path}"))
+                .await;
+            let _ = context.host.close_session(&session.session_id).await;
+            let mut state = self.state_lock()?;
+            Self::remove_agent_locked(&mut state, &root_session_id, &path);
+            return Err(err);
+        }
+
         Ok(SpawnAgentResponse {
-            task_name: normalized_task_name,
-            task_id: format!("subagent:{path}"),
-            target: path,
-            session_id: session.session_id,
-            run_state: "running".to_string(),
-            capability: request.capability,
-            model: session.policy.model,
-            model_variant: session.policy.model_variant,
-            task_name_note,
+            agent_name: normalized_agent_name.clone(),
+            task_id: format!("subagent:{normalized_agent_name}"),
+            agent_name_note,
         })
     }
 
@@ -706,31 +859,29 @@ impl SubagentHost for LocalSubagentHost {
         let (root_session_id, from, to, status, active_session_id, turn_to_cancel, should_start) = {
             let mut state = self.state_lock()?;
             let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let to = Self::resolve_target(&locator.path, &request.target)?;
+            let (root_session_id, to) =
+                Self::resolve_direct_child_locked(&state, &context.session_id, &request.agent_name)?;
             let tree = state
                 .trees
-                .get_mut(&locator.root_session_id)
+                .get_mut(&root_session_id)
                 .ok_or_else(|| "subagent tree missing".to_string())?;
             let target = tree
                 .agents
                 .get_mut(&to)
-                .ok_or_else(|| format!("unknown agent `{to}`"))?;
+                .ok_or_else(|| format!("unknown agent_name `{}`", request.agent_name))?;
             if target.closing {
-                return Err(format!("agent `{to}` is closing"));
+                return Err(format!("agent_name `{}` is closing", target.agent_name));
             }
 
             let mut message = message.clone();
-            message.from = locator.path.clone();
+            message.from = locator.agent_name.clone().unwrap_or_else(|| "root".to_string());
             let active_turn_id = target
                 .active_turn
                 .as_ref()
                 .map(|active| active.turn_id.clone());
             let active_session_id = active_turn_id.as_ref().map(|_| target.session_id.clone());
             let (status, turn_to_cancel, should_start) =
-                if to == "/root" && active_turn_id.is_none() {
-                    ("notified", None, false)
-                } else {
-                    match (active_turn_id, request.delivery) {
+                match (active_turn_id, request.delivery) {
                         (Some(_), DeliveryMode::NextPossible) => ("delivering", None, false),
                         (Some(turn_id), DeliveryMode::Interrupt) => {
                             target
@@ -756,19 +907,21 @@ impl SubagentHost for LocalSubagentHost {
                                 .push_back(QueuedTurn::Message(message.clone()));
                             ("started", None, true)
                         }
-                    }
                 };
-            Self::queue_event(
+            let to_agent = target.agent_name.clone();
+            let from_agent = locator.agent_name.clone().unwrap_or_else(|| "root".to_string());
+            LocalSubagentHost::queue_event(
                 tree,
                 WaitAgentEvent::Message {
-                    from: locator.path.clone(),
-                    to: to.clone(),
+                    from_agent,
+                    to_agent,
+                    parent_session_id: context.session_id.clone(),
                     message: request.message.clone(),
                 },
             );
             (
-                locator.root_session_id,
-                locator.path,
+                root_session_id,
+                locator.agent_name.unwrap_or_else(|| "root".to_string()),
                 to,
                 status.to_string(),
                 active_session_id,
@@ -849,24 +1002,26 @@ impl SubagentHost for LocalSubagentHost {
         context: &lash::ToolExecutionContext,
         request: FollowupTaskRequest,
     ) -> Result<FollowupTaskResponse, String> {
-        let (root_session_id, target_path, disposition, turn_to_cancel, should_start) = {
+        let (root_session_id, target_path, agent_name, disposition, turn_to_cancel, should_start) = {
             let mut state = self.state_lock()?;
-            let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let target_path = Self::resolve_target(&locator.path, &request.target)?;
-            if target_path == "/root" {
-                return Err("cannot assign followup work to /root".to_string());
-            }
+            Self::ensure_current_agent_locked(&mut state, &context.session_id);
+            let (root_session_id, target_path) = Self::resolve_direct_child_locked(
+                &state,
+                &context.session_id,
+                &request.agent_name,
+            )?;
             let tree = state
                 .trees
-                .get_mut(&locator.root_session_id)
+                .get_mut(&root_session_id)
                 .ok_or_else(|| "subagent tree missing".to_string())?;
             let agent = tree
                 .agents
                 .get_mut(&target_path)
-                .ok_or_else(|| format!("unknown agent `{target_path}`"))?;
+                .ok_or_else(|| format!("unknown agent_name `{}`", request.agent_name))?;
             if agent.closing {
-                return Err(format!("agent `{target_path}` is closing"));
+                return Err(format!("agent_name `{}` is closing", agent.agent_name));
             }
+            let agent_name = agent.agent_name.clone();
             let active_turn = agent.active_turn.as_ref().map(|turn| turn.turn_id.clone());
             let queued = QueuedTurn::Task(QueuedTask {
                 task: request.task.clone(),
@@ -892,8 +1047,9 @@ impl SubagentHost for LocalSubagentHost {
                 }
             };
             (
-                locator.root_session_id,
+                root_session_id,
                 target_path,
+                agent_name,
                 disposition.to_string(),
                 turn_to_cancel,
                 should_start,
@@ -916,8 +1072,8 @@ impl SubagentHost for LocalSubagentHost {
         }
 
         Ok(FollowupTaskResponse {
-            task_id: format!("subagent:{target_path}"),
-            target: target_path,
+            task_id: format!("subagent:{agent_name}"),
+            agent_name,
             delivery: request.delivery.as_str().to_string(),
             status: disposition,
         })
@@ -928,29 +1084,64 @@ impl SubagentHost for LocalSubagentHost {
         context: &lash::ToolExecutionContext,
         request: WaitAgentRequest,
     ) -> Result<WaitAgentResponse, String> {
-        let (root_session_id, current_path, targets, notify) = {
+        if request.all
+            && !matches!(
+                request.until,
+                WaitUntil::TaskCompleted | WaitUntil::Terminal
+            )
+        {
+            return Err(
+                "`wait_agent(all=true)` is only valid with until=\"task_completed\" or until=\"terminal\""
+                    .to_string(),
+            );
+        }
+        let (root_session_id, parent_session_id, agents, notify) = {
             let mut state = self.state_lock()?;
             let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let targets = request
-                .targets
-                .iter()
-                .map(|target| Self::resolve_target(&locator.path, target))
-                .collect::<Result<Vec<_>, _>>()?;
+            let agents = if request.agents.is_empty() {
+                state
+                    .children_by_parent_session
+                    .get(&context.session_id)
+                    .map(|children| children.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default()
+            } else {
+                request
+                    .agents
+                    .iter()
+                    .map(|agent| {
+                        let normalized = normalize_agent_name(agent)?;
+                        Self::resolve_direct_child_locked(&state, &context.session_id, &normalized)?;
+                        Ok::<String, String>(normalized)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
             let tree = state
                 .trees
                 .get(&locator.root_session_id)
                 .ok_or_else(|| "subagent tree missing".to_string())?;
             (
                 locator.root_session_id,
-                locator.path,
-                targets,
+                context.session_id.clone(),
+                agents,
                 Arc::clone(&tree.notify),
             )
         };
 
-        let timeout_ms = request.timeout_ms.unwrap_or(30_000);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let cancellation = context.cancellation_token.clone();
         let mut events = Vec::new();
+
+        // Two modes:
+        //   * `timeout_ms = Some(ms)` — block up to `ms` then return whatever
+        //     state we have (possibly with `timed_out = true`).
+        //   * `timeout_ms = None` — block until satisfied, the parent's
+        //     cancellation token fires, or `ms == 0` (an explicit "poll once").
+        //
+        // The default at the wire layer is `None`: fan-outs should block
+        // until every spawned agent completes, not race a 30-second timer.
+        let deadline = request
+            .timeout_ms
+            .map(|ms| tokio::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let poll_once = matches!(request.timeout_ms, Some(0));
 
         loop {
             // Register for the next notification before draining the queue,
@@ -964,42 +1155,86 @@ impl SubagentHost for LocalSubagentHost {
                     .get_mut(&root_session_id)
                     .ok_or_else(|| "subagent tree missing".to_string())?;
                 events.extend(
-                    Self::drain_matching_events(tree, &current_path, &targets)
+                    Self::drain_matching_events(tree, &parent_session_id, &agents)
                         .into_iter()
                         .filter(|event| event_visible_for_until(event, request.until)),
                 );
-                if wait_until_satisfied(&events, request.until) {
-                    let pending =
-                        Self::pending_task_targets(tree, &current_path, &targets, &events);
+                let pending = Self::pending_task_agents(tree, &parent_session_id, &agents, &events);
+                if wait_agent_satisfied(&events, &pending, request.until, request.all) {
                     return Ok(wait_response(false, events, pending));
                 }
             }
 
-            if timeout_ms == 0 || tokio::time::Instant::now() >= deadline {
+            if poll_once {
                 let pending = {
                     let state = self.state_lock()?;
                     let tree = state
                         .trees
                         .get(&root_session_id)
                         .ok_or_else(|| "subagent tree missing".to_string())?;
-                    Self::pending_task_targets(tree, &current_path, &targets, &events)
+                    Self::pending_task_agents(tree, &parent_session_id, &agents, &events)
                 };
                 return Ok(wait_response(true, events, pending));
             }
 
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            if cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                let pending = {
+                    let state = self.state_lock()?;
+                    let tree = state
+                        .trees
+                        .get(&root_session_id)
+                        .ok_or_else(|| "subagent tree missing".to_string())?;
+                    Self::pending_task_agents(tree, &parent_session_id, &agents, &events)
+                };
+                return Ok(wait_response(true, events, pending));
+            }
+
+            let cancelled = async {
+                if let Some(token) = cancellation.as_ref() {
+                    token.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
+
+            let woken = match deadline {
+                Some(deadline) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        false
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = cancelled => false,
+                            res = tokio::time::timeout_at(deadline, notified) => res.is_ok(),
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        biased;
+                        _ = cancelled => false,
+                        _ = notified => true,
+                    }
+                }
+            };
+
+            if !woken {
                 let mut state = self.state_lock()?;
                 let tree = state
                     .trees
                     .get_mut(&root_session_id)
                     .ok_or_else(|| "subagent tree missing".to_string())?;
                 events.extend(
-                    Self::drain_matching_events(tree, &current_path, &targets)
+                    Self::drain_matching_events(tree, &parent_session_id, &agents)
                         .into_iter()
                         .filter(|event| event_visible_for_until(event, request.until)),
                 );
-                let timed_out = !wait_until_satisfied(&events, request.until);
-                let pending = Self::pending_task_targets(tree, &current_path, &targets, &events);
+                let pending = Self::pending_task_agents(tree, &parent_session_id, &agents, &events);
+                let timed_out =
+                    !wait_agent_satisfied(&events, &pending, request.until, request.all);
                 return Ok(wait_response(timed_out, events, pending));
             }
         }
@@ -1010,51 +1245,57 @@ impl SubagentHost for LocalSubagentHost {
         context: &lash::ToolExecutionContext,
         request: CloseAgentRequest,
     ) -> Result<CloseAgentResponse, String> {
-        let (root_session_id, target) = {
+        let (root_session_id, target, agent_name) = {
             let mut state = self.state_lock()?;
-            let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let target = Self::resolve_target(&locator.path, &request.target)?;
-            if target == "/root" {
-                return Err("cannot close /root".to_string());
-            }
-            (locator.root_session_id, target)
+            Self::ensure_current_agent_locked(&mut state, &context.session_id);
+            let (root_session_id, target) = Self::resolve_direct_child_locked(
+                &state,
+                &context.session_id,
+                &request.agent_name,
+            )?;
+            let agent_name = normalize_agent_name(&request.agent_name)?;
+            (root_session_id, target, agent_name)
         };
         let paths = self
             .force_close_subtree(Arc::clone(&context.host), &root_session_id, &target)
             .await?;
-        Ok(CloseAgentResponse { closed: paths })
+        let closed = paths
+            .into_iter()
+            .map(|path| {
+                path.rsplit('/')
+                    .next()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| agent_name.clone())
+            })
+            .collect();
+        Ok(CloseAgentResponse { closed })
     }
 
     async fn list_agents(
         &self,
         context: &lash::ToolExecutionContext,
-        request: ListAgentsRequest,
+        _request: ListAgentsRequest,
     ) -> Result<ListAgentsResponse, String> {
         let state = self.state_lock()?;
         let locator = state
             .session_agents
             .get(&context.session_id)
-            .cloned()
-            .unwrap_or_else(|| AgentLocator {
-                root_session_id: context.session_id.clone(),
-                path: "/root".to_string(),
-            });
+            .cloned();
+        let Some(locator) = locator else {
+            return Ok(ListAgentsResponse { agents: Vec::new() });
+        };
         let Some(tree) = state.trees.get(&locator.root_session_id) else {
             return Ok(ListAgentsResponse { agents: Vec::new() });
         };
-        let prefix = match request.path_prefix {
-            Some(prefix) => Self::resolve_target(&locator.path, &prefix)?,
-            None => locator.path,
-        };
         let agents = tree
             .agents
-            .iter()
-            .filter(|(path, _)| is_same_or_descendant(path, &prefix))
-            .map(|(path, agent)| AgentSummary {
-                target: path.clone(),
-                task_id: format!("subagent:{path}"),
+            .values()
+            .filter(|agent| agent.parent_session_id.as_deref() == Some(&context.session_id))
+            .map(|agent| AgentSummary {
+                agent_name: agent.agent_name.clone(),
+                task_id: format!("subagent:{}", agent.agent_name),
                 session_id: agent.session_id.clone(),
-                parent_target: agent.parent_path.clone(),
+                parent_session_id: agent.parent_session_id.clone(),
                 capability: agent.capability.clone(),
                 agent_state: if agent.closing {
                     "closed"
@@ -1093,849 +1334,77 @@ impl SubagentHost for LocalSubagentHost {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex as StdMutex};
-
-    use async_trait::async_trait;
-    use lash::{InputItem, TurnInput};
-    use serde_json::{Value, json};
-
     use super::*;
-    use crate::routing::{normalize_relative_path, validate_segment};
-    use crate::types::{WaitAgentSessionSummary, WaitUntil};
+    use serde_json::Value;
 
-    struct NoopSessionManager;
-
-    #[async_trait]
-    impl lash::SessionManager for NoopSessionManager {
-        async fn snapshot_current(&self) -> Result<lash::SessionSnapshot, lash::PluginError> {
-            Ok(lash::PersistedSessionState::default())
-        }
-
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<lash::SessionSnapshot, lash::PluginError> {
-            Ok(lash::PersistedSessionState::default())
-        }
-
-        async fn tool_catalog(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
-            Ok(Vec::new())
-        }
-
-        async fn create_session(
-            &self,
-            request: lash::SessionCreateRequest,
-        ) -> Result<lash::SessionHandle, lash::PluginError> {
-            Ok(lash::SessionHandle {
-                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
-                parent_session_id: request.parent_session_id,
-                policy: request.policy.unwrap_or_default(),
-            })
-        }
-
-        async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
-            Ok(())
-        }
-
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            _input: lash::TurnInput,
-        ) -> Result<lash::SessionTurnHandle, lash::PluginError> {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            Ok(lash::SessionTurnHandle {
-                turn_id: format!("{session_id}-turn"),
-                session_id: session_id.to_string(),
-                policy: lash::SessionPolicy::default(),
-                events: rx,
-            })
-        }
-
-        async fn await_turn(
-            &self,
-            _turn_id: &str,
-        ) -> Result<lash::AssembledTurn, lash::PluginError> {
-            Err(lash::PluginError::Session("not used".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::PluginError> {
-            Ok(())
-        }
+    #[test]
+    fn normalize_agent_name_slugifies_mixed_case_and_hyphens() {
+        assert_eq!(normalize_agent_name("Task-Lifecycle Test").unwrap(), "task_lifecycle_test");
+        assert_eq!(normalize_agent_name("InspectAuth").unwrap(), "inspectauth");
+        assert_eq!(normalize_agent_name("foo__bar").unwrap(), "foo_bar");
     }
 
-    struct BlockingInjectManager {
-        started: Arc<tokio::sync::Notify>,
-        release: Arc<tokio::sync::Notify>,
+    #[test]
+    fn normalize_agent_name_rejects_empty_names() {
+        assert!(normalize_agent_name("---").is_err());
+        assert!(normalize_agent_name("").is_err());
     }
 
-    #[async_trait]
-    impl lash::SessionManager for BlockingInjectManager {
-        async fn snapshot_current(&self) -> Result<lash::PersistedSessionState, lash::PluginError> {
-            Ok(lash::PersistedSessionState::default())
-        }
-
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<lash::PersistedSessionState, lash::PluginError> {
-            Ok(lash::PersistedSessionState::default())
-        }
-
-        async fn tool_catalog(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
-            Ok(Vec::new())
-        }
-
-        async fn create_session(
-            &self,
-            request: lash::SessionCreateRequest,
-        ) -> Result<lash::plugin::SessionHandle, lash::PluginError> {
-            Ok(lash::plugin::SessionHandle {
-                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
-                parent_session_id: request.parent_session_id,
-                policy: request.policy.unwrap_or_default(),
-            })
-        }
-
-        async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
-            Ok(())
-        }
-
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            _input: lash::TurnInput,
-        ) -> Result<lash::SessionTurnHandle, lash::PluginError> {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            Ok(lash::SessionTurnHandle {
-                turn_id: format!("{session_id}-turn"),
-                session_id: session_id.to_string(),
-                policy: lash::SessionPolicy::default(),
-                events: rx,
-            })
-        }
-
-        async fn await_turn(
-            &self,
-            _turn_id: &str,
-        ) -> Result<lash::AssembledTurn, lash::PluginError> {
-            std::future::pending().await
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::PluginError> {
-            Ok(())
-        }
-
-        async fn inject_turn_input(
-            &self,
-            _session_id: &str,
-            _message: PluginMessage,
-        ) -> Result<(), lash::PluginError> {
-            self.started.notify_waiters();
-            self.release.notified().await;
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingStartManager {
-        inputs: StdMutex<Vec<TurnInput>>,
-    }
-
-    #[async_trait]
-    impl lash::SessionManager for RecordingStartManager {
-        async fn snapshot_current(&self) -> Result<lash::PersistedSessionState, lash::PluginError> {
-            Ok(lash::PersistedSessionState::default())
-        }
-
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<lash::PersistedSessionState, lash::PluginError> {
-            Ok(lash::PersistedSessionState::default())
-        }
-
-        async fn tool_catalog(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
-            Ok(Vec::new())
-        }
-
-        async fn create_session(
-            &self,
-            request: lash::SessionCreateRequest,
-        ) -> Result<lash::plugin::SessionHandle, lash::PluginError> {
-            Ok(lash::plugin::SessionHandle {
-                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
-                parent_session_id: request.parent_session_id,
-                policy: request.policy.unwrap_or_default(),
-            })
-        }
-
-        async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
-            Ok(())
-        }
-
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            input: lash::TurnInput,
-        ) -> Result<lash::SessionTurnHandle, lash::PluginError> {
-            self.inputs.lock().expect("inputs").push(input);
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            Ok(lash::SessionTurnHandle {
-                turn_id: format!("{session_id}-turn"),
-                session_id: session_id.to_string(),
-                policy: lash::SessionPolicy::default(),
-                events: rx,
-            })
-        }
-
-        async fn await_turn(
-            &self,
-            _turn_id: &str,
-        ) -> Result<lash::AssembledTurn, lash::PluginError> {
-            std::future::pending().await
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::PluginError> {
-            Ok(())
-        }
-    }
-
-    fn test_context() -> lash::ToolExecutionContext {
-        test_context_with_host(Arc::new(NoopSessionManager))
-    }
-
-    fn test_context_with_host(host: Arc<dyn lash::SessionManager>) -> lash::ToolExecutionContext {
-        test_context_for_session("root", host)
-    }
-
-    fn test_context_for_session(
-        session_id: &str,
-        host: Arc<dyn lash::SessionManager>,
-    ) -> lash::ToolExecutionContext {
-        lash::ToolExecutionContext {
-            session_id: session_id.to_string(),
-            host,
-            cancellation_token: None,
-            async_task_id: None,
-        }
-    }
-
-    fn test_agent(
-        session_id: &str,
-        parent_path: Option<&str>,
-        active_turn: Option<ActiveTurn>,
-    ) -> AgentRecord {
-        AgentRecord {
-            session_id: session_id.to_string(),
-            parent_session_id: parent_path.map(|_| "root".to_string()),
-            parent_path: parent_path.map(str::to_string),
-            capability: parent_path.map(|_| "low".to_string()),
-            model: "mock-model".to_string(),
-            model_variant: None,
-            active_turn,
-            queued_turns: VecDeque::new(),
-            closing: false,
-            last_task_state: None,
-            owner_session_id: "root".to_string(),
-        }
-    }
-
-    fn test_completed_event(path: &str) -> WaitAgentEvent {
-        WaitAgentEvent::TaskCompleted {
-            target: path.to_string(),
-            task: "work".to_string(),
-            status: "completed".to_string(),
-            result: Value::String("done".to_string()),
-            error: None,
-            session: WaitAgentSessionSummary {
-                id: "worker-session".to_string(),
-                parent_session_id: Some("root".to_string()),
-                task: "work".to_string(),
-                iterations: 1,
-                tool_calls: 0,
-                model: "mock-model".to_string(),
-                model_variant: None,
-                token_usage: json!({
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cached_input_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "total_tokens": 0,
-                }),
-            },
-        }
-    }
-
-    fn seed_started_worker(host: &LocalSubagentHost) {
-        let mut state = host.state_lock().expect("state");
+    #[test]
+    fn queue_event_task_started_purges_stale_completion_for_same_agent_name() {
         let mut tree = AgentTree::default();
-        tree.agents
-            .insert("/root".to_string(), test_agent("root", None, None));
-        tree.agents.insert(
-            "/root/worker".to_string(),
-            test_agent(
-                "worker-session",
-                Some("/root"),
-                Some(ActiveTurn {
-                    kind: ActiveTurnKind::Task {
-                        task: "work".to_string(),
-                    },
-                    turn_id: "turn-1".to_string(),
-                }),
-            ),
-        );
-        tree.events.push_back(WaitAgentEvent::TaskStarted {
-            target: "/root/worker".to_string(),
-            task: "work".to_string(),
-            session_id: "worker-session".to_string(),
-            capability: "low".to_string(),
-            model: "mock-model".to_string(),
-            model_variant: None,
-        });
-        state.trees.insert("root".to_string(), tree);
-        state.session_agents.insert(
-            "root".to_string(),
-            AgentLocator {
-                root_session_id: "root".to_string(),
-                path: "/root".to_string(),
+        LocalSubagentHost::queue_event(
+            &mut tree,
+            WaitAgentEvent::TaskCompleted {
+                agent_name: "worker".to_string(),
+                parent_session_id: "root".to_string(),
+                task: "old".to_string(),
+                status: "completed".to_string(),
+                result: Value::Null,
+                error: None,
             },
         );
-        state.session_agents.insert(
-            "worker-session".to_string(),
-            AgentLocator {
-                root_session_id: "root".to_string(),
-                path: "/root/worker".to_string(),
+        LocalSubagentHost::queue_event(
+            &mut tree,
+            WaitAgentEvent::AgentClosed {
+                agent_name: "worker".to_string(),
+                parent_session_id: "root".to_string(),
             },
         );
-    }
-
-    #[test]
-    fn slugifies_mixed_case_and_hyphens() {
-        assert_eq!(
-            validate_segment("Task-Lifecycle Test").unwrap(),
-            "task_lifecycle_test"
+        LocalSubagentHost::queue_event(
+            &mut tree,
+            WaitAgentEvent::TaskCompleted {
+                agent_name: "other".to_string(),
+                parent_session_id: "root".to_string(),
+                task: "done".to_string(),
+                status: "completed".to_string(),
+                result: Value::Null,
+                error: None,
+            },
         );
-        assert_eq!(validate_segment("InspectAuth").unwrap(), "inspectauth");
-        assert_eq!(validate_segment("foo__bar").unwrap(), "foo_bar");
-        assert_eq!(validate_segment("foo-").unwrap(), "foo");
-    }
-
-    #[test]
-    fn rejects_segment_with_no_alphanumerics() {
-        assert!(validate_segment("---").is_err());
-        assert!(validate_segment("").is_err());
-    }
-
-    #[test]
-    fn passes_through_already_valid_segment() {
-        assert_eq!(validate_segment("foo_bar").unwrap(), "foo_bar");
-    }
-
-    #[test]
-    fn normalize_relative_path_handles_multiple_segments() {
-        assert_eq!(
-            normalize_relative_path("Auth Flow/Stage 1").unwrap(),
-            "auth_flow/stage_1"
-        );
-    }
-
-    #[test]
-    fn wait_until_defaults_to_task_completed() {
-        assert_eq!(WaitUntil::parse(None).unwrap(), WaitUntil::TaskCompleted);
-        assert_eq!(
-            WaitUntil::parse(Some("task_completed")).unwrap(),
-            WaitUntil::TaskCompleted
-        );
-        assert!(WaitUntil::parse(Some("started")).is_err());
-    }
-
-    #[tokio::test]
-    async fn wait_agent_does_not_complete_on_task_started_only() {
-        let host = LocalSubagentHost::default();
-        seed_started_worker(&host);
-
-        let response = host
-            .wait_agent(
-                &test_context(),
-                WaitAgentRequest {
-                    targets: vec!["/root/worker".to_string()],
-                    until: WaitUntil::TaskCompleted,
-                    timeout_ms: Some(1),
-                },
-            )
-            .await
-            .expect("wait response");
-
-        assert!(response.timed_out);
-        assert!(response.events.is_empty());
-        assert!(response.completed.is_empty());
-        assert_eq!(response.pending, vec!["/root/worker"]);
-    }
-
-    #[tokio::test]
-    async fn wait_agent_defaults_to_task_completion_not_message() {
-        let host = LocalSubagentHost::default();
-        seed_started_worker(&host);
-        {
-            let mut state = host.state_lock().expect("state");
-            let tree = state.trees.get_mut("root").expect("tree");
-            LocalSubagentHost::queue_event(
-                tree,
-                WaitAgentEvent::Message {
-                    from: "/root/worker".to_string(),
-                    to: "/root".to_string(),
-                    message: "progress".to_string(),
-                },
-            );
-        }
-
-        let response = host
-            .wait_agent(
-                &test_context(),
-                WaitAgentRequest {
-                    targets: vec!["/root/worker".to_string()],
-                    until: WaitUntil::TaskCompleted,
-                    timeout_ms: Some(1),
-                },
-            )
-            .await
-            .expect("wait response");
-
-        assert!(response.timed_out);
-        assert!(response.events.is_empty());
-        assert!(response.completed.is_empty());
-        assert_eq!(response.pending, vec!["/root/worker"]);
-    }
-
-    #[tokio::test]
-    async fn wait_agent_message_target_ignores_callers_outbound_echo() {
-        let host = LocalSubagentHost::default();
-        seed_started_worker(&host);
-        {
-            let mut state = host.state_lock().expect("state");
-            let tree = state.trees.get_mut("root").expect("tree");
-            LocalSubagentHost::queue_event(
-                tree,
-                WaitAgentEvent::Message {
-                    from: "/root".to_string(),
-                    to: "/root/worker".to_string(),
-                    message: "outbound".to_string(),
-                },
-            );
-        }
-
-        let response = host
-            .wait_agent(
-                &test_context(),
-                WaitAgentRequest {
-                    targets: vec!["/root/worker".to_string()],
-                    until: WaitUntil::Message,
-                    timeout_ms: Some(1),
-                },
-            )
-            .await
-            .expect("wait response");
-
-        assert!(response.timed_out);
-        assert!(response.events.is_empty());
-        assert_eq!(response.pending, vec!["/root/worker"]);
-    }
-
-    #[tokio::test]
-    async fn wait_agent_message_recipient_receives_inbound_message() {
-        let host = LocalSubagentHost::default();
-        seed_started_worker(&host);
-        {
-            let mut state = host.state_lock().expect("state");
-            let tree = state.trees.get_mut("root").expect("tree");
-            LocalSubagentHost::queue_event(
-                tree,
-                WaitAgentEvent::Message {
-                    from: "/root".to_string(),
-                    to: "/root/worker".to_string(),
-                    message: "inbound".to_string(),
-                },
-            );
-        }
-
-        let response = host
-            .wait_agent(
-                &test_context_for_session("worker-session", Arc::new(NoopSessionManager)),
-                WaitAgentRequest {
-                    targets: Vec::new(),
-                    until: WaitUntil::Message,
-                    timeout_ms: Some(1),
-                },
-            )
-            .await
-            .expect("wait response");
-
-        assert!(!response.timed_out);
-        assert_eq!(
-            response
-                .messages
-                .first()
-                .map(|message| message.message.as_str()),
-            Some("inbound")
-        );
-        assert_eq!(response.pending, vec!["/root/worker"]);
-    }
-
-    #[tokio::test]
-    async fn wait_agent_returns_started_with_later_completion() {
-        let host = LocalSubagentHost::default();
-        seed_started_worker(&host);
-        let notifier = {
-            let state = host.state_lock().expect("state");
-            state.trees.get("root").expect("tree").notify.clone()
-        };
-        let finishing_host = host.clone();
-
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let mut state = finishing_host.state_lock().expect("state");
-            let tree = state.trees.get_mut("root").expect("tree");
-            LocalSubagentHost::queue_event(tree, test_completed_event("/root/worker"));
-            notifier.notify_waiters();
-        });
-
-        let response = host
-            .wait_agent(
-                &test_context(),
-                WaitAgentRequest {
-                    targets: vec!["/root/worker".to_string()],
-                    until: WaitUntil::TaskCompleted,
-                    timeout_ms: Some(500),
-                },
-            )
-            .await
-            .expect("wait response");
-
-        assert!(!response.timed_out);
-        assert_eq!(response.events.len(), 1);
-        assert!(matches!(
-            response.events[0],
-            WaitAgentEvent::TaskCompleted { .. }
-        ));
-        assert_eq!(
-            response
-                .completed
-                .first()
-                .map(|completion| &completion.result),
-            Some(&Value::String("done".to_string()))
-        );
-        assert!(response.pending.is_empty());
-    }
-
-    #[tokio::test]
-    async fn wait_agent_reports_completed_and_pending_targets() {
-        let host = LocalSubagentHost::default();
-        seed_started_worker(&host);
-        {
-            let mut state = host.state_lock().expect("state");
-            let tree = state.trees.get_mut("root").expect("tree");
-            tree.agents.insert(
-                "/root/other".to_string(),
-                test_agent(
-                    "other-session",
-                    Some("/root"),
-                    Some(ActiveTurn {
-                        kind: ActiveTurnKind::Task {
-                            task: "other".to_string(),
-                        },
-                        turn_id: "turn-2".to_string(),
-                    }),
-                ),
-            );
-            LocalSubagentHost::queue_event(tree, test_completed_event("/root/worker"));
-        }
-
-        let response = host
-            .wait_agent(
-                &test_context(),
-                WaitAgentRequest {
-                    targets: vec!["/root/worker".to_string(), "/root/other".to_string()],
-                    until: WaitUntil::TaskCompleted,
-                    timeout_ms: Some(1),
-                },
-            )
-            .await
-            .expect("wait response");
-
-        assert!(!response.timed_out);
-        assert_eq!(response.completed.len(), 1);
-        assert_eq!(response.completed[0].target, "/root/worker");
-        assert_eq!(response.pending, vec!["/root/other"]);
-    }
-
-    #[tokio::test]
-    async fn wait_agent_any_event_keeps_intermediate_events() {
-        let host = LocalSubagentHost::default();
-        seed_started_worker(&host);
-
-        let response = host
-            .wait_agent(
-                &test_context(),
-                WaitAgentRequest {
-                    targets: vec!["/root/worker".to_string()],
-                    until: WaitUntil::AnyEvent,
-                    timeout_ms: Some(1),
-                },
-            )
-            .await
-            .expect("wait response");
-
-        assert!(!response.timed_out);
-        assert_eq!(response.events.len(), 1);
-        assert!(matches!(
-            response.events[0],
-            WaitAgentEvent::TaskStarted { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn send_message_next_possible_does_not_wait_for_active_target_injection() {
-        let host = LocalSubagentHost::default();
-        seed_started_worker(&host);
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let context = test_context_with_host(Arc::new(BlockingInjectManager {
-            started: Arc::clone(&started),
-            release: Arc::clone(&release),
-        }));
-
-        let response = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            host.send_message(
-                &context,
-                SendMessageRequest {
-                    target: "/root/worker".to_string(),
-                    message: "status?".to_string(),
-                    delivery: DeliveryMode::NextPossible,
-                },
-            ),
-        )
-        .await
-        .expect("send_message should not wait for injection")
-        .expect("send response");
-
-        assert_eq!(response.status, "delivering");
-        tokio::time::timeout(std::time::Duration::from_millis(50), started.notified())
-            .await
-            .expect("injection attempted in background");
-        release.notify_waiters();
-    }
-
-    #[tokio::test]
-    async fn send_message_wakes_idle_subagent_with_message_turn() {
-        let host = LocalSubagentHost::default();
-        {
-            let mut state = host.state_lock().expect("state");
-            let mut tree = AgentTree::default();
-            tree.agents
-                .insert("/root".to_string(), test_agent("root", None, None));
-            tree.agents.insert(
-                "/root/worker".to_string(),
-                test_agent("worker-session", Some("/root"), None),
-            );
-            state.trees.insert("root".to_string(), tree);
-            state.session_agents.insert(
-                "root".to_string(),
-                AgentLocator {
-                    root_session_id: "root".to_string(),
-                    path: "/root".to_string(),
-                },
-            );
-        }
-        let manager = Arc::new(RecordingStartManager::default());
-        let context = test_context_with_host(manager.clone());
-
-        let response = host
-            .send_message(
-                &context,
-                SendMessageRequest {
-                    target: "/root/worker".to_string(),
-                    message: "new note".to_string(),
-                    delivery: DeliveryMode::NextPossible,
-                },
-            )
-            .await
-            .expect("send response");
-
-        assert_eq!(response.status, "started");
-        let response = host
-            .list_agents(&context, ListAgentsRequest { path_prefix: None })
-            .await
-            .expect("list response");
-        let worker = response
-            .agents
-            .iter()
-            .find(|agent| agent.target == "/root/worker")
-            .expect("worker");
-        assert_eq!(worker.agent_state, "running");
-        assert_eq!(worker.current_task, None);
-        assert_eq!(worker.queued_messages, 0);
-
-        let inputs = manager.inputs.lock().expect("inputs");
-        assert_eq!(inputs.len(), 1);
-        let InputItem::Text { text } = &inputs[0].items[0] else {
-            panic!("expected text input");
-        };
-        assert!(text.contains("## Message from /root"));
-        assert!(text.contains("new note"));
-    }
-
-    #[tokio::test]
-    async fn followup_task_next_turn_queues_without_waking_idle_agent() {
-        let host = LocalSubagentHost::default();
-        {
-            let mut state = host.state_lock().expect("state");
-            let mut tree = AgentTree::default();
-            tree.agents
-                .insert("/root".to_string(), test_agent("root", None, None));
-            tree.agents.insert(
-                "/root/worker".to_string(),
-                test_agent("worker-session", Some("/root"), None),
-            );
-            state.trees.insert("root".to_string(), tree);
-            state.session_agents.insert(
-                "root".to_string(),
-                AgentLocator {
-                    root_session_id: "root".to_string(),
-                    path: "/root".to_string(),
-                },
-            );
-        }
-
-        let response = host
-            .followup_task(
-                &test_context(),
-                FollowupTaskRequest {
-                    target: "/root/worker".to_string(),
-                    task: "later".to_string(),
-                    turn_input: TurnInput {
-                        items: vec![InputItem::Text {
-                            text: "later".to_string(),
-                        }],
-                        image_blobs: HashMap::new(),
-                        user_input: None,
-                        mode: None,
-                        mode_turn_options: None,
-                    },
-                    delivery: DeliveryMode::NextTurn,
-                },
-            )
-            .await
-            .expect("followup response");
-
-        assert_eq!(response.status, "queued");
-        let listed = host
-            .list_agents(&test_context(), ListAgentsRequest { path_prefix: None })
-            .await
-            .expect("list response");
-        let worker = listed
-            .agents
-            .iter()
-            .find(|agent| agent.target == "/root/worker")
-            .expect("worker");
-        assert_eq!(worker.agent_state, "idle");
-        assert_eq!(worker.queued_tasks, 1);
-    }
-
-    #[tokio::test]
-    async fn list_agents_separates_agent_state_from_last_task_state() {
-        let host = LocalSubagentHost::default();
-        {
-            let mut state = host.state_lock().expect("state");
-            let mut tree = AgentTree::default();
-            tree.agents
-                .insert("/root".to_string(), test_agent("root", None, None));
-            let mut worker = test_agent("worker-session", Some("/root"), None);
-            worker.last_task_state = Some("completed".to_string());
-            tree.agents.insert("/root/worker".to_string(), worker);
-            state.trees.insert("root".to_string(), tree);
-            state.session_agents.insert(
-                "root".to_string(),
-                AgentLocator {
-                    root_session_id: "root".to_string(),
-                    path: "/root".to_string(),
-                },
-            );
-        }
-
-        let response = host
-            .list_agents(&test_context(), ListAgentsRequest { path_prefix: None })
-            .await
-            .expect("list response");
-        let worker = response
-            .agents
-            .iter()
-            .find(|agent| agent.target == "/root/worker")
-            .expect("worker agent");
-
-        assert_eq!(worker.agent_state, "idle");
-        assert_eq!(worker.current_task_state, None);
-        assert_eq!(worker.last_task_state.as_deref(), Some("completed"));
-        assert_eq!(worker.task_id, "subagent:/root/worker");
-    }
-
-    /// Regression: `followup_task` on an idle agent used to leave the
-    /// prior `TaskCompleted` in the per-tree event queue, so the next
-    /// `wait_agent` drained that stale event and returned immediately
-    /// instead of waiting for the follow-up. Queueing a new
-    /// `TaskStarted` for a target must purge any stale terminal events
-    /// for that target.
-    #[test]
-    fn queue_event_task_started_purges_stale_completion_for_same_target() {
-        let mut tree = AgentTree::default();
-        tree.events.push_back(test_completed_event("/root/worker"));
-        tree.events.push_back(WaitAgentEvent::AgentClosed {
-            target: "/root/worker".to_string(),
-        });
-        // Events for a different agent must NOT be purged.
-        tree.events.push_back(test_completed_event("/root/other"));
-
         LocalSubagentHost::queue_event(
             &mut tree,
             WaitAgentEvent::TaskStarted {
-                target: "/root/worker".to_string(),
-                task: "follow-up".to_string(),
+                agent_name: "worker".to_string(),
+                parent_session_id: "root".to_string(),
+                task: "new".to_string(),
                 session_id: "worker-session".to_string(),
-                capability: "low".to_string(),
-                model: "mock-model".to_string(),
-                model_variant: None,
             },
         );
 
-        let remaining: Vec<_> = tree
+        let remaining = tree
             .events
             .iter()
             .map(|event| match event {
-                WaitAgentEvent::TaskCompleted { target, .. } => format!("completed:{target}"),
-                WaitAgentEvent::AgentClosed { target } => format!("closed:{target}"),
-                WaitAgentEvent::TaskStarted { target, .. } => format!("started:{target}"),
-                WaitAgentEvent::Message { from, to, .. } => format!("message:{from}->{to}"),
+                WaitAgentEvent::TaskCompleted { agent_name, .. } => format!("completed:{agent_name}"),
+                WaitAgentEvent::AgentClosed { agent_name, .. } => format!("closed:{agent_name}"),
+                WaitAgentEvent::TaskStarted { agent_name, .. } => format!("started:{agent_name}"),
+                WaitAgentEvent::Message { from_agent, to_agent, .. } => {
+                    format!("message:{from_agent}->{to_agent}")
+                }
             })
-            .collect();
+            .collect::<Vec<_>>();
 
-        assert_eq!(
-            remaining,
-            vec![
-                "completed:/root/other".to_string(),
-                "started:/root/worker".to_string(),
-            ],
-            "stale terminal events for /root/worker should be purged; \
-             events for other agents must survive",
-        );
+        assert_eq!(remaining, vec!["completed:other", "started:worker"]);
     }
 }

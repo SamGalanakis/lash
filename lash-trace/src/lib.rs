@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -11,7 +11,21 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "otel")]
 pub mod otel;
 
-pub const TRACE_SCHEMA_VERSION: u32 = 1;
+pub const TRACE_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceLevel {
+    #[default]
+    Standard,
+    Extended,
+}
+
+impl TraceLevel {
+    pub fn is_extended(self) -> bool {
+        matches!(self, Self::Extended)
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceContext {
@@ -117,6 +131,12 @@ pub enum TraceEvent {
         error: TraceError,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream_summary: Option<Value>,
+    },
+    ProviderStreamEvent {
+        event: TraceProviderStreamEvent,
+    },
+    RuntimeStreamEvent {
+        event: TraceRuntimeStreamEvent,
     },
     ToolCallStarted {
         call_id: Option<String>,
@@ -240,6 +260,45 @@ pub struct TraceLlmResponse {
     pub parts: Option<Value>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TraceProviderStreamEvent {
+    pub provider: String,
+    pub sequence: u64,
+    pub elapsed_ms: u64,
+    pub event_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<i64>,
+    pub raw_len: usize,
+    pub raw_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_json: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TraceRuntimeStreamEvent {
+    pub sequence: u64,
+    pub elapsed_ms: u64,
+    pub event_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_json: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TraceTokenUsage>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceTokenUsage {
     pub input_tokens: i64,
@@ -263,8 +322,22 @@ pub struct TraceError {
     pub raw: Option<String>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum TraceSinkError {
+    #[error("failed to serialize trace record: {0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error("trace sink lock poisoned")]
+    LockPoisoned,
+    #[error("failed to create trace directory {path}: {source}")]
+    CreateDir { path: PathBuf, source: io::Error },
+    #[error("failed to open trace file {path}: {source}")]
+    Open { path: PathBuf, source: io::Error },
+    #[error("failed to write trace file {path}: {source}")]
+    Write { path: PathBuf, source: io::Error },
+}
+
 pub trait TraceSink: Send + Sync {
-    fn append(&self, record: &TraceRecord);
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError>;
 }
 
 pub struct JsonlTraceSink {
@@ -286,19 +359,29 @@ impl JsonlTraceSink {
 }
 
 impl TraceSink for JsonlTraceSink {
-    fn append(&self, record: &TraceRecord) {
-        let Ok(line) = serde_json::to_string(record) else {
-            return;
-        };
-        let file = OpenOptions::new()
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
+        let line = serde_json::to_string(record)?;
+        let _guard = self.lock.lock().map_err(|_| TraceSinkError::LockPoisoned)?;
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|source| TraceSinkError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path);
-        let Ok(mut file) = file else {
-            return;
-        };
-        let _guard = self.lock.lock().ok();
-        let _ = writeln!(file, "{line}");
+            .open(&self.path)
+            .map_err(|source| TraceSinkError::Open {
+                path: self.path.clone(),
+                source,
+            })?;
+        writeln!(file, "{line}").map_err(|source| TraceSinkError::Write {
+            path: self.path.clone(),
+            source,
+        })
     }
 }
 
@@ -328,7 +411,8 @@ mod tests {
                 name: "test.event".to_string(),
                 payload: serde_json::json!({"ok": true}),
             },
-        ));
+        ))
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"type\":\"custom\""));
         assert!(text.contains("\"session_id\":\"root\""));
@@ -362,5 +446,33 @@ mod tests {
         let completed_json = serde_json::to_value(completed).unwrap();
         assert_eq!(completed_json["type"], "turn_completed");
         assert_eq!(completed_json["handoff"]["successor_session_id"], "child-1");
+    }
+
+    #[test]
+    fn jsonl_sink_creates_parent_directories() {
+        let dir = std::env::temp_dir().join(format!("lash-trace-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("nested").join("trace.jsonl");
+        let sink = JsonlTraceSink::new(&path);
+        sink.append(&TraceRecord::new(
+            TraceContext::default().for_session("root"),
+            TraceEvent::RuntimeStreamEvent {
+                event: TraceRuntimeStreamEvent {
+                    sequence: 1,
+                    elapsed_ms: 0,
+                    event_name: "delta".to_string(),
+                    raw_text: Some("hello".to_string()),
+                    visible_text: Some("hello".to_string()),
+                    item_id: None,
+                    output_index: None,
+                    call_id: None,
+                    tool_name: None,
+                    input_json: None,
+                    usage: None,
+                },
+            },
+        ))
+        .unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

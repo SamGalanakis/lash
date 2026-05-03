@@ -722,6 +722,9 @@ pub(crate) async fn sync_ui_extensions(
     session_manager: Arc<dyn SessionManager>,
 ) {
     let session_id = app.session_id.clone();
+    if let Ok(tasks) = session_manager.list_background_tasks(&session_id).await {
+        app.update_background_tasks(tasks);
+    }
     match ui_extensions
         .sync_all(UiContext {
             plugin_host,

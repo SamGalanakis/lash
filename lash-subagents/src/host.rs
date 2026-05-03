@@ -21,16 +21,25 @@ use async_trait::async_trait;
 pub use crate::local::LocalSubagentHost;
 pub use crate::routing::truncate_snapshot_to_recent_turns;
 pub use crate::types::{
-    AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode, FollowupTaskRequest,
-    FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse, SendMessageRequest,
-    SendMessageResponse, SessionAgentInfo, SpawnAgentRequest, SpawnAgentResponse, WaitAgentClosed,
-    WaitAgentCompletion, WaitAgentEvent, WaitAgentMessage, WaitAgentRequest, WaitAgentResponse,
-    WaitAgentSessionSummary, WaitUntil,
+    AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode,
+    FollowupTaskRequest, FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse,
+    SendMessageRequest, SendMessageResponse, SpawnAgentRequest, SpawnAgentResponse,
+    WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent, WaitAgentMessage, WaitAgentRequest,
+    WaitAgentResponse, WaitUntil,
 };
 
 #[async_trait]
 pub trait SubagentHost: Send + Sync {
-    fn session_info(&self, session_id: &str) -> Option<SessionAgentInfo>;
+    /// Return display-only metadata about a direct child agent.
+    ///
+    /// UI consumers (the activity projector) call this to fetch model name,
+    /// capability, run state, and per-completion stats for the dock without
+    /// needing those fields to live on the model-facing wire shapes.
+    /// Returns `None` if no direct child exists with `agent_name`.
+    fn agent_metadata(&self, session_id: &str, agent_name: &str) -> Option<AgentMetadata> {
+        let _ = (session_id, agent_name);
+        None
+    }
 
     async fn spawn_agent(
         &self,
