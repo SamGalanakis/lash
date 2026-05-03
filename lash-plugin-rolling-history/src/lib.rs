@@ -22,7 +22,7 @@ use lash::plugin::{
     DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
     HistoryError, HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory,
     PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
-    SessionCreateRequest, SessionManager, SessionPlugin, SessionPluginMode, SessionStartPoint,
+    SessionCreateRequest, SessionPlugin, SessionPluginMode, SessionStartPoint,
     TurnContextTransform, TurnTransformContext,
 };
 use lash::session_model::context::PreparedContext;
@@ -529,7 +529,7 @@ async fn summarize_compaction_prefix(
     state: &SessionStateEnvelope,
     prefix_messages: Vec<Message>,
     instructions: Option<&str>,
-    host: Arc<dyn SessionManager>,
+    host: Arc<dyn lash::HistoryHost>,
 ) -> Result<Option<String>, HistoryError> {
     if prefix_messages.is_empty() {
         return Ok(None);
@@ -544,9 +544,9 @@ async fn summarize_compaction_prefix(
     snapshot.last_prompt_usage = None;
     let previous_summary = extract_previous_summary(&messages);
     let referenced = referenced_tool_call_ids(&messages);
-    let projection = state.shared_projection();
-    let tool_calls = projection
-        .tool_calls
+    let read_view = state.read_view();
+    let tool_calls = read_view
+        .tool_calls()
         .iter()
         .filter(|record| {
             record
@@ -556,7 +556,7 @@ async fn summarize_compaction_prefix(
         })
         .cloned()
         .collect::<Vec<_>>();
-    snapshot.replace_projection(&messages, &tool_calls);
+    snapshot.replace_active_read_state(&messages, &tool_calls);
 
     let compaction_session_id = format!("{session_id}-compaction");
     let mut policy = snapshot.policy.clone();
@@ -652,7 +652,7 @@ async fn compact_messages_core(
     state: &SessionStateEnvelope,
     messages: &[Message],
     instructions: Option<&str>,
-    host: Arc<dyn SessionManager>,
+    host: Arc<dyn lash::HistoryHost>,
 ) -> Result<Option<Vec<Message>>, HistoryError> {
     let prefix_len = leading_system_prefix_len(messages);
     let cut_point = find_compaction_cut_point(messages, prefix_len);
@@ -954,14 +954,18 @@ async fn handle_compact_command(
         .snapshot_session(&session_id)
         .await
         .map_err(|err| PluginError::Session(format!("compact: snapshot failed: {err}")))?;
-    let input = HistoryState::from_state(&state.export_state());
+    let input = HistoryState {
+        messages: state.read_view().messages().to_vec(),
+        tool_calls: state.read_view().tool_calls().to_vec(),
+        metadata: Default::default(),
+    };
     let ctx = RewriteContext {
         session_id: session_id.clone(),
         trigger: RewriteTrigger::Manual {
             instructions: argument,
         },
         state: state.read_view(),
-        host: Arc::clone(&host),
+        host: host.clone(),
     };
     // Run only the rolling rewriter for now — invoking the full chain
     // via PluginSession::rewrite_history would require looking the
@@ -1029,9 +1033,14 @@ mod tests {
                 kind: PartKind::Image,
                 content: String::new(),
                 attachment: Some(lash::session_model::message::PartAttachment {
-                    mime: "image/png".to_string(),
-                    url: lash::session_model::message::data_url_for_bytes("image/png", bytes),
-                    filename: None,
+                    reference: lash::AttachmentRef {
+                        id: lash::AttachmentId::new(format!("{id}-att")),
+                        media_type: lash::MediaType::Image(lash::ImageMediaType::Png),
+                        byte_len: bytes.len() as u64,
+                        width: None,
+                        height: None,
+                        label: None,
+                    },
                 }),
                 tool_call_id: None,
                 tool_name: None,
@@ -1110,7 +1119,7 @@ mod tests {
         state: SessionStateEnvelope,
         prompt_usage: Option<PromptUsage>,
         max_context_tokens: Option<usize>,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn lash::HistoryHost>,
     ) -> TurnTransformContext {
         TurnTransformContext {
             session_id: session_id.to_string(),
@@ -1173,9 +1182,9 @@ mod tests {
             policy: SessionPolicy::default(),
             ..Default::default()
         };
-        state.replace_projection(&messages, &tool_calls);
+        state.replace_active_read_state(&messages, &tool_calls);
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
-        let host: Arc<dyn SessionManager> = Arc::new(mock_manager());
+        let host: Arc<dyn lash::HistoryHost> = Arc::new(mock_manager());
         let ctx = build_turn_ctx(
             "root",
             state,
@@ -1215,7 +1224,7 @@ mod tests {
         ];
 
         let state = SessionStateEnvelope::default();
-        let host: Arc<dyn SessionManager> = Arc::new(mock_manager());
+        let host: Arc<dyn lash::HistoryHost> = Arc::new(mock_manager());
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let ctx = build_turn_ctx(
             "root",
@@ -1248,7 +1257,7 @@ mod tests {
     #[tokio::test]
     async fn rolling_turn_transform_replaces_prefix_with_summary() {
         let manager = Arc::new(mock_manager());
-        let host: Arc<dyn SessionManager> = manager.clone();
+        let host: Arc<dyn lash::HistoryHost> = manager.clone();
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let state = SessionStateEnvelope {
             session_id: "root".to_string(),

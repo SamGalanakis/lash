@@ -11,9 +11,9 @@ pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use parser::{ParseError, parse};
 pub use runtime::{
     CompileStats, CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats,
-    ExecutionOutcome, ExecutionScratch, LASH_TYPE_KEY, ProfileReport, ProfileStat, Record,
-    RuntimeError, RuntimeFailure, Snapshot, State, ToolHost, ToolHostError, Value, compile_program,
-    compile_source, execute_compiled, execute_compiled_traced,
+    ExecutionOutcome, ExecutionScratch, ImageValue, LASH_TYPE_KEY, ProfileReport, ProfileStat,
+    Record, RuntimeError, RuntimeFailure, Snapshot, State, ToolHost, ToolHostError, Value,
+    compile_program, compile_source, execute_compiled, execute_compiled_traced,
     execute_compiled_traced_with_scratch, execute_compiled_with_scratch, execute_program, prewarm,
     profile_compiled, profile_compiled_with_scratch, unwrap_type_value,
 };

@@ -46,7 +46,7 @@ const LONGCOT_USER_DIRECTIVE: &str = concat!(
     "Solve the LongCoT problem bound as `input.prompt`. ",
     "Its length is reported in the Bound Variables section — decide how much of it to pull into context at once and use lashlang (slicing, `spawn_agent`, etc.) to decompose if helpful. ",
     "Follow every instruction in the problem exactly, including any ban on tools or code beyond what you need to inspect the input. ",
-    "End with plain prose (no fenced block) whose final line is exactly `solution = <value>` matching the shape the problem specifies; emit nothing after that line."
+    "End by calling `submit <string>` from a fenced `lashlang` block, where the submitted string's final line is exactly `solution = <value>` matching the shape the problem specifies."
 );
 
 // Defaults. GPT-5.2 (`openai/gpt-5.2` via OpenRouter's OpenAI-

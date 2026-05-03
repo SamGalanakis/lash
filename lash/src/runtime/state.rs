@@ -34,26 +34,34 @@ pub struct SessionStateEnvelope {
 }
 
 impl SessionStateEnvelope {
-    pub fn shared_projection(&self) -> crate::SessionProjection {
-        self.session_graph.shared_projection()
+    pub(crate) fn read_model(&self) -> crate::session_graph::SessionReadModel {
+        self.session_graph.read_model()
     }
 
-    pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn replace_active_read_state(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         self.session_graph
-            .merge_active_projection(messages, tool_calls);
+            .replace_active_read_state(messages, tool_calls);
     }
 
-    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
-        self.session_graph.replace_tool_call_projection(tool_calls);
+    pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
+        self.session_graph.replace_active_tool_calls(tool_calls);
     }
 
-    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn append_active_read_delta(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         self.session_graph
-            .append_projection_delta(messages, tool_calls);
+            .append_active_read_delta(messages, tool_calls);
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
-        crate::SessionReadView::from_state(self)
+        crate::SessionReadView::from_exported_state(self)
     }
 }
 
@@ -190,29 +198,37 @@ impl PersistedSessionState {
         super::usage::SessionUsageReport::from_entries(&self.token_ledger)
     }
 
-    pub fn shared_projection(&self) -> crate::SessionProjection {
-        self.session_graph.shared_projection()
+    pub(crate) fn read_model(&self) -> crate::session_graph::SessionReadModel {
+        self.session_graph.read_model()
     }
 
-    pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn replace_active_read_state(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         self.session_graph
-            .merge_active_projection(messages, tool_calls);
+            .replace_active_read_state(messages, tool_calls);
         self.graph_replace_required = false;
     }
 
-    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
-        self.session_graph.replace_tool_call_projection(tool_calls);
+    pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
+        self.session_graph.replace_active_tool_calls(tool_calls);
         self.graph_replace_required = false;
     }
 
-    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn append_active_read_delta(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         self.session_graph
-            .append_projection_delta(messages, tool_calls);
+            .append_active_read_delta(messages, tool_calls);
     }
 
-    pub fn append_projected_conversation_messages(&mut self, messages: &[Message]) {
+    pub fn append_active_conversation_messages(&mut self, messages: &[Message]) {
         self.session_graph
-            .append_projected_conversation_messages(messages);
+            .append_active_conversation_messages(messages);
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
@@ -256,6 +272,12 @@ impl PersistedSessionState {
         self.execution_state_ref = result.manifest.execution_state_ref;
         self.persisted_graph_node_count = result.persisted_graph_node_count;
         self.graph_replace_required = false;
+        self.dynamic_state_snapshot = None;
+        self.plugin_snapshot = None;
+        self.execution_state_snapshot = None;
+    }
+
+    pub fn discard_runtime_snapshots(&mut self) {
         self.dynamic_state_snapshot = None;
         self.plugin_snapshot = None;
         self.execution_state_snapshot = None;
@@ -384,55 +406,12 @@ pub(super) fn apply_session_head(
     apply_persisted_session_config(&mut state.policy, &head.config);
 }
 
-pub(super) async fn persist_runtime_state(
-    store: &(dyn crate::store::RuntimePersistence + '_),
-    state: &mut PersistedSessionState,
-) {
-    match commit_runtime_state(store, state, &[]).await {
-        Ok(()) => {}
-        Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
-    }
-}
-
-pub(super) async fn commit_runtime_state(
-    store: &(dyn crate::store::RuntimePersistence + '_),
-    state: &mut PersistedSessionState,
-    usage_deltas: &[crate::TokenLedgerEntry],
-) -> Result<(), crate::store::StoreError> {
-    let commit = crate::store::PersistedStateCommit::persisted_state(state, usage_deltas);
-    let result = crate::store::apply_runtime_commit(store, commit).await?;
-    state.apply_persisted_commit_result(result);
-    Ok(())
-}
-
-pub(super) async fn commit_runtime_state_with_graph_commit(
-    store: &(dyn crate::store::RuntimePersistence + '_),
-    state: &mut PersistedSessionState,
-    graph: crate::store::SessionGraphCommit,
-    usage_deltas: &[crate::TokenLedgerEntry],
-) -> Result<(), crate::store::StoreError> {
-    let commit = crate::store::PersistedStateCommit::persisted_state_with_graph_commit(
-        state,
-        graph,
-        usage_deltas,
-    );
-    let result = crate::store::apply_runtime_commit(store, commit).await?;
-    state.apply_persisted_commit_result(result);
-    Ok(())
-}
-
 pub(super) async fn load_session_checkpoint(
     store: &(dyn crate::store::RuntimePersistence + '_),
     checkpoint_ref: Option<&crate::store::BlobRef>,
 ) -> Option<crate::store::HydratedSessionCheckpoint> {
     let checkpoint_ref = checkpoint_ref?;
     crate::store::get_checkpoint(store, checkpoint_ref).await
-}
-
-pub(super) fn clear_persisted_runtime_caches(state: &mut PersistedSessionState) {
-    state.dynamic_state_snapshot = None;
-    state.plugin_snapshot = None;
-    state.execution_state_snapshot = None;
 }
 
 pub(super) fn append_session_nodes_to_state(

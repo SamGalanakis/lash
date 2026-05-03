@@ -44,7 +44,7 @@ pub(super) fn handle_surface_input(
     ui_extensions: &UiExtensions,
     event: &TuiInputEvent,
     plugin_host: &PluginHost,
-    session_manager: &Arc<dyn SessionManager>,
+    session_manager: &Arc<dyn RuntimeSessionHost>,
     app: &mut App,
 ) -> bool {
     match ui_extensions.handle_input(
@@ -111,6 +111,109 @@ pub(super) fn apply_terminal_action(
     apply_ui_action(app, action, context)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ScrollInputAction {
+    Prompt(UiAction),
+    History {
+        action: UiAction,
+        trace_amount: usize,
+    },
+}
+
+fn classify_always_on_scroll_key(
+    key: KeyEvent,
+    app: &App,
+    viewport_height: usize,
+) -> Option<ScrollInputAction> {
+    let half_page = viewport_height / 2;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    if app.has_prompt() {
+        if ctrl && key.code == KeyCode::Char('u') {
+            return Some(ScrollInputAction::Prompt(UiAction::PromptScrollUp(
+                half_page,
+            )));
+        }
+        if ctrl && key.code == KeyCode::Char('d') {
+            return Some(ScrollInputAction::Prompt(UiAction::PromptScrollDown(
+                half_page,
+            )));
+        }
+        if key.code == KeyCode::PageUp {
+            return Some(ScrollInputAction::Prompt(UiAction::PromptScrollUp(
+                viewport_height,
+            )));
+        }
+        if key.code == KeyCode::PageDown {
+            return Some(ScrollInputAction::Prompt(UiAction::PromptScrollDown(
+                viewport_height,
+            )));
+        }
+        if !app.is_prompt_text_entry() && !app.prompt_has_options() {
+            if key.code == KeyCode::Up {
+                return Some(ScrollInputAction::Prompt(UiAction::PromptScrollUp(1)));
+            }
+            if key.code == KeyCode::Down {
+                return Some(ScrollInputAction::Prompt(UiAction::PromptScrollDown(1)));
+            }
+        }
+    }
+
+    if ctrl && key.code == KeyCode::Char('u') {
+        return Some(ScrollInputAction::History {
+            action: UiAction::ScrollUp(half_page),
+            trace_amount: half_page,
+        });
+    }
+    if ctrl && key.code == KeyCode::Char('d') {
+        return Some(ScrollInputAction::History {
+            action: UiAction::ScrollDown(half_page),
+            trace_amount: half_page,
+        });
+    }
+    if key.code == KeyCode::PageUp {
+        return Some(ScrollInputAction::History {
+            action: UiAction::ScrollUp(viewport_height),
+            trace_amount: viewport_height,
+        });
+    }
+    if key.code == KeyCode::PageDown {
+        return Some(ScrollInputAction::History {
+            action: UiAction::ScrollDown(viewport_height),
+            trace_amount: viewport_height,
+        });
+    }
+
+    None
+}
+
+fn apply_scroll_input_action(
+    app: &mut App,
+    terminal: &Terminal,
+    ui_trace: &mut Option<UiTraceRecorder>,
+    action: ScrollInputAction,
+) {
+    match action {
+        ScrollInputAction::Prompt(action) => {
+            let _ = apply_terminal_action(app, terminal, action);
+        }
+        ScrollInputAction::History {
+            action,
+            trace_amount,
+        } => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                match action {
+                    UiAction::ScrollUp(_) => recorder.record_scroll_up(trace_amount),
+                    UiAction::ScrollDown(_) => recorder.record_scroll_down(trace_amount),
+                    _ => {}
+                }
+            }
+            let _ = apply_terminal_action(app, terminal, action);
+        }
+    }
+    app.dirty = true;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn activate_foreground_session_handoff(
     app: &mut App,
@@ -120,7 +223,7 @@ pub(super) async fn activate_foreground_session_handoff(
     turn_counter: &mut usize,
     current_execution_mode: &mut ExecutionMode,
     current_model_variant: &mut Option<String>,
-    session_manager: &mut Arc<dyn SessionManager>,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
 ) -> bool {
@@ -162,7 +265,7 @@ pub(super) async fn activate_foreground_session_handoff(
     *current_execution_mode = state.policy.execution_mode.clone();
     *current_model_variant = state.policy.model_variant.clone();
     app.set_model_variant(current_model_variant.clone());
-    *history = state.shared_projection().messages.as_ref().clone();
+    *history = state.read_view().messages().to_vec();
     *turn_counter = state.iteration;
 
     match rt.session_manager() {
@@ -256,7 +359,7 @@ pub(super) fn handle_mouse_event(
     ui_trace: &mut Option<UiTraceRecorder>,
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
-    session_manager: &Arc<dyn SessionManager>,
+    session_manager: &Arc<dyn RuntimeSessionHost>,
 ) -> anyhow::Result<()> {
     use crossterm::event::{MouseButton, MouseEventKind};
     // Some terminals (notably kitty) can paint transient hover/search
@@ -483,7 +586,7 @@ pub(super) async fn handle_key_event(
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn SessionManager>,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_dynamic: &mut DynamicStateSnapshot,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
@@ -681,96 +784,10 @@ pub(super) async fn handle_key_event(
     // ── Always-on scroll keys (work in all states) ──
     {
         let (width, height) = terminal.size()?;
-        let vw = width as usize;
         let vh = render::history_viewport_height(app, width, height);
-        let half_page = vh / 2;
-
-        if app.has_prompt() {
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptScrollUp(half_page));
-                app.dirty = true;
-                return Ok(false);
-            }
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptScrollDown(half_page));
-                app.dirty = true;
-                return Ok(false);
-            }
-            if key.code == KeyCode::PageUp {
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptScrollUp(vh));
-                app.dirty = true;
-                return Ok(false);
-            }
-            if key.code == KeyCode::PageDown {
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptScrollDown(vh));
-                app.dirty = true;
-                return Ok(false);
-            }
-        }
-
-        // Ctrl+U / Ctrl+D: half-page scroll
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-            if let Some(recorder) = ui_trace.as_mut() {
-                recorder.record_scroll_up(half_page);
-            }
-            let _ = apply_terminal_action(app, terminal, UiAction::ScrollUp(half_page));
-            app.dirty = true;
+        if let Some(action) = classify_always_on_scroll_key(key, app, vh) {
+            apply_scroll_input_action(app, terminal, ui_trace, action);
             return Ok(false);
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
-            if let Some(recorder) = ui_trace.as_mut() {
-                recorder.record_scroll_down(half_page);
-            }
-            let _ = apply_ui_action(
-                app,
-                UiAction::ScrollDown(half_page),
-                UiActionContext {
-                    viewport_width: vw,
-                    viewport_height: vh,
-                    prompt_max_scroll: 0,
-                },
-            );
-            app.dirty = true;
-            return Ok(false);
-        }
-
-        // PgUp / PgDn
-        if key.code == KeyCode::PageUp {
-            if let Some(recorder) = ui_trace.as_mut() {
-                recorder.record_scroll_up(vh);
-            }
-            let _ = apply_terminal_action(app, terminal, UiAction::ScrollUp(vh));
-            app.dirty = true;
-            return Ok(false);
-        }
-        if key.code == KeyCode::PageDown {
-            if let Some(recorder) = ui_trace.as_mut() {
-                recorder.record_scroll_down(vh);
-            }
-            let _ = apply_ui_action(
-                app,
-                UiAction::ScrollDown(vh),
-                UiActionContext {
-                    viewport_width: vw,
-                    viewport_height: vh,
-                    prompt_max_scroll: 0,
-                },
-            );
-            app.dirty = true;
-            return Ok(false);
-        }
-
-        if app.has_prompt() && !app.is_prompt_text_entry() && !app.prompt_has_options() {
-            if key.code == KeyCode::Up {
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptScrollUp(1));
-                app.dirty = true;
-                return Ok(false);
-            }
-            if key.code == KeyCode::Down {
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptScrollDown(1));
-                app.dirty = true;
-                return Ok(false);
-            }
         }
     }
 
@@ -846,7 +863,7 @@ pub(super) async fn handle_key_event(
                             );
                         }
                         Err(err) => {
-                            app.blocks.push(UiTimelineItem::SystemMessage(err));
+                            app.timeline.push(UiTimelineItem::SystemMessage(err));
                             app.invalidate_height_cache();
                             app.scroll_to_bottom();
                         }
@@ -1384,20 +1401,20 @@ pub(super) async fn handle_key_event(
                             } else {
                                 None
                             };
-                            app.blocks.push(UiTimelineItem::ShellOutput {
+                            app.timeline.push(UiTimelineItem::ShellOutput {
                                 command: cmd_str.to_string(),
                                 output: stdout.trim_end().to_string(),
                                 error: error.map(|e| e.trim_end().to_string()),
                             });
                         }
                         Ok(Err(e)) => {
-                            app.blocks.push(UiTimelineItem::Error(format!(
+                            app.timeline.push(UiTimelineItem::Error(format!(
                                 "Failed to run '{}': {}",
                                 cmd_str, e
                             )));
                         }
                         Err(_) => {
-                            app.blocks.push(UiTimelineItem::Error(format!(
+                            app.timeline.push(UiTimelineItem::Error(format!(
                                 "Command '{}' timed out after 30s. Try a narrower command or run it in smaller steps.",
                                 cmd_str
                             )));

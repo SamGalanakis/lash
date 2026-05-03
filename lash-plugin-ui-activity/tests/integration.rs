@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lash::plugin::{PromptRequestHookContext, SessionManager};
+use lash::plugin::{PromptRequestHookContext, RuntimeSessionHost};
 use lash::testing::{MockSessionManager, mock_assembled_turn};
 use lash::{
     ExecutionMode, PersistedSessionState, PluginDirective, PluginHost, PluginSurfaceEvent,
@@ -34,7 +34,7 @@ async fn ui_activity_plugin_emits_done_notification_surface_event() {
         PluginHost::new(f)
     };
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     let events = session
         .after_turn(TurnResultHookContext {
@@ -70,7 +70,7 @@ async fn ui_activity_plugin_emits_prompt_notification_surface_event() {
         PluginHost::new(f)
     };
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     let events = session
         .on_prompt_request(PromptRequestHookContext {

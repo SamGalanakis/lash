@@ -3,7 +3,7 @@ use std::sync::Arc;
 use lash::session_model::Message;
 use lash::*;
 
-use crate::app::{App, projected_timeline_items_from_projection};
+use crate::app::{App, timeline_from_read_view};
 use crate::push_system_message;
 
 use super::super::runtime::sync_runtime_tool_surface;
@@ -14,7 +14,7 @@ pub(super) async fn handle_plugin(
     app: &mut App,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
-    session_manager: &Arc<dyn SessionManager>,
+    session_manager: &Arc<dyn RuntimeSessionHost>,
 ) -> anyhow::Result<bool> {
     // `/compact` is a built-in plugin command but its handler needs
     // to mutate the live runtime state, which the in-tree plugin
@@ -32,13 +32,10 @@ pub(super) async fn handle_plugin(
         match rt.rewrite_history(trigger).await {
             Ok(true) => {
                 let state = rt.export_state();
-                let projection = state.shared_projection();
+                let read_view = state.read_view();
                 history.clear();
-                history.extend(projection.messages.iter().cloned());
-                app.blocks = projected_timeline_items_from_projection(
-                    &projection,
-                    &app.ui_projection_state(),
-                );
+                history.extend(read_view.messages().iter().cloned());
+                app.timeline = timeline_from_read_view(&read_view, &app.ui_projection_state());
                 app.invalidate_height_cache();
                 app.scroll_to_bottom();
                 push_system_message(app, "Compaction summary inserted.");
@@ -60,7 +57,7 @@ pub(super) async fn handle_plugin(
         return Ok(false);
     };
     match plugin_session
-        .invoke_command(&name, argument, Arc::clone(session_manager))
+        .invoke_command(&name, argument, session_manager.clone())
         .await
     {
         Ok(outcome) => {

@@ -38,10 +38,7 @@ impl ManagedTaskKind {
 pub enum ManagedRunState {
     /// Actively working on a task right now.
     Running,
-    /// Long-lived task is alive but has nothing to do right now. Used for
-    /// subagent sessions that finished their last task and are waiting
-    /// for a follow-up via `followup_task` or `send_message`. A new
-    /// follow-up transitions the task back to `Running`.
+    /// Long-lived task is alive but has nothing to do right now.
     Idle,
     Completed,
     Failed,
@@ -410,6 +407,7 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
 pub struct RuntimeCoreConfig {
     pub base_dir: PathBuf,
     pub path_resolver: Arc<dyn PathResolver>,
+    pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub prompt_template: crate::PromptTemplate,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
@@ -430,6 +428,7 @@ impl Default for RuntimeCoreConfig {
         Self {
             base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path_resolver: Arc::new(DefaultPathResolver),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             prompt_template: crate::default_prompt_template(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
@@ -450,6 +449,14 @@ impl RuntimeCoreConfig {
 
     pub fn with_path_resolver(mut self, path_resolver: Arc<dyn PathResolver>) -> Self {
         self.path_resolver = path_resolver;
+        self
+    }
+
+    pub fn with_attachment_store(
+        mut self,
+        attachment_store: Arc<dyn crate::AttachmentStore>,
+    ) -> Self {
+        self.attachment_store = attachment_store;
         self
     }
 

@@ -247,7 +247,9 @@ mod tests {
             .collect_prompt_contributions(lash::PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(lash::testing::MockSessionManager::default()),
-                state: lash::SessionReadView::new(lash::SessionStateEnvelope::default()),
+                state: lash::SessionReadView::from_exported_state(
+                    &lash::SessionStateEnvelope::default(),
+                ),
                 mode_turn_options: lash::ModeTurnOptions::default(),
             })
             .await

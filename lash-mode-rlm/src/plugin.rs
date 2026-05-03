@@ -14,7 +14,7 @@ use lash_rlm_types::RlmCreateExtras;
 use crate::driver::{RlmProjectorConfig, build_rlm_preamble};
 use crate::rlm_support::{
     BoundVariablesCache, apply_globals_patch_nodes, budget_prompt_contributions,
-    restore_execution_state_and_globals, user_input_patch_from_events, user_input_patch_from_nodes,
+    restore_execution_state_and_globals,
 };
 use crate::stream_mask;
 
@@ -154,7 +154,6 @@ fn print_output_prompt_contribution() -> PromptContribution {
 
 struct RlmModeSession {
     config: RlmModePluginConfig,
-    user_input_count: Mutex<usize>,
     warned_at_threshold: Mutex<bool>,
 }
 
@@ -162,7 +161,6 @@ impl RlmModeSession {
     fn new(config: RlmModePluginConfig) -> Self {
         Self {
             config,
-            user_input_count: Mutex::new(0),
             warned_at_threshold: Mutex::new(false),
         }
     }
@@ -212,7 +210,8 @@ impl ModeSessionPlugin for RlmModeSession {
         mut ctx: ModeSessionContext<'_>,
     ) -> Result<(), SessionError> {
         ctx.set_execution_output_projection(self.config.observe_projection.clone());
-        ctx.start_lashlang_runtime().await
+        ctx.start_lashlang_runtime().await?;
+        Ok(())
     }
 
     async fn restore_session(
@@ -220,15 +219,7 @@ impl ModeSessionPlugin for RlmModeSession {
         mut ctx: ModeSessionContext<'_>,
         state: &lash::runtime::PersistedSessionState,
     ) -> Result<(), SessionError> {
-        restore_execution_state_and_globals(&mut ctx, state).await?;
-        let projection = state.shared_projection();
-        let (patch, count) = user_input_patch_from_events(projection.active_events.iter(), 0);
-        *self
-            .user_input_count
-            .lock()
-            .expect("rlm user input count lock") = count;
-        ctx.apply_mode_globals_patch(&patch).await?;
-        Ok(())
+        restore_execution_state_and_globals(&mut ctx, state).await
     }
 
     async fn append_session_nodes(
@@ -236,17 +227,6 @@ impl ModeSessionPlugin for RlmModeSession {
         mut ctx: ModeSessionContext<'_>,
         nodes: &[lash::SessionAppendNode],
     ) -> Result<(), SessionError> {
-        let start_index = *self
-            .user_input_count
-            .lock()
-            .expect("rlm user input count lock");
-        let (user_patch, next_count) = user_input_patch_from_nodes(nodes, start_index);
-        ctx.apply_mode_globals_patch(&user_patch).await?;
-        *self
-            .user_input_count
-            .lock()
-            .expect("rlm user input count lock") = next_count;
-
         apply_globals_patch_nodes(&mut ctx, nodes).await
     }
 
@@ -271,7 +251,7 @@ mod tests {
     struct NoopPromptManager;
 
     #[async_trait::async_trait]
-    impl lash::plugin::SessionManager for NoopPromptManager {
+    impl lash::SessionSnapshotHost for NoopPromptManager {
         async fn snapshot_current(
             &self,
         ) -> Result<lash::PersistedSessionState, lash::plugin::PluginError> {
@@ -284,14 +264,24 @@ mod tests {
         ) -> Result<lash::PersistedSessionState, lash::plugin::PluginError> {
             Err(lash::plugin::PluginError::Session("not used".to_string()))
         }
+    }
 
+    #[async_trait::async_trait]
+    impl lash::ToolCatalogHost for NoopPromptManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
         ) -> Result<Vec<serde_json::Value>, lash::plugin::PluginError> {
             Ok(Vec::new())
         }
+    }
 
+    impl lash::TaskHost for NoopPromptManager {}
+    impl lash::DirectCompletionHost for NoopPromptManager {}
+    impl lash::TraceHost for NoopPromptManager {}
+
+    #[async_trait::async_trait]
+    impl lash::SessionLifecycleHost for NoopPromptManager {
         async fn create_session(
             &self,
             _request: lash::SessionCreateRequest,
@@ -302,97 +292,6 @@ mod tests {
         async fn close_session(&self, _session_id: &str) -> Result<(), lash::plugin::PluginError> {
             Ok(())
         }
-
-        async fn start_turn_stream(
-            &self,
-            _session_id: &str,
-            _input: lash::TurnInput,
-        ) -> Result<lash::SessionTurnHandle, lash::plugin::PluginError> {
-            Err(lash::plugin::PluginError::Session("not used".to_string()))
-        }
-
-        async fn await_turn(
-            &self,
-            _turn_id: &str,
-        ) -> Result<lash::AssembledTurn, lash::plugin::PluginError> {
-            Err(lash::plugin::PluginError::Session("not used".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::plugin::PluginError> {
-            Ok(())
-        }
-    }
-
-    fn user_event(id: &str, text: &str) -> lash::SessionEventRecord {
-        lash::SessionEventRecord::Conversation(lash::ConversationRecord {
-            id: id.to_string(),
-            role: lash::MessageRole::User,
-            parts: vec![lash::Part {
-                id: format!("{id}.p0"),
-                kind: lash::PartKind::Text,
-                content: text.to_string(),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
-                prune_state: lash::PruneState::Intact,
-                reasoning_meta: None,
-                response_meta: None,
-            }]
-            .into(),
-            user_input: None,
-            origin: None,
-        })
-    }
-
-    #[test]
-    fn user_input_patch_from_events_binds_messages_in_order() {
-        let events = [
-            user_event("u1", "first"),
-            lash::SessionEventRecord::Conversation(lash::ConversationRecord {
-                id: "a1".to_string(),
-                role: lash::MessageRole::Assistant,
-                parts: Arc::new(Vec::new()),
-                user_input: None,
-                origin: None,
-            }),
-            user_event("u2", "second"),
-        ];
-        let (patch, count) = user_input_patch_from_events(events.iter(), 0);
-
-        assert_eq!(count, 2);
-        assert_eq!(patch.set["user_input_1"], serde_json::json!("first"));
-        assert_eq!(patch.set["user_input_2"], serde_json::json!("second"));
-        assert!(patch.unset.is_empty());
-    }
-
-    #[test]
-    fn user_input_patch_from_nodes_continues_existing_count() {
-        let nodes = vec![lash::SessionAppendNode::Event {
-            event: user_event("u3", "third"),
-        }];
-        let (patch, count) = user_input_patch_from_nodes(&nodes, 2);
-
-        assert_eq!(count, 3);
-        assert_eq!(patch.set["user_input_3"], serde_json::json!("third"));
-    }
-
-    #[test]
-    fn plugin_origin_user_message_does_not_pollute_user_input_count() {
-        let mut event = user_event("plugin", "soft warning");
-        let lash::SessionEventRecord::Conversation(record) = &mut event else {
-            unreachable!("user_event returns conversation")
-        };
-        record.origin = Some(lash::MessageOrigin::Plugin {
-            plugin_id: "mode_rlm".to_string(),
-            transient: false,
-        });
-
-        let (patch, count) = user_input_patch_from_events([event].iter(), 0);
-
-        assert_eq!(count, 0);
-        assert!(patch.set.is_empty());
     }
 
     #[test]
@@ -415,7 +314,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -439,7 +338,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -468,7 +367,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -497,7 +396,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -529,7 +428,7 @@ mod tests {
             .soft_warn_directives(lash::plugin::CheckpointHookContext {
                 session_id: "root".to_string(),
                 checkpoint: lash::CheckpointKind::AfterWork,
-                state: lash::SessionReadView::new(state),
+                state: lash::SessionReadView::from_exported_state(&state),
                 host: std::sync::Arc::new(NoopPromptManager),
             })
             .expect("warning directives");
@@ -572,7 +471,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 
@@ -593,7 +492,7 @@ mod tests {
         let ctx = lash::plugin::PromptHookContext {
             session_id: "root".to_string(),
             host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::new(state),
+            state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
         };
 

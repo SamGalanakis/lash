@@ -8,10 +8,9 @@
 //! The ordering invariant enforced by [`queue_event`] is load-bearing:
 //! when a new `TaskStarted` event is queued for an agent, any stale
 //! `TaskCompleted` or `AgentClosed` events still sitting in the queue
-//! for that same target are purged. Without this, a `wait_agent` call
-//! issued right after a `followup_task` on an idle agent would drain
-//! the PRIOR task's completion and return immediately, skipping the
-//! follow-up. The regression test
+//! for that same target are purged. Without this, a later wait for a
+//! restarted task could drain the PRIOR task's completion and return
+//! immediately. The regression test
 //! `queue_event_task_started_purges_stale_completion_for_same_target`
 //! in `local.rs` pins this behavior.
 //!
@@ -22,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use lash::{AssembledTurn, InputItem, TurnInput, TurnStatus};
+use lash::{AssembledTurn, TurnInput, TurnStatus};
 use serde_json::{Value, json};
 
 use crate::types::WaitAgentEvent;
@@ -54,14 +53,7 @@ impl Default for AgentTree {
 pub(crate) struct AgentLocator {
     pub(crate) root_session_id: String,
     pub(crate) path: String,
-    pub(crate) agent_name: Option<String>,
     pub(crate) depth: u8,
-}
-
-#[derive(Clone)]
-pub(crate) struct QueuedMessage {
-    pub(crate) from: String,
-    pub(crate) message: String,
 }
 
 pub(crate) struct AgentRecord {
@@ -93,12 +85,10 @@ pub(crate) struct ActiveTurn {
 
 pub(crate) enum ActiveTurnKind {
     Task { task: String },
-    Message { from: String },
 }
 
 pub(crate) enum QueuedTurn {
     Task(QueuedTask),
-    Message(QueuedMessage),
 }
 
 pub(crate) struct QueuedTask {
@@ -156,25 +146,10 @@ pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
     if let Some(value) = &turn.typed_finish {
         return value.clone();
     }
-    if let Some(record) = turn
-        .tool_calls
-        .iter()
-        .rev()
-        .find(|record| record.tool == "submit" && record.success)
-    {
-        return record.args.clone();
-    }
     if !turn.assistant_output.safe_text.trim().is_empty() {
         return json!(turn.assistant_output.safe_text.trim().to_string());
     }
     json!(turn.assistant_output.raw_text.trim().to_string())
-}
-
-pub(crate) fn task_result_text(turn: &AssembledTurn) -> String {
-    match task_result_value(turn) {
-        Value::String(text) => text,
-        value => serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
-    }
 }
 
 pub(crate) fn task_completion_event(
@@ -196,7 +171,7 @@ pub(crate) fn task_completion_event(
             };
             agent.last_task_state = Some(status.to_string());
             agent.last_iterations = Some(turn.state.iteration);
-            agent.last_tool_calls = Some(turn.state.shared_projection().tool_calls.len());
+            agent.last_tool_calls = Some(turn.state.read_view().tool_calls().len());
             agent.last_token_usage = Some(json!({
                 "input_tokens": turn.token_usage.input_tokens,
                 "output_tokens": turn.token_usage.output_tokens,
@@ -243,40 +218,6 @@ pub(crate) fn task_completion_event(
     }
 }
 
-pub(crate) fn message_response_event(
-    agent_name: &str,
-    parent_session_id: &str,
-    to: String,
-    outcome: &Result<AssembledTurn, lash::PluginError>,
-) -> WaitAgentEvent {
-    let message = match outcome {
-        Ok(turn) => task_result_text(turn),
-        Err(_) => "Subagent failed while handling the message.".to_string(),
-    };
-    WaitAgentEvent::Message {
-        from_agent: agent_name.to_string(),
-        to_agent: to,
-        parent_session_id: parent_session_id.to_string(),
-        message,
-    }
-}
-
-pub(crate) fn message_turn_input(from: &str, message: &str) -> TurnInput {
-    TurnInput {
-        items: vec![InputItem::Text {
-            text: format!(
-                "## Message from {from}\n\n{message}\n\nRespond to this message directly. If no reply is needed, briefly acknowledge it."
-            ),
-        }],
-        image_blobs: HashMap::new(),
-        user_input: None,
-        mode: None,
-        mode_turn_options: Some(lash::ModeTurnOptions::rlm(
-            lash_rlm_types::RlmTermination::ProseWithoutFence,
-        )),
-    }
-}
-
 pub(crate) fn turn_status_label(status: &TurnStatus) -> &'static str {
     match status {
         TurnStatus::Completed => "completed",
@@ -287,21 +228,14 @@ pub(crate) fn turn_status_label(status: &TurnStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use lash::{ToolCallRecord, testing::mock_assembled_turn};
+    use lash::testing::mock_assembled_turn;
 
     use super::*;
 
     #[test]
-    fn task_result_value_prefers_standard_submit_tool_args() {
+    fn task_result_value_prefers_typed_finish() {
         let mut turn = mock_assembled_turn("child", "fallback");
-        turn.tool_calls.push(ToolCallRecord {
-            call_id: Some("submit-1".to_string()),
-            tool: "submit".to_string(),
-            args: json!({ "answer": "ok" }),
-            result: json!({ "answer": "ok" }),
-            success: true,
-            duration_ms: 1,
-        });
+        turn.typed_finish = Some(json!({ "answer": "ok" }));
         assert_eq!(task_result_value(&turn), json!({ "answer": "ok" }));
     }
 }

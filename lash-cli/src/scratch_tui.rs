@@ -490,13 +490,13 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let scroll = app.scroll_offset;
     let block_height = app.height_cache_snapshot().last().copied().unwrap_or(0);
     let (first_idx, mut skip_lines) = if scroll >= block_height {
-        (app.blocks.len(), scroll - block_height)
+        (app.timeline.len(), scroll - block_height)
     } else {
         render::find_visible_block(app, scroll)
     };
 
     let mut written_rows = 0usize;
-    'blocks: for idx in first_idx..app.blocks.len() {
+    'blocks: for idx in first_idx..app.timeline.len() {
         let block_lines = app.rendered_block_lines_cached(idx, viewport_width, viewport_height);
         if skip_lines >= block_lines.len() {
             skip_lines -= block_lines.len();
@@ -1443,9 +1443,10 @@ mod tests {
     #[test]
     fn history_selection_highlights_visible_cells() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-        app.blocks = vec![crate::app::UiTimelineItem::UserInput(
+        app.timeline = vec![crate::app::UiTimelineItem::UserInput(
             "alpha\nbeta\ngamma".into(),
-        )];
+        )]
+        .into();
         app.selection.anchor = (2, 1);
         app.selection.end = (5, 1);
         app.selection.visible = true;
@@ -1469,9 +1470,10 @@ mod tests {
     #[test]
     fn history_selection_tracks_content_rows_while_scrolled() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-        app.blocks = vec![crate::app::UiTimelineItem::UserInput(
+        app.timeline = vec![crate::app::UiTimelineItem::UserInput(
             "alpha\nbeta\ngamma\ndelta".into(),
-        )];
+        )]
+        .into();
         app.scroll_offset = 1;
         app.selection.anchor = (2, 2);
         app.selection.end = (4, 2);
@@ -1596,7 +1598,7 @@ mod tests {
     #[test]
     fn workspace_surface_replaces_history_and_footer_renders_above_input() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-        app.blocks = vec![crate::app::UiTimelineItem::UserInput("history line".into())];
+        app.timeline = vec![crate::app::UiTimelineItem::UserInput("history line".into())].into();
         let ui_extensions = Arc::new(
             UiExtensions::new(vec![Arc::new(SurfaceTestExtension)]).expect("surface extensions"),
         );

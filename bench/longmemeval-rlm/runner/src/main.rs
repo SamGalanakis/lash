@@ -828,7 +828,7 @@ fn build_prompt(
         }
     };
     let mut prompt = format!(
-        "Question: {user_question}\nAsked on: {question_date}\nType: {question_type}\n\nRequirements:\n- prefer the most recent relevant fact\n- verify dates and entities before answering\n- if the history does not support an answer, say \"I don't know\"\n- final response must be plain prose only",
+        "Question: {user_question}\nAsked on: {question_date}\nType: {question_type}\n\nRequirements:\n- prefer the most recent relevant fact\n- verify dates and entities before answering\n- if the history does not support an answer, say \"I don't know\"\n- the submitted final response must be plain prose",
         question_date = question
             .question
             .question_date
@@ -870,8 +870,8 @@ print result
 
 - Wrap each work step in exactly one ` ```lashlang ` fenced block. Only the first block runs per turn.
 - Keep prose short. It is only a compact reasoning trace.
-- After each result, either write another fenced block to continue or `submit <value>` (or plain prose with no fenced block) to end the turn.
-- When you are done, reply with plain prose only — or `submit <value>` from inside a fenced block.
+- After each result, either write another fenced block to continue or call `submit <value>` from inside a fenced `lashlang` block to end the turn.
+- When you are done, call `submit <value>` from inside a fenced `lashlang` block. Do not end in prose without a fenced block.
 - Variables persist across iterations.
 - You can update variable-rooted collection paths: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms. Record assignment inserts/replaces fields; list assignment replaces an existing integer index only. Dynamic record reads return `null` when missing, so `counts[g] = counts[g] + 1` works for histograms.
 - If the prompt includes bound variables, use them directly.
@@ -889,16 +889,16 @@ Format each work step like this:
 Brief reasoning here in plain prose.
 
 ```lashlang
-candidate = (call spawn_agent { task_name: "narrow_candidates", task: "narrow the search to likely sessions", capability: "explore" })?
-result = (call wait_agent { targets: [candidate.path], timeout_ms: 30000 })?
+candidate = start call spawn_agent { agent_name: "narrow_candidates", task: "narrow the search to likely sessions", capability: "explore" }
+result = (await candidate)?
 print result
 ```
 ````
 
 - Wrap each work step in exactly one ` ```lashlang ` fenced block. Only the first block runs per turn.
 - Keep prose short. It is only a compact reasoning trace.
-- After each result, either write another fenced block to continue or `submit <value>` (or plain prose with no fenced block) to end the turn.
-- When you are done, reply with plain prose only — or `submit <value>` from inside a fenced block.
+- After each result, either write another fenced block to continue or call `submit <value>` from inside a fenced `lashlang` block to end the turn.
+- When you are done, call `submit <value>` from inside a fenced `lashlang` block. Do not end in prose without a fenced block.
 - Variables persist across iterations.
 - You can update variable-rooted collection paths: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms. Record assignment inserts/replaces fields; list assignment replaces an existing integer index only. Dynamic record reads return `null` when missing, so `counts[g] = counts[g] + 1` works for histograms.
 - If the prompt includes bound variables, use them directly.

@@ -139,7 +139,9 @@ impl<'a> Lexer<'a> {
                 '|' => self.double_or_single('|', TokenKind::OrOr, TokenKind::Pipe),
                 '<' => self.double_or_single('=', TokenKind::LessEqual, TokenKind::Less),
                 '>' => self.double_or_single('=', TokenKind::GreaterEqual, TokenKind::Greater),
+                '"' if self.starts_with_at(offset, "\"\"\"") => self.triple_string(false)?,
                 '"' => self.string()?,
+                'r' if self.starts_with_at(offset, "r\"\"\"") => self.triple_string(true)?,
                 c if is_ident_start(c) => self.ident_or_keyword(),
                 c if c.is_ascii_digit() => self.number()?,
                 _ => return Err(LexError::UnexpectedChar { ch, offset }),
@@ -230,6 +232,59 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+        Err(LexError::UnterminatedString { offset: start })
+    }
+
+    fn triple_string(&mut self, raw: bool) -> Result<Token, LexError> {
+        let (start, _) = self.peek().expect("triple string requires input");
+        let delimiter_start = start + usize::from(raw);
+        let content_start = delimiter_start + 3;
+        self.consume_until_byte(content_start);
+
+        if raw {
+            let Some(relative_end) = self.source[content_start..].find("\"\"\"") else {
+                return Err(LexError::UnterminatedString { offset: start });
+            };
+            let content_end = content_start + relative_end;
+            let end = content_end + 3;
+            let value = CompactString::from(&self.source[content_start..content_end]);
+            self.consume_until_byte(end);
+            return Ok(Token {
+                kind: TokenKind::String(value),
+                span: Span { start, end },
+            });
+        }
+
+        let mut value = String::new();
+        while let Some((offset, ch)) = self.bump() {
+            if ch == '"' && self.starts_with_at(offset, "\"\"\"") {
+                self.consume_until_byte(offset + 3);
+                return Ok(Token {
+                    kind: TokenKind::String(value.into()),
+                    span: Span {
+                        start,
+                        end: offset + 3,
+                    },
+                });
+            }
+            if ch == '\\' {
+                let Some((_, escaped)) = self.bump() else {
+                    return Err(LexError::UnterminatedString { offset: start });
+                };
+                let translated = match escaped {
+                    '"' => '"',
+                    '\\' => '\\',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                };
+                value.push(translated);
+            } else {
+                value.push(ch);
+            }
+        }
+
         Err(LexError::UnterminatedString { offset: start })
     }
 
@@ -334,6 +389,19 @@ impl<'a> Lexer<'a> {
         chars.next().map(|(_, ch)| ch)
     }
 
+    fn starts_with_at(&self, offset: usize, needle: &str) -> bool {
+        self.source[offset..].starts_with(needle)
+    }
+
+    fn consume_until_byte(&mut self, end: usize) {
+        while let Some((offset, _)) = self.peek() {
+            if offset >= end {
+                break;
+            }
+            self.bump();
+        }
+    }
+
     fn consume_if(&mut self, expected: char) -> bool {
         match self.peek() {
             Some((_, ch)) if ch == expected => {
@@ -429,6 +497,34 @@ mod tests {
     }
 
     #[test]
+    fn lexes_multiline_and_raw_multiline_strings() {
+        let tokens = lex(r####"
+            normal = """line1\n"quoted"
+line2"""
+            raw = r"""*** Begin Patch
+@@
+\n { untouched }
+*** End Patch"""
+            "####)
+        .expect("lexing should succeed");
+
+        let strings: Vec<_> = tokens
+            .into_iter()
+            .filter_map(|token| match token.kind {
+                TokenKind::String(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            strings,
+            vec![
+                CompactString::from("line1\n\"quoted\"\nline2"),
+                CompactString::from("*** Begin Patch\n@@\n\\n { untouched }\n*** End Patch"),
+            ]
+        );
+    }
+
+    #[test]
     fn lexes_double_slash_comments_without_breaking_division() {
         let tokens = lex(r#"
             value = 6 / 2
@@ -459,6 +555,12 @@ mod tests {
         assert_eq!(err, LexError::UnterminatedString { offset: 0 });
 
         let err = lex("\"abc\\").expect_err("lexing should fail");
+        assert_eq!(err, LexError::UnterminatedString { offset: 0 });
+
+        let err = lex("\"\"\"abc").expect_err("lexing should fail");
+        assert_eq!(err, LexError::UnterminatedString { offset: 0 });
+
+        let err = lex("r\"\"\"abc").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnterminatedString { offset: 0 });
     }
 

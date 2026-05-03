@@ -298,8 +298,11 @@ fn read_image(path: &Path, path_str: &str, mime: &str) -> ToolResult {
 
     let image = ToolImage {
         mime: mime.to_string(),
+        reference: None,
         data,
         label: label.clone(),
+        width: dims.map(|(width, _)| width),
+        height: dims.map(|(_, height)| height),
     };
 
     ToolResult::with_images(true, json!(format!("[Image: {}]", label)), vec![image])

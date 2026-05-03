@@ -29,47 +29,47 @@ fn stream_fallback_merges_adjacent_display_reasoning_chunks() {
     ));
 }
 
-trait ProjectionState {
-    fn shared_projection(&self) -> crate::SessionProjection;
+trait ReadModelState {
+    fn read_model(&self) -> crate::session_graph::SessionReadModel;
 }
 
-impl ProjectionState for SessionStateEnvelope {
-    fn shared_projection(&self) -> crate::SessionProjection {
-        self.shared_projection()
+impl ReadModelState for SessionStateEnvelope {
+    fn read_model(&self) -> crate::session_graph::SessionReadModel {
+        self.read_model()
     }
 }
 
-impl ProjectionState for PersistedSessionState {
-    fn shared_projection(&self) -> crate::SessionProjection {
-        self.shared_projection()
+impl ReadModelState for PersistedSessionState {
+    fn read_model(&self) -> crate::session_graph::SessionReadModel {
+        self.read_model()
     }
 }
 
-trait ProjectionStateMut: ProjectionState {
+trait ReadModelStateMut: ReadModelState {
     fn append_message(&mut self, message: Message);
 }
 
-impl ProjectionStateMut for SessionStateEnvelope {
+impl ReadModelStateMut for SessionStateEnvelope {
     fn append_message(&mut self, message: Message) {
         self.session_graph.append_message(message);
     }
 }
 
-impl ProjectionStateMut for PersistedSessionState {
+impl ReadModelStateMut for PersistedSessionState {
     fn append_message(&mut self, message: Message) {
         self.session_graph.append_message(message);
     }
 }
 
-fn projected_conversation_messages(state: &impl ProjectionState) -> Vec<Message> {
-    state.shared_projection().messages.as_ref().clone()
+fn active_conversation_messages(state: &impl ReadModelState) -> Vec<Message> {
+    state.read_model().messages.as_ref().clone()
 }
 
-fn projected_tool_calls(state: &impl ProjectionState) -> Vec<ToolCallRecord> {
-    state.shared_projection().tool_calls.as_ref().clone()
+fn active_tool_calls(state: &impl ReadModelState) -> Vec<ToolCallRecord> {
+    state.read_model().tool_calls.as_ref().clone()
 }
 
-fn append_message(state: &mut impl ProjectionStateMut, message: Message) {
+fn append_message(state: &mut impl ReadModelStateMut, message: Message) {
     state.append_message(message);
 }
 
@@ -320,11 +320,6 @@ fn default_tool_session(
         factories.push(Arc::new(StaticPluginFactory::new(
             "ask",
             crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::AskTool::new())),
-        )));
-        factories.push(Arc::new(StaticPluginFactory::new(
-            "show_snippet_to_user",
-            crate::PluginSpec::new()
-                .with_tool_provider(Arc::new(crate::tools::ShowSnippetToUser::new())),
         )));
     }
     crate::PluginHost::new(factories)
@@ -943,7 +938,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
     assert_eq!(turn.done_reason, DoneReason::RuntimeError);
     assert!(turn.errors.iter().any(|issue| issue.kind == "plugin"));
     assert!(
-        projected_conversation_messages(&turn.state)
+        active_conversation_messages(&turn.state)
             .iter()
             .any(|message| {
                 message
@@ -992,8 +987,8 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
         .await
         .expect("turn");
 
-    let projection = turn.state.shared_projection();
-    let user_message = projection
+    let read_model = turn.state.read_model();
+    let user_message = read_model
         .messages
         .iter()
         .find(|message| message.role == MessageRole::User)
@@ -1129,7 +1124,7 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
         .expect("turn");
 
     assert!(
-        projected_conversation_messages(&turn.state)
+        active_conversation_messages(&turn.state)
             .iter()
             .any(|message| {
                 message.role == MessageRole::Assistant
@@ -1140,7 +1135,7 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
             })
     );
     assert!(
-        projected_conversation_messages(&turn.state)
+        active_conversation_messages(&turn.state)
             .iter()
             .all(|message| {
                 !(message.role == MessageRole::User
@@ -1165,12 +1160,14 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     kind: crate::PartKind::Image,
                     content: String::new(),
                     attachment: Some(crate::session_model::message::PartAttachment {
-                        mime: "image/png".to_string(),
-                        url: crate::session_model::message::data_url_for_bytes(
-                            "image/png",
-                            &[9, 8, 7],
-                        ),
-                        filename: None,
+                        reference: crate::AttachmentRef {
+                            id: crate::AttachmentId::new("test-image"),
+                            media_type: crate::MediaType::Image(crate::ImageMediaType::Png),
+                            byte_len: 3,
+                            width: None,
+                            height: None,
+                            label: None,
+                        },
                     }),
                     tool_call_id: None,
                     tool_name: None,
@@ -1241,7 +1238,7 @@ async fn bridge_checkpoint_injection_preserves_images() {
         .expect("turn");
 
     assert!(
-        projected_conversation_messages(&turn.state)
+        active_conversation_messages(&turn.state)
             .iter()
             .any(|message| {
                 message.role == MessageRole::User
@@ -1321,7 +1318,7 @@ async fn checkpoint_hook_can_inject_messages() {
         .expect("turn");
 
     assert!(
-        projected_conversation_messages(&turn.state)
+        active_conversation_messages(&turn.state)
             .iter()
             .any(|message| {
                 message.role == MessageRole::System
@@ -1396,7 +1393,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
         "expected injected turn input accepted event"
     );
 
-    let projected = projected_conversation_messages(&assembled.state);
+    let projected = active_conversation_messages(&assembled.state);
     let follow_up_count = projected
         .iter()
         .filter(|message| {
@@ -1470,7 +1467,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                         match snapshot {
                                             Ok(snapshot) => crate::ToolResult::ok(json!({
                                                 "session_id": handle.session_id,
-                                                "message_count": snapshot.shared_projection().messages.len(),
+                                                "message_count": snapshot.read_model().messages.len(),
                                             })),
                                             Err(err) => err,
                                         }
@@ -1678,8 +1675,8 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     assert_eq!(meta.parent_session_id.as_deref(), Some("root"));
     let head = stores[0].load_session_head().expect("session head");
     let graph = head.graph;
-    let projection = graph.shared_projection();
-    let messages = projection.messages.as_slice();
+    let read_model = graph.read_model();
+    let messages = read_model.messages.as_slice();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].parts[0].content, "parent hello");
     let checkpoint = head
@@ -2595,8 +2592,14 @@ fn normalize_items_resolves_relative_paths_with_base_dir() {
         },
     ];
     let resolver = DefaultPathResolver;
-    let out =
-        normalize_input_items(&items, &HashMap::new(), tmp.path(), &resolver).expect("normalized");
+    let out = normalize_input_items(
+        &items,
+        &HashMap::new(),
+        tmp.path(),
+        &resolver,
+        &crate::InMemoryAttachmentStore::new(),
+    )
+    .expect("normalized");
     assert_eq!(out.len(), 1);
     match &out[0] {
         NormalizedItem::Text(text) => {
@@ -2852,13 +2855,13 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
         .expect("turn");
 
     assert_eq!(turn.assistant_output.safe_text, "done");
-    assert_eq!(projected_tool_calls(&turn.state).len(), 1);
+    assert_eq!(active_tool_calls(&turn.state).len(), 1);
     assert_eq!(
-        projected_tool_calls(&turn.state)[0].call_id.as_deref(),
+        active_tool_calls(&turn.state)[0].call_id.as_deref(),
         Some("tool-1")
     );
     assert_eq!(
-        projected_tool_calls(&turn.state)[0].result,
+        active_tool_calls(&turn.state)[0].result,
         serde_json::json!({
             "payload": "raw:sample"
         })
@@ -3527,7 +3530,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                                     .map(|call| call.result.clone())
                                     .unwrap_or(serde_json::Value::Null),
                                 turn.state
-                                    .shared_projection()
+                                    .read_model()
                                     .tool_calls
                                     .first()
                                     .map(|call| call.result.clone())
@@ -3593,7 +3596,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
         .expect("turn");
 
     assert!(
-        projected_conversation_messages(&turn.state)
+        active_conversation_messages(&turn.state)
             .iter()
             .any(|message| {
                 message.parts.iter().any(|part| {
@@ -3610,15 +3613,15 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
             serde_json::json!("history projection"),
         )]
     );
-    assert_eq!(projected_tool_calls(&turn.state).len(), 1);
+    assert_eq!(active_tool_calls(&turn.state).len(), 1);
     assert_eq!(
-        projected_tool_calls(&turn.state)[0].call_id.as_deref(),
+        active_tool_calls(&turn.state)[0].call_id.as_deref(),
         Some("tool-1")
     );
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("tool-1"));
     assert_eq!(
-        projected_tool_calls(&turn.state)[0].result,
+        active_tool_calls(&turn.state)[0].result,
         serde_json::json!("state projection")
     );
     assert_eq!(
@@ -3679,12 +3682,12 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
         .await
         .expect("turn");
 
-    let projection = crate::store::load_session_head(store.as_ref())
+    let read_model = crate::store::load_session_head(store.as_ref())
         .await
         .expect("session head")
         .graph
-        .shared_projection();
-    let messages = projection.messages.as_slice();
+        .read_model();
+    let messages = read_model.messages.as_slice();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, MessageRole::User);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
@@ -3762,8 +3765,8 @@ async fn completed_turns_are_persisted_in_session_graph() {
 
     let head = store.load_session_head().expect("session head");
     let graph = head.graph;
-    let projection = graph.shared_projection();
-    let messages = projection.messages.as_slice();
+    let read_model = graph.read_model();
+    let messages = read_model.messages.as_slice();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
     assert_eq!(messages[1].parts[0].content, "Stored answer");

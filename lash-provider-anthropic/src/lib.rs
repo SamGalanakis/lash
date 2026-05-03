@@ -402,24 +402,23 @@ impl AnthropicProvider {
         }
 
         if let Some(output_spec) = &req.output_spec {
-            // Anthropic Messages API doesn't support native JSON schema
-            // response formats. Append a system directive so the model
-            // emits well-formed JSON while leaving parsing to the caller.
-            let directive = match output_spec {
-                LlmOutputSpec::JsonObject => "Respond with a single JSON object.".to_string(),
-                LlmOutputSpec::JsonSchema(schema) => format!(
-                    "Respond with a single JSON object matching this schema (name: {}). Schema: {}",
-                    schema.name, schema.schema,
-                ),
+            let format = match output_spec {
+                LlmOutputSpec::JsonObject => json!({
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": true,
+                    },
+                }),
+                LlmOutputSpec::JsonSchema(schema) => json!({
+                    "type": "json_schema",
+                    "schema": schema.schema,
+                }),
             };
-            let suffix = json!({
-                "type": "text",
-                "text": directive,
-            });
-            match body.get_mut("system") {
-                Some(Value::Array(arr)) => arr.push(suffix),
-                _ => body["system"] = json!([suffix]),
+            if !body.get("output_config").is_some_and(Value::is_object) {
+                body["output_config"] = json!({});
             }
+            body["output_config"]["format"] = format;
         }
 
         body["stream"] = json!(true);
@@ -1105,5 +1104,90 @@ impl ProviderFactory for AnthropicProviderFactory {
             options: cfg.options,
             client: build_http_client(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+    use std::sync::Arc;
+
+    fn request(messages: Vec<LlmMessage>) -> LlmRequest {
+        LlmRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            messages,
+            attachments: Vec::new(),
+            tools: Arc::new(Vec::<LlmToolSpec>::new()),
+            tool_choice: LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: Some("session-1".to_string()),
+            output_spec: None,
+            stream_events: None,
+            provider_trace: None,
+        }
+    }
+
+    #[test]
+    fn structured_output_uses_native_output_config_format() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![
+            LlmMessage::text(LlmRole::System, "system prompt"),
+            LlmMessage::text(LlmRole::User, "extract"),
+        ]);
+        req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+            name: "extract_result".to_string(),
+            strict: true,
+            schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["answer"],
+                "properties": {
+                    "answer": { "type": "string" }
+                }
+            }),
+        }));
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(
+            body["output_config"]["format"],
+            json!({
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["answer"],
+                    "properties": {
+                        "answer": { "type": "string" }
+                    }
+                }
+            })
+        );
+        let system_text = body["system"][0]["text"].as_str().unwrap_or_default();
+        assert_eq!(system_text, "system prompt");
+        assert!(!system_text.contains("Respond with a single JSON object"));
+    }
+
+    #[test]
+    fn structured_output_preserves_adaptive_effort_config() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
+        req.model_variant = Some("medium".to_string());
+        req.output_spec = Some(LlmOutputSpec::JsonObject);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(body["output_config"]["effort"], json!("medium"));
+        assert_eq!(
+            body["output_config"]["format"],
+            json!({
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": true,
+                }
+            })
+        );
     }
 }

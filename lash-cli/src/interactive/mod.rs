@@ -567,8 +567,8 @@ pub(crate) async fn run_app(
                         }
                     }
 
-                    let projection = state.shared_projection();
-                    history = projection.messages.as_ref().clone();
+                    let read_view = state.read_view();
+                    history = read_view.messages().to_vec();
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
@@ -577,21 +577,21 @@ pub(crate) async fn run_app(
                         iteration = state.iteration,
                         status = ?done.result.status,
                         reason = ?done.result.done_reason,
-                        messages = projection.messages.len(),
-                        blocks = app.blocks.len(),
+                        messages = read_view.messages().len(),
+                        blocks = app.timeline.len(),
                         had_live_turn = app.live_turn.is_some(),
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
                     if interrupted {
                         let had_manual_interrupt_message = matches!(
-                            app.blocks.last(),
+                            app.timeline.last(),
                             Some(UiTimelineItem::SystemMessage(message))
                                 if message == crate::util::manual_interrupt_message()
                         );
                         let mut ui_projection_state = app.ui_projection_state();
                         ui_projection_state.live_assistant_text = app::interrupted_assistant_tail(
-                            &app.blocks,
+                            &app.timeline,
                             &done.result.assistant_output.safe_text,
                         );
                         let interrupted_message = if had_manual_interrupt_message {
@@ -600,8 +600,8 @@ pub(crate) async fn run_app(
                             "Cancelled.".to_string()
                         };
                         app.stop_turn();
-                        app.blocks = app::project_interrupted_blocks(
-                            &projection,
+                        app.timeline = app::interrupted_blocks_from_read_view(
+                            &read_view,
                             &ui_projection_state,
                             interrupted_message.clone(),
                         );
@@ -643,7 +643,7 @@ pub(crate) async fn run_app(
                         continue;
                     }
 
-                    app.finish_turn_from_projection(&projection);
+                    app.finish_turn_from_read_view(&read_view);
                     app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;

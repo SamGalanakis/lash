@@ -25,6 +25,7 @@ impl LashRuntime {
                     .to_string(),
             ));
         }
+        let services = services.with_attachment_store(Arc::clone(&host.core.attachment_store));
         let mut session = Session::new(
             services.clone(),
             &state.session_id,
@@ -51,11 +52,11 @@ impl LashRuntime {
                 &state,
             )
             .await?;
-        clear_persisted_runtime_caches(&mut state);
+        state.discard_runtime_snapshots();
         session
             .plugins()
             .emit_runtime_event(crate::PluginRuntimeEvent::SessionRestored(
-                state.read_view(),
+                crate::SessionReadView::from_persisted_state(&state),
             ))
             .await;
         let mode_turn_options = state.mode_turn_options.clone();
@@ -211,7 +212,11 @@ impl LashRuntime {
         let session_id = self.state.session_id.clone();
         let policy = self.policy.clone();
         // Flush any dirty resident state to the store before dropping.
-        persist_runtime_state(store.as_ref(), &mut self.state).await;
+        let commit = crate::store::PersistedStateCommit::persisted_state(&self.state, &[]);
+        match crate::store::apply_runtime_commit(store.as_ref(), commit).await {
+            Ok(result) => self.state.apply_persisted_commit_result(result),
+            Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
+        }
         // Drain pending tombstones if any. Under KeepHistory this is a
         // no-op (tombstones never get added). Under DropOrphans,
         // Phase-9's not-yet-wired rewrite path would have populated the

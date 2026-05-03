@@ -45,7 +45,7 @@ impl RuntimeTurnDriver {
         let transforms = self
             .session
             .plugins()
-            .transform_assistant_stream(&self.session_id, chunk, Arc::clone(&self.session_manager))
+            .transform_assistant_stream(&self.session_id, chunk, self.session_manager.clone())
             .await
             .map_err(|err| LlmCallError {
                 message: err.to_string(),
@@ -87,11 +87,7 @@ impl RuntimeTurnDriver {
         let transforms = self
             .session
             .plugins()
-            .transform_assistant_response(
-                &self.session_id,
-                response,
-                Arc::clone(&self.session_manager),
-            )
+            .transform_assistant_response(&self.session_id, response, self.session_manager.clone())
             .await
             .map_err(|err| LlmCallError {
                 message: err.to_string(),
@@ -116,6 +112,24 @@ impl RuntimeTurnDriver {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
+        let request = match crate::attachments::resolve_llm_request_attachments(
+            request,
+            self.host.core.attachment_store.as_ref(),
+        ) {
+            Ok(request) => request,
+            Err(err) => {
+                return (
+                    Err(LlmCallError {
+                        message: err.to_string(),
+                        retryable: false,
+                        raw: None,
+                        code: Some("attachment_resolution_failed".to_string()),
+                        request_body: None,
+                    }),
+                    false,
+                );
+            }
+        };
         let trace_enabled = self.host.core.trace_sink.is_some();
         let llm_call_id = if trace_enabled {
             Some(format!("{}:{iteration}", self.session_id))

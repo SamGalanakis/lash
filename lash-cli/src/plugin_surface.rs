@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use lash::PluginSurfaceEvent;
 
 use crate::app::{
-    PlanDockItem, PlanDockItemStatus, PlanDockState, PluginPanelBlock, UiTimelineItem,
+    PlanDockItem, PlanDockItemStatus, PlanDockState, PluginPanelBlock, UiTimeline, UiTimelineItem,
 };
 
 pub struct PluginSurfaceMutation {
@@ -117,7 +117,7 @@ fn plan_state_from_panel(title: &str, content: &str) -> PlanDockState {
 }
 
 pub fn apply_surface_event(
-    blocks: &mut Vec<UiTimelineItem>,
+    blocks: &mut UiTimeline,
     indicators: &mut BTreeMap<String, String>,
     plan_dock: &Option<PlanDockState>,
     plugin_id: &str,
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn panel_upsert_from_update_plan_routes_to_dock() {
-        let mut blocks = Vec::new();
+        let mut blocks = UiTimeline::default();
         let mut indicators = BTreeMap::new();
         let dock: Option<PlanDockState> = None;
 
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn panel_clear_from_update_plan_clears_dock() {
-        let mut blocks = Vec::new();
+        let mut blocks = UiTimeline::default();
         let mut indicators = BTreeMap::new();
         let dock = Some(PlanDockState {
             title: "PLAN".into(),
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn all_completed_plan_auto_hides_dock() {
-        let mut blocks = Vec::new();
+        let mut blocks = UiTimeline::default();
         let mut indicators = BTreeMap::new();
         let dock = Some(PlanDockState {
             title: "PLAN".into(),
@@ -392,7 +392,7 @@ mod tests {
     /// quarter-second after every tool call.
     #[test]
     fn plan_mode_clear_does_not_wipe_update_plan_dock() {
-        let mut blocks = Vec::new();
+        let mut blocks = UiTimeline::default();
         let mut indicators = BTreeMap::new();
         let dock = Some(PlanDockState {
             title: "PLAN".into(),
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn unrelated_panel_still_becomes_inline_block() {
-        let mut blocks = Vec::new();
+        let mut blocks = UiTimeline::default();
         let mut indicators = BTreeMap::new();
         let dock: Option<PlanDockState> = None;
 

@@ -166,7 +166,7 @@ pub struct SessionCreateRequest {
     /// Optional seed message dispatched as the new session's first turn
     /// input. The runtime stashes it during `create_session`; any host
     /// that drives turns on the new session can claim it via
-    /// `SessionManager::take_first_turn_input`.
+    /// `RuntimeSessionHost::take_first_turn_input`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_turn_input: Option<PluginMessage>,
     #[serde(default)]
@@ -293,7 +293,7 @@ pub struct PrepareTurnRequest {
     pub session_id: String,
     pub state: SessionReadView,
     pub messages: crate::MessageSequence,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn TurnHookHost>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -412,10 +412,18 @@ impl PluginDirective {
 }
 
 #[async_trait::async_trait]
-pub trait SessionManager: Send + Sync {
+pub trait SessionSnapshotHost: Send + Sync {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError>;
     async fn snapshot_session(&self, session_id: &str) -> Result<SessionSnapshot, PluginError>;
+}
+
+#[async_trait::async_trait]
+pub trait ToolCatalogHost: Send + Sync {
     async fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError>;
+}
+
+#[async_trait::async_trait]
+pub trait DynamicToolHost: Send + Sync {
     async fn dynamic_tool_state(
         &self,
         _session_id: &str,
@@ -465,17 +473,14 @@ pub trait SessionManager: Send + Sync {
         spec.definition.availability_override = availability;
         self.apply_dynamic_tool_state(session_id, snapshot).await
     }
+}
+
+#[async_trait::async_trait]
+pub trait SessionLifecycleHost: Send + Sync {
     async fn create_session(
         &self,
         request: SessionCreateRequest,
     ) -> Result<SessionHandle, PluginError>;
-    async fn emit_trace_event(
-        &self,
-        _context: lash_trace::TraceContext,
-        _event: lash_trace::TraceEvent,
-    ) -> Result<(), PluginError> {
-        Ok(())
-    }
     /// Pop the seed message that was queued for `session_id` via
     /// `SessionCreateRequest::first_turn_input`. Returns `None` if no
     /// seed was queued, or after a previous caller has already taken
@@ -488,6 +493,10 @@ pub trait SessionManager: Send + Sync {
         Ok(None)
     }
     async fn close_session(&self, session_id: &str) -> Result<(), PluginError>;
+}
+
+#[async_trait::async_trait]
+pub trait TurnHost: Send + Sync {
     async fn start_turn_stream(
         &self,
         session_id: &str,
@@ -495,12 +504,25 @@ pub trait SessionManager: Send + Sync {
     ) -> Result<SessionTurnHandle, PluginError>;
     async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
+    async fn start_turn(
+        &self,
+        session_id: &str,
+        input: TurnInput,
+    ) -> Result<AssembledTurn, PluginError> {
+        let handle = self.start_turn_stream(session_id, input).await?;
+        drop(handle.events);
+        self.await_turn(&handle.turn_id).await
+    }
+}
+
+#[async_trait::async_trait]
+pub trait TaskHost: Send + Sync {
     /// Push a user-visible message into the target session's turn-input
     /// injection bridge so it surfaces at the next iteration boundary of
     /// the current turn (or at the start of the next turn if the target
-    /// is idle). Used for cross-session "poke" flows like
-    /// `send_message`, where an inbox note should land at the next
-    /// available step rather than waiting for a brand-new task.
+    /// is idle). Used by monitor and other wake-up flows where a note
+    /// should land at the next available step rather than waiting for a
+    /// brand-new task.
     async fn inject_turn_input(
         &self,
         _session_id: &str,
@@ -591,6 +613,10 @@ pub trait SessionManager: Send + Sync {
             "background task registry is unavailable in this session".to_string(),
         ))
     }
+}
+
+#[async_trait::async_trait]
+pub trait MonitorHost: Send + Sync {
     async fn monitor_snapshot(&self, _session_id: &str) -> Result<MonitorSnapshot, PluginError> {
         Err(PluginError::Session(
             "monitors are unavailable in this session".to_string(),
@@ -622,6 +648,10 @@ pub trait SessionManager: Send + Sync {
             "monitors are unavailable in this session".to_string(),
         ))
     }
+}
+
+#[async_trait::async_trait]
+pub trait SessionGraphHost: Send + Sync {
     async fn append_session_nodes(
         &self,
         _session_id: &str,
@@ -631,6 +661,10 @@ pub trait SessionManager: Send + Sync {
             "session graph mutation is unavailable in this session".to_string(),
         ))
     }
+}
+
+#[async_trait::async_trait]
+pub trait PromptHost: Send + Sync {
     async fn prompt_user(
         &self,
         _request: crate::PromptRequest,
@@ -639,15 +673,10 @@ pub trait SessionManager: Send + Sync {
             "user prompts are unavailable in this session".to_string(),
         ))
     }
-    async fn start_turn(
-        &self,
-        session_id: &str,
-        input: TurnInput,
-    ) -> Result<AssembledTurn, PluginError> {
-        let handle = self.start_turn_stream(session_id, input).await?;
-        drop(handle.events);
-        self.await_turn(&handle.turn_id).await
-    }
+}
+
+#[async_trait::async_trait]
+pub trait DirectCompletionHost: Send + Sync {
     /// Make a single LLM call without creating a full session. Used by
     /// plugins for structured extraction, summarization, observation,
     /// and other one-shot calls that don't need tools, turn loops, or
@@ -664,8 +693,158 @@ pub trait SessionManager: Send + Sync {
     }
 }
 
+#[async_trait::async_trait]
+pub trait TraceHost: Send + Sync {
+    async fn emit_trace_event(
+        &self,
+        _context: lash_trace::TraceContext,
+        _event: lash_trace::TraceEvent,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+pub trait PromptHookHost:
+    SessionSnapshotHost + ToolCatalogHost + TaskHost + DirectCompletionHost
+{
+}
+impl<T> PromptHookHost for T where
+    T: SessionSnapshotHost + ToolCatalogHost + TaskHost + DirectCompletionHost + ?Sized
+{
+}
+
+pub trait PromptRequestHookHost: PromptHost {}
+impl<T> PromptRequestHookHost for T where T: PromptHost + ?Sized {}
+
+pub trait TurnHookHost:
+    SessionSnapshotHost + DynamicToolHost + SessionLifecycleHost + PromptHost + TraceHost
+{
+}
+impl<T> TurnHookHost for T where
+    T: SessionSnapshotHost
+        + DynamicToolHost
+        + SessionLifecycleHost
+        + PromptHost
+        + TraceHost
+        + ?Sized
+{
+}
+
+pub trait ToolHookHost:
+    SessionSnapshotHost
+    + ToolCatalogHost
+    + DynamicToolHost
+    + SessionLifecycleHost
+    + TurnHost
+    + TaskHost
+    + MonitorHost
+    + SessionGraphHost
+    + PromptHost
+    + DirectCompletionHost
+    + TraceHost
+    + TurnResultHookHost
+    + CheckpointHookHost
+{
+}
+impl<T> ToolHookHost for T where
+    T: SessionSnapshotHost
+        + ToolCatalogHost
+        + DynamicToolHost
+        + SessionLifecycleHost
+        + TurnHost
+        + TaskHost
+        + MonitorHost
+        + SessionGraphHost
+        + PromptHost
+        + DirectCompletionHost
+        + TraceHost
+        + ?Sized
+{
+}
+
+pub trait TurnResultHookHost: SessionLifecycleHost + TraceHost {}
+impl<T> TurnResultHookHost for T where T: SessionLifecycleHost + TraceHost + ?Sized {}
+
+pub trait CheckpointHookHost: SessionLifecycleHost + TraceHost {}
+impl<T> CheckpointHookHost for T where T: SessionLifecycleHost + TraceHost + ?Sized {}
+
+pub trait CommandHost: HistoryHost + TraceHost {}
+impl<T> CommandHost for T where T: HistoryHost + TraceHost + ?Sized {}
+
+pub trait HistoryHost:
+    SessionSnapshotHost
+    + SessionLifecycleHost
+    + TurnHost
+    + TaskHost
+    + SessionGraphHost
+    + DirectCompletionHost
+{
+}
+impl<T> HistoryHost for T where
+    T: SessionSnapshotHost
+        + SessionLifecycleHost
+        + TurnHost
+        + TaskHost
+        + SessionGraphHost
+        + DirectCompletionHost
+        + ?Sized
+{
+}
+
+pub trait ExternalInvokeHost:
+    SessionSnapshotHost
+    + ToolCatalogHost
+    + DynamicToolHost
+    + SessionLifecycleHost
+    + TurnHost
+    + TaskHost
+    + MonitorHost
+    + SessionGraphHost
+    + PromptHost
+    + DirectCompletionHost
+    + TraceHost
+{
+}
+impl<T> ExternalInvokeHost for T where
+    T: SessionSnapshotHost
+        + ToolCatalogHost
+        + DynamicToolHost
+        + SessionLifecycleHost
+        + TurnHost
+        + TaskHost
+        + MonitorHost
+        + SessionGraphHost
+        + PromptHost
+        + DirectCompletionHost
+        + TraceHost
+        + ?Sized
+{
+}
+
+pub trait RuntimeSessionHost:
+    ExternalInvokeHost
+    + ToolHookHost
+    + HistoryHost
+    + CommandHost
+    + TurnHookHost
+    + PromptHookHost
+    + PromptRequestHookHost
+{
+}
+impl<T> RuntimeSessionHost for T where
+    T: ExternalInvokeHost
+        + ToolHookHost
+        + HistoryHost
+        + CommandHost
+        + TurnHookHost
+        + PromptHookHost
+        + PromptRequestHookHost
+        + ?Sized
+{
+}
+
 /// Result of a single-shot LLM call via
-/// [`SessionManager::direct_completion`].
+/// [`DirectCompletionHost::direct_completion`].
 #[derive(Clone, Debug)]
 pub struct DirectCompletion {
     pub text: String,
@@ -694,7 +873,7 @@ pub enum AppendSessionNodesResult {
 #[derive(Clone)]
 pub struct PromptHookContext {
     pub session_id: String,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn PromptHookHost>,
     pub state: SessionReadView,
     pub mode_turn_options: ModeTurnOptions,
 }
@@ -703,14 +882,14 @@ pub struct PromptHookContext {
 pub struct PromptRequestHookContext {
     pub session_id: String,
     pub request: crate::PromptRequest,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn PromptRequestHookHost>,
 }
 
 #[derive(Clone)]
 pub struct TurnHookContext {
     pub session_id: String,
     pub state: SessionReadView,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn TurnHookHost>,
 }
 
 #[derive(Clone)]
@@ -718,14 +897,14 @@ pub struct SessionConfigChangedContext {
     pub session_id: String,
     pub previous: SessionPolicy,
     pub current: SessionPolicy,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn TaskHost>,
 }
 
 #[derive(Clone)]
 pub struct SessionStateChangedContext {
     pub session_id: String,
     pub state: SessionReadView,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn HistoryHost>,
 }
 
 #[derive(Clone)]
@@ -770,7 +949,7 @@ pub struct ToolCallHookContext {
     pub session_id: String,
     pub tool_name: String,
     pub args: serde_json::Value,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn ToolHookHost>,
 }
 
 #[derive(Clone)]
@@ -780,7 +959,7 @@ pub struct ToolResultHookContext {
     pub args: serde_json::Value,
     pub result: ToolResult,
     pub duration_ms: u64,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn ToolHookHost>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -809,14 +988,14 @@ pub struct ToolResultProjectionContext {
     pub args: serde_json::Value,
     pub result: ToolResult,
     pub duration_ms: u64,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn ToolHookHost>,
 }
 
 #[derive(Clone)]
 pub struct TurnResultHookContext {
     pub session_id: String,
     pub turn: Arc<TurnResultSummary>,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn TurnResultHookHost>,
 }
 
 #[derive(Clone)]
@@ -824,7 +1003,7 @@ pub struct CheckpointHookContext {
     pub session_id: String,
     pub checkpoint: CheckpointKind,
     pub state: SessionReadView,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn CheckpointHookHost>,
 }
 
 /// Metadata about a slash command contributed by a plugin.
@@ -849,7 +1028,7 @@ pub struct CommandInvocation {
     pub name: String,
     pub argument: Option<String>,
     pub session_id: String,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn CommandHost>,
 }
 
 /// Result from a plugin command handler, surfaced into the host UI.
@@ -867,7 +1046,7 @@ pub enum CommandOutcome {
 pub struct AssistantStreamHookContext {
     pub session_id: String,
     pub chunk: String,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn ToolHookHost>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -888,7 +1067,7 @@ pub struct AssistantStreamTransform {
 pub struct AssistantResponseHookContext {
     pub session_id: String,
     pub response: LlmResponse,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn ToolHookHost>,
 }
 
 #[derive(Clone, Debug)]
@@ -935,7 +1114,7 @@ pub struct ExternalOpDef {
 #[derive(Clone)]
 pub struct ExternalInvokeContext {
     pub session_id: Option<String>,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn ExternalInvokeHost>,
 }
 
 #[derive(Clone)]
@@ -1102,7 +1281,7 @@ mod tests {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
-                state: SessionReadView::new(SessionStateEnvelope::default()),
+                state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
                 mode_turn_options: ModeTurnOptions::default(),
             })
             .await

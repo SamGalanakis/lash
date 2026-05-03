@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::plugin::SessionManager;
+use crate::plugin::ToolHookHost;
 use crate::{ToolDefinition, ToolResult};
 
 /// A message sent from the sandbox to the host during execution.
@@ -17,7 +17,7 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 #[derive(Clone)]
 pub struct ToolExecutionContext {
     pub session_id: String,
-    pub host: Arc<dyn SessionManager>,
+    pub host: Arc<dyn ToolHookHost>,
     pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub async_task_id: Option<String>,
 }

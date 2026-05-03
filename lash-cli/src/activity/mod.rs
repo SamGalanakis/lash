@@ -4,14 +4,16 @@ use std::sync::Arc;
 use lash_subagents::SubagentHost;
 use serde_json::Value;
 
+use crate::app::{UiTimeline, UiTimelineItem};
+
 mod projector;
 mod projectors;
 mod shared;
 
 pub use self::projector::{ProjectCtx, ToolProjector};
-pub use self::projectors::edit::merge_edit_activity;
+use self::projectors::edit::merge_edit_activity;
 pub(crate) use self::projectors::edit::{patch_file_subject, patch_status_title};
-pub use self::projectors::exploration::merge_exploration_activity;
+use self::projectors::exploration::merge_exploration_activity;
 use self::shared::activity_tool_name;
 
 pub(crate) fn is_batch_tool_name(name: &str) -> bool {
@@ -226,13 +228,30 @@ impl ActivityBlock {
     }
 }
 
+fn merge_projected_activity(target: &mut ActivityBlock, incoming: ActivityBlock) -> bool {
+    if target.call.kind == ActivityKind::Exploration
+        && incoming.call.kind == ActivityKind::Exploration
+        && target.result.status == ActivityStatus::Completed
+        && incoming.result.status == ActivityStatus::Completed
+    {
+        return merge_exploration_activity(target, incoming);
+    }
+    if target.call.kind == ActivityKind::Edit
+        && incoming.call.kind == ActivityKind::Edit
+        && target.result.status == ActivityStatus::Completed
+        && incoming.result.status == ActivityStatus::Completed
+    {
+        return merge_edit_activity(target, incoming);
+    }
+    false
+}
+
 #[derive(Clone)]
 pub struct ActivityState {
     shell_handles: HashMap<String, String>,
-    /// Tool-name → projector registry, populated once at construction via
+    /// Tool-name -> projector registry, populated once at construction via
     /// `projectors::register_builtins`. Dispatch walks this map before
-    /// falling through to the legacy match (during the refactor) or the
-    /// generic projector (once the refactor is complete).
+    /// falling through to the generic projector.
     registry: HashMap<&'static str, Arc<dyn ToolProjector>>,
     /// Live subagent host, plumbed through to projectors via `ProjectCtx`
     /// so they can fetch display-only metadata (capability, model, run
@@ -292,7 +311,7 @@ impl ActivityState {
         self.shell_handles.clear();
     }
 
-    pub fn blocks_for_tool_call(
+    pub fn project_tool_call(
         &mut self,
         name: &str,
         args: Value,
@@ -326,6 +345,34 @@ impl ActivityState {
         // free function so we don't round-trip through the registry
         // (GenericProjector is already registered under `search_tools`).
         vec![projectors::generic::fallback_block(&mut ctx, status)]
+    }
+
+    pub(crate) fn append_tool_call_to_timeline(
+        &mut self,
+        timeline: &mut UiTimeline,
+        name: &str,
+        args: Value,
+        result: Value,
+        success: bool,
+        duration_ms: u64,
+    ) -> Vec<ActivityBlock> {
+        let activities = self.project_tool_call(name, args, result, success, duration_ms);
+        for activity in activities.iter().cloned() {
+            Self::append_projected_activity_to_timeline(timeline, activity);
+        }
+        activities
+    }
+
+    pub(crate) fn append_projected_activity_to_timeline(
+        timeline: &mut UiTimeline,
+        activity: ActivityBlock,
+    ) {
+        if let Some(UiTimelineItem::Activity(existing)) = timeline.last_mut()
+            && merge_projected_activity(existing, activity.clone())
+        {
+            return;
+        }
+        timeline.push(UiTimelineItem::Activity(Box::new(activity)));
     }
 
     fn blocks_for_batch_tool_call(&mut self, args: &Value, result: &Value) -> Vec<ActivityBlock> {
@@ -364,7 +411,7 @@ impl ActivityState {
                     item.clone()
                 };
 
-                self.blocks_for_tool_call(
+                self.project_tool_call(
                     &child_name,
                     child_args,
                     child_result,
@@ -428,10 +475,8 @@ pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use lash_subagents::{
-        AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, FollowupTaskRequest,
-        FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse, SendMessageRequest,
-        SendMessageResponse, SpawnAgentRequest, SpawnAgentResponse, SubagentHost, WaitAgentRequest,
-        WaitAgentResponse,
+        AgentMetadata, CloseAgentRequest, CloseAgentResponse, SpawnAgentRequest,
+        SpawnAgentResponse, SubagentHost, WaitAgentRequest, WaitAgentResponse,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -477,22 +522,6 @@ pub(crate) mod tests {
             unreachable!("MockSubagentHost is read-only")
         }
 
-        async fn send_message(
-            &self,
-            _context: &lash::ToolExecutionContext,
-            _request: SendMessageRequest,
-        ) -> Result<SendMessageResponse, String> {
-            unreachable!("MockSubagentHost is read-only")
-        }
-
-        async fn followup_task(
-            &self,
-            _context: &lash::ToolExecutionContext,
-            _request: FollowupTaskRequest,
-        ) -> Result<FollowupTaskResponse, String> {
-            unreachable!("MockSubagentHost is read-only")
-        }
-
         async fn wait_agent(
             &self,
             _context: &lash::ToolExecutionContext,
@@ -507,16 +536,6 @@ pub(crate) mod tests {
             _request: CloseAgentRequest,
         ) -> Result<CloseAgentResponse, String> {
             unreachable!("MockSubagentHost is read-only")
-        }
-
-        async fn list_agents(
-            &self,
-            _context: &lash::ToolExecutionContext,
-            _request: ListAgentsRequest,
-        ) -> Result<ListAgentsResponse, String> {
-            Ok(ListAgentsResponse {
-                agents: Vec::<AgentSummary>::new(),
-            })
         }
     }
 
@@ -541,7 +560,7 @@ pub(crate) mod tests {
     #[test]
     fn batch_expands_into_child_tool_blocks() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "batch",
             json!({
                 "tool_calls": [
@@ -576,7 +595,7 @@ pub(crate) mod tests {
     #[test]
     fn batch_normalizes_namespaced_child_tool_blocks() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "batch",
             json!({
                 "tool_calls": [
@@ -604,7 +623,7 @@ pub(crate) mod tests {
     #[test]
     fn namespaced_batch_expands_into_child_tool_blocks() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "functions.batch",
             json!({
                 "tool_calls": [
@@ -630,7 +649,7 @@ pub(crate) mod tests {
     #[test]
     fn projected_batch_results_expand_into_child_tool_blocks() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "batch",
             json!({
                 "tool_calls": [
@@ -659,7 +678,7 @@ pub(crate) mod tests {
     #[test]
     fn tool_use_batch_results_expand_into_child_tool_blocks() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "batch",
             json!({
                 "tool_uses": [
@@ -690,7 +709,7 @@ pub(crate) mod tests {
     fn write_stdin_uses_session_id_argument() {
         let mut state = ActivityState::default();
         state.shell_handles.insert("7".into(), "python3 -q".into());
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "write_stdin",
             json!({
                 "session_id": 7,
@@ -719,7 +738,7 @@ pub(crate) mod tests {
     #[test]
     fn write_stdin_summary_uses_input_preview() {
         let mut state = ActivityState::default();
-        state.blocks_for_tool_call(
+        state.project_tool_call(
             "start_command",
             json!({"cmd":"python3 -q"}),
             json!({
@@ -730,7 +749,7 @@ pub(crate) mod tests {
             1,
         );
 
-        let wrote = state.blocks_for_tool_call(
+        let wrote = state.project_tool_call(
             "write_stdin",
             json!({"session_id":7,"chars":"print(2 + 2)\n","poll_ms":1000}),
             json!({
@@ -748,7 +767,7 @@ pub(crate) mod tests {
     #[test]
     fn write_stdin_empty_poll_without_output_is_suppressed() {
         let mut state = ActivityState::default();
-        state.blocks_for_tool_call(
+        state.project_tool_call(
             "start_command",
             json!({"cmd":"python3 -q"}),
             json!({
@@ -759,7 +778,7 @@ pub(crate) mod tests {
             1,
         );
 
-        let polled = state.blocks_for_tool_call(
+        let polled = state.project_tool_call(
             "write_stdin",
             json!({"session_id":7,"chars":"","poll_ms":1000}),
             json!({
@@ -777,7 +796,7 @@ pub(crate) mod tests {
     #[test]
     fn write_stdin_empty_poll_with_output_is_kept() {
         let mut state = ActivityState::default();
-        state.blocks_for_tool_call(
+        state.project_tool_call(
             "start_command",
             json!({"cmd":"python3 -q"}),
             json!({
@@ -788,7 +807,7 @@ pub(crate) mod tests {
             1,
         );
 
-        let polled = state.blocks_for_tool_call(
+        let polled = state.project_tool_call(
             "write_stdin",
             json!({"session_id":7,"chars":"","poll_ms":1000}),
             json!({
@@ -807,7 +826,7 @@ pub(crate) mod tests {
     #[test]
     fn tool_search_and_ask_show_specific_context() {
         let mut state = ActivityState::default();
-        let search_blocks = state.blocks_for_tool_call(
+        let search_blocks = state.project_tool_call(
             "search_tools",
             json!({"query":"planning"}),
             json!([
@@ -819,7 +838,7 @@ pub(crate) mod tests {
             true,
             0,
         );
-        let ask_blocks = state.blocks_for_tool_call(
+        let ask_blocks = state.project_tool_call(
             "ask",
             json!({"question":"Which environment should I use?","options":["staging","prod"]}),
             json!({"kind":"single","selection":"staging"}),
@@ -845,7 +864,7 @@ pub(crate) mod tests {
     #[test]
     fn ask_tool_result_omits_echoed_answer_and_note_lines() {
         let mut state = ActivityState::default();
-        let ask_blocks = state.blocks_for_tool_call(
+        let ask_blocks = state.project_tool_call(
             "ask",
             json!({"question":"Which direction should I take?","options":["minimal","full"]}),
             json!({
@@ -875,7 +894,7 @@ pub(crate) mod tests {
     #[test]
     fn search_web_summary_keeps_query_in_primary_row() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "search_web",
             json!({ "query": "terminal queue preview" }),
             json!({
@@ -916,7 +935,7 @@ pub(crate) mod tests {
         );
         let mut state = ActivityState::default();
         state.set_subagent_host(host);
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "spawn_agent",
             json!({
                 "agent_name":"probe_repo_shape",

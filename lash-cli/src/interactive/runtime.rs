@@ -11,6 +11,7 @@ use crate::turn_runner::{RuntimeRunResult, spawn_runtime_turn};
 pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
         build_items_from_editor_input(&turn.effective_text, turn.images.clone());
+    let attachment_store = lash::FileAttachmentStore::new(crate::paths::attachments_dir());
     let mut parts = Vec::new();
     let mut image_ids = Vec::new();
     for item in items {
@@ -71,15 +72,22 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     continue;
                 }
                 image_ids.push(id.clone());
+                let meta = lash::AttachmentMeta::new(
+                    lash::AttachmentId::new("pending"),
+                    lash::MediaType::Image(lash::ImageMediaType::Png),
+                    bytes.len() as u64,
+                    None,
+                    None,
+                    Some(id.clone()),
+                );
+                let Ok(reference) = attachment_store.put(bytes.clone(), meta) else {
+                    continue;
+                };
                 parts.push(Part {
                     id: String::new(),
                     kind: PartKind::Image,
                     content: String::new(),
-                    attachment: Some(lash::session_model::message::PartAttachment {
-                        mime: "image/png".to_string(),
-                        url: lash::session_model::message::data_url_for_bytes("image/png", bytes),
-                        filename: None,
-                    }),
+                    attachment: Some(lash::session_model::message::PartAttachment { reference }),
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,
@@ -433,7 +441,7 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
     let history_text = terminal_size.and_then(|(width, height)| {
         crate::render::extract_history_selection_text(app, width, height)
     });
-    let last_text = app.blocks.iter().rev().find_map(|b| {
+    let last_text = app.timeline.iter().rev().find_map(|b| {
         if let UiTimelineItem::AssistantText(text) = b {
             Some(text.clone())
         } else {

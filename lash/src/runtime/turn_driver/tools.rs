@@ -12,7 +12,7 @@ async fn run_one_tool_call(
     pending_tool: crate::sansio::PendingToolCall,
     dispatch: Arc<crate::tool_dispatch::ToolDispatchContext>,
     plugins: Arc<crate::PluginSession>,
-    projector_manager: Arc<dyn SessionManager>,
+    projector_manager: Arc<dyn RuntimeSessionHost>,
     event_tx: mpsc::Sender<RuntimeStreamEvent>,
     task_cancel: CancellationToken,
 ) -> (usize, crate::sansio::CompletedToolCall) {
@@ -63,7 +63,7 @@ async fn run_one_tool_call(
             args: outcome.record.args.clone(),
             result: raw_result.clone(),
             duration_ms: outcome.record.duration_ms,
-            host: Arc::clone(&projector_manager),
+            host: projector_manager.clone(),
         })
         .await
     {
@@ -78,7 +78,7 @@ async fn run_one_tool_call(
             args: outcome.record.args.clone(),
             result: raw_result.clone(),
             duration_ms: outcome.record.duration_ms,
-            host: Arc::clone(&projector_manager),
+            host: projector_manager.clone(),
         })
         .await
     {
@@ -114,23 +114,24 @@ impl RuntimeTurnDriver {
             }
         });
         let plugins = Arc::clone(self.session.plugins());
-        let manager = Arc::clone(&self.session_manager);
-        let projector_manager = Arc::clone(&manager);
+        let manager = self.session_manager.clone();
+        let projector_manager = manager.clone();
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(&plugins),
             tools: self.session.tools(),
             surface: self
                 .session
                 .tool_surface(&self.session_id, self.policy.execution_mode.clone()),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
             session_id: self.session_id.clone(),
             event_tx: tool_event_tx,
             turn_injection_bridge: self.session.turn_injection_bridge().clone(),
+            attachment_store: Arc::clone(&self.host.core.attachment_store),
         });
         // Partition pending tool calls by declared [`ToolExecutionMode`]:
         // parallel-safe tools spawn onto a JoinSet to run concurrently, while
         // tools declared `Serial` (apply_patch, exec_command, write_stdin,
-        // followup_task, ...) run one-at-a-time afterwards so they can't
+        // ...) run one-at-a-time afterwards so they can't
         // interleave with each other or clobber shared state. Order is
         // preserved by the caller-provided `index` and the final sort below.
         let mut parallel_calls: Vec<(usize, crate::sansio::PendingToolCall)> = Vec::new();
@@ -156,7 +157,7 @@ impl RuntimeTurnDriver {
         for (index, pending_tool) in parallel_calls.into_iter() {
             let dispatch = Arc::clone(&dispatch);
             let plugins = Arc::clone(&plugins);
-            let projector_manager = Arc::clone(&projector_manager);
+            let projector_manager = projector_manager.clone();
             let event_tx_clone = event_tx.clone();
             let task_cancel = tool_cancel.clone();
             join_set.spawn(async move {
@@ -251,7 +252,7 @@ impl RuntimeTurnDriver {
                 pending_tool,
                 Arc::clone(&dispatch),
                 Arc::clone(&plugins),
-                Arc::clone(&projector_manager),
+                projector_manager.clone(),
                 event_tx.clone(),
                 tool_cancel.clone(),
             )

@@ -112,6 +112,14 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_attachment_store(
+        mut self,
+        attachment_store: Arc<dyn crate::AttachmentStore>,
+    ) -> Self {
+        self.core = self.core.with_attachment_store(attachment_store);
+        self
+    }
+
     pub fn with_prompt_template(mut self, prompt_template: crate::PromptTemplate) -> Self {
         self.core = self.core.with_prompt_template(prompt_template);
         self

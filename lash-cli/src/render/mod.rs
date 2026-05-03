@@ -271,19 +271,18 @@ pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Ve
         let state = match task.run_state {
             lash::ManagedRunState::Running => "running",
             lash::ManagedRunState::Idle => "idle",
-            lash::ManagedRunState::Completed => "completed",
-            lash::ManagedRunState::Failed => "failed",
+            lash::ManagedRunState::Completed => "success",
+            lash::ManagedRunState::Failed => "error",
             lash::ManagedRunState::Cancelled => "cancelled",
         };
         let kind = task.kind.as_str();
-        let elapsed = task
-            .started_at
-            .elapsed()
-            .ok()
-            .and_then(|elapsed| {
-                crate::util::format_duration_ms_if_visible(elapsed.as_millis() as u64)
-            })
-            .unwrap_or_else(|| "0:00".to_string());
+        let elapsed_duration = task
+            .terminal_duration
+            .or_else(|| task.started_at.elapsed().ok())
+            .unwrap_or_default();
+        let elapsed =
+            crate::util::format_duration_ms_if_visible(elapsed_duration.as_millis() as u64)
+                .unwrap_or_else(|| "0:00".to_string());
         let state_style = match task.run_state {
             lash::ManagedRunState::Running => theme::turn_status_state(),
             lash::ManagedRunState::Idle => theme::text_subtle_style(),
@@ -560,8 +559,8 @@ pub(crate) fn find_visible_block(app: &App, scroll_offset: usize) -> (usize, usi
     }
     let cache = app.height_cache_snapshot();
     let idx = cache.partition_point(|&cumulative| cumulative <= scroll_offset);
-    if idx >= app.blocks.len() {
-        return (app.blocks.len(), 0);
+    if idx >= app.timeline.len() {
+        return (app.timeline.len(), 0);
     }
     let block_start = if idx == 0 { 0 } else { cache[idx - 1] };
     (idx, scroll_offset - block_start)
@@ -573,7 +572,7 @@ fn history_content_lines_snapshot(
     viewport_height: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for idx in 0..app.blocks.len() {
+    for idx in 0..app.timeline.len() {
         lines.extend(render_block_lines(
             app,
             idx,
@@ -1004,7 +1003,7 @@ fn render_block(
     viewport_height: usize,
 ) -> Vec<Line<'static>> {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks = blocks.to_vec();
+    app.timeline = blocks.to_vec().into();
     app.expand_level = expand_level;
     render_block_lines(&app, idx, viewport_width, viewport_height)
 }
@@ -1016,7 +1015,7 @@ fn render_block_into(
     viewport_width: usize,
     viewport_height: usize,
 ) {
-    let blocks = &app.blocks;
+    let blocks = &app.timeline;
     let expand_level = app.expand_level;
     match &blocks[idx] {
         UiTimelineItem::TurnStart(turn) => {

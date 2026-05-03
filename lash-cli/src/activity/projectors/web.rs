@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn fetch_url_projects_content_field_not_raw_record() {
         let mut state = ActivityState::default();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "fetch_url",
             json!({ "url": "https://example.com" }),
             json!({

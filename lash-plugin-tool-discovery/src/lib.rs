@@ -11,7 +11,8 @@ use lash::plugin::{
 use lash::{
     DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolDefinition, ToolExecutionContext,
-    ToolExecutionMode, ToolProvider, ToolResult, ToolSurfaceContribution, ToolSurfaceOverride,
+    ToolExecutionMode, ToolOutputContract, ToolProvider, ToolResult, ToolSurfaceContribution,
+    ToolSurfaceOverride,
 };
 use serde_json::{Value, json};
 
@@ -523,6 +524,7 @@ impl CatalogTool {
                 .cloned()
                 .unwrap_or_else(|| json!({})),
         )
+        .with_output_contract(output_contract_field(self.raw.get("output_contract")))
         .with_examples(string_vec(self.raw.get("examples")))
     }
 }
@@ -563,7 +565,12 @@ impl DiscoveryDoc {
         push_field(
             &mut fields,
             "output_fields",
-            vec![schema_index_text(tool.raw.get("output_schema"))],
+            vec![
+                schema_index_text(tool.raw.get("output_schema")),
+                tool.compact_definition()
+                    .compact_contract()
+                    .render_returns(),
+            ],
             2.4,
             false,
         );
@@ -941,6 +948,13 @@ fn json_field(value: &Value, key: &str) -> String {
     value.get(key).map(Value::to_string).unwrap_or_default()
 }
 
+fn output_contract_field(value: Option<&Value>) -> ToolOutputContract {
+    value
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
 fn schema_index_text(schema: Option<&Value>) -> String {
     let mut parts = Vec::new();
     if let Some(schema) = schema {
@@ -1058,14 +1072,14 @@ fn semantic_model()
     static MODEL: OnceLock<Mutex<Option<model2vec_rs::model::StaticModel>>> = OnceLock::new();
     let lock = MODEL.get_or_init(|| Mutex::new(None));
     let mut guard = lock.lock().ok()?;
-    if guard.is_none() {
-        if let Ok(model) = {
+    if guard.is_none()
+        && let Ok(model) = {
             let model_id = std::env::var("LASH_TOOL_SEARCH_SEMANTIC_MODEL")
                 .unwrap_or_else(|_| "minishlab/potion-base-2M".to_string());
             model2vec_rs::model::StaticModel::from_pretrained(model_id, None, None, None)
-        } {
-            *guard = Some(model);
         }
+    {
+        *guard = Some(model);
     }
     guard.as_ref()?;
     Some(guard)
@@ -1462,7 +1476,9 @@ fn rlm_tool_surface(ctx: ToolSurfaceContext) -> Result<ToolSurfaceContribution, 
 mod tests {
     use super::*;
     use lash::plugin::{
-        PluginError, SessionHandle, SessionManager, SessionSnapshot, SessionTurnHandle,
+        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, PromptHost,
+        SessionGraphHost, SessionHandle, SessionLifecycleHost, SessionSnapshot,
+        SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost, TraceHost, TurnHost,
     };
     use lash::{
         AssembledTurn, DirectCompletion, ExecutionMode, TokenUsage, ToolExecutionContext,
@@ -1512,7 +1528,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl SessionManager for FakeSessionManager {
+    impl SessionSnapshotHost for FakeSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Err(PluginError::Session("unused".to_string()))
         }
@@ -1523,11 +1539,17 @@ mod tests {
         ) -> Result<SessionSnapshot, PluginError> {
             Err(PluginError::Session("unused".to_string()))
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ToolCatalogHost for FakeSessionManager {
         async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<Value>, PluginError> {
             Ok(self.catalog.clone())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl DynamicToolHost for FakeSessionManager {
         async fn set_tools_availability(
             &self,
             _session_id: &str,
@@ -1540,7 +1562,10 @@ mod tests {
                 .extend(tool_names.iter().cloned());
             Ok(2)
         }
+    }
 
+    #[async_trait::async_trait]
+    impl DirectCompletionHost for FakeSessionManager {
         async fn direct_completion(
             &self,
             request: lash::DirectRequest,
@@ -1561,7 +1586,10 @@ mod tests {
                 usage: TokenUsage::default(),
             })
         }
+    }
 
+    #[async_trait::async_trait]
+    impl SessionLifecycleHost for FakeSessionManager {
         async fn create_session(
             &self,
             _request: lash::plugin::SessionCreateRequest,
@@ -1572,7 +1600,10 @@ mod tests {
         async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl TurnHost for FakeSessionManager {
         async fn start_turn_stream(
             &self,
             _session_id: &str,
@@ -1589,6 +1620,12 @@ mod tests {
             Ok(())
         }
     }
+
+    impl TaskHost for FakeSessionManager {}
+    impl MonitorHost for FakeSessionManager {}
+    impl SessionGraphHost for FakeSessionManager {}
+    impl PromptHost for FakeSessionManager {}
+    impl TraceHost for FakeSessionManager {}
 
     fn catalog_tool_with_metadata(
         name: &str,
@@ -2532,6 +2569,90 @@ mod tests {
         assert!(results[0].get("namespace").is_none());
         assert!(results[0].get("matched_fields").is_none());
         assert!(results[0].get("score").is_none());
+    }
+
+    #[tokio::test]
+    async fn search_tools_projects_dynamic_output_contracts() {
+        let mut spawn_agent = catalog_tool("spawn_agent", "Run a subagent");
+        spawn_agent.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "agent_name": { "type": "string" },
+                    "task": { "type": "string" },
+                    "output": { "type": "object", "additionalProperties": true }
+                },
+                "required": ["agent_name", "task"]
+            }),
+        );
+        spawn_agent.as_object_mut().unwrap().insert(
+            "output_contract".to_string(),
+            json!({ "kind": "from_input_schema", "input_field": "output" }),
+        );
+
+        let mut llm_query = catalog_tool("llm_query", "Run one lightweight LLM call");
+        llm_query.as_object_mut().unwrap().insert(
+            "input_schema".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string" },
+                    "output": { "type": "object", "additionalProperties": true }
+                },
+                "required": ["task"]
+            }),
+        );
+        llm_query.as_object_mut().unwrap().insert(
+            "output_contract".to_string(),
+            json!({
+                "kind": "from_input_schema",
+                "input_field": "output",
+                "default_schema": { "type": "string" }
+            }),
+        );
+
+        let host = Arc::new(FakeSessionManager {
+            catalog: vec![spawn_agent, llm_query],
+            promoted: Mutex::default(),
+            ..Default::default()
+        });
+        let provider = ToolDiscoveryToolsProvider::new();
+        let context = ToolExecutionContext {
+            session_id: "session".to_string(),
+            host,
+            cancellation_token: None,
+            async_task_id: None,
+        };
+
+        let result = provider
+            .execute_streaming_with_context(
+                "search_tools",
+                &json!({ "query": "spawn_agent", "limit": 1 }),
+                &context,
+                None,
+            )
+            .await;
+        assert!(result.success, "{result:?}");
+        let results = result.result.as_array().expect("spawn results");
+        assert_eq!(results[0]["name"], json!("spawn_agent"));
+        assert_eq!(results[0]["returns"], json!("schema from `output`"));
+
+        let result = provider
+            .execute_streaming_with_context(
+                "search_tools",
+                &json!({ "query": "llm_query", "limit": 1 }),
+                &context,
+                None,
+            )
+            .await;
+        assert!(result.success, "{result:?}");
+        let results = result.result.as_array().expect("llm results");
+        assert_eq!(results[0]["name"], json!("llm_query"));
+        assert_eq!(
+            results[0]["returns"],
+            json!("schema from `output`, default str")
+        );
     }
 
     #[test]

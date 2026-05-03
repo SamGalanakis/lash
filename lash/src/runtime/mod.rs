@@ -11,9 +11,11 @@ mod session_ops;
 mod state;
 #[cfg(test)]
 mod tests;
+mod turn_commit_pipeline;
 mod turn_driver;
 mod turn_graph;
 mod turn_loop;
+mod turn_progress;
 mod usage;
 
 use std::collections::HashMap;
@@ -40,16 +42,17 @@ use crate::session_model::{
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call_with_execution_context};
 use crate::{
     CheckpointKind, ExecutionMode, ExternalInvokeError, PersistentRuntimeServices,
-    PromptHookContext, RuntimeServices, SandboxMessage, Session, SessionCreateRequest,
-    SessionError, SessionHandle, SessionManager, SessionSnapshot, SessionStartPoint,
+    PromptHookContext, RuntimeServices, RuntimeSessionHost, SandboxMessage, Session,
+    SessionCreateRequest, SessionError, SessionHandle, SessionSnapshot, SessionStartPoint,
     ToolCallRecord,
 };
 use crate::{Effect, TurnMachine};
 
 use host::*;
 use session_manager::*;
+use turn_commit_pipeline::*;
 use turn_driver::*;
-use turn_graph::*;
+use turn_progress::*;
 
 // `PromptUsage` is re-exported below alongside the runtime's own types.
 pub use lash_sansio::PromptUsage;
@@ -68,13 +71,11 @@ pub use host::{
     ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, RuntimeCoreConfig,
     SessionTaskExecutor, TokioSessionTaskExecutor,
 };
-use io::{normalize_input_items, projection_message_delta_if_base_preserved};
+use io::normalize_input_items;
 pub use state::{PersistedSessionState, SessionStateEnvelope};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
-    apply_session_head, clear_persisted_runtime_caches, commit_runtime_state,
-    commit_runtime_state_with_graph_commit, load_session_checkpoint, normalize_session_graph,
-    persist_runtime_state,
+    apply_session_head, load_session_checkpoint, normalize_session_graph,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,
@@ -133,7 +134,7 @@ pub struct TurnInput {
 #[derive(Clone, Debug)]
 pub(super) enum NormalizedItem {
     Text(String),
-    Image(Vec<u8>),
+    Image(crate::AttachmentRef),
 }
 
 /// Canonical assistant output payload.

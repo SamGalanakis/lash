@@ -2,12 +2,10 @@ use super::artifact::render_snippet_preview;
 use super::prompt::prompt_content_lines_snapshot;
 use super::*;
 use crate::activity::ActivityState;
-use crate::app::projected_timeline_items_from_parts;
+use crate::app::timeline_items_from_read_view_parts;
 use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use async_trait::async_trait;
-use lash::ToolProvider;
-use lash::tools::ShowSnippetToUser;
 use lash::{Part, PartKind, PromptRequest, SkillCatalog};
 use lash_ui::{SlashCommandSpec, UiContext, UiExtension, UiExtensions, UiHostEffect};
 use serde_json::Value;
@@ -89,7 +87,7 @@ fn single_op_exploration_renders_as_one_line() {
     // single top-level bullet — no `EXPLORE` wrapper, no `1 step` body,
     // no indented detail line duplicating the header.
     let mut state = crate::activity::ActivityState::default();
-    let blocks = state.blocks_for_tool_call(
+    let blocks = state.project_tool_call(
         "read_file",
         serde_json::json!({ "path": "README.md" }),
         Value::Null,
@@ -132,7 +130,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
     );
     let mut state = crate::activity::ActivityState::default();
     state.set_subagent_host(host);
-    let blocks = state.blocks_for_tool_call(
+    let blocks = state.project_tool_call(
         "spawn_agent",
         serde_json::json!({
             "agent_name":"probe_repo_shape",
@@ -183,7 +181,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
 #[test]
 fn extract_history_selection_text_reads_across_scrolled_content_rows() {
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-    app.blocks = vec![UiTimelineItem::UserInput("alpha\nbeta\ngamma".into())];
+    app.timeline = vec![UiTimelineItem::UserInput("alpha\nbeta\ngamma".into())].into();
     app.scroll_offset = 1;
     app.selection.anchor = (2, 1);
     app.selection.end = (4, 2);
@@ -346,7 +344,7 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
         origin: None,
     };
 
-    let blocks = projected_timeline_items_from_parts(
+    let blocks = timeline_items_from_read_view_parts(
         &[],
         &[message],
         &[],
@@ -410,9 +408,9 @@ fn snippet_preview_renders_line_numbered_code_block() {
 fn activity_block_renders_snippet_preview_at_default_expand_level() {
     let activity = ActivityBlock::new(
         ActivityKind::GenericTool,
-        "show_snippet_to_user",
+        "preview_text",
         Value::Null,
-        "show README.md:1-3 to user",
+        "preview README.md:1-3",
         ActivityStatus::Completed,
         Value::Null,
         0,
@@ -443,19 +441,19 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("show README.md:1-3 to user"))
+            .any(|line| line.contains("preview README.md:1-3"))
     );
     assert!(rendered.iter().any(|line| line.contains("README")));
     assert!(rendered.iter().any(|line| line.contains("Title")));
 }
 
 #[test]
-fn activity_block_indents_show_snippet_to_user_preview_under_summary() {
+fn activity_block_indents_snippet_preview_under_summary() {
     let activity = ActivityBlock::new(
         ActivityKind::GenericTool,
-        "show_snippet_to_user",
+        "preview_text",
         Value::Null,
-        "show lash/src/plugin_builtin/plan_mode.rs:780-786 to user",
+        "preview lash/src/plugin_builtin/plan_mode.rs:780-786",
         ActivityStatus::Completed,
         Value::Null,
         0,
@@ -484,7 +482,7 @@ fn activity_block_indents_show_snippet_to_user_preview_under_summary() {
         .collect::<Vec<_>>();
 
     assert!(rendered.iter().any(|line| {
-        line.starts_with("• show lash/src/plugin_builtin/plan_mode.rs:780-786 to user")
+        line.starts_with("• preview lash/src/plugin_builtin/plan_mode.rs:780-786")
     }));
     assert!(
         rendered
@@ -502,75 +500,6 @@ fn activity_block_indents_show_snippet_to_user_preview_under_summary() {
             .iter()
             .any(|line| line.starts_with("    780 │ if ctx.tool_name != \"plan_exit\" {"))
     );
-}
-
-#[tokio::test]
-async fn show_snippet_to_user_output_wraps_under_line_number_gutter() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("sample.rs");
-    std::fs::write(
-        &path,
-        "fn autonomous_prompt_template() -> PromptTemplate {\n",
-    )
-    .expect("write file");
-
-    let tool = ShowSnippetToUser::new();
-    let result = tool
-        .execute(
-            "show_snippet_to_user",
-            &serde_json::json!({
-                "path": path,
-                "start_line": 1,
-                "end_line": 1,
-                "title": "Autonomous-mode prompt template"
-            }),
-        )
-        .await;
-
-    assert!(result.success, "tool failed: {:?}", result.result);
-
-    let mut state = ActivityState::default();
-    let activity = state
-        .blocks_for_tool_call(
-            "show_snippet_to_user",
-            serde_json::json!({
-                "path": path,
-                "start_line": 1,
-                "end_line": 1,
-                "title": "Autonomous-mode prompt template"
-            }),
-            result.result,
-            true,
-            5,
-        )
-        .into_iter()
-        .next()
-        .expect("activity block");
-
-    let blocks = vec![UiTimelineItem::Activity(Box::new(activity))];
-    let rendered = render_block(&blocks, 0, 1, 54, 24);
-
-    assert!(rendered.iter().all(|line| line.width() <= 54));
-
-    let text = rendered
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-
-    assert!(
-        text.iter()
-            .any(|line| line.contains("Autonomous-mode prompt template"))
-    );
-    assert!(
-        text.iter()
-            .any(|line| line == "     1 │ fn autonomous_prompt_template() -> PromptTemp")
-    );
-    assert!(text.iter().any(|line| line == "       │ late {"));
 }
 
 #[test]
@@ -744,9 +673,10 @@ fn user_input_highlights_every_detected_slash_command() {
         ("yolopush", "ship changes"),
         ("ghmonitor", "monitor"),
     ]);
-    app.blocks = vec![UiTimelineItem::UserInput(
+    app.timeline = vec![UiTimelineItem::UserInput(
         "/spring-cleaning /yolopush and then /ghmonitor status".into(),
-    )];
+    )]
+    .into();
 
     let rendered = render_block_lines(&app, 0, 80, 20);
     let slash_spans = rendered
@@ -762,9 +692,10 @@ fn user_input_highlights_every_detected_slash_command() {
 fn user_input_does_not_highlight_unknown_inline_slash_words() {
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     app.skills = skill_catalog_with(&[("ghmonitor", "monitor")]);
-    app.blocks = vec![UiTimelineItem::UserInput(
+    app.timeline = vec![UiTimelineItem::UserInput(
         "Please check /not-a-command and /ghmonitor soon".into(),
-    )];
+    )]
+    .into();
 
     let rendered = render_block_lines(&app, 0, 80, 20);
     let line = rendered.first().expect("user input line");
@@ -803,7 +734,7 @@ fn queue_preview_highlights_multiple_detected_slash_commands() {
 #[test]
 fn shell_activity_renders_live_output_inline_under_tool() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.blocks = vec![UiTimelineItem::Activity(Box::new(
+    app.timeline = vec![UiTimelineItem::Activity(Box::new(
         ActivityBlock::new(
             ActivityKind::ShellCommand,
             "exec_command",
@@ -814,7 +745,8 @@ fn shell_activity_renders_live_output_inline_under_tool() {
             0,
         )
         .with_detail_lines(vec!["Handle shell-1".into()]),
-    ))];
+    ))]
+    .into();
     let now = std::time::Instant::now();
     app.running = true;
     app.live_turn = Some(crate::app::LiveTurnState {
@@ -1116,7 +1048,7 @@ fn lashlang_code_block_is_hidden_below_full_expand() {
 #[test]
 fn activity_detail_lines_are_visible_at_l0() {
     let mut state = ActivityState::default();
-    let blocks = state.blocks_for_tool_call(
+    let blocks = state.project_tool_call(
         "monitor",
         serde_json::json!({
             "description": "build",
@@ -1262,9 +1194,10 @@ fn reasoning_is_compact_below_l2_and_full_at_l2() {
 fn live_reasoning_compacts_after_activity_appends_below_it() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
-    app.blocks = vec![UiTimelineItem::AssistantReasoning(
+    app.timeline = vec![UiTimelineItem::AssistantReasoning(
         "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
-    )];
+    )]
+    .into();
 
     app.expand_level = 1;
     let live_text: Vec<String> = app
@@ -1322,9 +1255,10 @@ fn committed_reasoning_compacts_while_live_assistant_streams() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.expand_level = 1;
-    app.blocks = vec![UiTimelineItem::AssistantReasoning(
+    app.timeline = vec![UiTimelineItem::AssistantReasoning(
         "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
-    )];
+    )]
+    .into();
 
     app.handle_session_event(lash::SessionEvent::TextDelta {
         content: "Answer is streaming.".into(),
@@ -1358,9 +1292,10 @@ fn committed_reasoning_compacts_while_live_assistant_streams() {
 fn live_reasoning_compacts_after_turn_stops() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
-    app.blocks = vec![UiTimelineItem::AssistantReasoning(
+    app.timeline = vec![UiTimelineItem::AssistantReasoning(
         "**Inspecting config implementation**\n\nDetailed thinking body.".into(),
-    )];
+    )]
+    .into();
 
     let live_text: Vec<String> = app
         .rendered_block_lines_cached(0, 80, 24)

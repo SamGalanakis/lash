@@ -129,28 +129,6 @@ pub(crate) fn plugin_message_to_message(
     } else {
         plugin_message.parts.clone()
     };
-    let has_image_parts = parts
-        .iter()
-        .any(|part| matches!(part.kind, PartKind::Image));
-    if matches!(plugin_message.role, MessageRole::User) && !has_image_parts {
-        parts.extend(plugin_message.images.iter().map(|bytes| Part {
-            id: String::new(),
-            kind: PartKind::Image,
-            content: String::new(),
-            attachment: Some(message::PartAttachment {
-                mime: "image/png".to_string(),
-                url: message::data_url_for_bytes("image/png", bytes),
-                filename: None,
-            }),
-            tool_call_id: None,
-            tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-            response_meta: None,
-        }));
-    }
     reassign_part_ids(&message_id, &mut parts);
     Message {
         id: message_id,

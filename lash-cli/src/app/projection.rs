@@ -15,33 +15,74 @@ impl UiTimeline {
         Self::default()
     }
 
-    fn push(&mut self, item: UiTimelineItem) {
+    pub(crate) fn push(&mut self, item: UiTimelineItem) {
         self.items.push(item);
     }
 
-    fn extend(&mut self, items: impl IntoIterator<Item = UiTimelineItem>) {
+    pub(crate) fn extend(&mut self, items: impl IntoIterator<Item = UiTimelineItem>) {
         self.items.extend(items);
     }
 
-    fn last(&self) -> Option<&UiTimelineItem> {
+    pub(crate) fn last(&self) -> Option<&UiTimelineItem> {
         self.items.last()
     }
 
-    fn last_mut(&mut self) -> Option<&mut UiTimelineItem> {
+    pub(crate) fn last_mut(&mut self) -> Option<&mut UiTimelineItem> {
         self.items.last_mut()
     }
 
-    #[cfg(test)]
     pub(crate) fn items(&self) -> &[UiTimelineItem] {
         self.items.as_slice()
     }
 
-    pub(crate) fn to_items(&self) -> Vec<UiTimelineItem> {
-        self.items.clone()
+    pub(crate) fn clear(&mut self) {
+        self.items.clear();
     }
 
-    fn into_items(self) -> Vec<UiTimelineItem> {
-        self.items
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.items.truncate(len);
+    }
+
+    pub(crate) fn retain(&mut self, f: impl FnMut(&UiTimelineItem) -> bool) {
+        self.items.retain(f);
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, UiTimelineItem> {
+        self.items.iter_mut()
+    }
+
+    pub(crate) fn push_system_message_if_new(&mut self, message: String) {
+        if matches!(
+            self.last(),
+            Some(UiTimelineItem::SystemMessage(existing)) if existing == &message
+        ) {
+            return;
+        }
+        self.push(UiTimelineItem::SystemMessage(message));
+    }
+
+    pub(crate) fn push_user_turn_start(&mut self) {
+        let show_separator = match self.last() {
+            None => false,
+            Some(UiTimelineItem::Splash) => false,
+            Some(UiTimelineItem::TurnStart(_)) => false,
+            Some(_) => true,
+        };
+        self.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
+    }
+}
+
+impl From<Vec<UiTimelineItem>> for UiTimeline {
+    fn from(items: Vec<UiTimelineItem>) -> Self {
+        Self { items }
+    }
+}
+
+impl std::ops::Deref for UiTimeline {
+    type Target = [UiTimelineItem];
+
+    fn deref(&self) -> &Self::Target {
+        self.items()
     }
 }
 
@@ -75,22 +116,12 @@ pub(crate) enum UiTimelineItem {
     Splash,
 }
 
-pub(crate) fn projected_timeline_items_from_projection(
-    projection: &lash::SessionProjection,
-    ui_state: &UiProjectionState,
-) -> Vec<UiTimelineItem> {
-    projected_timeline_from_projection(projection, ui_state).into_items()
-}
-
-pub(crate) fn projected_timeline_from_projection(
-    projection: &lash::SessionProjection,
+pub(crate) fn timeline_from_read_view(
+    read_view: &lash::SessionReadView,
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
-    let mut timeline = timeline_from_events(
-        projection.active_events.as_slice(),
-        projection.messages.as_slice(),
-        projection.tool_calls.as_slice(),
-    );
+    let projection = read_view.chronological_projection();
+    let mut timeline = timeline_from_chronological(&projection);
     append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
         ui_state
@@ -103,23 +134,12 @@ pub(crate) fn projected_timeline_from_projection(
 }
 
 #[cfg(test)]
-pub(crate) fn projected_timeline_items_from_parts(
-    events: &[lash::SessionEventRecord],
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-    ui_state: &UiProjectionState,
-) -> Vec<UiTimelineItem> {
-    projected_timeline_from_parts(events, messages, tool_calls, ui_state).into_items()
-}
-
-#[cfg(test)]
-pub(crate) fn projected_timeline_from_parts(
-    events: &[lash::SessionEventRecord],
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
+fn timeline_from_test_read_view(
+    read_view: &lash::SessionReadView,
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
-    let mut timeline = timeline_from_events(events, messages, tool_calls);
+    let projection = read_view.chronological_projection();
+    let mut timeline = timeline_from_chronological(&projection);
     append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
         ui_state
@@ -131,79 +151,108 @@ pub(crate) fn projected_timeline_from_parts(
     timeline
 }
 
-pub(crate) fn project_interrupted_blocks(
-    projection: &lash::SessionProjection,
+#[cfg(test)]
+pub(crate) fn timeline_items_from_read_view_parts(
+    events: &[lash::SessionEventRecord],
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
-    status_message: impl Into<String>,
 ) -> Vec<UiTimelineItem> {
-    let mut timeline = projected_timeline_from_projection(projection, ui_state);
-    push_system_message_item_if_new(&mut timeline, status_message.into());
-    timeline.into_items()
+    let read_view = read_view_from_parts(events, messages, tool_calls);
+    timeline_from_test_read_view(&read_view, ui_state)
+        .items()
+        .to_vec()
 }
 
 #[cfg(test)]
-pub(crate) fn project_interrupted_blocks_from_parts(
+pub(crate) fn timeline_from_read_view_parts(
+    events: &[lash::SessionEventRecord],
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+    ui_state: &UiProjectionState,
+) -> UiTimeline {
+    let read_view = read_view_from_parts(events, messages, tool_calls);
+    timeline_from_test_read_view(&read_view, ui_state)
+}
+
+pub(crate) fn interrupted_blocks_from_read_view(
+    read_view: &lash::SessionReadView,
+    ui_state: &UiProjectionState,
+    status_message: impl Into<String>,
+) -> UiTimeline {
+    let mut timeline = timeline_from_read_view(read_view, ui_state);
+    timeline.push_system_message_if_new(status_message.into());
+    timeline
+}
+
+#[cfg(test)]
+pub(crate) fn interrupted_blocks_from_read_view_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
 ) -> Vec<UiTimelineItem> {
-    let mut timeline = projected_timeline_from_parts(events, messages, tool_calls, ui_state);
-    push_system_message_item_if_new(&mut timeline, status_message.into());
-    timeline.into_items()
+    let read_view = read_view_from_parts(events, messages, tool_calls);
+    let mut timeline = timeline_from_test_read_view(&read_view, ui_state);
+    timeline.push_system_message_if_new(status_message.into());
+    timeline.items().to_vec()
 }
 
-fn timeline_from_events(
+#[cfg(test)]
+fn read_view_from_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
-) -> UiTimeline {
-    if events.is_empty() {
-        return timeline_from_transcript(messages, tool_calls);
-    }
+) -> lash::SessionReadView {
+    lash::SessionReadView::from_derived_message_view(
+        lash::SessionStateEnvelope::default(),
+        std::sync::Arc::new(events.to_vec()),
+        std::sync::Arc::new(messages.to_vec()),
+        std::sync::Arc::new(tool_calls.to_vec()),
+    )
+}
 
+fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> UiTimeline {
     let mut timeline = UiTimeline::new();
     let mut activity_state = ActivityState::default();
-    let tool_call_map = tool_calls
+    let tool_call_map = projection
+        .entries()
         .iter()
-        .filter_map(|record| {
-            record
+        .filter_map(|entry| match &entry.payload {
+            lash::ChronologicalPayload::ToolCall(record) => record
                 .call_id
                 .as_deref()
-                .map(|call_id| (call_id, record.clone()))
+                .map(|call_id| (call_id, record.clone())),
+            lash::ChronologicalPayload::Message(_) | lash::ChronologicalPayload::RlmStep(_) => None,
         })
         .collect::<HashMap<_, _>>();
-    let mut seen_messages = HashSet::new();
+    let mut seen_tool_calls = HashSet::new();
 
-    for event in events {
-        match event {
-            lash::SessionEventRecord::Conversation(record) => {
-                seen_messages.insert(record.id.clone());
-                let message = record.to_message();
+    for entry in projection.entries() {
+        match &entry.payload {
+            lash::ChronologicalPayload::Message(message) => {
                 append_transcript_items(
                     &mut timeline,
-                    &message,
+                    message,
                     &tool_call_map,
                     &mut activity_state,
+                    false,
                 );
             }
-            lash::SessionEventRecord::Mode(event) => {
-                if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
-                    event.rlm_event()
-                {
-                    append_rlm_trajectory_items(&mut timeline, &entry, &mut activity_state);
-                }
+            lash::ChronologicalPayload::ToolCall(record) => {
+                seen_tool_calls.insert(lash::chronological_tool_call_key(record));
+                append_tool_call_record_items(&mut timeline, record, &mut activity_state);
             }
-            _ => {}
+            lash::ChronologicalPayload::RlmStep(entry) => {
+                append_rlm_trajectory_items(
+                    &mut timeline,
+                    entry,
+                    &mut activity_state,
+                    &mut seen_tool_calls,
+                );
+            }
         }
-    }
-
-    for message in messages
-        .iter()
-        .filter(|message| !seen_messages.contains(&message.id))
-    {
-        append_transcript_items(&mut timeline, message, &tool_call_map, &mut activity_state);
     }
 
     timeline
@@ -213,20 +262,15 @@ fn append_rlm_trajectory_items(
     timeline: &mut UiTimeline,
     entry: &lash_rlm_types::RlmTrajectoryEntry,
     activity_state: &mut ActivityState,
+    seen_tool_calls: &mut HashSet<String>,
 ) {
     if let Some(reasoning) = rlm_reasoning_display_text(&entry.reasoning) {
         let _ = push_assistant_reasoning_item(timeline, &reasoning);
     }
     timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
     for record in &entry.tool_calls {
-        for activity in activity_state.blocks_for_tool_call(
-            &record.tool,
-            record.args.clone(),
-            record.result.clone(),
-            record.success,
-            record.duration_ms,
-        ) {
-            append_activity_item(timeline, activity);
+        if seen_tool_calls.insert(lash::chronological_tool_call_key(record)) {
+            append_tool_call_record_items(timeline, record, activity_state);
         }
     }
 }
@@ -335,97 +379,10 @@ fn append_live_projection_items(timeline: &mut UiTimeline, ui_state: &UiProjecti
         let _ = push_assistant_reasoning_item(timeline, text);
     }
     if let Some(text) = ui_state.live_assistant_text.as_deref()
-        && let Some(tail) = interrupted_assistant_tail(&timeline.to_items(), text)
+        && let Some(tail) = interrupted_assistant_tail(timeline.items(), text)
     {
         let _ = push_assistant_text_item(timeline, &tail);
     }
-}
-
-pub(crate) fn push_system_message_block_if_new(blocks: &mut Vec<UiTimelineItem>, message: String) {
-    if matches!(
-        blocks.last(),
-        Some(UiTimelineItem::SystemMessage(existing)) if existing == &message
-    ) {
-        return;
-    }
-    blocks.push(UiTimelineItem::SystemMessage(message));
-}
-
-/// Emit a `TurnStart` marker before a `UserInput` block. The marker is the
-/// data-driven source of truth for the horizontal rule between turns. The
-/// first turn in the stream (nothing above it, or only a `Splash` above
-/// it) does not show a separator — the rule is a *between* signal, not a
-/// *leading* ornament.
-pub(crate) fn push_user_turn_start(blocks: &mut Vec<UiTimelineItem>) {
-    let show_separator = match blocks.last() {
-        None => false,
-        Some(UiTimelineItem::Splash) => false,
-        Some(UiTimelineItem::TurnStart(_)) => false,
-        Some(_) => true,
-    };
-    blocks.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
-}
-
-fn timeline_from_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> UiTimeline {
-    let mut timeline = UiTimeline::new();
-    let mut activity_state = ActivityState::default();
-    let tool_call_map = tool_calls
-        .iter()
-        .filter_map(|record| {
-            record
-                .call_id
-                .as_deref()
-                .map(|call_id| (call_id, record.clone()))
-        })
-        .collect::<HashMap<_, _>>();
-    for message in messages {
-        append_transcript_items(&mut timeline, message, &tool_call_map, &mut activity_state);
-    }
-    timeline
-}
-
-pub(crate) fn append_activity_block(blocks: &mut Vec<UiTimelineItem>, activity: ActivityBlock) {
-    if let Some(UiTimelineItem::Activity(existing)) = blocks.last_mut()
-        && existing.call.kind == ActivityKind::Exploration
-        && activity.call.kind == ActivityKind::Exploration
-        && existing.result.status == ActivityStatus::Completed
-        && activity.result.status == ActivityStatus::Completed
-        && merge_exploration_activity(existing, activity.clone())
-    {
-        return;
-    }
-    if let Some(UiTimelineItem::Activity(existing)) = blocks.last_mut()
-        && existing.call.kind == ActivityKind::Edit
-        && activity.call.kind == ActivityKind::Edit
-        && existing.result.status == ActivityStatus::Completed
-        && activity.result.status == ActivityStatus::Completed
-        && merge_edit_activity(existing, activity.clone())
-    {
-        return;
-    }
-    blocks.push(UiTimelineItem::Activity(Box::new(activity)));
-}
-
-fn append_activity_item(timeline: &mut UiTimeline, activity: ActivityBlock) {
-    if let Some(UiTimelineItem::Activity(existing)) = timeline.last_mut()
-        && existing.call.kind == ActivityKind::Exploration
-        && activity.call.kind == ActivityKind::Exploration
-        && existing.result.status == ActivityStatus::Completed
-        && activity.result.status == ActivityStatus::Completed
-        && merge_exploration_activity(existing, activity.clone())
-    {
-        return;
-    }
-    if let Some(UiTimelineItem::Activity(existing)) = timeline.last_mut()
-        && existing.call.kind == ActivityKind::Edit
-        && activity.call.kind == ActivityKind::Edit
-        && existing.result.status == ActivityStatus::Completed
-        && activity.result.status == ActivityStatus::Completed
-        && merge_edit_activity(existing, activity.clone())
-    {
-        return;
-    }
-    timeline.push(UiTimelineItem::Activity(Box::new(activity)));
 }
 
 pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {
@@ -547,14 +504,17 @@ fn append_transcript_items(
     message: &Message,
     tool_calls: &HashMap<&str, ToolCallRecord>,
     activity_state: &mut ActivityState,
+    render_tool_results: bool,
 ) {
     match message.role {
         MessageRole::User => {
             if message.parts.iter().any(|part| {
                 part_is_rlm_exec_result(part) || matches!(part.kind, PartKind::ToolResult)
             }) {
-                for part in message.parts.iter() {
-                    append_tool_result_items(timeline, part, tool_calls, activity_state);
+                if render_tool_results {
+                    for part in message.parts.iter() {
+                        append_tool_result_items(timeline, part, tool_calls, activity_state);
+                    }
                 }
             } else {
                 let text = message
@@ -563,7 +523,7 @@ fn append_transcript_items(
                     .map(|user_input| user_input.display_text.clone())
                     .unwrap_or_else(|| rendered_message_text(message));
                 if !text.is_empty() {
-                    push_user_turn_start_item(timeline);
+                    timeline.push_user_turn_start();
                     timeline.push(UiTimelineItem::UserInput(text));
                 }
             }
@@ -612,6 +572,24 @@ fn append_transcript_items(
     }
 }
 
+fn append_tool_call_record_items(
+    timeline: &mut UiTimeline,
+    record: &ToolCallRecord,
+    activity_state: &mut ActivityState,
+) {
+    if record.tool == "execute_lashlang" {
+        return;
+    }
+    activity_state.append_tool_call_to_timeline(
+        timeline,
+        &record.tool,
+        record.args.clone(),
+        record.result.clone(),
+        record.success,
+        record.duration_ms,
+    );
+}
+
 /// True when a legacy user-message part carries an RLM exec result.
 /// Current RLM history uses trajectory events instead; these old
 /// messages should stay hidden rather than render as fake tool calls.
@@ -641,15 +619,14 @@ fn append_tool_result_items(
         return;
     };
 
-    for activity in activity_state.blocks_for_tool_call(
+    activity_state.append_tool_call_to_timeline(
+        timeline,
         &record.tool,
         record.args.clone(),
         record.result.clone(),
         record.success,
         record.duration_ms,
-    ) {
-        append_activity_item(timeline, activity);
-    }
+    );
 }
 
 fn flush_assistant_prose_items(timeline: &mut UiTimeline, prose: &mut Vec<String>) {
@@ -680,26 +657,6 @@ fn push_assistant_reasoning_item(timeline: &mut UiTimeline, text: &str) -> bool 
     }
     timeline.push(UiTimelineItem::AssistantReasoning(cleaned));
     true
-}
-
-fn push_system_message_item_if_new(timeline: &mut UiTimeline, message: String) {
-    if matches!(
-        timeline.last(),
-        Some(UiTimelineItem::SystemMessage(existing)) if existing == &message
-    ) {
-        return;
-    }
-    timeline.push(UiTimelineItem::SystemMessage(message));
-}
-
-fn push_user_turn_start_item(timeline: &mut UiTimeline) {
-    let show_separator = match timeline.last() {
-        None => false,
-        Some(UiTimelineItem::Splash) => false,
-        Some(UiTimelineItem::TurnStart(_)) => false,
-        Some(_) => true,
-    };
-    timeline.push(UiTimelineItem::TurnStart(Turn::user(show_separator)));
 }
 
 pub(crate) fn rendered_message_text(message: &Message) -> String {

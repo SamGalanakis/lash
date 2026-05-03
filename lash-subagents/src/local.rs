@@ -5,8 +5,7 @@
 //!   * turn launch + completion (`prepare_turn_launch`, `start_next_turn`,
 //!     `finish_turn`)
 //!   * request handlers for the [`SubagentHost`] trait (`spawn_agent`,
-//!     `send_message`, `followup_task`, `wait_agent`, `close_agent`,
-//!     `list_agents`)
+//!     `wait_agent`, `close_agent`)
 //!   * forced teardown paths (`force_close_subtree`) used when the
 //!     parent session cancels a subagent via `tasks_stop`
 //!   * registry integration: each subagent registers a background task
@@ -16,7 +15,7 @@
 //!
 //! The inherent impl block contains internal helpers (`state_lock`,
 //! `prepare_turn_launch`, `start_next_turn`, `finish_turn`,
-//! `drain_matching_events`, `queue_message_turn`, etc.) plus the
+//! `drain_matching_events`, etc.) plus the
 //! `pub` entry points. The [`SubagentHost`] trait impl is a thin
 //! layer on top of those.
 //!
@@ -29,16 +28,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash::{
-    AssembledTurn, ManagedRunState, ManagedTaskKind, ManagedTaskSpec, MessageRole, PluginMessage,
-    SessionManager, SessionToolAccess, SubagentSessionAuthority,
+    AssembledTurn, ManagedRunState, ManagedTaskKind, ManagedTaskSpec, SessionToolAccess,
+    SubagentSessionAuthority, ToolHookHost,
 };
 use std::collections::BTreeSet;
 
 use crate::host::SubagentHost;
 use crate::queue::{
     ActiveTurn, ActiveTurnKind, AgentLocator, AgentRecord, AgentTree, HostState,
-    PreparedTurnLaunch, QueuedMessage, QueuedTask, QueuedTurn, message_response_event,
-    message_turn_input, task_completion_event,
+    PreparedTurnLaunch, QueuedTask, QueuedTurn, task_completion_event,
 };
 use crate::routing::{
     completed_agents, event_matches, event_visible_for_until, normalize_agent_name, wait_response,
@@ -46,10 +44,8 @@ use crate::routing::{
 };
 use crate::shared::{MAX_SUBAGENT_DEPTH, SUBAGENT_SUITE_DENY};
 use crate::types::{
-    AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode,
-    FollowupTaskRequest, FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse,
-    SendMessageRequest, SendMessageResponse, SpawnAgentRequest, SpawnAgentResponse, WaitAgentEvent,
-    WaitAgentPending, WaitAgentRequest, WaitAgentResponse, WaitUntil,
+    AgentMetadata, CloseAgentRequest, CloseAgentResponse, SpawnAgentRequest, SpawnAgentResponse,
+    WaitAgentEvent, WaitAgentPending, WaitAgentRequest, WaitAgentResponse, WaitUntil,
 };
 
 #[derive(Clone, Default)]
@@ -108,10 +104,6 @@ impl LocalSubagentHost {
                 },
                 task.turn_input,
             ),
-            QueuedTurn::Message(message) => {
-                let turn_input = message_turn_input(&message.from, &message.message);
-                (ActiveTurnKind::Message { from: message.from }, turn_input)
-            }
         };
         Ok(Some(PreparedTurnLaunch {
             session_id: agent.session_id.clone(),
@@ -150,7 +142,6 @@ impl LocalSubagentHost {
         let locator = AgentLocator {
             root_session_id,
             path,
-            agent_name: None,
             depth: 0,
         };
         state
@@ -262,9 +253,8 @@ impl LocalSubagentHost {
                         && agent.agent_name == agent_name
                 })?;
                 Self::agent_has_pending_task(agent).then(|| {
-                    let task = agent.active_turn.as_ref().and_then(|turn| match &turn.kind {
-                        ActiveTurnKind::Task { task } => Some(task.clone()),
-                        ActiveTurnKind::Message { .. } => None,
+                    let task = agent.active_turn.as_ref().map(|turn| match &turn.kind {
+                        ActiveTurnKind::Task { task } => task.clone(),
                     });
                     (
                         agent_name.clone(),
@@ -288,7 +278,7 @@ impl LocalSubagentHost {
     /// `tasks_stop` targets a subagent.
     pub async fn force_close_subtree(
         &self,
-        host: Arc<dyn SessionManager>,
+        host: Arc<dyn ToolHookHost>,
         root_session_id: &str,
         target: &str,
     ) -> Result<Vec<String>, String> {
@@ -364,7 +354,7 @@ impl LocalSubagentHost {
 
     async fn start_next_turn(
         &self,
-        manager: Arc<dyn SessionManager>,
+        manager: Arc<dyn ToolHookHost>,
         root_session_id: String,
         path: String,
     ) -> Result<(), String> {
@@ -390,19 +380,18 @@ impl LocalSubagentHost {
                     .get_mut(&path)
                     .ok_or_else(|| "subagent disappeared".to_string())?;
                 let event = match &launch.kind {
-                    ActiveTurnKind::Task { task } => Some(WaitAgentEvent::TaskStarted {
+                    ActiveTurnKind::Task { task } => WaitAgentEvent::TaskStarted {
                         agent_name: agent.agent_name.clone(),
                         parent_session_id: agent.parent_session_id.clone().unwrap_or_default(),
                         task: task.clone(),
                         session_id: launch.session_id.clone(),
-                    }),
-                    ActiveTurnKind::Message { .. } => None,
+                    },
                 };
                 agent.active_turn = Some(ActiveTurn {
                     kind: launch.kind,
                     turn_id: turn_id.clone(),
                 });
-                event
+                Some(event)
             };
             if let Some(event) = event {
                 LocalSubagentHost::queue_event(tree, event);
@@ -443,10 +432,11 @@ impl LocalSubagentHost {
         root_session_id: String,
         path: String,
         outcome: Result<AssembledTurn, lash::PluginError>,
-        manager: Arc<dyn SessionManager>,
+        manager: Arc<dyn ToolHookHost>,
     ) {
         let mut close_session_id = None;
         let mut start_next = false;
+        let terminal_state = subagent_terminal_state(&outcome);
         if let Ok(mut state) = self.state_lock()
             && let Some(tree) = state.trees.get_mut(&root_session_id)
             && tree.agents.contains_key(&path)
@@ -461,22 +451,15 @@ impl LocalSubagentHost {
                     Some(ActiveTurnKind::Task { task }) => {
                         vec![task_completion_event(agent, task, &outcome)]
                     }
-                    Some(ActiveTurnKind::Message { from }) => {
-                        vec![message_response_event(
-                            &agent.agent_name,
-                            agent.parent_session_id.as_deref().unwrap_or_default(),
-                            from,
-                            &outcome,
-                        )]
-                    }
                     None => Vec::new(),
                 };
-                let closing_session_id = if agent.closing {
+                let queued_more = !agent.queued_turns.is_empty();
+                let closing_session_id = if agent.closing || !queued_more {
                     Some(agent.session_id.clone())
                 } else {
                     None
                 };
-                (events, closing_session_id, !agent.queued_turns.is_empty())
+                (events, closing_session_id, queued_more)
             };
 
             for event in events {
@@ -516,11 +499,7 @@ impl LocalSubagentHost {
             };
             if let Some(owner) = owner_session_id {
                 manager
-                    .complete_background_task(
-                        &owner,
-                        &format!("subagent:{path}"),
-                        ManagedRunState::Completed,
-                    )
+                    .complete_background_task(&owner, &format!("subagent:{path}"), terminal_state)
                     .await;
             }
             return;
@@ -532,25 +511,6 @@ impl LocalSubagentHost {
                 let handle = tokio::runtime::Handle::current();
                 let _ = handle.block_on(host.start_next_turn(manager, root_session_id, path));
             });
-        } else {
-            // Task finished, session kept alive, nothing queued — the
-            // subagent is now idle, awaiting a follow-up. Reflect that
-            // in the background-task registry so `tasks_list` can
-            // distinguish idle subagents from actively running ones.
-            let owner_session_id = if let Ok(state) = self.state_lock() {
-                Self::owner_session_id_for_path(&state, &root_session_id, &path)
-            } else {
-                None
-            };
-            if let Some(owner) = owner_session_id {
-                manager
-                    .transition_background_task_live_state(
-                        &owner,
-                        &format!("subagent:{path}"),
-                        ManagedRunState::Idle,
-                    )
-                    .await;
-            }
         }
     }
 
@@ -571,31 +531,21 @@ impl LocalSubagentHost {
         tree.events = kept;
         drained
     }
+}
 
-    fn queue_message_turn(
-        &self,
-        root_session_id: &str,
-        path: &str,
-        message: QueuedMessage,
-        front: bool,
-    ) -> Result<bool, String> {
-        let mut state = self.state_lock()?;
-        let Some(tree) = state.trees.get_mut(root_session_id) else {
-            return Ok(false);
-        };
-        let Some(agent) = tree.agents.get_mut(path) else {
-            return Ok(false);
-        };
-        if agent.closing {
-            return Ok(false);
-        }
-        let should_start = agent.active_turn.is_none() && agent.queued_turns.is_empty();
-        if front {
-            agent.queued_turns.push_front(QueuedTurn::Message(message));
-        } else {
-            agent.queued_turns.push_back(QueuedTurn::Message(message));
-        }
-        Ok(should_start)
+fn subagent_terminal_state(outcome: &Result<AssembledTurn, lash::PluginError>) -> ManagedRunState {
+    let Ok(turn) = outcome else {
+        return ManagedRunState::Failed;
+    };
+    let submitted_error = turn
+        .tool_calls
+        .iter()
+        .rev()
+        .any(|record| record.tool == "submit_error" && record.success);
+    if submitted_error || turn.status != lash::TurnStatus::Completed {
+        ManagedRunState::Failed
+    } else {
+        ManagedRunState::Completed
     }
 }
 
@@ -751,7 +701,7 @@ impl SubagentHost for LocalSubagentHost {
 
         // Register with the parent session's background task registry so it
         // shows up in `tasks_list` and can be cancelled via `tasks_stop`.
-        let cancel_host = Arc::clone(&context.host);
+        let cancel_host = context.host.clone();
         let cancel_self = self.clone();
         let cancel_root = root_session_id.clone();
         let cancel_path = path.clone();
@@ -815,18 +765,13 @@ impl SubagentHost for LocalSubagentHost {
                 AgentLocator {
                     root_session_id: root_session_id.clone(),
                     path: path.clone(),
-                    agent_name: Some(normalized_agent_name.clone()),
                     depth: child_depth,
                 },
             );
         }
 
         if let Err(err) = self
-            .start_next_turn(
-                Arc::clone(&context.host),
-                root_session_id.clone(),
-                path.clone(),
-            )
+            .start_next_turn(context.host.clone(), root_session_id.clone(), path.clone())
             .await
         {
             context
@@ -843,239 +788,6 @@ impl SubagentHost for LocalSubagentHost {
             agent_name: normalized_agent_name.clone(),
             task_id: format!("subagent:{normalized_agent_name}"),
             agent_name_note,
-        })
-    }
-
-    async fn send_message(
-        &self,
-        context: &lash::ToolExecutionContext,
-        request: SendMessageRequest,
-    ) -> Result<SendMessageResponse, String> {
-        let message_id = uuid::Uuid::new_v4().to_string();
-        let message = QueuedMessage {
-            from: String::new(),
-            message: request.message.clone(),
-        };
-        let (root_session_id, from, to, status, active_session_id, turn_to_cancel, should_start) = {
-            let mut state = self.state_lock()?;
-            let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let (root_session_id, to) =
-                Self::resolve_direct_child_locked(&state, &context.session_id, &request.agent_name)?;
-            let tree = state
-                .trees
-                .get_mut(&root_session_id)
-                .ok_or_else(|| "subagent tree missing".to_string())?;
-            let target = tree
-                .agents
-                .get_mut(&to)
-                .ok_or_else(|| format!("unknown agent_name `{}`", request.agent_name))?;
-            if target.closing {
-                return Err(format!("agent_name `{}` is closing", target.agent_name));
-            }
-
-            let mut message = message.clone();
-            message.from = locator.agent_name.clone().unwrap_or_else(|| "root".to_string());
-            let active_turn_id = target
-                .active_turn
-                .as_ref()
-                .map(|active| active.turn_id.clone());
-            let active_session_id = active_turn_id.as_ref().map(|_| target.session_id.clone());
-            let (status, turn_to_cancel, should_start) =
-                match (active_turn_id, request.delivery) {
-                        (Some(_), DeliveryMode::NextPossible) => ("delivering", None, false),
-                        (Some(turn_id), DeliveryMode::Interrupt) => {
-                            target
-                                .queued_turns
-                                .push_front(QueuedTurn::Message(message.clone()));
-                            ("queued_after_interrupt", Some(turn_id), false)
-                        }
-                        (Some(_), DeliveryMode::NextTurn) => {
-                            target
-                                .queued_turns
-                                .push_back(QueuedTurn::Message(message.clone()));
-                            ("queued", None, false)
-                        }
-                        (None, DeliveryMode::NextTurn) => {
-                            target
-                                .queued_turns
-                                .push_back(QueuedTurn::Message(message.clone()));
-                            ("queued", None, false)
-                        }
-                        (None, DeliveryMode::NextPossible | DeliveryMode::Interrupt) => {
-                            target
-                                .queued_turns
-                                .push_back(QueuedTurn::Message(message.clone()));
-                            ("started", None, true)
-                        }
-                };
-            let to_agent = target.agent_name.clone();
-            let from_agent = locator.agent_name.clone().unwrap_or_else(|| "root".to_string());
-            LocalSubagentHost::queue_event(
-                tree,
-                WaitAgentEvent::Message {
-                    from_agent,
-                    to_agent,
-                    parent_session_id: context.session_id.clone(),
-                    message: request.message.clone(),
-                },
-            );
-            (
-                root_session_id,
-                locator.agent_name.unwrap_or_else(|| "root".to_string()),
-                to,
-                status.to_string(),
-                active_session_id,
-                turn_to_cancel,
-                should_start,
-            )
-        };
-
-        if let Some(session_id) = active_session_id
-            && request.delivery == DeliveryMode::NextPossible
-        {
-            let text = format!("## Message from {from}\n\n{}", request.message);
-            let plugin_message = PluginMessage {
-                role: MessageRole::User,
-                content: text,
-                parts: Vec::new(),
-                images: Vec::new(),
-                user_input: None,
-            };
-            let host = self.clone();
-            let manager = Arc::clone(&context.host);
-            let fallback = QueuedMessage {
-                from: from.clone(),
-                message: request.message.clone(),
-            };
-            let root_for_fallback = root_session_id.clone();
-            let target_for_fallback = to.clone();
-            tokio::spawn(async move {
-                if let Err(err) = manager.inject_turn_input(&session_id, plugin_message).await {
-                    let should_start = host
-                        .queue_message_turn(
-                            &root_for_fallback,
-                            &target_for_fallback,
-                            fallback,
-                            true,
-                        )
-                        .unwrap_or(false);
-                    if should_start {
-                        let _ = host
-                            .start_next_turn(
-                                Arc::clone(&manager),
-                                root_for_fallback,
-                                target_for_fallback.clone(),
-                            )
-                            .await;
-                    }
-                    tracing::debug!(
-                        target = %target_for_fallback,
-                        error = %err,
-                        "send_message bridge injection failed; queued message turn"
-                    );
-                }
-            });
-        }
-
-        if let Some(turn_id) = turn_to_cancel {
-            let manager = Arc::clone(&context.host);
-            tokio::spawn(async move {
-                let _ = manager.cancel_turn(&turn_id).await;
-            });
-        }
-        if should_start {
-            self.start_next_turn(Arc::clone(&context.host), root_session_id, to.clone())
-                .await?;
-        }
-
-        Ok(SendMessageResponse {
-            from,
-            to,
-            message_id,
-            delivery: request.delivery.as_str().to_string(),
-            status,
-        })
-    }
-
-    async fn followup_task(
-        &self,
-        context: &lash::ToolExecutionContext,
-        request: FollowupTaskRequest,
-    ) -> Result<FollowupTaskResponse, String> {
-        let (root_session_id, target_path, agent_name, disposition, turn_to_cancel, should_start) = {
-            let mut state = self.state_lock()?;
-            Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let (root_session_id, target_path) = Self::resolve_direct_child_locked(
-                &state,
-                &context.session_id,
-                &request.agent_name,
-            )?;
-            let tree = state
-                .trees
-                .get_mut(&root_session_id)
-                .ok_or_else(|| "subagent tree missing".to_string())?;
-            let agent = tree
-                .agents
-                .get_mut(&target_path)
-                .ok_or_else(|| format!("unknown agent_name `{}`", request.agent_name))?;
-            if agent.closing {
-                return Err(format!("agent_name `{}` is closing", agent.agent_name));
-            }
-            let agent_name = agent.agent_name.clone();
-            let active_turn = agent.active_turn.as_ref().map(|turn| turn.turn_id.clone());
-            let queued = QueuedTurn::Task(QueuedTask {
-                task: request.task.clone(),
-                turn_input: request.turn_input,
-            });
-            let (disposition, turn_to_cancel, should_start) = match (active_turn, request.delivery)
-            {
-                (Some(turn_id), DeliveryMode::Interrupt) => {
-                    agent.queued_turns.push_front(queued);
-                    ("queued_after_interrupt", Some(turn_id), false)
-                }
-                (Some(_), DeliveryMode::NextPossible | DeliveryMode::NextTurn) => {
-                    agent.queued_turns.push_back(queued);
-                    ("queued", None, false)
-                }
-                (None, DeliveryMode::NextTurn) => {
-                    agent.queued_turns.push_back(queued);
-                    ("queued", None, false)
-                }
-                (None, DeliveryMode::NextPossible | DeliveryMode::Interrupt) => {
-                    agent.queued_turns.push_back(queued);
-                    ("started", None, true)
-                }
-            };
-            (
-                root_session_id,
-                target_path,
-                agent_name,
-                disposition.to_string(),
-                turn_to_cancel,
-                should_start,
-            )
-        };
-
-        if let Some(turn_id) = turn_to_cancel {
-            let manager = Arc::clone(&context.host);
-            tokio::spawn(async move {
-                let _ = manager.cancel_turn(&turn_id).await;
-            });
-        }
-        if should_start {
-            self.start_next_turn(
-                Arc::clone(&context.host),
-                root_session_id,
-                target_path.clone(),
-            )
-            .await?;
-        }
-
-        Ok(FollowupTaskResponse {
-            task_id: format!("subagent:{agent_name}"),
-            agent_name,
-            delivery: request.delivery.as_str().to_string(),
-            status: disposition,
         })
     }
 
@@ -1110,7 +822,11 @@ impl SubagentHost for LocalSubagentHost {
                     .iter()
                     .map(|agent| {
                         let normalized = normalize_agent_name(agent)?;
-                        Self::resolve_direct_child_locked(&state, &context.session_id, &normalized)?;
+                        Self::resolve_direct_child_locked(
+                            &state,
+                            &context.session_id,
+                            &normalized,
+                        )?;
                         Ok::<String, String>(normalized)
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -1257,7 +973,7 @@ impl SubagentHost for LocalSubagentHost {
             (root_session_id, target, agent_name)
         };
         let paths = self
-            .force_close_subtree(Arc::clone(&context.host), &root_session_id, &target)
+            .force_close_subtree(context.host.clone(), &root_session_id, &target)
             .await?;
         let closed = paths
             .into_iter()
@@ -1270,66 +986,6 @@ impl SubagentHost for LocalSubagentHost {
             .collect();
         Ok(CloseAgentResponse { closed })
     }
-
-    async fn list_agents(
-        &self,
-        context: &lash::ToolExecutionContext,
-        _request: ListAgentsRequest,
-    ) -> Result<ListAgentsResponse, String> {
-        let state = self.state_lock()?;
-        let locator = state
-            .session_agents
-            .get(&context.session_id)
-            .cloned();
-        let Some(locator) = locator else {
-            return Ok(ListAgentsResponse { agents: Vec::new() });
-        };
-        let Some(tree) = state.trees.get(&locator.root_session_id) else {
-            return Ok(ListAgentsResponse { agents: Vec::new() });
-        };
-        let agents = tree
-            .agents
-            .values()
-            .filter(|agent| agent.parent_session_id.as_deref() == Some(&context.session_id))
-            .map(|agent| AgentSummary {
-                agent_name: agent.agent_name.clone(),
-                task_id: format!("subagent:{}", agent.agent_name),
-                session_id: agent.session_id.clone(),
-                parent_session_id: agent.parent_session_id.clone(),
-                capability: agent.capability.clone(),
-                agent_state: if agent.closing {
-                    "closed"
-                } else if agent.active_turn.is_some() {
-                    "running"
-                } else {
-                    "idle"
-                }
-                .to_string(),
-                current_task: agent
-                    .active_turn
-                    .as_ref()
-                    .and_then(|turn| match &turn.kind {
-                        ActiveTurnKind::Task { task } => Some(task.clone()),
-                        ActiveTurnKind::Message { .. } => None,
-                    }),
-                current_task_state: agent.active_turn.as_ref().map(|_| "running".to_string()),
-                last_task_state: agent.last_task_state.clone(),
-                queued_tasks: agent
-                    .queued_turns
-                    .iter()
-                    .filter(|turn| matches!(turn, QueuedTurn::Task(_)))
-                    .count(),
-                queued_messages: agent
-                    .queued_turns
-                    .iter()
-                    .filter(|turn| matches!(turn, QueuedTurn::Message(_)))
-                    .count(),
-                model: agent.model.clone(),
-                model_variant: agent.model_variant.clone(),
-            })
-            .collect();
-        Ok(ListAgentsResponse { agents })
-    }
 }
 
 #[cfg(test)]
@@ -1339,7 +995,10 @@ mod tests {
 
     #[test]
     fn normalize_agent_name_slugifies_mixed_case_and_hyphens() {
-        assert_eq!(normalize_agent_name("Task-Lifecycle Test").unwrap(), "task_lifecycle_test");
+        assert_eq!(
+            normalize_agent_name("Task-Lifecycle Test").unwrap(),
+            "task_lifecycle_test"
+        );
         assert_eq!(normalize_agent_name("InspectAuth").unwrap(), "inspectauth");
         assert_eq!(normalize_agent_name("foo__bar").unwrap(), "foo_bar");
     }
@@ -1396,12 +1055,11 @@ mod tests {
             .events
             .iter()
             .map(|event| match event {
-                WaitAgentEvent::TaskCompleted { agent_name, .. } => format!("completed:{agent_name}"),
+                WaitAgentEvent::TaskCompleted { agent_name, .. } => {
+                    format!("completed:{agent_name}")
+                }
                 WaitAgentEvent::AgentClosed { agent_name, .. } => format!("closed:{agent_name}"),
                 WaitAgentEvent::TaskStarted { agent_name, .. } => format!("started:{agent_name}"),
-                WaitAgentEvent::Message { from_agent, to_agent, .. } => {
-                    format!("message:{from_agent}->{to_agent}")
-                }
             })
             .collect::<Vec<_>>();
 

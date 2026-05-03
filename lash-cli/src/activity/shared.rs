@@ -188,9 +188,8 @@ pub(super) fn named_description_detail_lines(result: &Value, limit: usize) -> Ve
 
 // ─── Generic semantic summary fallback ───────────────────────────────────────
 //
-// Used by: `apply_patch` when the result has no semantic summary,
-// `show_snippet_to_user` when the result is missing path info, and the
-// generic projector as the last-ditch label for unknown tools.
+// Used by: `apply_patch` when the result has no semantic summary and
+// the generic projector as the last-ditch label for unknown tools.
 // Known tool names get a hand-tuned phrase; others fall back to
 // `"tool_name_with_underscores"` → `"tool name with underscores"`.
 
@@ -235,24 +234,6 @@ pub(super) fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "spawn_agent" => tool_arg_str(args, "task")
             .map(|task| format!("spawn subagent · {}", inline_text(task)))
             .unwrap_or_else(|| "spawn subagent".to_string()),
-        "show_snippet_to_user" => tool_arg_str(args, "path")
-            .map(|path| {
-                let start = args
-                    .get("start_line")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(1);
-                let end = args
-                    .get("end_line")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(start);
-                format!(
-                    "show {}:{}-{} to user",
-                    compact_path_display(path),
-                    start,
-                    end
-                )
-            })
-            .unwrap_or_else(|| "show snippet to user".to_string()),
         _ => name.replace('_', " "),
     }
 }

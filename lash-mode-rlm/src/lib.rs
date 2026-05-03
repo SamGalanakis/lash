@@ -12,8 +12,7 @@ mod stream_mask;
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
 pub use protocol::{
-    LASHLANG_LANGUAGE_REFERENCE, RlmDriver, build_task_context, contains_closed_lashlang_fence,
-    rlm_execution_section,
+    LASHLANG_LANGUAGE_REFERENCE, RlmDriver, contains_closed_lashlang_fence, rlm_execution_section,
 };
 pub use rlm_support::{
     BoundVariablesCache, apply_globals_patch_nodes, bound_variables_prompt_contributions,

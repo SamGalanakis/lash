@@ -2,8 +2,7 @@
 //!
 //! All four produce an `ActivityKind::Exploration` block with one
 //! `ExplorationOp`. Consecutive explorations merge into a single
-//! `Explored` block via `merge_exploration_activity`, which is called
-//! from `projection.rs::append_activity_block`.
+//! `Explored` block via the `ActivityState` timeline append path.
 
 use serde_json::Value;
 
@@ -190,7 +189,7 @@ mod tests {
         let path = std::env::current_dir()
             .expect("cwd")
             .join("lash-cli/src/render/mod.rs");
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "read_file",
             json!({ "path": path }),
             json!("fn render() {}"),
@@ -208,7 +207,7 @@ mod tests {
         let path = std::env::current_dir()
             .expect("cwd")
             .join("lash-cli/src/render/mod.rs");
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "grep",
             json!({ "query": format!("{} render_activity_block", path.display()) }),
             json!("match"),

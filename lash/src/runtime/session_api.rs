@@ -65,6 +65,14 @@ impl LashRuntime {
         self.state.export_state()
     }
 
+    pub fn read_view(&self) -> crate::SessionReadView {
+        crate::SessionReadView::from_runtime_state(
+            &self.state,
+            self.policy.clone(),
+            self.mode_turn_options.clone(),
+        )
+    }
+
     /// Export the narrow persistence snapshot used by stores and resume logic.
     pub fn export_persistence_state(&self) -> PersistedSessionState {
         self.state.clone()
@@ -158,7 +166,7 @@ impl LashRuntime {
 
     pub(super) fn runtime_session_manager(
         &self,
-    ) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         self.runtime_session_manager_with_prompt_bridge(None)
     }
 
@@ -166,7 +174,7 @@ impl LashRuntime {
         &self,
         prompt_bridge: Option<HostPromptBridge>,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-    ) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
             prompt_bridge,
@@ -178,7 +186,7 @@ impl LashRuntime {
     pub(super) fn runtime_session_manager_with_prompt_bridge(
         &self,
         prompt_bridge: Option<HostPromptBridge>,
-    ) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
             prompt_bridge,
@@ -187,7 +195,7 @@ impl LashRuntime {
         )?))
     }
 
-    pub fn session_manager(&self) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+    pub fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         self.runtime_session_manager()
     }
 
@@ -213,7 +221,7 @@ impl LashRuntime {
         let ctx = crate::RewriteContext {
             session_id: self.state.session_id.clone(),
             trigger,
-            state: self.state.read_view(),
+            state: self.read_view(),
             host: manager,
         };
         let input = crate::HistoryState::from_state(&self.state.export_state());
@@ -228,7 +236,7 @@ impl LashRuntime {
             outcome.metadata.produced_summary || outcome.messages.len() != baseline_messages;
         if mutated {
             self.state
-                .replace_projection(&outcome.messages, &outcome.tool_calls);
+                .replace_active_read_state(&outcome.messages, &outcome.tool_calls);
             if let Some(session) = self.session.as_ref() {
                 self.state.dynamic_state_snapshot = session
                     .plugins()

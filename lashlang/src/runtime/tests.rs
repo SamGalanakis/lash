@@ -913,6 +913,97 @@ fn json_helpers_cover_special_paths() {
     assert!(matches!(record["a"], Value::List(_)));
 }
 
+fn test_image() -> Value {
+    Value::Image(ImageValue::new(
+        "img-1",
+        "chart.png",
+        1234,
+        Some(640),
+        Some(480),
+    ))
+}
+
+fn exec_with_global(name: &str, value: Value, source: &str) -> Result<Value, RuntimeError> {
+    let program = crate::parse(source).expect("program should parse");
+    let mut state = State::new();
+    state.globals.insert(name.to_string(), value);
+    match execute_program(&program, &mut state, &Host)? {
+        ExecutionOutcome::Finished(value) => Ok(value),
+        ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+    }
+}
+
+#[test]
+fn image_values_expose_read_only_metadata_fields() {
+    let value = exec_with_global(
+        "img",
+        test_image(),
+        "submit [img.id, img.label, img.size, img.width, img.height, img.missing]",
+    )
+    .expect("image fields should read");
+
+    assert_eq!(
+        value,
+        Value::List(
+            vec![
+                Value::String("img-1".into()),
+                Value::String("chart.png".into()),
+                Value::Number(1234.0),
+                Value::Number(640.0),
+                Value::Number(480.0),
+                Value::Null,
+            ]
+            .into()
+        )
+    );
+}
+
+#[test]
+fn image_values_serialize_as_descriptors() {
+    let image = test_image();
+    assert_eq!(
+        to_json(&image),
+        serde_json::json!({
+            "type": "image",
+            "id": "img-1",
+            "label": "chart.png",
+            "size": 1234,
+            "width": 640,
+            "height": 480
+        })
+    );
+    assert_eq!(
+        stringify_value(&image).expect("stringify image"),
+        r#"{"height":480,"id":"img-1","label":"chart.png","size":1234,"type":"image","width":640}"#
+    );
+    assert_eq!(
+        exec_with_global("img", image.clone(), "submit img").expect("submit image"),
+        image
+    );
+}
+
+#[test]
+fn image_values_are_immutable_and_len_is_unsupported() {
+    let err = exec_with_global("img", test_image(), "img.label = \"other\"\nsubmit img")
+        .expect_err("image field assignment should fail");
+    assert_eq!(
+        err,
+        RuntimeError::TypeError {
+            message: "can't assign image fields; images are immutable".to_string()
+        }
+    );
+
+    let err = exec_with_global("img", test_image(), "submit len(img)")
+        .expect_err("len image should fail");
+    assert_eq!(
+        err,
+        RuntimeError::TypeError {
+            message: "`len` requires a string, list, record, or null; use `.size` for images"
+                .to_string()
+        }
+    );
+}
+
 #[test]
 fn false_if_branch_and_finish_inside_loop_are_covered() {
     let value = exec(

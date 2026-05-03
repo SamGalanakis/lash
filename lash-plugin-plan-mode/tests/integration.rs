@@ -12,12 +12,145 @@ use lash::plugin::{
 };
 use lash::{
     AssembledTurn, DynamicToolProvider, ExecutionMode, MessageRole, PersistedSessionState,
-    PluginHost, SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy,
-    SessionReadView, SessionSnapshot, SessionStateEnvelope, ToolDefinition, ToolProvider,
-    ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
+    PluginHost, RuntimeSessionHost, SessionCreateRequest, SessionHandle, SessionPolicy,
+    SessionReadView, SessionSnapshot, SessionSnapshotHost, SessionStateEnvelope, ToolCatalogHost,
+    ToolDefinition, ToolProvider, ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
 };
+use lash::{DynamicToolHost, SessionLifecycleHost, TurnHost};
 
 use lash::testing::{MockSessionManager, mock_assembled_turn};
+
+#[async_trait::async_trait]
+trait PlanTestHostCore: Send + Sync {
+    async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError>;
+    async fn snapshot_session(&self, session_id: &str) -> Result<SessionSnapshot, PluginError>;
+    async fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError>;
+    async fn dynamic_tool_state(
+        &self,
+        _session_id: &str,
+    ) -> Result<lash::DynamicStateSnapshot, PluginError> {
+        Err(PluginError::Session(
+            "dynamic tool state is unavailable in this session".to_string(),
+        ))
+    }
+    async fn apply_dynamic_tool_state(
+        &self,
+        _session_id: &str,
+        _snapshot: lash::DynamicStateSnapshot,
+    ) -> Result<u64, PluginError> {
+        Err(PluginError::Session(
+            "dynamic tool state mutation is unavailable in this session".to_string(),
+        ))
+    }
+    async fn create_session(
+        &self,
+        request: SessionCreateRequest,
+    ) -> Result<SessionHandle, PluginError>;
+    async fn close_session(&self, session_id: &str) -> Result<(), PluginError>;
+    async fn start_turn_stream(
+        &self,
+        session_id: &str,
+        input: TurnInput,
+    ) -> Result<lash::plugin::SessionTurnHandle, PluginError>;
+    async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
+    async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
+    async fn prompt_user(
+        &self,
+        _request: lash::PromptRequest,
+    ) -> Result<lash::PromptResponse, PluginError> {
+        Err(PluginError::Session("prompt unavailable".to_string()))
+    }
+}
+
+macro_rules! impl_plan_test_host {
+    ($ty:ty) => {
+        #[async_trait::async_trait]
+        impl lash::SessionSnapshotHost for $ty {
+            async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+                PlanTestHostCore::snapshot_current(self).await
+            }
+            async fn snapshot_session(
+                &self,
+                session_id: &str,
+            ) -> Result<SessionSnapshot, PluginError> {
+                PlanTestHostCore::snapshot_session(self, session_id).await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl lash::ToolCatalogHost for $ty {
+            async fn tool_catalog(
+                &self,
+                session_id: &str,
+            ) -> Result<Vec<serde_json::Value>, PluginError> {
+                PlanTestHostCore::tool_catalog(self, session_id).await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl lash::DynamicToolHost for $ty {
+            async fn dynamic_tool_state(
+                &self,
+                session_id: &str,
+            ) -> Result<lash::DynamicStateSnapshot, PluginError> {
+                PlanTestHostCore::dynamic_tool_state(self, session_id).await
+            }
+            async fn apply_dynamic_tool_state(
+                &self,
+                session_id: &str,
+                snapshot: lash::DynamicStateSnapshot,
+            ) -> Result<u64, PluginError> {
+                PlanTestHostCore::apply_dynamic_tool_state(self, session_id, snapshot).await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl lash::SessionLifecycleHost for $ty {
+            async fn create_session(
+                &self,
+                request: SessionCreateRequest,
+            ) -> Result<SessionHandle, PluginError> {
+                PlanTestHostCore::create_session(self, request).await
+            }
+            async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
+                PlanTestHostCore::close_session(self, session_id).await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl lash::TurnHost for $ty {
+            async fn start_turn_stream(
+                &self,
+                session_id: &str,
+                input: TurnInput,
+            ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
+                PlanTestHostCore::start_turn_stream(self, session_id, input).await
+            }
+            async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
+                PlanTestHostCore::await_turn(self, turn_id).await
+            }
+            async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
+                PlanTestHostCore::cancel_turn(self, turn_id).await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl lash::PromptHost for $ty {
+            async fn prompt_user(
+                &self,
+                request: lash::PromptRequest,
+            ) -> Result<lash::PromptResponse, PluginError> {
+                PlanTestHostCore::prompt_user(self, request).await
+            }
+        }
+
+        impl lash::TaskHost for $ty {}
+        impl lash::MonitorHost for $ty {}
+        impl lash::SessionGraphHost for $ty {}
+        impl lash::DirectCompletionHost for $ty {}
+        impl lash::TraceHost for $ty {}
+    };
+}
 
 fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
     PersistedSessionState::from_state(SessionStateEnvelope {
@@ -153,16 +286,10 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     let enabled = session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
     assert!(enabled.success);
@@ -222,7 +349,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
-    let manager_host: Arc<dyn SessionManager> = manager.clone();
+    let manager_host: Arc<dyn RuntimeSessionHost> = manager.clone();
 
     let initial = manager
         .dynamic_tool_state("root")
@@ -278,16 +405,10 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -295,7 +416,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_turn");
@@ -342,7 +463,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             session_id: "root".to_string(),
             tool_name: "exec_command".to_string(),
             args: json!({"cmd":"cargo test -q"}),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_tool_call");
@@ -353,7 +474,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             session_id: "root".to_string(),
             tool_name: "read_file".to_string(),
             args: json!({"path":"src/main.rs"}),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_tool_call");
@@ -368,12 +489,6 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     "search_tools",
                     "Discover tools",
                     lash::ToolAvailabilityConfig::callable(),
-                    lash::ToolExecutionMode::Parallel,
-                ),
-                test_tool(
-                    "show_snippet_to_user",
-                    "Show a snippet",
-                    lash::ToolAvailabilityConfig::documented(),
                     lash::ToolExecutionMode::Parallel,
                 ),
                 test_tool(
@@ -409,13 +524,6 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         surface
             .tools
             .iter()
-            .find(|tool| tool.definition.name == "show_snippet_to_user")
-            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Hidden)
-    );
-    assert!(
-        surface
-            .tools
-            .iter()
             .find(|tool| tool.definition.name == "search_web")
             .is_some_and(|tool| tool.availability == lash::ToolAvailability::Documented)
     );
@@ -433,24 +541,6 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             .any(|note| note.contains(".lash/plans/run-session.md"))
     );
 
-    let snippet_blocked = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "show_snippet_to_user".to_string(),
-            args: json!({
-                "path":"lash/src/plugin_builtin/plan_mode.rs",
-                "start_line": 1,
-                "end_line": 20
-            }),
-            host: Arc::clone(&manager),
-        })
-        .await
-        .expect("before_tool_call");
-    assert!(snippet_blocked.iter().any(|emitted| matches!(
-        &emitted.value,
-        PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
-    )));
-
     let read_allowed = session
         .before_tool_call(ToolCallHookContext {
             session_id: "root".to_string(),
@@ -458,7 +548,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             args: json!({
                 "path":"src/main.rs"
             }),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_tool_call");
@@ -471,7 +561,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             args: json!({
                 "query":"surrealdb datetime best practices"
             }),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_tool_call");
@@ -484,7 +574,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             args: json!({
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
             }),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_tool_call");
@@ -497,7 +587,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             args: json!({
                 "input": "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch"
             }),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_tool_call");
@@ -509,23 +599,11 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     )));
 
     session
-        .invoke_external(
-            "plan_mode.disable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.disable", json!({}), None, true, manager.clone())
         .await
         .expect("disable");
     session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -534,7 +612,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             session_id: "root".to_string(),
             checkpoint: lash::CheckpointKind::AfterWork,
             state: mock_read_view("run-session"),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("checkpoint");
@@ -565,16 +643,10 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -582,7 +654,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("first before_turn");
@@ -596,7 +668,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
             turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn("root"))),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("after_turn");
@@ -605,7 +677,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("second before_turn");
@@ -621,16 +693,10 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
         PlanModePluginConfig::default().with_allowed_tools(["apply_patch", "read_file"]),
     ));
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -639,29 +705,11 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
             session_id: "root".to_string(),
             tool_name: "read_file".to_string(),
             args: json!({"path":"src/main.rs"}),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_tool_call");
     assert!(allowed.is_empty());
-
-    let blocked = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "show_snippet_to_user".to_string(),
-            args: json!({
-                "path":"lash/src/plugin_builtin/plan_mode.rs",
-                "start_line": 1,
-                "end_line": 20
-            }),
-            host: Arc::clone(&manager),
-        })
-        .await
-        .expect("before_tool_call");
-    assert!(blocked.iter().any(|emitted| matches!(
-        &emitted.value,
-        PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
-    )));
 
     let apply_patch_allowed = session
         .before_tool_call(ToolCallHookContext {
@@ -670,7 +718,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
             args: json!({
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
             }),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_tool_call");
@@ -682,9 +730,10 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     struct PromptingSessionManager {
         base: MockSessionManager,
     }
+    impl_plan_test_host!(PromptingSessionManager);
 
     #[async_trait::async_trait]
-    impl SessionManager for PromptingSessionManager {
+    impl PlanTestHostCore for PromptingSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             self.base.snapshot_current().await
         }
@@ -780,7 +829,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     let manager = Arc::new(PromptingSessionManager {
         base: mock_session_manager("run-session"),
     });
-    let manager_host: Arc<dyn SessionManager> = manager.clone();
+    let manager_host: Arc<dyn RuntimeSessionHost> = manager.clone();
 
     session
         .invoke_external(
@@ -788,7 +837,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             json!({}),
             None,
             true,
-            Arc::clone(&manager_host),
+            manager_host.clone(),
         )
         .await
         .expect("enable");
@@ -796,7 +845,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: Arc::clone(&manager_host),
+            host: manager_host.clone(),
         })
         .await
         .expect("before_turn");
@@ -808,7 +857,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             &json!({}),
             &lash::ToolExecutionContext {
                 session_id: "root".to_string(),
-                host: Arc::clone(&manager_host),
+                host: manager_host.clone(),
                 cancellation_token: None,
                 async_task_id: None,
             },
@@ -835,8 +884,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             })
     );
 
-    let dynamic = manager
-        .dynamic_tool_state("root")
+    let dynamic = lash::DynamicToolHost::dynamic_tool_state(manager.as_ref(), "root")
         .await
         .expect("dynamic tool state");
     assert!(dynamic.tools.get("plan_exit").is_some_and(|tool| {
@@ -849,9 +897,10 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
 #[tokio::test]
 async fn plan_mode_tool_exit_allows_exit_without_validation() {
     struct PromptingSessionManager;
+    impl_plan_test_host!(PromptingSessionManager);
 
     #[async_trait::async_trait]
-    impl SessionManager for PromptingSessionManager {
+    impl PlanTestHostCore for PromptingSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Ok(mock_snapshot("run-session"))
         }
@@ -925,16 +974,10 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(PromptingSessionManager);
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(PromptingSessionManager);
 
     session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -942,7 +985,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_turn");
@@ -954,7 +997,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             &json!({}),
             &lash::ToolExecutionContext {
                 session_id: "root".to_string(),
-                host: Arc::clone(&manager),
+                host: manager.clone(),
                 cancellation_token: None,
                 async_task_id: None,
             },
@@ -980,9 +1023,10 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
 #[tokio::test]
 async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     struct PromptingSessionManager;
+    impl_plan_test_host!(PromptingSessionManager);
 
     #[async_trait::async_trait]
-    impl SessionManager for PromptingSessionManager {
+    impl PlanTestHostCore for PromptingSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Ok(mock_snapshot("run-session"))
         }
@@ -1049,16 +1093,10 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(PromptingSessionManager);
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(PromptingSessionManager);
 
     session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -1066,7 +1104,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: Arc::clone(&manager),
+            host: manager.clone(),
         })
         .await
         .expect("before_turn");
@@ -1078,7 +1116,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             &json!({}),
             &lash::ToolExecutionContext {
                 session_id: "root".to_string(),
-                host: Arc::clone(&manager),
+                host: manager.clone(),
                 cancellation_token: None,
                 async_task_id: None,
             },
@@ -1104,9 +1142,10 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     struct CapturingSessionManager {
         created: Arc<std::sync::Mutex<Vec<SessionCreateRequest>>>,
     }
+    impl_plan_test_host!(CapturingSessionManager);
 
     #[async_trait::async_trait]
-    impl SessionManager for CapturingSessionManager {
+    impl PlanTestHostCore for CapturingSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Ok(mock_snapshot("run-session"))
         }
@@ -1231,16 +1270,10 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
+    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -1248,7 +1281,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
         .transform_assistant_stream(
             "root",
             "Keep this text exactly.".to_string(),
-            Arc::clone(&manager),
+            manager.clone(),
         )
         .await
         .expect("stream");

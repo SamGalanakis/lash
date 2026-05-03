@@ -28,7 +28,7 @@ pub(super) async fn handle_clear(
     active_stream_id: &mut u64,
     current_model_variant: &Option<String>,
     current_execution_mode: &ExecutionMode,
-    session_manager: &mut Arc<dyn SessionManager>,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
     app.clear();
@@ -52,7 +52,7 @@ pub(super) async fn handle_clear(
             last_prompt_usage: None,
             mode_turn_options: rt.export_state().mode_turn_options,
         };
-        state.replace_projection(history, &[]);
+        state.replace_active_read_state(history, &[]);
         rt.set_persisted_state(lash::PersistedSessionState::from_state(state));
         match rt.session_manager() {
             Ok(manager) => *session_manager = manager,
@@ -239,7 +239,7 @@ pub(super) async fn handle_resume(
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn SessionManager>,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_dynamic: &mut DynamicStateSnapshot,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
@@ -285,7 +285,7 @@ pub(super) async fn handle_resume(
                 );
             }
             Err(err) => {
-                app.blocks.push(UiTimelineItem::SystemMessage(err));
+                app.timeline.push(UiTimelineItem::SystemMessage(err));
                 app.invalidate_height_cache();
                 app.scroll_to_bottom();
             }
@@ -301,7 +301,7 @@ pub(super) async fn handle_resume(
         .await
         .unwrap_or_default();
         if sessions.is_empty() {
-            app.blocks.push(UiTimelineItem::SystemMessage(
+            app.timeline.push(UiTimelineItem::SystemMessage(
                 "No sessions found.".to_string(),
             ));
             app.invalidate_height_cache();
@@ -322,7 +322,7 @@ pub(super) fn handle_skills(app: &mut App) -> anyhow::Result<bool> {
         .map(|s| (s.name.clone(), s.description.clone()))
         .collect();
     if items.is_empty() {
-        app.blocks.push(UiTimelineItem::SystemMessage(
+        app.timeline.push(UiTimelineItem::SystemMessage(
             "No skills found.\n\
              Add skill directories to ~/.lash/skills/ or .agents/lash/skills/\n\
              Each skill is a directory with a SKILL.md file."

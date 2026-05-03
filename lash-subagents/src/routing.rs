@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::types::{
-    WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent, WaitAgentMessage, WaitAgentPending,
-    WaitAgentResponse, WaitUntil,
+    WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent, WaitAgentPending, WaitAgentResponse,
+    WaitUntil,
 };
 
 pub(crate) fn event_matches(
@@ -31,11 +31,6 @@ pub(crate) fn event_matches(
             agent_name,
             parent_session_id: event_parent,
         } => event_parent == parent_session_id && agent_name == name,
-        WaitAgentEvent::Message {
-            from_agent,
-            parent_session_id: event_parent,
-            ..
-        } => event_parent == parent_session_id && from_agent == name,
     })
 }
 
@@ -54,15 +49,6 @@ pub(crate) fn event_visible_for_until(event: &WaitAgentEvent, until: WaitUntil) 
                 WaitAgentEvent::TaskCompleted { .. } | WaitAgentEvent::AgentClosed { .. }
             )
         }
-        WaitUntil::Message => matches!(event, WaitAgentEvent::Message { .. }),
-        WaitUntil::AnyResult => {
-            matches!(
-                event,
-                WaitAgentEvent::Message { .. }
-                    | WaitAgentEvent::TaskCompleted { .. }
-                    | WaitAgentEvent::AgentClosed { .. }
-            )
-        }
     }
 }
 
@@ -72,7 +58,6 @@ pub(crate) fn wait_response(
     pending: BTreeMap<String, WaitAgentPending>,
 ) -> WaitAgentResponse {
     let mut completed = BTreeMap::new();
-    let mut messages: BTreeMap<String, Vec<WaitAgentMessage>> = BTreeMap::new();
     let mut closed = BTreeMap::new();
     for event in events {
         match event {
@@ -95,20 +80,6 @@ pub(crate) fn wait_response(
                     },
                 );
             }
-            WaitAgentEvent::Message {
-                from_agent,
-                parent_session_id: _,
-                message,
-                ..
-            } => {
-                messages
-                    .entry(from_agent.clone())
-                    .or_default()
-                    .push(WaitAgentMessage {
-                        from_agent,
-                        message,
-                    });
-            }
             WaitAgentEvent::AgentClosed {
                 agent_name,
                 parent_session_id: _,
@@ -122,7 +93,6 @@ pub(crate) fn wait_response(
         timed_out,
         completed,
         pending,
-        messages,
         closed,
     }
 }
@@ -178,8 +148,8 @@ pub fn truncate_snapshot_to_recent_turns(
         return snapshot;
     }
 
-    let projection = snapshot.shared_projection();
-    let messages = projection.messages.as_slice();
+    let read_view = snapshot.read_view();
+    let messages = read_view.messages();
     let user_turn_starts = messages
         .iter()
         .enumerate()
@@ -195,8 +165,8 @@ pub fn truncate_snapshot_to_recent_turns(
         .flat_map(|message| message.parts.iter())
         .filter_map(|part| part.tool_call_id.clone())
         .collect::<HashSet<_>>();
-    let kept_tool_calls = projection
-        .tool_calls
+    let kept_tool_calls = read_view
+        .tool_calls()
         .iter()
         .filter(|tool_call| {
             tool_call
@@ -206,6 +176,6 @@ pub fn truncate_snapshot_to_recent_turns(
         })
         .cloned()
         .collect::<Vec<_>>();
-    snapshot.replace_projection(&kept_messages, &kept_tool_calls);
+    snapshot.replace_active_read_state(&kept_messages, &kept_tool_calls);
     snapshot
 }

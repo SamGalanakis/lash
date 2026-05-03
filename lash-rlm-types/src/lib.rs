@@ -1,4 +1,4 @@
-use lash_sansio::{ModeProtocol, ToolCallRecord};
+use lash_sansio::{AttachmentRef, ModeProtocol, ToolCallRecord};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RlmTrajectoryEntry {
@@ -12,6 +12,8 @@ pub struct RlmTrajectoryEntry {
     pub observations: Vec<String>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<AttachmentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -24,6 +26,74 @@ impl RlmTrajectoryEntry {
     pub fn output_preview(&self, max_chars: usize) -> String {
         lash_sansio::head_tail_truncate(&self.output, max_chars).0
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RlmHistoryRole {
+    User,
+    System,
+    Assistant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RlmAttachmentRef {
+    pub id: String,
+    pub media_type: lash_sansio::MediaType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub reference: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RlmImageRef {
+    pub id: String,
+    pub media_type: lash_sansio::MediaType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    pub bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RlmHistoryItem {
+    Message {
+        id: String,
+        role: RlmHistoryRole,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<RlmAttachmentRef>,
+    },
+    ToolCall {
+        id: String,
+        tool: String,
+        args: serde_json::Value,
+        result: serde_json::Value,
+        success: bool,
+        duration_ms: u64,
+    },
+    RlmStep {
+        id: String,
+        iteration: usize,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reasoning: String,
+        code: String,
+        #[serde(default)]
+        observations: Vec<String>,
+        output: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<ToolCallRecord>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<RlmImageRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_output: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -106,16 +176,23 @@ pub fn project_trajectory(
     RlmProjection::from_events(events).trajectory
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RlmTermination {
-    #[default]
-    ProseWithoutFence,
     Finish {
         schema: Option<serde_json::Value>,
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         include_submit_prompt: bool,
     },
+}
+
+impl Default for RlmTermination {
+    fn default() -> Self {
+        Self::Finish {
+            schema: None,
+            include_submit_prompt: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -126,8 +203,8 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
-/// RLM-mode session config. Carries the choice of how the model
-/// terminates the session (prose vs `submit`-with-optional-schema).
+/// RLM-mode session config. RLM turns terminate through `submit`,
+/// optionally validated against a schema.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RlmCreateExtras {
     #[serde(default)]

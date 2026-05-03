@@ -52,11 +52,13 @@ async fn embedded_runtime_builder_loads_state_from_store() {
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: None,
             plugin_snapshot: None,
+            execution_state_ref: None,
+            execution_state: None,
         })
         .checkpoint_ref;
     store.save_session_head(SessionHead {
         session_id: "stored-session".to_string(),
-        graph: SessionGraph::from_projection(
+        graph: SessionGraph::from_active_read_state(
             &[text_message("u0", MessageRole::User, "stored question")],
             &[],
         ),
@@ -75,16 +77,16 @@ async fn embedded_runtime_builder_loads_state_from_store() {
     let runtime = LashRuntime::builder()
         .with_store(store.clone() as Arc<dyn RuntimePersistence>)
         .with_plugin_factories(vec![Arc::new(
-            lash_mode_standard::BuiltinStandardModePluginFactory::default(),
+            lash_mode_standard::BuiltinStandardModePluginFactory,
         )])
         .build()
         .await
         .expect("runtime");
 
     let state = runtime.export_state();
-    let projection = state.shared_projection();
-    assert_eq!(projection.messages.len(), 1);
-    assert_eq!(projection.messages[0].parts[0].content, "stored question");
+    let read_view = state.read_view();
+    assert_eq!(read_view.messages().len(), 1);
+    assert_eq!(read_view.messages()[0].parts[0].content, "stored question");
     assert_eq!(state.iteration, 3);
     assert_eq!(state.token_usage.input_tokens, 20);
     assert_eq!(state.policy.model, "gpt-5.4-mini");
@@ -113,7 +115,7 @@ async fn embedded_runtime_builder_rejects_store_bound_to_different_session_id() 
         .with_store(store as Arc<dyn RuntimePersistence>)
         .with_session_id("beta")
         .with_plugin_factories(vec![Arc::new(
-            lash_mode_standard::BuiltinStandardModePluginFactory::default(),
+            lash_mode_standard::BuiltinStandardModePluginFactory,
         )])
         .build()
         .await

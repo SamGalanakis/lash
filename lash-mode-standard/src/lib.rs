@@ -25,7 +25,7 @@ use lash::sansio::{
     CheckpointResumeAction, CompletedToolCall, PendingToolCall, ProtocolDriverHandle,
     WaitingExecState, WaitingLlmState,
 };
-use lash::session_model::message::{PartAttachment, ReasoningMeta, data_url_for_bytes};
+use lash::session_model::message::{PartAttachment, ReasoningMeta};
 use lash::session_model::{
     ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
     SessionEventRecord, format_tool_result_content, fresh_message_id, make_error_event,
@@ -590,6 +590,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
             });
 
             for (image_offset, image) in outcome.model_result.images.into_iter().enumerate() {
+                let Some(reference) = image.reference.clone() else {
+                    continue;
+                };
                 result_parts.push(Part {
                     id: String::new(),
                     kind: PartKind::Text,
@@ -608,9 +611,13 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     kind: PartKind::Image,
                     content: String::new(),
                     attachment: Some(PartAttachment {
-                        mime: image.mime.clone(),
-                        url: data_url_for_bytes(&image.mime, &image.data),
-                        filename: Some(format!("tool-image-{image_offset}")),
+                        reference: lash::AttachmentRef {
+                            label: reference
+                                .label
+                                .clone()
+                                .or_else(|| Some(format!("tool-image-{image_offset}"))),
+                            ..reference
+                        },
                     }),
                     tool_call_id: None,
                     tool_name: None,

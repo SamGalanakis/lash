@@ -479,14 +479,14 @@ pub(crate) fn hash12(bytes: &[u8]) -> String {
 pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {
     let msg = msg.into();
     let duplicate = matches!(
-        app.blocks.last(),
+        app.timeline.last(),
         Some(UiTimelineItem::SystemMessage(existing)) if existing == &msg
     );
     if duplicate {
         return;
     }
     crate::ui_trace::record_system_message_aux(&msg);
-    app.blocks.push(UiTimelineItem::SystemMessage(msg));
+    app.timeline.push(UiTimelineItem::SystemMessage(msg));
     app.invalidate_height_cache();
     app.scroll_to_bottom();
 }
@@ -719,7 +719,7 @@ pub(crate) async fn sync_ui_extensions(
     app: &mut App,
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
-    session_manager: Arc<dyn SessionManager>,
+    session_manager: Arc<dyn RuntimeSessionHost>,
 ) {
     let session_id = app.session_id.clone();
     if let Ok(tasks) = session_manager.list_background_tasks(&session_id).await {

@@ -32,7 +32,7 @@ impl RuntimeTurnDriver {
                 session_id: self.session_id.clone(),
                 checkpoint,
                 state: self.checkpoint_state_view(machine.message_sequence(), machine.iteration()),
-                host: Arc::clone(&self.session_manager),
+                host: self.session_manager.clone(),
             })
             .await
             .map_err(|err| RuntimeError {
@@ -169,20 +169,10 @@ impl RuntimeTurnDriver {
                 }
             }
         });
-        let manager = Arc::clone(&self.session_manager);
-        let accept_finish = matches!(
-            self.mode_turn_options.rlm_termination(),
-            lash_rlm_types::RlmTermination::Finish { .. }
-        );
+        let manager = self.session_manager.clone();
         let result = self
             .session
-            .run_code(
-                &self.session_id,
-                manager,
-                &session_event_tx,
-                code,
-                accept_finish,
-            )
+            .run_code(&self.session_id, manager, &session_event_tx, code, true)
             .await
             .map_err(|e| e.to_string());
         drop(session_event_tx);

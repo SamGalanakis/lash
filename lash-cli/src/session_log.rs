@@ -10,9 +10,11 @@ use lash::ToolCallRecord;
 use lash::session_model::Message;
 #[cfg(test)]
 use lash::session_model::{MessageRole, PartKind};
-use lash::{Store, TokenUsage};
+use lash::{SessionStateEnvelope, Store, TokenUsage};
 
-use crate::app::{LiveToolOutput, UiTimelineItem, projected_timeline_items_from_projection};
+#[cfg(test)]
+use crate::app::UiTimelineItem;
+use crate::app::{LiveToolOutput, UiTimeline, timeline_from_read_view};
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -31,7 +33,7 @@ pub struct SessionStart {
 
 pub struct LoadedSession {
     pub messages: Vec<Message>,
-    pub blocks: Vec<UiTimelineItem>,
+    pub blocks: UiTimeline,
     pub last_token_usage: TokenUsage,
     pub plugin_mode_indicators: BTreeMap<String, String>,
     pub live_tool_output: LiveToolOutput,
@@ -300,24 +302,28 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
 pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
     let head = store.load_session_head().unwrap_or_default();
-    let graph = head.graph;
-    let projection = graph.shared_projection();
-    let messages = projection.messages.as_ref().clone();
+    let checkpoint_ref = head.checkpoint_ref.clone();
+    let state = SessionStateEnvelope {
+        session_id: head.session_id,
+        session_graph: head.graph,
+        ..SessionStateEnvelope::default()
+    };
+    let read_view = state.read_view();
+    let messages = read_view.messages().to_vec();
     let ui_state = crate::app::UiProjectionState::default();
-    let checkpoint = head
-        .checkpoint_ref
+    let checkpoint = checkpoint_ref
         .as_ref()
         .and_then(|blob_ref| store.get_checkpoint(blob_ref));
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
-    let blocks = projected_timeline_items_from_projection(&projection, &ui_state);
+    let blocks = timeline_from_read_view(&read_view, &ui_state);
     tracing::debug!(
         session_file = filename,
-        messages = projection.messages.len(),
-        tool_calls = projection.tool_calls.len(),
+        messages = read_view.messages().len(),
+        tool_calls = read_view.tool_calls().len(),
         blocks = blocks.len(),
         plugin_mode_indicators = plugin_mode_indicators.len(),
-        graph_nodes = graph.nodes.len(),
+        graph_nodes = read_view.materialized_session_graph().nodes.len(),
         "loaded persisted session snapshot"
     );
 
@@ -351,7 +357,7 @@ mod tests {
         tool_calls: Vec<ToolCallRecord>,
         token_usage: TokenUsage,
     ) {
-        let graph = lash::SessionGraph::from_projection(&messages, &tool_calls);
+        let graph = lash::SessionGraph::from_active_read_state(&messages, &tool_calls);
         let checkpoint_ref = store
             .put_checkpoint(&lash::HydratedSessionCheckpoint {
                 turn_state: lash::PersistedTurnState {

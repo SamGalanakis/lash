@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
-use crate::session_model::message::{PartAttachment, data_url_for_bytes};
+use crate::session_model::message::PartAttachment;
 use crate::session_model::{
     ConversationRecord, Message, MessageRole, MessageSequence, Part, PartKind, PruneState,
     SessionEventRecord,
@@ -24,6 +24,17 @@ fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineCon
         emit_llm_trace: false,
         termination: (),
         retry_policy: RetryPolicy::default(),
+    }
+}
+
+fn test_attachment_ref(byte_len: u64) -> crate::AttachmentRef {
+    crate::AttachmentRef {
+        id: crate::AttachmentId::new("att-test"),
+        media_type: crate::MediaType::Image(crate::ImageMediaType::Png),
+        byte_len,
+        width: None,
+        height: None,
+        label: None,
     }
 }
 
@@ -351,9 +362,7 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
                 kind: PartKind::Image,
                 content: String::new(),
                 attachment: Some(PartAttachment {
-                    mime: "image/png".to_string(),
-                    url: data_url_for_bytes("image/png", &[1, 2, 3]),
-                    filename: None,
+                    reference: test_attachment_ref(3),
                 }),
                 tool_call_id: None,
                 tool_name: None,
@@ -569,6 +578,7 @@ fn exec_driver_state_round_trip() {
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
+            printed_images: Vec::new(),
             error: None,
             duration_ms: 0,
             terminal_finish: None,

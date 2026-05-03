@@ -18,8 +18,7 @@ use lash_ui::{
 use serde::Serialize;
 
 use crate::activity::{
-    ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, ExplorationOp,
-    ExplorationOpKind, SnippetPreviewArtifact, SnippetRenderMode,
+    ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, ExplorationOp, ExplorationOpKind,
 };
 use crate::app::{App, FollowOutputMode, PreparedTurn, TextSelection, UiTimelineItem};
 use crate::cli_support::apply_ui_host_effects;
@@ -310,7 +309,7 @@ fn run_once(scenario: UiPerfScenario) -> UiPerfRunResult {
         selection_render_max_ms: max_value(&selection_frame_durations),
         selection_frames: selection_frame_durations.len(),
         selection_perf: aggregate_frame_perf(&selection_perf_samples),
-        total_blocks: harness.app.blocks.len(),
+        total_blocks: harness.app.timeline.len(),
         total_content_rows,
     }
 }
@@ -618,7 +617,7 @@ fn build_benchmark_app() -> App {
         "ui-perf".to_string(),
         "test-session-id".into(),
     );
-    app.blocks.clear();
+    app.timeline.clear();
     app.token_usage = TokenUsage {
         input_tokens: 208_000,
         output_tokens: 11_500,
@@ -640,27 +639,27 @@ fn build_benchmark_app() -> App {
             Vec::new(),
         );
         app.push_prepared_user_input(&turn);
-        app.blocks
+        app.timeline
             .push(UiTimelineItem::AssistantText(long_assistant_text(
                 turn.preview().as_str(),
             )));
         if turn.draft_id.is_empty() {
             unreachable!("prepared turns should always have a draft id");
         }
-        app.blocks
+        app.timeline
             .push(UiTimelineItem::Activity(Box::new(exploration_activity(
                 turn.preview().as_str(),
                 turn.display_text.as_str(),
             ))));
         if turn.display_text.len().is_multiple_of(3) {
-            app.blocks
+            app.timeline
                 .push(UiTimelineItem::Activity(Box::new(snippet_activity(
                     &turn_label,
                     false,
                 ))));
         }
         if turn.display_text.len().is_multiple_of(5) {
-            app.blocks
+            app.timeline
                 .push(UiTimelineItem::Activity(Box::new(snippet_activity(
                     &turn_label,
                     true,
@@ -772,42 +771,27 @@ fn exploration_activity(subject: &str, detail_seed: &str) -> ActivityBlock {
 }
 
 fn snippet_activity(subject: &str, markdown: bool) -> ActivityBlock {
-    let (content, render_mode, language) = if markdown {
-        (
-            "## Render cache checklist\n\n- Cache rendered block lines by width and expand level.\n- Make height cache read lengths from that shared render cache.\n- Stop rebuilding wrapped markdown lines on every scroll tick.\n".to_string(),
-            SnippetRenderMode::Markdown,
-            None,
-        )
+    let content = if markdown {
+        "## Render cache checklist\n\n- Cache rendered block lines by width and expand level.\n- Make height cache read lengths from that shared render cache.\n- Stop rebuilding wrapped markdown lines on every scroll tick.\n".to_string()
     } else {
-        (
-            "pub(crate) fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {\n    // synthetic snippet payload for UI perf benchmark\n    // the real benchmark exercises the actual renderer and wrapping path\n    // with large code and markdown panels visible in the viewport\n    let viewport_height = area.height as usize;\n    let viewport_width = area.width as usize;\n    let _ = (viewport_height, viewport_width);\n}\n".to_string(),
-            SnippetRenderMode::Code,
-            Some("rust".to_string()),
-        )
+        "pub(crate) fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {\n    // synthetic preview payload for UI perf benchmark\n    // the real benchmark exercises the renderer and wrapping path\n    // with large code-like panels visible in the viewport\n    let viewport_height = area.height as usize;\n    let viewport_width = area.width as usize;\n    let _ = (viewport_height, viewport_width);\n}\n".to_string()
     };
     ActivityBlock::new(
         ActivityKind::GenericTool,
-        "show_snippet_to_user",
+        "preview_text",
         serde_json::json!({}),
-        format!("show render/mod.rs:120-164 to user for {subject}"),
+        format!("preview render/mod.rs:120-164 for {subject}"),
         ActivityStatus::Completed,
         serde_json::json!({}),
         7,
     )
     .with_detail_lines(vec![
-        "show lash-cli/src/render/mod.rs:120-164 to user".to_string(),
+        "preview lash-cli/src/render/mod.rs:120-164".to_string(),
     ])
-    .with_artifact(Some(ActivityArtifact::SnippetPreview(
-        SnippetPreviewArtifact {
-            title: Some("Render cache candidate".to_string()),
-            path: "lash-cli/src/render/mod.rs".to_string(),
-            start_line: 120,
-            end_line: 164,
-            content,
-            render_mode,
-            language,
-        },
-    )))
+    .with_artifact(Some(ActivityArtifact::TextPreview {
+        title: Some("Render cache candidate".to_string()),
+        text: content,
+    }))
 }
 
 fn summarize(results: &[UiPerfRunResult]) -> UiPerfSummary {

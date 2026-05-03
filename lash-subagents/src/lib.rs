@@ -18,12 +18,9 @@ use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
 use lash::{PluginSpec, PluginSpecFactory, PromptContribution, SessionPolicy, ToolProvider};
 
 pub use host::{
-    AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode,
-    FollowupTaskRequest, FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse,
-    LocalSubagentHost, SendMessageRequest, SendMessageResponse, SpawnAgentRequest,
+    AgentMetadata, CloseAgentRequest, CloseAgentResponse, LocalSubagentHost, SpawnAgentRequest,
     SpawnAgentResponse, SubagentHost, WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent,
-    WaitAgentMessage, WaitAgentRequest, WaitAgentResponse, WaitUntil,
-    truncate_snapshot_to_recent_turns,
+    WaitAgentRequest, WaitAgentResponse, WaitUntil, truncate_snapshot_to_recent_turns,
 };
 
 pub struct SubagentsPluginFactory {
@@ -87,7 +84,7 @@ impl PluginFactory for SubagentsPluginFactory {
             "subagents",
             Arc::new(move |ctx| {
                 let contributions = subagent_prompt_contributions_for_context(
-                    &ctx,
+                    ctx,
                     &prompt_contributions,
                     &continue_as_prompt_contributions,
                 );
@@ -136,17 +133,18 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Mutex;
 
-    use crate::shared::{
-        ForkTurns, build_session_policy, build_spawn_create_request, parse_fork_turns,
-        parse_output_schema,
-    };
+    use crate::shared::{build_session_policy, build_spawn_create_request, parse_output_schema};
     use async_trait::async_trait;
     use lash::PersistedSessionState;
-    use lash::plugin::{PluginError, SessionHandle, SessionManager, SessionTurnHandle};
+    use lash::plugin::{
+        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, PromptHost,
+        SessionGraphHost, SessionHandle, SessionLifecycleHost, SessionSnapshotHost,
+        SessionTurnHandle, TaskHost, ToolCatalogHost, TraceHost, TurnHost,
+    };
     use lash::session_model::SessionEventRecord;
     use lash::{
         SessionAppendNode, SessionCreateRequest, SessionPluginMode, SessionStartPoint,
-        ToolDefinition, ToolExecutionContext, TurnInput,
+        ToolDefinition, ToolExecutionContext, ToolOutputContract, TurnInput,
     };
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
     use serde_json::{Value, json};
@@ -205,43 +203,134 @@ mod tests {
         assert_eq!(schema["type"], json!("array"));
     }
 
-    #[test]
-    fn fork_turns_defaults_to_none() {
-        assert!(matches!(
-            parse_fork_turns(None).expect("fork"),
-            ForkTurns::None
-        ));
-        assert!(matches!(
-            parse_fork_turns(Some(&json!("all"))).expect("fork"),
-            ForkTurns::All
-        ));
-        assert!(matches!(
-            parse_fork_turns(Some(&json!(3))).expect("fork"),
-            ForkTurns::Recent(3)
-        ));
+    #[derive(Default)]
+    struct DirectCompletionManager {
+        snapshot: PersistedSessionState,
+        requests: Mutex<Vec<(lash::DirectRequest, String)>>,
+        response_text: String,
     }
+
+    #[async_trait]
+    impl SessionSnapshotHost for DirectCompletionManager {
+        async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
+            Ok(self.snapshot.clone())
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<PersistedSessionState, PluginError> {
+            Ok(self.snapshot.clone())
+        }
+    }
+
+    #[async_trait]
+    impl ToolCatalogHost for DirectCompletionManager {
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl DynamicToolHost for DirectCompletionManager {}
+
+    #[async_trait]
+    impl SessionLifecycleHost for DirectCompletionManager {
+        async fn create_session(
+            &self,
+            _request: SessionCreateRequest,
+        ) -> Result<SessionHandle, PluginError> {
+            Err(PluginError::Session("not used".to_string()))
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl TurnHost for DirectCompletionManager {
+        async fn start_turn_stream(
+            &self,
+            _session_id: &str,
+            _input: TurnInput,
+        ) -> Result<SessionTurnHandle, PluginError> {
+            Err(PluginError::Session("not used".to_string()))
+        }
+
+        async fn await_turn(&self, _turn_id: &str) -> Result<lash::AssembledTurn, PluginError> {
+            Err(PluginError::Session("not used".to_string()))
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl DirectCompletionHost for DirectCompletionManager {
+        async fn direct_completion(
+            &self,
+            request: lash::DirectRequest,
+            usage_source: &str,
+        ) -> Result<lash::DirectCompletion, PluginError> {
+            self.requests
+                .lock()
+                .expect("requests")
+                .push((request, usage_source.to_string()));
+            Ok(lash::DirectCompletion {
+                text: self.response_text.clone(),
+                usage: lash::TokenUsage::default(),
+            })
+        }
+    }
+
+    impl TaskHost for DirectCompletionManager {}
+    impl MonitorHost for DirectCompletionManager {}
+    impl SessionGraphHost for DirectCompletionManager {}
+    impl PromptHost for DirectCompletionManager {}
+    impl TraceHost for DirectCompletionManager {}
 
     #[test]
     fn rlm_definitions_expose_spawn_without_mini_api() {
         let registry = default_registry(&BTreeMap::new(), lash::ExecutionMode::standard());
         let rlm_defs = rlm::rlm_subagent_tool_definitions(&registry.names());
 
+        assert!(rlm_defs.iter().any(|tool| tool.name == "llm_query"));
         assert!(rlm_defs.iter().any(|tool| tool.name == "continue_as"));
         assert!(rlm_defs.iter().any(|tool| tool.name == "spawn_agent"));
-        assert!(rlm_defs.iter().all(|tool| !matches!(
-            tool.name.as_str(),
-            "send_message" | "followup_task" | "wait_agent" | "close_agent" | "list_agents"
-        )));
+        assert_eq!(
+            rlm_defs
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["llm_query", "spawn_agent", "continue_as"]
+        );
 
         let rlm_spawn = rlm_defs
             .iter()
             .find(|tool| tool.name == "spawn_agent")
             .expect("rlm spawn_agent");
+        assert_eq!(
+            rlm_spawn.output_contract,
+            ToolOutputContract::from_input_schema("output", None)
+        );
         assert!(
             rlm_spawn
                 .examples
                 .iter()
                 .any(|example| example.contains("start call spawn_agent"))
+        );
+
+        let llm_query = rlm_defs
+            .iter()
+            .find(|tool| tool.name == "llm_query")
+            .expect("rlm llm_query");
+        assert_eq!(
+            llm_query.output_contract,
+            ToolOutputContract::from_input_schema("output", Some(json!({ "type": "string" })))
         );
     }
 
@@ -252,7 +341,7 @@ mod tests {
         }
 
         #[async_trait]
-        impl SessionManager for SnapshotManager {
+        impl SessionSnapshotHost for SnapshotManager {
             async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
                 Ok(self.snapshot.clone())
             }
@@ -263,14 +352,22 @@ mod tests {
             ) -> Result<PersistedSessionState, PluginError> {
                 Ok(self.snapshot.clone())
             }
+        }
 
+        #[async_trait]
+        impl ToolCatalogHost for SnapshotManager {
             async fn tool_catalog(
                 &self,
                 _session_id: &str,
             ) -> Result<Vec<serde_json::Value>, PluginError> {
                 Ok(Vec::new())
             }
+        }
 
+        impl DynamicToolHost for SnapshotManager {}
+
+        #[async_trait]
+        impl SessionLifecycleHost for SnapshotManager {
             async fn create_session(
                 &self,
                 _request: SessionCreateRequest,
@@ -281,7 +378,10 @@ mod tests {
             async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
                 Ok(())
             }
+        }
 
+        #[async_trait]
+        impl TurnHost for SnapshotManager {
             async fn start_turn_stream(
                 &self,
                 _session_id: &str,
@@ -298,6 +398,13 @@ mod tests {
                 Ok(())
             }
         }
+
+        impl TaskHost for SnapshotManager {}
+        impl MonitorHost for SnapshotManager {}
+        impl SessionGraphHost for SnapshotManager {}
+        impl PromptHost for SnapshotManager {}
+        impl DirectCompletionHost for SnapshotManager {}
+        impl TraceHost for SnapshotManager {}
 
         // Two distinct stub providers so we can verify that spawn
         // resolves against the *live* policy, not the factory's stale
@@ -353,10 +460,9 @@ mod tests {
             async_task_id: None,
         };
 
-        let request =
-            build_spawn_create_request(&registry, &context, "explore", ForkTurns::None, None)
-                .await
-                .expect("spawn request");
+        let request = build_spawn_create_request(&registry, &context, "explore", None)
+            .await
+            .expect("spawn request");
         let child_policy = request.policy.expect("child policy");
 
         // The capability looked up the live policy's provider, not
@@ -388,6 +494,7 @@ mod tests {
                 "exec_command",
                 "start_command",
                 "write_stdin",
+                "llm_query",
                 "continue_as"
             ]
         );
@@ -396,7 +503,6 @@ mod tests {
             &registry,
             &context,
             "explore",
-            ForkTurns::None,
             Some(json!({
                 "type": "object",
                 "properties": { "ok": { "type": "boolean" } },
@@ -422,6 +528,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn llm_query_uses_explore_model_and_direct_completion() {
+        fn tiered_provider() -> lash::testing::TestProvider {
+            lash::testing::TestProvider::builder()
+                .kind("direct-stub")
+                .default_model("root-model")
+                .default_agent_model(|tier| {
+                    (tier == "explore").then(|| lash::AgentModelSelection {
+                        model: "explore-model".to_string(),
+                        variant: Some("low".to_string()),
+                    })
+                })
+                .complete_error("stub")
+                .build()
+        }
+
+        let manager = Arc::new(DirectCompletionManager {
+            snapshot: PersistedSessionState {
+                policy: SessionPolicy {
+                    provider: tiered_provider().into_handle(),
+                    model: "root-model".to_string(),
+                    execution_mode: lash::ExecutionMode::new("rlm"),
+                    ..SessionPolicy::default()
+                },
+                ..PersistedSessionState::default()
+            },
+            requests: Mutex::new(Vec::new()),
+            response_text:
+                r#"{"kind":"value","value":{"root_cause":"missing config","confidence":0.8},"error":null}"#
+                    .to_string(),
+        });
+        let provider = rlm::RlmSubagentToolsProvider {
+            registry: Arc::new(default_registry(
+                &BTreeMap::new(),
+                lash::ExecutionMode::new("rlm"),
+            )),
+            host: Arc::new(LocalSubagentHost::default()),
+        };
+        let context = ToolExecutionContext {
+            session_id: "parent".to_string(),
+            host: manager.clone(),
+            cancellation_token: None,
+            async_task_id: None,
+        };
+
+        let result = provider
+            .execute_with_context(
+                "llm_query",
+                &json!({
+                    "task": "extract root cause",
+                    "inputs": { "log": "failed" },
+                    "output": { "root_cause": "str", "confidence": "float" }
+                }),
+                &context,
+            )
+            .await;
+
+        assert!(result.success, "{:?}", result.result);
+        assert_eq!(result.result["root_cause"], json!("missing config"));
+        assert_eq!(result.result["confidence"], json!(0.8));
+
+        let requests = manager.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        let (request, usage_source) = &requests[0];
+        assert_eq!(usage_source, "llm_query");
+        assert_eq!(request.model, "explore-model");
+        assert_eq!(request.model_variant.as_deref(), Some("low"));
+        assert!(matches!(
+            request.output,
+            lash::DirectOutputSpec::JsonSchema(_)
+        ));
+        let prompt = request
+            .messages
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .filter_map(|part| match part {
+                lash::DirectPart::Text(text) => Some(text.as_str()),
+                lash::DirectPart::Image(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("extract root cause"));
+        assert!(prompt.contains("\"log\": \"failed\""));
+    }
+
+    #[tokio::test]
+    async fn llm_query_error_result_fails_tool_call() {
+        let manager = Arc::new(DirectCompletionManager {
+            snapshot: PersistedSessionState {
+                policy: SessionPolicy {
+                    execution_mode: lash::ExecutionMode::new("rlm"),
+                    ..SessionPolicy::default()
+                },
+                ..PersistedSessionState::default()
+            },
+            requests: Mutex::new(Vec::new()),
+            response_text: r#"{"kind":"error","value":null,"error":"missing required evidence"}"#
+                .to_string(),
+        });
+        let provider = rlm::RlmSubagentToolsProvider {
+            registry: Arc::new(default_registry(
+                &BTreeMap::new(),
+                lash::ExecutionMode::new("rlm"),
+            )),
+            host: Arc::new(LocalSubagentHost::default()),
+        };
+        let context = ToolExecutionContext {
+            session_id: "parent".to_string(),
+            host: manager,
+            cancellation_token: None,
+            async_task_id: None,
+        };
+
+        let result = provider
+            .execute_with_context(
+                "llm_query",
+                &json!({ "task": "answer from missing evidence" }),
+                &context,
+            )
+            .await;
+
+        assert!(!result.success);
+        assert_eq!(result.result, json!("missing required evidence"));
+    }
+
+    #[tokio::test]
     async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
         #[derive(Default)]
         struct BatonManager {
@@ -430,7 +661,7 @@ mod tests {
         }
 
         #[async_trait]
-        impl SessionManager for BatonManager {
+        impl SessionSnapshotHost for BatonManager {
             async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
                 Ok(self.snapshot.clone())
             }
@@ -441,14 +672,22 @@ mod tests {
             ) -> Result<PersistedSessionState, PluginError> {
                 Ok(self.snapshot.clone())
             }
+        }
 
+        #[async_trait]
+        impl ToolCatalogHost for BatonManager {
             async fn tool_catalog(
                 &self,
                 _session_id: &str,
             ) -> Result<Vec<serde_json::Value>, PluginError> {
                 Ok(Vec::new())
             }
+        }
 
+        impl DynamicToolHost for BatonManager {}
+
+        #[async_trait]
+        impl SessionLifecycleHost for BatonManager {
             async fn create_session(
                 &self,
                 request: SessionCreateRequest,
@@ -464,7 +703,10 @@ mod tests {
             async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
                 Ok(())
             }
+        }
 
+        #[async_trait]
+        impl TurnHost for BatonManager {
             async fn start_turn_stream(
                 &self,
                 _session_id: &str,
@@ -481,6 +723,13 @@ mod tests {
                 Ok(())
             }
         }
+
+        impl TaskHost for BatonManager {}
+        impl MonitorHost for BatonManager {}
+        impl SessionGraphHost for BatonManager {}
+        impl PromptHost for BatonManager {}
+        impl DirectCompletionHost for BatonManager {}
+        impl TraceHost for BatonManager {}
 
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {
@@ -586,49 +835,6 @@ mod tests {
 
     #[tokio::test]
     async fn standard_provider_does_not_expose_continue_as() {
-        struct StubManager;
-
-        #[async_trait]
-        impl SessionManager for StubManager {
-            async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
-                Ok(PersistedSessionState::default())
-            }
-            async fn snapshot_session(
-                &self,
-                _session_id: &str,
-            ) -> Result<PersistedSessionState, PluginError> {
-                Ok(PersistedSessionState::default())
-            }
-            async fn tool_catalog(
-                &self,
-                _session_id: &str,
-            ) -> Result<Vec<serde_json::Value>, PluginError> {
-                Ok(Vec::new())
-            }
-            async fn create_session(
-                &self,
-                _request: SessionCreateRequest,
-            ) -> Result<SessionHandle, PluginError> {
-                Err(PluginError::Session("stub".to_string()))
-            }
-            async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-                Ok(())
-            }
-            async fn start_turn_stream(
-                &self,
-                _session_id: &str,
-                _input: TurnInput,
-            ) -> Result<SessionTurnHandle, PluginError> {
-                Err(PluginError::Session("stub".to_string()))
-            }
-            async fn await_turn(&self, _turn_id: &str) -> Result<lash::AssembledTurn, PluginError> {
-                Err(PluginError::Session("stub".to_string()))
-            }
-            async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
-                Ok(())
-            }
-        }
-
         let factory = SubagentsPluginFactory::new(
             SessionPolicy::default(),
             Arc::new(default_registry(
@@ -686,6 +892,7 @@ mod tests {
 
         assert_eq!(contributions.len(), 1);
         assert_eq!(contributions[0].title.as_deref(), Some("Exploration"));
+        assert!(contributions[0].content.contains("llm_query"));
         assert!(contributions[0].content.contains("`continue_as`"));
         assert!(contributions[0].content.contains("submit <expr>"));
         assert!(!contributions[0].content.contains("subagent"));
@@ -707,7 +914,11 @@ mod tests {
         );
 
         assert_eq!(contributions.len(), 1);
-        assert_eq!(contributions[0].title.as_deref(), Some("Subagents"));
+        assert_eq!(
+            contributions[0].title.as_deref(),
+            Some("Subagents and lightweight LLM calls")
+        );
+        assert!(contributions[0].content.contains("llm_query"));
         assert!(contributions[0].content.contains("spawn_agent"));
         assert!(contributions[0].content.contains("list_async_handles"));
         assert!(!contributions[0].content.contains("wait_agent"));

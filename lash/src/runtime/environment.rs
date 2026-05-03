@@ -79,6 +79,7 @@ pub struct RuntimeEnvironment {
     // embedders don't have to build a separate core config.
     pub base_dir: PathBuf,
     pub path_resolver: Arc<dyn PathResolver>,
+    pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub prompt_template: crate::PromptTemplate,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
@@ -106,6 +107,7 @@ impl Default for RuntimeEnvironment {
             session_task_executor: None,
             base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path_resolver: Arc::new(DefaultPathResolver),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             prompt_template: crate::default_prompt_template(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
@@ -130,6 +132,7 @@ impl RuntimeEnvironment {
         RuntimeCoreConfig {
             base_dir: self.base_dir.clone(),
             path_resolver: Arc::clone(&self.path_resolver),
+            attachment_store: Arc::clone(&self.attachment_store),
             prompt_template: self.prompt_template.clone(),
             trace_sink: self.trace_sink.clone(),
             trace_level: self.trace_level,
@@ -187,6 +190,11 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn with_path_resolver(mut self, resolver: Arc<dyn PathResolver>) -> Self {
         self.env.path_resolver = resolver;
+        self
+    }
+
+    pub fn with_attachment_store(mut self, store: Arc<dyn crate::AttachmentStore>) -> Self {
+        self.env.attachment_store = store;
         self
     }
 

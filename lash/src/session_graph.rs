@@ -167,7 +167,7 @@ pub struct SessionMessageTreeNode {
 }
 
 #[derive(Clone)]
-enum ProjectionItem<'a> {
+enum ActiveReadItem<'a> {
     Message(&'a Message),
     ToolCall {
         stable_key: String,
@@ -175,13 +175,13 @@ enum ProjectionItem<'a> {
     },
 }
 
-#[derive(Clone)]
-pub struct SessionProjection {
-    pub active_events: Arc<Vec<SessionEventRecord>>,
-    pub messages: Arc<Vec<Message>>,
-    pub tool_calls: Arc<Vec<ToolCallRecord>>,
-    pub rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
-    pub messages_render_cache: Arc<BaseRenderCache>,
+#[derive(Clone, Debug)]
+pub(crate) struct SessionReadModel {
+    pub(crate) active_events: Arc<Vec<SessionEventRecord>>,
+    pub(crate) messages: Arc<Vec<Message>>,
+    pub(crate) tool_calls: Arc<Vec<ToolCallRecord>>,
+    pub(crate) rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    pub(crate) prompt_render_cache: Arc<BaseRenderCache>,
 }
 
 #[derive(Clone, Debug)]
@@ -267,23 +267,23 @@ struct SessionGraphCache {
     by_id: HashMap<String, usize>,
     active_path_indices: Vec<usize>,
     active_events: Arc<Vec<SessionEventRecord>>,
-    projected_messages: Arc<Vec<Message>>,
-    /// Index from `Message::id` to its position in `projected_messages`,
+    active_messages: Arc<Vec<Message>>,
+    /// Index from `Message::id` to its position in `active_messages`,
     /// kept in sync with the vec so dedup on append is O(1) instead of an
     /// O(n) linear scan (which made long sessions quadratic in message
     /// count).
-    projected_message_ids: HashMap<String, usize>,
-    projected_tool_calls: Arc<Vec<ToolCallRecord>>,
-    /// RLM globals projection. Maintained incrementally on append so the
+    active_message_ids: HashMap<String, usize>,
+    active_tool_calls: Arc<Vec<ToolCallRecord>>,
+    /// RLM globals state. Maintained incrementally on append so the
     /// per-iteration `bound_variables` prompt contribution doesn't replay
     /// every patch event in the active path.
-    projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
-    /// Memoized render of `projected_messages`. Shared with every
-    /// `MessageSequence` built off this projection so the chat projector's
+    rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    /// Memoized render of `active_messages`. Shared with every
+    /// `MessageSequence` built off this read model so the chat projector's
     /// per-iteration `render_prompt` walk only happens once per turn.
-    /// Replaced (not invalidated in-place) whenever `projected_messages`
+    /// Replaced (not invalidated in-place) whenever `active_messages`
     /// changes — the `Arc` identity tracks the cache's validity.
-    projected_messages_render_cache: Arc<BaseRenderCache>,
+    prompt_render_cache: Arc<BaseRenderCache>,
 }
 
 impl SessionGraphCache {
@@ -312,54 +312,49 @@ impl SessionGraphCache {
             by_id,
             active_path_indices,
             active_events: Arc::new(Vec::new()),
-            projected_messages: Arc::new(Vec::new()),
-            projected_message_ids: HashMap::new(),
-            projected_tool_calls: Arc::new(Vec::new()),
-            projected_rlm_globals: Arc::new(serde_json::Map::new()),
-            projected_messages_render_cache: Arc::new(BaseRenderCache::new()),
+            active_messages: Arc::new(Vec::new()),
+            active_message_ids: HashMap::new(),
+            active_tool_calls: Arc::new(Vec::new()),
+            rlm_globals: Arc::new(serde_json::Map::new()),
+            prompt_render_cache: Arc::new(BaseRenderCache::new()),
         };
-        cache.rebuild_projection(graph);
+        cache.rebuild_read_model(graph);
         cache
     }
 
-    fn rebuild_projection(&mut self, graph: &SessionGraph) {
-        let mut projected_messages = Vec::with_capacity(self.active_path_indices.len());
-        let mut projected_message_ids: HashMap<String, usize> =
+    fn rebuild_read_model(&mut self, graph: &SessionGraph) {
+        let mut active_messages = Vec::with_capacity(self.active_path_indices.len());
+        let mut active_message_ids: HashMap<String, usize> =
             HashMap::with_capacity(self.active_path_indices.len());
-        let mut projected_tool_calls = Vec::with_capacity(self.active_path_indices.len());
+        let mut active_tool_calls = Vec::with_capacity(self.active_path_indices.len());
         let mut active_events = Vec::with_capacity(self.active_path_indices.len());
-        let mut projected_rlm_globals = serde_json::Map::new();
         for idx in &self.active_path_indices {
             let node = &graph.nodes[*idx];
             if let Some(event) = node.event() {
-                if let SessionEventRecord::Mode(mode_event) = event
-                    && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                        mode_event.rlm_event()
-                {
-                    lash_rlm_types::apply_globals_patch(&mut projected_rlm_globals, &patch);
-                }
                 active_events.push(event.clone());
             }
             if let Some(message) = node.message() {
-                if !message.is_transient() && !projected_message_ids.contains_key(&message.id) {
-                    projected_message_ids.insert(message.id.clone(), projected_messages.len());
-                    projected_messages.push(message);
+                if !message.is_transient() && !active_message_ids.contains_key(&message.id) {
+                    active_message_ids.insert(message.id.clone(), active_messages.len());
+                    active_messages.push(message);
                 }
                 continue;
             }
             if let Some(event) = node.event()
                 && let SessionEventRecord::Tool(ToolEvent::Invocation { record, .. }) = event
             {
-                projected_tool_calls.push(record.clone());
+                active_tool_calls.push(record.clone());
                 continue;
             }
         }
-        self.projected_messages = Arc::new(projected_messages);
-        self.projected_message_ids = projected_message_ids;
+        let rlm_globals =
+            crate::chronological::project_rlm_globals_from_events(active_events.iter());
+        self.active_messages = Arc::new(active_messages);
+        self.active_message_ids = active_message_ids;
         self.active_events = Arc::new(active_events);
-        self.projected_tool_calls = Arc::new(projected_tool_calls);
-        self.projected_rlm_globals = Arc::new(projected_rlm_globals);
-        self.projected_messages_render_cache = Arc::new(BaseRenderCache::new());
+        self.active_tool_calls = Arc::new(active_tool_calls);
+        self.rlm_globals = Arc::new(rlm_globals);
+        self.prompt_render_cache = Arc::new(BaseRenderCache::new());
     }
 
     fn append_node(
@@ -375,31 +370,25 @@ impl SessionGraphCache {
         }
         self.active_path_indices.push(node_index);
         if let Some(event) = node.event() {
-            if let SessionEventRecord::Mode(mode_event) = event
-                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                    mode_event.rlm_event()
-            {
-                lash_rlm_types::apply_globals_patch(
-                    Arc::make_mut(&mut self.projected_rlm_globals),
-                    &patch,
-                );
-            }
             Arc::make_mut(&mut self.active_events).push(event.clone());
+            self.rlm_globals = Arc::new(crate::chronological::project_rlm_globals_from_events(
+                self.active_events.iter(),
+            ));
         }
         if let Some(message) = node.message() {
-            if !message.is_transient() && !self.projected_message_ids.contains_key(&message.id) {
-                let messages = Arc::make_mut(&mut self.projected_messages);
-                self.projected_message_ids
+            if !message.is_transient() && !self.active_message_ids.contains_key(&message.id) {
+                let messages = Arc::make_mut(&mut self.active_messages);
+                self.active_message_ids
                     .insert(message.id.clone(), messages.len());
                 messages.push(message);
-                self.projected_messages_render_cache = Arc::new(BaseRenderCache::new());
+                self.prompt_render_cache = Arc::new(BaseRenderCache::new());
             }
             return;
         }
         if let Some(event) = node.event()
             && let SessionEventRecord::Tool(ToolEvent::Invocation { record, .. }) = event
         {
-            Arc::make_mut(&mut self.projected_tool_calls).push(record.clone());
+            Arc::make_mut(&mut self.active_tool_calls).push(record.clone());
         }
     }
 
@@ -412,10 +401,10 @@ impl SessionGraphCache {
         self.by_id.reserve(additional_nodes);
         self.active_path_indices.reserve(additional_nodes);
         if additional_messages > 0 {
-            Arc::make_mut(&mut self.projected_messages).reserve(additional_messages);
+            Arc::make_mut(&mut self.active_messages).reserve(additional_messages);
         }
         if additional_tool_calls > 0 {
-            Arc::make_mut(&mut self.projected_tool_calls).reserve(additional_tool_calls);
+            Arc::make_mut(&mut self.active_tool_calls).reserve(additional_tool_calls);
         }
     }
 }
@@ -454,10 +443,14 @@ impl SessionNodeRecord {
 }
 
 impl SessionGraph {
-    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn append_active_read_delta(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         let appendable_messages = {
-            let projection = self.shared_projection();
-            let mut seen_message_ids = projection
+            let read_model = self.read_model();
+            let mut seen_message_ids = read_model
                 .messages
                 .iter()
                 .map(|message| message.id.as_str())
@@ -470,19 +463,19 @@ impl SessionGraph {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        let projection = self.shared_projection();
-        let mut seen_tool_call_keys = projection
+        let read_model = self.read_model();
+        let mut seen_tool_call_keys = read_model
             .tool_calls
             .iter()
-            .map(|record| tool_call_projection_key(&stable_tool_call_key(record), record))
+            .map(|record| tool_call_active_read_key(&stable_tool_call_key(record), record))
             .collect::<HashSet<_>>();
         let appendable_tool_calls = tool_calls
             .iter()
             .filter_map(|record| {
                 let stable_key = stable_tool_call_key(record);
-                let projection_key = tool_call_projection_key(&stable_key, record);
+                let active_read_key = tool_call_active_read_key(&stable_key, record);
                 seen_tool_call_keys
-                    .insert(projection_key)
+                    .insert(active_read_key)
                     .then_some((stable_key, record))
             })
             .collect::<Vec<_>>();
@@ -502,7 +495,7 @@ impl SessionGraph {
         }
     }
 
-    pub(crate) fn append_projected_conversation_messages(&mut self, messages: &[Message]) {
+    pub(crate) fn append_active_conversation_messages(&mut self, messages: &[Message]) {
         let appendable_messages = messages
             .iter()
             .filter(|message| !message.is_transient())
@@ -730,20 +723,20 @@ impl SessionGraph {
             .collect()
     }
 
-    pub fn shared_projection(&self) -> SessionProjection {
+    pub(crate) fn read_model(&self) -> SessionReadModel {
         let cache = self.cache();
-        SessionProjection {
+        SessionReadModel {
             active_events: Arc::clone(&cache.active_events),
-            messages: Arc::clone(&cache.projected_messages),
-            tool_calls: Arc::clone(&cache.projected_tool_calls),
-            rlm_globals: Arc::clone(&cache.projected_rlm_globals),
-            messages_render_cache: Arc::clone(&cache.projected_messages_render_cache),
+            messages: Arc::clone(&cache.active_messages),
+            tool_calls: Arc::clone(&cache.active_tool_calls),
+            rlm_globals: Arc::clone(&cache.rlm_globals),
+            prompt_render_cache: Arc::clone(&cache.prompt_render_cache),
         }
     }
 
-    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
-        let messages = Arc::clone(&self.cache().projected_messages);
-        self.merge_active_projection(messages.as_slice(), tool_calls);
+    pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
+        let messages = Arc::clone(&self.cache().active_messages);
+        self.replace_active_read_state(messages.as_slice(), tool_calls);
     }
 
     pub fn append_event(&mut self, event: SessionEventRecord) -> String {
@@ -880,12 +873,16 @@ impl SessionGraph {
         self.cache().by_id.get(node_id).copied()
     }
 
-    pub fn merge_active_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn replace_active_read_state(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         let current_nodes = self.active_path_nodes();
-        let target = build_projection_items(messages, tool_calls);
+        let target = build_active_read_items(messages, tool_calls);
 
         let mut preserved_ids = Vec::new();
-        let mut seen_projection_keys = HashSet::new();
+        let mut seen_active_read_keys = HashSet::new();
         let mut target_idx = 0usize;
         for node in current_nodes {
             if node
@@ -895,14 +892,14 @@ impl SessionGraph {
             {
                 continue;
             }
-            if let Some(key) = recognized_projection_key(node) {
-                if !seen_projection_keys.insert(key.clone()) {
+            if let Some(key) = recognized_active_read_key(node) {
+                if !seen_active_read_keys.insert(key.clone()) {
                     continue;
                 }
                 let Some(target_item) = target.get(target_idx) else {
                     break;
                 };
-                if key != target_item_key(target_item) {
+                if key != active_read_item_key(target_item) {
                     break;
                 }
                 preserved_ids.push(node.node_id.clone());
@@ -922,7 +919,7 @@ impl SessionGraph {
         for item in target.into_iter().skip(target_idx) {
             let parent_node_id = self.leaf_node_id.clone();
             let node = match item {
-                ProjectionItem::Message(message) => {
+                ActiveReadItem::Message(message) => {
                     let node_id = unique_message_node_id(&message.id, &existing_ids);
                     SessionNodeRecord {
                         node_id,
@@ -935,7 +932,7 @@ impl SessionGraph {
                         },
                     }
                 }
-                ProjectionItem::ToolCall { stable_key, record } => {
+                ActiveReadItem::ToolCall { stable_key, record } => {
                     let node_id = unique_plugin_node_id(&stable_key, &existing_ids);
                     SessionNodeRecord {
                         node_id,
@@ -957,9 +954,9 @@ impl SessionGraph {
         }
     }
 
-    pub fn from_projection(messages: &[Message], tool_calls: &[ToolCallRecord]) -> Self {
+    pub fn from_active_read_state(messages: &[Message], tool_calls: &[ToolCallRecord]) -> Self {
         let mut graph = Self::default();
-        graph.merge_active_projection(messages, tool_calls);
+        graph.replace_active_read_state(messages, tool_calls);
         graph
     }
 
@@ -1042,16 +1039,16 @@ fn build_tree_children(
     children
 }
 
-fn build_projection_items<'a>(
+fn build_active_read_items<'a>(
     messages: &'a [Message],
     tool_calls: &'a [ToolCallRecord],
-) -> Vec<ProjectionItem<'a>> {
+) -> Vec<ActiveReadItem<'a>> {
     let mut first_message_for_call = HashMap::<String, usize>::new();
-    let projected_messages = messages
+    let active_messages = messages
         .iter()
         .filter(|message| !message.is_transient())
         .collect::<Vec<_>>();
-    for (idx, message) in projected_messages.iter().enumerate() {
+    for (idx, message) in active_messages.iter().enumerate() {
         for part in message.parts.iter() {
             if let Some(call_id) = &part.tool_call_id {
                 first_message_for_call.entry(call_id.clone()).or_insert(idx);
@@ -1059,23 +1056,23 @@ fn build_projection_items<'a>(
         }
     }
 
-    let mut anchored = HashMap::<usize, Vec<ProjectionItem<'a>>>::new();
+    let mut anchored = HashMap::<usize, Vec<ActiveReadItem<'a>>>::new();
     for record in tool_calls {
         let stable_key = stable_tool_call_key(record);
         let anchor = record
             .call_id
             .as_ref()
             .and_then(|call_id| first_message_for_call.get(call_id).copied())
-            .unwrap_or_else(|| projected_messages.len().saturating_sub(1));
+            .unwrap_or_else(|| active_messages.len().saturating_sub(1));
         anchored
             .entry(anchor)
             .or_default()
-            .push(ProjectionItem::ToolCall { stable_key, record });
+            .push(ActiveReadItem::ToolCall { stable_key, record });
     }
 
     let mut out = Vec::new();
-    for (idx, message) in projected_messages.iter().enumerate() {
-        out.push(ProjectionItem::Message(message));
+    for (idx, message) in active_messages.iter().enumerate() {
+        out.push(ActiveReadItem::Message(message));
         if let Some(items) = anchored.remove(&idx) {
             out.extend(items);
         }
@@ -1083,12 +1080,12 @@ fn build_projection_items<'a>(
     out
 }
 
-fn recognized_projection_key(node: &SessionNodeRecord) -> Option<String> {
+fn recognized_active_read_key(node: &SessionNodeRecord) -> Option<String> {
     match &node.payload {
         SessionNodePayload::Event { event } => match event {
             SessionEventRecord::Conversation(record) => Some(format!("message:{}", record.id)),
             SessionEventRecord::Tool(ToolEvent::Invocation { stable_key, record }) => {
-                Some(tool_call_projection_key(stable_key, record))
+                Some(tool_call_active_read_key(stable_key, record))
             }
             _ => None,
         },
@@ -1096,23 +1093,23 @@ fn recognized_projection_key(node: &SessionNodeRecord) -> Option<String> {
     }
 }
 
-fn target_item_key(item: &ProjectionItem<'_>) -> String {
+fn active_read_item_key(item: &ActiveReadItem<'_>) -> String {
     match item {
-        ProjectionItem::Message(message) => format!("message:{}", message.id),
-        ProjectionItem::ToolCall { stable_key, record } => {
-            tool_call_projection_key(stable_key, record)
+        ActiveReadItem::Message(message) => format!("message:{}", message.id),
+        ActiveReadItem::ToolCall { stable_key, record } => {
+            tool_call_active_read_key(stable_key, record)
         }
     }
 }
 
-fn tool_call_projection_key(stable_key: &str, record: &ToolCallRecord) -> String {
+fn tool_call_active_read_key(stable_key: &str, record: &ToolCallRecord) -> String {
     let fingerprint = serde_json::to_string(record).unwrap_or_default();
     format!("tool_call:{stable_key}:{fingerprint}")
 }
 
-pub(crate) fn tool_call_record_projection_key(record: &ToolCallRecord) -> String {
+pub(crate) fn tool_call_record_active_read_key(record: &ToolCallRecord) -> String {
     let stable_key = stable_tool_call_key(record);
-    tool_call_projection_key(&stable_key, record)
+    tool_call_active_read_key(&stable_key, record)
 }
 
 fn unique_plugin_node_id(stable_key: &str, existing_ids: &HashSet<String>) -> String {
@@ -1181,7 +1178,14 @@ fn first_message_search_text(message: &Message) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MessageRole, Part, PartKind, PruneState};
+    use crate::session_model::message::PartAttachment;
+    use crate::{
+        AttachmentId, AttachmentRef, ImageMediaType, MediaType, MessageRole, ModeEvent, Part,
+        PartKind, PruneState, SessionNodePayload, ToolCallRecord,
+    };
+    use lash_rlm_types::{
+        RlmDiagnosticEvent, RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTrajectoryEntry,
+    };
 
     fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
         Message {
@@ -1206,6 +1210,31 @@ mod tests {
         }
     }
 
+    fn image_part(id: &str) -> Part {
+        Part {
+            id: id.to_string(),
+            kind: PartKind::Image,
+            content: "plot".to_string(),
+            attachment: Some(PartAttachment {
+                reference: AttachmentRef {
+                    id: AttachmentId::new("att-1"),
+                    media_type: MediaType::Image(ImageMediaType::Png),
+                    byte_len: 128,
+                    width: Some(8),
+                    height: Some(8),
+                    label: Some("plot".to_string()),
+                },
+            }),
+            tool_call_id: None,
+            tool_name: None,
+            tool_item_id: None,
+            tool_signature: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }
+    }
+
     fn transient_plugin_message(id: &str, role: MessageRole, content: &str) -> Message {
         Message {
             origin: Some(crate::MessageOrigin::Plugin {
@@ -1217,29 +1246,32 @@ mod tests {
     }
 
     #[test]
-    fn transient_messages_are_not_projected_or_persisted() {
+    fn transient_messages_are_not_read_or_persisted() {
         let mut graph = SessionGraph::default();
         let user = text_message("m1", MessageRole::User, "hello");
         let transient = transient_plugin_message("mem", MessageRole::System, "memory");
         let assistant = text_message("m2", MessageRole::Assistant, "world");
 
-        graph.merge_active_projection(&[user.clone(), transient, assistant.clone()], &[]);
+        graph.replace_active_read_state(&[user.clone(), transient, assistant.clone()], &[]);
 
-        let projection = graph.shared_projection();
-        let projected = projection.messages.as_slice();
+        let read_model = graph.read_model();
+        let active_messages = read_model.messages.as_slice();
         assert_eq!(
-            projected.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            active_messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["m1", "m2"]
         );
         assert!(!graph.nodes.iter().any(|node| node.node_id == "mem"));
     }
 
     #[test]
-    fn merge_active_projection_drops_duplicate_active_message_ids() {
+    fn replace_active_read_state_drops_duplicate_active_message_ids() {
         let mut graph = SessionGraph::default();
         let user = text_message("m1", MessageRole::User, "hello");
         let assistant = text_message("m2", MessageRole::Assistant, "world");
-        graph.merge_active_projection(&[user.clone(), assistant.clone()], &[]);
+        graph.replace_active_read_state(&[user.clone(), assistant.clone()], &[]);
 
         graph.push_node_record(SessionNodeRecord {
             node_id: "m2".to_string(),
@@ -1253,12 +1285,15 @@ mod tests {
         });
         graph.set_leaf_node_id(Some("m2".to_string()));
 
-        graph.merge_active_projection(&[user, assistant], &[]);
+        graph.replace_active_read_state(&[user, assistant], &[]);
 
-        let projection = graph.shared_projection();
-        let projected = projection.messages.as_slice();
+        let read_model = graph.read_model();
+        let active_messages = read_model.messages.as_slice();
         assert_eq!(
-            projected.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            active_messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["m1", "m2"]
         );
         let m2_count = graph
@@ -1267,5 +1302,176 @@ mod tests {
             .filter(|node| node.node_id == "m2")
             .count();
         assert_eq!(m2_count, 2);
+    }
+
+    #[test]
+    fn read_model_preserves_active_state_and_prompt_cache_identity() {
+        let mut graph = SessionGraph::default();
+        let user = text_message("m1", MessageRole::User, "hello");
+        let assistant = text_message("m2", MessageRole::Assistant, "world");
+        let tool_call = ToolCallRecord {
+            call_id: Some("call_1".to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({"q": "hello"}),
+            result: serde_json::json!({"answer": "world"}),
+            success: true,
+            duration_ms: 3,
+        };
+        graph.replace_active_read_state(
+            &[user.clone(), assistant.clone()],
+            std::slice::from_ref(&tool_call),
+        );
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
+                set: serde_json::Map::from_iter([(
+                    "topic".to_string(),
+                    serde_json::json!("read-model"),
+                )]),
+                unset: Vec::new(),
+            }),
+        )));
+
+        let first = graph.read_model();
+        let second = graph.read_model();
+        assert!(Arc::ptr_eq(
+            &first.prompt_render_cache,
+            &second.prompt_render_cache
+        ));
+        assert_eq!(first.active_events.len(), 4);
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![user.id.as_str(), assistant.id.as_str()]
+        );
+        assert_eq!(first.tool_calls.as_slice(), &[tool_call]);
+        assert_eq!(
+            first.rlm_globals.get("topic"),
+            Some(&serde_json::json!("read-model"))
+        );
+
+        graph.append_message(text_message("m3", MessageRole::User, "again"));
+        let updated = graph.read_model();
+        assert!(!Arc::ptr_eq(
+            &first.prompt_render_cache,
+            &updated.prompt_render_cache
+        ));
+    }
+
+    #[test]
+    fn chronological_projection_covers_active_path_without_branch_or_transients() {
+        let mut graph = SessionGraph::default();
+        let mut user = text_message("u1", MessageRole::User, "first");
+        Arc::make_mut(&mut user.parts).push(image_part("u1.p1"));
+        let system = text_message("s1", MessageRole::System, "system");
+        let assistant = text_message("a1", MessageRole::Assistant, "done");
+        let transient = transient_plugin_message("transient", MessageRole::System, "hidden");
+        let tool_call = ToolCallRecord {
+            call_id: Some("call_1".to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({"q": "first"}),
+            result: serde_json::json!({"answer": "done"}),
+            success: true,
+            duration_ms: 9,
+        };
+
+        graph.append_message(user);
+        graph.append_message(system);
+        graph.append_message(transient);
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
+                id: "rlm_step_0".to_string(),
+                iteration: 0,
+                reasoning: "think".to_string(),
+                code: "x = 1".to_string(),
+                output: "1".to_string(),
+                observations: vec!["observed".to_string()],
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                error: None,
+                final_output: None,
+                output_raw_len: 1,
+            }),
+        )));
+        graph.append_event(SessionEventRecord::Tool(ToolEvent::Invocation {
+            stable_key: "call_1".to_string(),
+            record: tool_call.clone(),
+        }));
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
+                set: serde_json::Map::from_iter([(
+                    "topic".to_string(),
+                    serde_json::json!("chronology"),
+                )]),
+                unset: Vec::new(),
+            }),
+        )));
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmDiagnostic(RlmDiagnosticEvent {
+                phase: "ignored".to_string(),
+                payload: serde_json::json!({"debug": true}),
+            }),
+        )));
+        graph.append_message(assistant);
+        graph.push_node_record(SessionNodeRecord {
+            node_id: "inactive".to_string(),
+            parent_node_id: Some("u1".to_string()),
+            timestamp: Utc::now().to_rfc3339(),
+            payload: SessionNodePayload::Event {
+                event: SessionEventRecord::Conversation(ConversationRecord::from_message(
+                    text_message("branch", MessageRole::Assistant, "inactive"),
+                )),
+            },
+        });
+
+        let read_model = graph.read_model();
+        let projection = crate::ChronologicalProjection::from_read_model(&read_model);
+        let labels = projection
+            .entries()
+            .iter()
+            .map(|entry| match &entry.payload {
+                crate::ChronologicalPayload::Message(message) => match message.role {
+                    MessageRole::User => format!("message:user:{}", message.id),
+                    MessageRole::System => format!("message:system:{}", message.id),
+                    MessageRole::Assistant => format!("message:assistant:{}", message.id),
+                },
+                crate::ChronologicalPayload::RlmStep(step) => format!("rlm:{}", step.iteration),
+                crate::ChronologicalPayload::ToolCall(record) => format!("tool:{}", record.tool),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "message:user:u1",
+                "message:system:s1",
+                "rlm:0",
+                "tool:lookup",
+                "message:assistant:a1"
+            ]
+        );
+        assert_eq!(
+            projection
+                .entries()
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert_eq!(projection.tool_call_by_call_id("call_1"), Some(&tool_call));
+        let history = projection.rlm_history();
+        assert_eq!(history.len(), projection.entries().len());
+        assert_eq!(
+            read_model.rlm_globals.get("topic"),
+            Some(&serde_json::json!("chronology"))
+        );
+        assert_eq!(
+            read_model.rlm_globals.get("history"),
+            Some(&projection.rlm_history_value())
+        );
+        assert!(!labels.iter().any(|label| label.contains("inactive")));
+        assert!(!labels.iter().any(|label| label.contains("transient")));
     }
 }

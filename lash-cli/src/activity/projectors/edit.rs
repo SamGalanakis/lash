@@ -2,8 +2,8 @@
 //!
 //! Produces an `Edit` block with a `PatchPreview` artifact listing the
 //! changed files. Consecutive edits merge via `merge_edit_activity`
-//! (called from `projection.rs::append_activity_block`) so a run of
-//! patches collapses into a single "Edited N files (+M -K)" block.
+//! through `ActivityState` so a run of patches collapses into a single
+//! "Edited N files (+M -K)" block.
 
 use std::collections::HashSet;
 
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn apply_patch_summary_prefers_semantic_single_file_copy() {
         let mut state = ActivityState::new();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "apply_patch",
             json!({}),
             json!({
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn apply_patch_summary_shows_move_arrow() {
         let mut state = ActivityState::new();
-        let blocks = state.blocks_for_tool_call(
+        let blocks = state.project_tool_call(
             "apply_patch",
             json!({}),
             json!({

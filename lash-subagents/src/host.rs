@@ -21,11 +21,9 @@ use async_trait::async_trait;
 pub use crate::local::LocalSubagentHost;
 pub use crate::routing::truncate_snapshot_to_recent_turns;
 pub use crate::types::{
-    AgentMetadata, AgentSummary, CloseAgentRequest, CloseAgentResponse, DeliveryMode,
-    FollowupTaskRequest, FollowupTaskResponse, ListAgentsRequest, ListAgentsResponse,
-    SendMessageRequest, SendMessageResponse, SpawnAgentRequest, SpawnAgentResponse,
-    WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent, WaitAgentMessage, WaitAgentRequest,
-    WaitAgentResponse, WaitUntil,
+    AgentMetadata, CloseAgentRequest, CloseAgentResponse, SpawnAgentRequest, SpawnAgentResponse,
+    WaitAgentClosed, WaitAgentCompletion, WaitAgentEvent, WaitAgentRequest, WaitAgentResponse,
+    WaitUntil,
 };
 
 #[async_trait]
@@ -47,18 +45,6 @@ pub trait SubagentHost: Send + Sync {
         request: SpawnAgentRequest,
     ) -> Result<SpawnAgentResponse, String>;
 
-    async fn send_message(
-        &self,
-        context: &lash::ToolExecutionContext,
-        request: SendMessageRequest,
-    ) -> Result<SendMessageResponse, String>;
-
-    async fn followup_task(
-        &self,
-        context: &lash::ToolExecutionContext,
-        request: FollowupTaskRequest,
-    ) -> Result<FollowupTaskResponse, String>;
-
     async fn wait_agent(
         &self,
         context: &lash::ToolExecutionContext,
@@ -70,10 +56,4 @@ pub trait SubagentHost: Send + Sync {
         context: &lash::ToolExecutionContext,
         request: CloseAgentRequest,
     ) -> Result<CloseAgentResponse, String>;
-
-    async fn list_agents(
-        &self,
-        context: &lash::ToolExecutionContext,
-        request: ListAgentsRequest,
-    ) -> Result<ListAgentsResponse, String>;
 }

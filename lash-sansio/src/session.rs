@@ -1,4 +1,4 @@
-use crate::{ToolCallRecord, ToolImage};
+use crate::{AttachmentRef, ToolCallRecord, ToolImage};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TextProjectionMetadata {
@@ -19,6 +19,7 @@ pub struct ExecResponse {
     pub observation_truncation: Vec<TextProjectionMetadata>,
     pub tool_calls: Vec<ToolCallRecord>,
     pub images: Vec<ToolImage>,
+    pub printed_images: Vec<AttachmentRef>,
     pub error: Option<String>,
     pub duration_ms: u64,
     /// When the surrounding session uses `mode-specific finish`,

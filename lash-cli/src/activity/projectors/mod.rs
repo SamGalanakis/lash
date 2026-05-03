@@ -19,7 +19,6 @@ pub(crate) mod generic;
 pub(crate) mod lashlang;
 pub(crate) mod monitor;
 pub(crate) mod shell;
-pub(crate) mod snippet;
 pub(crate) mod subagents;
 pub(crate) mod update_plan;
 pub(crate) mod web;
@@ -28,7 +27,7 @@ pub(crate) mod web;
 /// Called from `ActivityState::new`. The generic projector is also
 /// registered under its primary tool name (`search_tools`), and
 /// additionally used as the fallback path in
-/// `ActivityState::blocks_for_tool_call` for names with no dedicated
+/// `ActivityState::project_tool_call` for names with no dedicated
 /// projector.
 pub(super) fn register_builtins(state: &mut ActivityState) {
     state.register(ask::AskProjector);
@@ -38,7 +37,6 @@ pub(super) fn register_builtins(state: &mut ActivityState) {
     state.register(lashlang::LashlangProjector);
     state.register(monitor::MonitorProjector);
     state.register(shell::ShellProjector);
-    state.register(snippet::SnippetProjector);
     state.register(subagents::SubagentProjector);
     state.register(update_plan::UpdatePlanProjector);
     state.register(web::WebProjector);

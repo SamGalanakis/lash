@@ -370,7 +370,7 @@ fn standard_max_turns_stops_iteration() {
 }
 
 #[test]
-fn rlm_prose_only_response_emits_done() {
+fn rlm_prose_only_response_requests_submit_by_default() {
     let config = test_config(ExecutionMode::new("rlm"));
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -388,7 +388,14 @@ fn rlm_prose_only_response_emits_done() {
 
     let effects = drain_effects(&mut machine);
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-    assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+    assert_eq!(checkpoint, CheckpointKind::AfterWork);
+    assert!(machine.messages().iter().any(|message| {
+        message.role == MessageRole::System
+            && message.parts.iter().any(|part| {
+                part.content.contains("final answer must be delivered")
+                    && part.content.contains("submit")
+            })
+    }));
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
         messages: Vec::new(),
@@ -396,7 +403,7 @@ fn rlm_prose_only_response_emits_done() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(find_done(&effects).is_some());
+    assert!(find_llm_call(&effects).is_some());
 }
 
 #[test]
@@ -426,7 +433,7 @@ fn typed_rlm_prose_only_response_requests_submit() {
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     assert!(machine.messages().iter().any(|message| {
-        message.role == MessageRole::User
+        message.role == MessageRole::System
             && message.parts.iter().any(|part| {
                 part.content.contains("final answer must be delivered")
                     && part.content.contains("submit")
@@ -470,7 +477,7 @@ fn typed_rlm_prose_only_response_can_suppress_submit_reminder() {
     let (_checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     assert!(machine.messages().iter().any(|message| {
-        message.role == MessageRole::User
+        message.role == MessageRole::System
             && message.parts.iter().any(|part| {
                 part.content.contains("task-specific completion path")
                     && !part.content.contains("submit")
@@ -520,6 +527,7 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
+            printed_images: Vec::new(),
             error: None,
             duration_ms: 1,
             terminal_finish: None,
@@ -589,6 +597,7 @@ fn rlm_exec_tool_call_events_keep_call_id() {
                 duration_ms: 7,
             }],
             images: Vec::new(),
+            printed_images: Vec::new(),
             error: None,
             duration_ms: 7,
             terminal_finish: None,
@@ -646,6 +655,7 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
+            printed_images: Vec::new(),
             error: None,
             duration_ms: 1,
             terminal_finish: Some(serde_json::json!({ "ok": true })),
@@ -728,6 +738,7 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
+            printed_images: Vec::new(),
             error: None,
             duration_ms: 1,
             terminal_finish: Some(serde_json::json!("Hi.")),
@@ -798,6 +809,7 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
+            printed_images: Vec::new(),
             error: None,
             duration_ms: 1,
             terminal_finish: Some(serde_json::json!({ "missing": true })),
@@ -808,7 +820,7 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     assert!(machine.messages().iter().any(|message| {
-        message.role == MessageRole::User
+        message.role == MessageRole::System
             && message.parts.iter().any(|part| {
                 part.content
                     .contains("didn't match the required output schema")

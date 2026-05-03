@@ -49,7 +49,7 @@ async fn restore_execution_state_if_present<'a>(
     match snapshot {
         Some(snapshot) => match rt.restore_execution_state(snapshot).await {
             Ok(()) => {
-                app.blocks.push(UiTimelineItem::SystemMessage(
+                app.timeline.push(UiTimelineItem::SystemMessage(
                     "Execution state restored from snapshot.".to_string(),
                 ));
             }
@@ -159,9 +159,12 @@ async fn apply_graph_resume_state(
     if graph.heal_orphaned_leaf() {
         tracing::warn!("session graph leaf was orphaned on resume; healed to most recent message");
     }
-    let projection = graph.shared_projection();
-    let messages = projection.messages.as_ref().clone();
-    let tool_calls = projection.tool_calls.as_ref().clone();
+    let read_view = lash::SessionReadView::from_exported_state(&lash::SessionStateEnvelope {
+        session_graph: graph.clone(),
+        ..lash::SessionStateEnvelope::default()
+    });
+    let messages = read_view.messages().to_vec();
+    let tool_calls = read_view.tool_calls().to_vec();
     *history = messages.clone();
 
     if let Some(dynamic_state) = checkpoint
@@ -206,7 +209,7 @@ async fn apply_graph_resume_state(
     if let Some(requested_execution_mode) = requested_execution_mode.as_ref()
         && !lash::execution_mode_supported(&restored_execution_mode)
     {
-        app.blocks.push(UiTimelineItem::SystemMessage(format!(
+        app.timeline.push(UiTimelineItem::SystemMessage(format!(
             "This build does not support `{}` mode; resuming in `standard`.",
             crate::execution_mode_label(requested_execution_mode)
         )));
@@ -268,7 +271,7 @@ async fn apply_graph_resume_state(
             persisted_graph_node_count,
             graph_replace_required: false,
         };
-        restored_state.replace_projection(&messages, &tool_calls);
+        restored_state.replace_active_read_state(&messages, &tool_calls);
         rt.set_persisted_state(restored_state);
     }
 
@@ -294,11 +297,11 @@ pub async fn load_resumed_session(
     let loaded =
         session_log::load_session(&filename).map_err(|err| format!("Could not load: {err}"))?;
     *history = loaded.messages;
-    app.blocks = loaded.blocks;
+    app.timeline = loaded.blocks;
     app.last_response_usage = loaded.last_token_usage;
     app.last_prompt_usage = None;
     app.plugin_mode_indicators = loaded.plugin_mode_indicators;
-    app.blocks.push(UiTimelineItem::SystemMessage(format!(
+    app.timeline.push(UiTimelineItem::SystemMessage(format!(
         "Resumed: {}",
         filename
     )));
@@ -347,7 +350,7 @@ pub async fn restore_session_state(
     let resume_store = match Store::open(&db_path) {
         Ok(s) => s,
         Err(err) => {
-            app.blocks.push(UiTimelineItem::SystemMessage(format!(
+            app.timeline.push(UiTimelineItem::SystemMessage(format!(
                 "Could not open session database: {err}"
             )));
             return Ok(());
@@ -424,7 +427,7 @@ mod tests {
         last_prompt_usage: Option<PromptUsage>,
     ) -> (lash::SessionGraph, lash::HydratedSessionCheckpoint) {
         (
-            lash::SessionGraph::from_projection(&messages, &[]),
+            lash::SessionGraph::from_active_read_state(&messages, &[]),
             lash::HydratedSessionCheckpoint {
                 turn_state: lash::PersistedTurnState {
                     iteration,

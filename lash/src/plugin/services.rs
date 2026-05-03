@@ -21,6 +21,7 @@ pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
     pub turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
+    pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub(crate) store: Option<Arc<dyn crate::store::RuntimePersistence>>,
 }
 
@@ -38,7 +39,7 @@ impl std::ops::Deref for PersistentRuntimeServices {
 pub(crate) struct NoopSessionManager;
 
 #[async_trait::async_trait]
-impl SessionManager for NoopSessionManager {
+impl SessionSnapshotHost for NoopSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
         Err(PluginError::Session(
             "session snapshots are unavailable in this runtime".to_string(),
@@ -50,13 +51,21 @@ impl SessionManager for NoopSessionManager {
             "session lookup is unavailable in this runtime".to_string(),
         ))
     }
+}
 
+#[async_trait::async_trait]
+impl ToolCatalogHost for NoopSessionManager {
     async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
         Err(PluginError::Session(
             "tool catalogs are unavailable in this runtime".to_string(),
         ))
     }
+}
 
+impl DynamicToolHost for NoopSessionManager {}
+
+#[async_trait::async_trait]
+impl SessionLifecycleHost for NoopSessionManager {
     async fn create_session(
         &self,
         _request: SessionCreateRequest,
@@ -71,7 +80,10 @@ impl SessionManager for NoopSessionManager {
             "session closing is unavailable in this runtime".to_string(),
         ))
     }
+}
 
+#[async_trait::async_trait]
+impl TurnHost for NoopSessionManager {
     async fn start_turn_stream(
         &self,
         _session_id: &str,
@@ -95,6 +107,13 @@ impl SessionManager for NoopSessionManager {
     }
 }
 
+impl TaskHost for NoopSessionManager {}
+impl MonitorHost for NoopSessionManager {}
+impl SessionGraphHost for NoopSessionManager {}
+impl PromptHost for NoopSessionManager {}
+impl DirectCompletionHost for NoopSessionManager {}
+impl TraceHost for NoopSessionManager {}
+
 impl RuntimeServices {
     pub fn new(plugins: Arc<PluginSession>) -> Self {
         Self::new_with_bridges(
@@ -113,8 +132,17 @@ impl RuntimeServices {
             plugins,
             turn_injection_bridge,
             turn_input_injection_bridge,
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             store: None,
         }
+    }
+
+    pub(crate) fn with_attachment_store(
+        mut self,
+        attachment_store: Arc<dyn crate::AttachmentStore>,
+    ) -> Self {
+        self.attachment_store = attachment_store;
+        self
     }
 }
 
@@ -141,6 +169,7 @@ impl PersistentRuntimeServices {
             plugins,
             turn_injection_bridge,
             turn_input_injection_bridge,
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             store: Some(store),
         })
     }
