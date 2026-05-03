@@ -64,6 +64,24 @@ impl ToolHost for MockHost {
                     .ok_or_else(|| ToolHostError::new(format!("no such file: {path}")))
             }
             "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
+            "exec_command" => {
+                let cmd = args
+                    .get("cmd")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| ToolHostError::new("missing cmd"))?;
+                let mut record = Record::default();
+                let exit_code = if cmd == "test -f Cargo.lock" { 1 } else { 0 };
+                record.insert("status".into(), Value::String("completed".into()));
+                record.insert("done".into(), Value::Bool(true));
+                record.insert("running".into(), Value::Bool(false));
+                record.insert("output".into(), Value::String(format!("ran: {cmd}").into()));
+                record.insert("exit_code".into(), Value::Number(exit_code.into()));
+                Ok(Value::Record(record.into()))
+            }
+            "apply_patch" => Ok(Value::String("patch applied".into())),
             "spawn_agent" => {
                 let name = args
                     .get("agent_name")
@@ -84,7 +102,7 @@ impl ToolHost for MockHost {
                     handle.insert("__handle__".into(), Value::String("task".into()));
                     handle.insert("id".into(), Value::String(handle_id.into()));
                     handle.insert("tool".into(), Value::String("spawn_agent".into()));
-                    subagent.insert(name.into(), Value::Record(handle.into()));
+                    subagent.insert(name, Value::Record(handle.into()));
                 }
                 let mut out = Record::default();
                 out.insert("subagent".into(), Value::Record(subagent.into()));
@@ -891,13 +909,85 @@ submit [results.a.claim, results.b.claim]"#,
         panic!("expected list");
     };
     assert_eq!(results.len(), 2);
+    assert_eq!(results[0], Value::String("done:chunk_1".to_string().into()));
+    assert_eq!(results[1], Value::String("done:chunk_2".to_string().into()));
+}
+
+#[test]
+fn prompt_example_allow_nonzero_exit_inspects_shell_exit_code() {
+    let host = MockHost::default();
     assert_eq!(
-        results[0],
-        Value::String("done:chunk_1".to_string().into())
+        run(
+            &host,
+            r#"probe = (call exec_command { cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?
+submit probe.exit_code == 0 ? "Cargo.lock exists" : "Cargo.lock is missing""#,
+        ),
+        Value::String("Cargo.lock is missing".into())
     );
+}
+
+#[test]
+fn prompt_example_loop_builds_collection_without_comprehension() {
+    let host = MockHost::default()
+        .with_file("Cargo.toml", "abc")
+        .with_file("README.md", "abcdef");
+    let Value::List(items) = run(
+        &host,
+        r#"items = []
+for path in ["Cargo.toml", "README.md"] {
+  text = (call read_file { path: path })?
+  items = push(items, { path: path, chars: len(text) })
+}
+submit items"#,
+    ) else {
+        panic!("expected list");
+    };
+
+    assert_eq!(items.len(), 2);
+    let first = items[0].as_record().expect("first item");
+    let second = items[1].as_record().expect("second item");
+    assert_eq!(first["path"], Value::String("Cargo.toml".into()));
+    assert_eq!(first["chars"], Value::Number(3.0));
+    assert_eq!(second["path"], Value::String("README.md".into()));
+    assert_eq!(second["chars"], Value::Number(6.0));
+}
+
+#[test]
+fn prompt_example_prints_targeted_slice_for_large_values() {
+    let host = MockHost::default().with_file("Cargo.toml", "abcdef");
+    let (outcome, _) = run_continued(
+        &host,
+        r#"text = (call read_file { path: "Cargo.toml" })?
+print { chars: len(text), head: slice(text, 0, 3) }"#,
+    );
+    assert!(matches!(outcome, ExecutionOutcome::Continued));
+    let observations = host.observations();
+    let record = observations[0].as_record().expect("observation record");
+    assert_eq!(record["chars"], Value::Number(6.0));
+    assert_eq!(record["head"], Value::String("abc".into()));
+}
+
+#[test]
+fn prompt_example_validates_nontrivial_edit_before_submit() {
+    let host = MockHost::default();
     assert_eq!(
-        results[1],
-        Value::String("done:chunk_2".to_string().into())
+        run(
+            &host,
+            r#"patch = r"""*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-old
++new
+*** End Patch"""
+(call apply_patch { input: patch })?
+check = (call exec_command { cmd: "cargo check --workspace --all-targets", allow_nonzero_exit: true })?
+if check.exit_code != 0 {
+  print slice(check.output, 0, 4000)
+} else {
+  submit "Edit applied and validation passed."
+}"#,
+        ),
+        Value::String("Edit applied and validation passed.".into())
     );
 }
 

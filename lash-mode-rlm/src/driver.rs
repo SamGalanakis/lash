@@ -377,9 +377,6 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
 
 fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
     match termination {
-        RlmTermination::ProseWithoutFence => {
-            "Finalization\nWhen the task only needs a conversational reply, answer in prose with no lashlang block — that ends the turn. When you need to call tools, compute, or fetch data first, emit a `lashlang` block; the next iteration sees its observations."
-        }
         RlmTermination::Finish {
             include_submit_prompt: true,
             ..

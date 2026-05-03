@@ -506,7 +506,7 @@ impl ToolDefinition {
     pub fn parameter_metadata(&self) -> Vec<serde_json::Value> {
         schema_parameter_docs(&self.input_schema)
             .into_iter()
-            .map(|param| param.to_value())
+            .map(|param| param.into_value())
             .collect()
     }
 }
@@ -588,7 +588,7 @@ impl ParameterDoc {
         out
     }
 
-    fn to_value(self) -> serde_json::Value {
+    fn into_value(self) -> serde_json::Value {
         let mut out = serde_json::Map::new();
         out.insert("name".to_string(), serde_json::json!(self.name));
         out.insert("type".to_string(), serde_json::json!(self.type_label));
@@ -690,7 +690,7 @@ impl FieldDoc {
         }
     }
 
-    fn to_value(self) -> serde_json::Value {
+    fn into_value(self) -> serde_json::Value {
         let mut out = serde_json::Map::new();
         out.insert("path".to_string(), serde_json::json!(self.path));
         out.insert("type".to_string(), serde_json::json!(self.type_label));
@@ -758,7 +758,7 @@ fn return_field_metadata(schema: &serde_json::Value) -> Vec<serde_json::Value> {
     collect_return_fields("", schema, true, &mut fields);
     merge_return_fields(fields)
         .into_iter()
-        .map(FieldDoc::to_value)
+        .map(FieldDoc::into_value)
         .collect()
 }
 

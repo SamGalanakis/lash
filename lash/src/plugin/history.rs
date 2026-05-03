@@ -47,10 +47,10 @@ pub struct HistoryState {
 
 impl HistoryState {
     pub fn from_state(state: &SessionStateEnvelope) -> Self {
-        let projection = state.shared_projection();
+        let read_model = state.read_model();
         Self {
-            messages: projection.messages.as_ref().clone(),
-            tool_calls: projection.tool_calls.as_ref().clone(),
+            messages: read_model.messages.as_ref().clone(),
+            tool_calls: read_model.tool_calls.as_ref().clone(),
             metadata: HistoryRewriteMetadata::default(),
         }
     }
@@ -63,13 +63,7 @@ pub struct SessionReadView(Arc<SessionReadState>);
 struct SessionReadState {
     meta: SessionReadMeta,
     graph: SessionReadGraph,
-    active_events: Arc<Vec<crate::SessionEventRecord>>,
-    messages: SessionReadMessages,
-    tool_calls: Arc<Vec<crate::ToolCallRecord>>,
-    /// RLM globals projection memoized at construction time so per-iteration
-    /// callers (e.g. the `bound_variables` prompt contribution) don't replay
-    /// every patch event in the active path.
-    projected_rlm_globals: OnceLock<Arc<serde_json::Map<String, serde_json::Value>>>,
+    read_model: crate::SessionReadModel,
 }
 
 #[derive(Clone, Debug)]
@@ -124,42 +118,19 @@ enum SessionReadGraph {
     },
 }
 
-#[derive(Debug)]
-enum SessionReadMessages {
-    Shared(Arc<Vec<crate::Message>>),
-    Sequence {
-        sequence: crate::MessageSequence,
-        cache: OnceLock<Arc<Vec<crate::Message>>>,
-    },
-}
-
-impl SessionReadMessages {
-    fn as_slice(&self) -> &[crate::Message] {
-        match self {
-            Self::Shared(messages) => messages.as_slice(),
-            Self::Sequence { sequence, cache } => {
-                cache.get_or_init(|| sequence.shared()).as_slice()
-            }
-        }
-    }
-}
-
 impl SessionReadView {
     pub fn new(state: SessionStateEnvelope) -> Self {
         let mut state = state;
         let graph = Arc::new(std::mem::take(&mut state.session_graph));
-        let projection = graph.shared_projection();
+        let read_model = graph.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_owned(state),
             graph: SessionReadGraph::Owned(Arc::clone(&graph)),
-            active_events: projection.active_events,
-            messages: SessionReadMessages::Shared(projection.messages),
-            tool_calls: projection.tool_calls,
-            projected_rlm_globals: OnceLock::new(),
+            read_model,
         }))
     }
 
-    pub fn from_projection_state(
+    pub fn from_read_model_state(
         mut state: SessionStateEnvelope,
         messages: Arc<Vec<crate::Message>>,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
@@ -173,39 +144,13 @@ impl SessionReadView {
                 cache: OnceLock::new(),
                 base_graph: None,
             },
-            active_events: Arc::new(Vec::new()),
-            messages: SessionReadMessages::Shared(messages),
-            tool_calls,
-            projected_rlm_globals: OnceLock::new(),
-        }))
-    }
-
-    pub fn from_graph_projection(
-        state: &SessionStateEnvelope,
-        base_graph: crate::SessionGraph,
-        messages: Arc<Vec<crate::Message>>,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
-    ) -> Self {
-        Self::from_graph_projection_arc(state, Arc::new(base_graph), messages, tool_calls)
-    }
-
-    pub(crate) fn from_graph_projection_arc(
-        state: &SessionStateEnvelope,
-        base_graph: Arc<crate::SessionGraph>,
-        messages: Arc<Vec<crate::Message>>,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
-    ) -> Self {
-        let active_events = base_graph.shared_projection().active_events;
-        Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_ref(state),
-            graph: SessionReadGraph::Derived {
-                cache: OnceLock::new(),
-                base_graph: Some(base_graph),
+            read_model: crate::SessionReadModel {
+                active_events: Arc::new(Vec::new()),
+                messages,
+                tool_calls,
+                rlm_globals: Arc::new(serde_json::Map::new()),
+                prompt_render_cache: Arc::new(crate::BaseRenderCache::new()),
             },
-            active_events,
-            messages: SessionReadMessages::Shared(messages),
-            tool_calls,
-            projected_rlm_globals: OnceLock::new(),
         }))
     }
 
@@ -215,32 +160,31 @@ impl SessionReadView {
         messages: crate::MessageSequence,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     ) -> Self {
-        let active_events = base_graph.shared_projection().active_events;
+        let base_read_model = base_graph.read_model();
+        let active_events = base_read_model.active_events;
+        let rlm_globals = base_read_model.rlm_globals;
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Derived {
                 cache: OnceLock::new(),
                 base_graph: Some(base_graph),
             },
-            active_events,
-            messages: SessionReadMessages::Sequence {
-                sequence: messages,
-                cache: OnceLock::new(),
+            read_model: crate::SessionReadModel {
+                active_events,
+                messages: messages.shared(),
+                tool_calls,
+                rlm_globals,
+                prompt_render_cache: Arc::new(crate::BaseRenderCache::new()),
             },
-            tool_calls,
-            projected_rlm_globals: OnceLock::new(),
         }))
     }
 
     pub fn from_state(state: &SessionStateEnvelope) -> Self {
-        let projection = state.session_graph.shared_projection();
+        let read_model = state.session_graph.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Owned(Arc::new(state.session_graph.clone())),
-            active_events: projection.active_events,
-            messages: SessionReadMessages::Shared(projection.messages),
-            tool_calls: projection.tool_calls,
-            projected_rlm_globals: OnceLock::new(),
+            read_model,
         }))
     }
 
@@ -256,17 +200,13 @@ impl SessionReadView {
                     .as_ref()
                     .map(|graph| graph.as_ref().clone())
                     .unwrap_or_default();
-                graph.merge_active_projection(
-                    self.0.messages.as_slice(),
-                    self.0.tool_calls.as_slice(),
+                graph.replace_active_read_state(
+                    self.0.read_model.messages.as_slice(),
+                    self.0.read_model.tool_calls.as_slice(),
                 );
                 Arc::new(graph)
             }),
         }
-    }
-
-    fn tool_calls_arc(&self) -> &Arc<Vec<crate::ToolCallRecord>> {
-        &self.0.tool_calls
     }
 
     pub fn session_id(&self) -> &str {
@@ -282,33 +222,30 @@ impl SessionReadView {
     }
 
     pub fn messages(&self) -> &[crate::Message] {
-        self.0.messages.as_slice()
+        self.0.read_model.messages.as_slice()
     }
 
     pub fn tool_calls(&self) -> &[crate::ToolCallRecord] {
-        self.tool_calls_arc().as_slice()
+        self.0.read_model.tool_calls.as_slice()
     }
 
     pub fn active_events(&self) -> &[crate::SessionEventRecord] {
-        self.0.active_events.as_slice()
+        self.0.read_model.active_events.as_slice()
     }
 
-    pub fn projected_rlm_globals(&self) -> serde_json::Map<String, serde_json::Value> {
-        self.shared_projected_rlm_globals().as_ref().clone()
+    pub fn rlm_globals(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.shared_rlm_globals().as_ref().clone()
     }
 
-    /// Borrow the memoized RLM globals projection for this view. Hot callers
+    /// Borrow the read model's RLM globals for this view. Hot callers
     /// (per-iteration prompt contributions like `bound_variables`) should use
-    /// this instead of [`projected_rlm_globals`] to avoid a deep map clone.
-    pub fn shared_projected_rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
-        Arc::clone(self.0.projected_rlm_globals.get_or_init(|| {
-            Arc::new(lash_rlm_types::project_globals(
-                self.active_events().iter().filter_map(|event| match event {
-                    crate::SessionEventRecord::Mode(event) => event.rlm_event(),
-                    _ => None,
-                }),
-            ))
-        }))
+    /// this instead of [`rlm_globals`] to avoid a deep map clone.
+    pub fn shared_rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
+        Arc::clone(&self.0.read_model.rlm_globals)
+    }
+
+    pub fn read_model(&self) -> &crate::SessionReadModel {
+        &self.0.read_model
     }
 
     pub fn iteration(&self) -> usize {
@@ -325,6 +262,101 @@ impl SessionReadView {
 
     pub fn to_owned_state(&self) -> SessionStateEnvelope {
         self.0.meta.to_owned_state(self.session_graph().clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Message, MessageRole, ModeEvent, Part, PartKind, PruneState, SessionEventRecord,
+        ToolCallRecord,
+    };
+    use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
+
+    fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role,
+            parts: vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: content.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_item_id: None,
+                tool_signature: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]
+            .into(),
+            user_input: None,
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn read_view_wraps_read_model_with_session_metadata_and_graph() {
+        let mut state = SessionStateEnvelope {
+            session_id: "session-read-view-test".to_string(),
+            iteration: 7,
+            ..SessionStateEnvelope::default()
+        };
+        state.policy.max_turns = Some(3);
+        let user = text_message("u1", MessageRole::User, "hello");
+        let assistant = text_message("a1", MessageRole::Assistant, "hi");
+        let tool_call = ToolCallRecord {
+            call_id: Some("call_1".to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({"q": "hello"}),
+            result: serde_json::json!("hi"),
+            success: true,
+            duration_ms: 5,
+        };
+        state
+            .session_graph
+            .replace_active_read_state(&[user.clone(), assistant.clone()], &[tool_call.clone()]);
+        state
+            .session_graph
+            .append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+                RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
+                    set: serde_json::Map::from_iter([(
+                        "answer".to_string(),
+                        serde_json::json!(42),
+                    )]),
+                    unset: Vec::new(),
+                }),
+            )));
+
+        let view = SessionReadView::from_state(&state);
+        assert_eq!(view.session_id(), "session-read-view-test");
+        assert_eq!(view.policy().max_turns, Some(3));
+        assert_eq!(view.iteration(), 7);
+        assert_eq!(view.messages().len(), 2);
+        assert_eq!(view.messages()[0].id, user.id);
+        assert_eq!(view.messages()[1].id, assistant.id);
+        assert_eq!(view.tool_calls().len(), 1);
+        assert_eq!(view.tool_calls()[0].call_id, tool_call.call_id);
+        assert_eq!(view.active_events().len(), 4);
+        assert_eq!(
+            view.shared_rlm_globals().get("answer"),
+            Some(&serde_json::json!(42))
+        );
+        assert_eq!(view.read_model().messages.len(), 2);
+        assert_eq!(
+            view.session_graph().nodes.len(),
+            state.session_graph.nodes.len()
+        );
+
+        let owned = view.to_owned_state();
+        assert_eq!(owned.session_id, state.session_id);
+        assert_eq!(owned.iteration, state.iteration);
+        assert_eq!(
+            owned.session_graph.nodes.len(),
+            state.session_graph.nodes.len()
+        );
     }
 }
 

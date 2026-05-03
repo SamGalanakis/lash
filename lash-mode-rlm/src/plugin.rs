@@ -221,8 +221,8 @@ impl ModeSessionPlugin for RlmModeSession {
         state: &lash::runtime::PersistedSessionState,
     ) -> Result<(), SessionError> {
         restore_execution_state_and_globals(&mut ctx, state).await?;
-        let projection = state.shared_projection();
-        let (patch, count) = user_input_patch_from_events(projection.active_events.iter(), 0);
+        let read_model = state.read_model();
+        let (patch, count) = user_input_patch_from_events(read_model.active_events.iter(), 0);
         *self
             .user_input_count
             .lock()

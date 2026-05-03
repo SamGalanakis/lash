@@ -262,10 +262,13 @@ impl LocalSubagentHost {
                         && agent.agent_name == agent_name
                 })?;
                 Self::agent_has_pending_task(agent).then(|| {
-                    let task = agent.active_turn.as_ref().and_then(|turn| match &turn.kind {
-                        ActiveTurnKind::Task { task } => Some(task.clone()),
-                        ActiveTurnKind::Message { .. } => None,
-                    });
+                    let task = agent
+                        .active_turn
+                        .as_ref()
+                        .and_then(|turn| match &turn.kind {
+                            ActiveTurnKind::Task { task } => Some(task.clone()),
+                            ActiveTurnKind::Message { .. } => None,
+                        });
                     (
                         agent_name.clone(),
                         WaitAgentPending {
@@ -447,6 +450,7 @@ impl LocalSubagentHost {
     ) {
         let mut close_session_id = None;
         let mut start_next = false;
+        let terminal_state = subagent_terminal_state(&outcome);
         if let Ok(mut state) = self.state_lock()
             && let Some(tree) = state.trees.get_mut(&root_session_id)
             && tree.agents.contains_key(&path)
@@ -471,12 +475,13 @@ impl LocalSubagentHost {
                     }
                     None => Vec::new(),
                 };
-                let closing_session_id = if agent.closing {
+                let queued_more = !agent.queued_turns.is_empty();
+                let closing_session_id = if agent.closing || !queued_more {
                     Some(agent.session_id.clone())
                 } else {
                     None
                 };
-                (events, closing_session_id, !agent.queued_turns.is_empty())
+                (events, closing_session_id, queued_more)
             };
 
             for event in events {
@@ -516,11 +521,7 @@ impl LocalSubagentHost {
             };
             if let Some(owner) = owner_session_id {
                 manager
-                    .complete_background_task(
-                        &owner,
-                        &format!("subagent:{path}"),
-                        ManagedRunState::Completed,
-                    )
+                    .complete_background_task(&owner, &format!("subagent:{path}"), terminal_state)
                     .await;
             }
             return;
@@ -532,25 +533,6 @@ impl LocalSubagentHost {
                 let handle = tokio::runtime::Handle::current();
                 let _ = handle.block_on(host.start_next_turn(manager, root_session_id, path));
             });
-        } else {
-            // Task finished, session kept alive, nothing queued — the
-            // subagent is now idle, awaiting a follow-up. Reflect that
-            // in the background-task registry so `tasks_list` can
-            // distinguish idle subagents from actively running ones.
-            let owner_session_id = if let Ok(state) = self.state_lock() {
-                Self::owner_session_id_for_path(&state, &root_session_id, &path)
-            } else {
-                None
-            };
-            if let Some(owner) = owner_session_id {
-                manager
-                    .transition_background_task_live_state(
-                        &owner,
-                        &format!("subagent:{path}"),
-                        ManagedRunState::Idle,
-                    )
-                    .await;
-            }
         }
     }
 
@@ -596,6 +578,22 @@ impl LocalSubagentHost {
             agent.queued_turns.push_back(QueuedTurn::Message(message));
         }
         Ok(should_start)
+    }
+}
+
+fn subagent_terminal_state(outcome: &Result<AssembledTurn, lash::PluginError>) -> ManagedRunState {
+    let Ok(turn) = outcome else {
+        return ManagedRunState::Failed;
+    };
+    let submitted_error = turn
+        .tool_calls
+        .iter()
+        .rev()
+        .any(|record| record.tool == "submit_error" && record.success);
+    if submitted_error || turn.status != lash::TurnStatus::Completed {
+        ManagedRunState::Failed
+    } else {
+        ManagedRunState::Completed
     }
 }
 
@@ -859,8 +857,11 @@ impl SubagentHost for LocalSubagentHost {
         let (root_session_id, from, to, status, active_session_id, turn_to_cancel, should_start) = {
             let mut state = self.state_lock()?;
             let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
-            let (root_session_id, to) =
-                Self::resolve_direct_child_locked(&state, &context.session_id, &request.agent_name)?;
+            let (root_session_id, to) = Self::resolve_direct_child_locked(
+                &state,
+                &context.session_id,
+                &request.agent_name,
+            )?;
             let tree = state
                 .trees
                 .get_mut(&root_session_id)
@@ -874,42 +875,47 @@ impl SubagentHost for LocalSubagentHost {
             }
 
             let mut message = message.clone();
-            message.from = locator.agent_name.clone().unwrap_or_else(|| "root".to_string());
+            message.from = locator
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "root".to_string());
             let active_turn_id = target
                 .active_turn
                 .as_ref()
                 .map(|active| active.turn_id.clone());
             let active_session_id = active_turn_id.as_ref().map(|_| target.session_id.clone());
-            let (status, turn_to_cancel, should_start) =
-                match (active_turn_id, request.delivery) {
-                        (Some(_), DeliveryMode::NextPossible) => ("delivering", None, false),
-                        (Some(turn_id), DeliveryMode::Interrupt) => {
-                            target
-                                .queued_turns
-                                .push_front(QueuedTurn::Message(message.clone()));
-                            ("queued_after_interrupt", Some(turn_id), false)
-                        }
-                        (Some(_), DeliveryMode::NextTurn) => {
-                            target
-                                .queued_turns
-                                .push_back(QueuedTurn::Message(message.clone()));
-                            ("queued", None, false)
-                        }
-                        (None, DeliveryMode::NextTurn) => {
-                            target
-                                .queued_turns
-                                .push_back(QueuedTurn::Message(message.clone()));
-                            ("queued", None, false)
-                        }
-                        (None, DeliveryMode::NextPossible | DeliveryMode::Interrupt) => {
-                            target
-                                .queued_turns
-                                .push_back(QueuedTurn::Message(message.clone()));
-                            ("started", None, true)
-                        }
-                };
+            let (status, turn_to_cancel, should_start) = match (active_turn_id, request.delivery) {
+                (Some(_), DeliveryMode::NextPossible) => ("delivering", None, false),
+                (Some(turn_id), DeliveryMode::Interrupt) => {
+                    target
+                        .queued_turns
+                        .push_front(QueuedTurn::Message(message.clone()));
+                    ("queued_after_interrupt", Some(turn_id), false)
+                }
+                (Some(_), DeliveryMode::NextTurn) => {
+                    target
+                        .queued_turns
+                        .push_back(QueuedTurn::Message(message.clone()));
+                    ("queued", None, false)
+                }
+                (None, DeliveryMode::NextTurn) => {
+                    target
+                        .queued_turns
+                        .push_back(QueuedTurn::Message(message.clone()));
+                    ("queued", None, false)
+                }
+                (None, DeliveryMode::NextPossible | DeliveryMode::Interrupt) => {
+                    target
+                        .queued_turns
+                        .push_back(QueuedTurn::Message(message.clone()));
+                    ("started", None, true)
+                }
+            };
             let to_agent = target.agent_name.clone();
-            let from_agent = locator.agent_name.clone().unwrap_or_else(|| "root".to_string());
+            let from_agent = locator
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "root".to_string());
             LocalSubagentHost::queue_event(
                 tree,
                 WaitAgentEvent::Message {
@@ -1110,7 +1116,11 @@ impl SubagentHost for LocalSubagentHost {
                     .iter()
                     .map(|agent| {
                         let normalized = normalize_agent_name(agent)?;
-                        Self::resolve_direct_child_locked(&state, &context.session_id, &normalized)?;
+                        Self::resolve_direct_child_locked(
+                            &state,
+                            &context.session_id,
+                            &normalized,
+                        )?;
                         Ok::<String, String>(normalized)
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -1277,10 +1287,7 @@ impl SubagentHost for LocalSubagentHost {
         _request: ListAgentsRequest,
     ) -> Result<ListAgentsResponse, String> {
         let state = self.state_lock()?;
-        let locator = state
-            .session_agents
-            .get(&context.session_id)
-            .cloned();
+        let locator = state.session_agents.get(&context.session_id).cloned();
         let Some(locator) = locator else {
             return Ok(ListAgentsResponse { agents: Vec::new() });
         };
@@ -1339,7 +1346,10 @@ mod tests {
 
     #[test]
     fn normalize_agent_name_slugifies_mixed_case_and_hyphens() {
-        assert_eq!(normalize_agent_name("Task-Lifecycle Test").unwrap(), "task_lifecycle_test");
+        assert_eq!(
+            normalize_agent_name("Task-Lifecycle Test").unwrap(),
+            "task_lifecycle_test"
+        );
         assert_eq!(normalize_agent_name("InspectAuth").unwrap(), "inspectauth");
         assert_eq!(normalize_agent_name("foo__bar").unwrap(), "foo_bar");
     }
@@ -1396,10 +1406,16 @@ mod tests {
             .events
             .iter()
             .map(|event| match event {
-                WaitAgentEvent::TaskCompleted { agent_name, .. } => format!("completed:{agent_name}"),
+                WaitAgentEvent::TaskCompleted { agent_name, .. } => {
+                    format!("completed:{agent_name}")
+                }
                 WaitAgentEvent::AgentClosed { agent_name, .. } => format!("closed:{agent_name}"),
                 WaitAgentEvent::TaskStarted { agent_name, .. } => format!("started:{agent_name}"),
-                WaitAgentEvent::Message { from_agent, to_agent, .. } => {
+                WaitAgentEvent::Message {
+                    from_agent,
+                    to_agent,
+                    ..
+                } => {
                     format!("message:{from_agent}->{to_agent}")
                 }
             })

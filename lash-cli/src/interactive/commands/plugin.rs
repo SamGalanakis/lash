@@ -3,7 +3,7 @@ use std::sync::Arc;
 use lash::session_model::Message;
 use lash::*;
 
-use crate::app::{App, projected_timeline_items_from_projection};
+use crate::app::{App, timeline_items_from_read_model};
 use crate::push_system_message;
 
 use super::super::runtime::sync_runtime_tool_surface;
@@ -32,13 +32,11 @@ pub(super) async fn handle_plugin(
         match rt.rewrite_history(trigger).await {
             Ok(true) => {
                 let state = rt.export_state();
-                let projection = state.shared_projection();
+                let read_model = state.read_model();
                 history.clear();
-                history.extend(projection.messages.iter().cloned());
-                app.blocks = projected_timeline_items_from_projection(
-                    &projection,
-                    &app.ui_projection_state(),
-                );
+                history.extend(read_model.messages.iter().cloned());
+                app.blocks =
+                    timeline_items_from_read_model(&read_model, &app.ui_projection_state());
                 app.invalidate_height_cache();
                 app.scroll_to_bottom();
                 push_system_message(app, "Compaction summary inserted.");

@@ -1,16 +1,19 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::session_graph::tool_call_record_projection_key;
+use crate::session_graph::tool_call_record_active_read_key;
 use crate::session_model::SessionEventRecord;
 use crate::store::SessionGraphCommit;
-use crate::{Message, MessageSequence, SessionGraph, SessionNodeRecord, ToolCallRecord};
+use crate::{
+    BaseRenderCache, Message, MessageSequence, SessionGraph, SessionNodeRecord, SessionReadModel,
+    ToolCallRecord,
+};
 
 #[derive(Debug)]
 pub(super) struct TurnGraphOverlay {
     base_graph: Arc<SessionGraph>,
     active_events: Arc<Vec<SessionEventRecord>>,
-    projected_messages: MessageSequence,
+    active_messages: MessageSequence,
     graph_tool_calls: Vec<ToolCallRecord>,
     read_tool_calls: Arc<Vec<ToolCallRecord>>,
     append_builder: crate::session_graph::SessionGraphAppendBuilder,
@@ -19,20 +22,16 @@ pub(super) struct TurnGraphOverlay {
 }
 
 impl TurnGraphOverlay {
-    pub(super) fn new(
-        base_graph: Arc<SessionGraph>,
-        base_events: Arc<Vec<SessionEventRecord>>,
-        base_messages: Arc<Vec<Message>>,
-        base_tool_calls: Arc<Vec<ToolCallRecord>>,
-    ) -> Self {
+    pub(super) fn new(base_graph: Arc<SessionGraph>, base_read_model: SessionReadModel) -> Self {
         let append_builder = base_graph.append_builder();
-        let projected_messages = MessageSequence::from_base(base_messages);
+        let active_messages = MessageSequence::from_base(base_read_model.messages);
+        let graph_tool_calls = base_read_model.tool_calls.as_ref().clone();
         Self {
             base_graph,
-            active_events: base_events,
-            projected_messages,
-            graph_tool_calls: base_tool_calls.as_ref().clone(),
-            read_tool_calls: base_tool_calls,
+            active_events: base_read_model.active_events,
+            active_messages,
+            graph_tool_calls,
+            read_tool_calls: base_read_model.tool_calls,
             append_builder,
             appended_nodes: Vec::new(),
             materialized: None,
@@ -44,7 +43,7 @@ impl TurnGraphOverlay {
     }
 
     pub(super) fn message_sequence(&self) -> MessageSequence {
-        self.projected_messages.clone()
+        self.active_messages.clone()
     }
 
     pub(super) fn tool_calls_arc(&self) -> Arc<Vec<ToolCallRecord>> {
@@ -55,13 +54,32 @@ impl TurnGraphOverlay {
         self.graph_tool_calls.as_slice()
     }
 
+    #[allow(dead_code)]
+    pub(super) fn read_model(&self) -> SessionReadModel {
+        if let Some(graph) = self.materialized.as_ref() {
+            return graph.read_model();
+        }
+        SessionReadModel {
+            active_events: Arc::clone(&self.active_events),
+            messages: self.active_messages.shared(),
+            tool_calls: Arc::clone(&self.read_tool_calls),
+            rlm_globals: Arc::new(lash_rlm_types::project_globals(
+                self.active_events.iter().filter_map(|event| match event {
+                    SessionEventRecord::Mode(event) => event.rlm_event(),
+                    _ => None,
+                }),
+            )),
+            prompt_render_cache: Arc::new(BaseRenderCache::new()),
+        }
+    }
+
     pub(super) fn record_tool_calls<I>(&mut self, records: I)
     where
         I: IntoIterator<Item = ToolCallRecord>,
     {
         self.append_events(records.into_iter().map(|record| {
             SessionEventRecord::Tool(crate::session_model::ToolEvent::Invocation {
-                stable_key: tool_call_record_projection_key(&record),
+                stable_key: tool_call_record_active_read_key(&record),
                 record,
             })
         }));
@@ -82,7 +100,7 @@ impl TurnGraphOverlay {
             Arc::make_mut(&mut self.active_events).push(event.clone());
             match event {
                 SessionEventRecord::Conversation(record) => {
-                    self.projected_messages.push(record.to_message());
+                    self.active_messages.push(record.to_message());
                 }
                 SessionEventRecord::Tool(crate::session_model::ToolEvent::Invocation {
                     record,
@@ -100,7 +118,7 @@ impl TurnGraphOverlay {
         &self,
         next: impl IntoIterator<Item = &'a Message>,
     ) -> Option<Vec<Message>> {
-        let mut current = self.projected_messages.iter();
+        let mut current = self.active_messages.iter();
         let mut appended = Vec::new();
         for message in next.into_iter().filter(|message| !message.is_transient()) {
             if let Some(current_message) = current.next() {
@@ -114,7 +132,7 @@ impl TurnGraphOverlay {
         current.next().is_none().then_some(appended)
     }
 
-    pub(super) fn append_projected_conversation_messages(&mut self, messages: &[Message]) {
+    pub(super) fn append_active_conversation_messages(&mut self, messages: &[Message]) {
         let appendable_messages = messages
             .iter()
             .filter(|message| !message.is_transient())
@@ -124,7 +142,7 @@ impl TurnGraphOverlay {
             return;
         }
         if let Some(graph) = self.materialized.as_mut() {
-            graph.append_projected_conversation_messages(&appendable_messages);
+            graph.append_active_conversation_messages(&appendable_messages);
             self.refresh_from_materialized();
             return;
         }
@@ -132,24 +150,26 @@ impl TurnGraphOverlay {
         let nodes = self
             .append_builder
             .append_messages(appendable_messages.clone());
+        Arc::make_mut(&mut self.active_events)
+            .extend(nodes.iter().filter_map(|node| node.event().cloned()));
         self.appended_nodes.extend(nodes);
-        self.projected_messages.extend(appendable_messages);
+        self.active_messages.extend(appendable_messages);
     }
 
-    pub(super) fn append_projection_delta(
+    pub(super) fn append_active_read_delta(
         &mut self,
         messages: &[Message],
         tool_calls: &[ToolCallRecord],
     ) {
         if let Some(graph) = self.materialized.as_mut() {
-            graph.append_projection_delta(messages, tool_calls);
+            graph.append_active_read_delta(messages, tool_calls);
             self.refresh_from_materialized();
             return;
         }
 
         let appendable_messages = {
             let mut seen_message_ids = self
-                .projected_messages
+                .active_messages
                 .iter()
                 .map(|message| message.id.as_str())
                 .collect::<HashSet<_>>();
@@ -164,11 +184,11 @@ impl TurnGraphOverlay {
         let mut seen_tool_call_keys = self
             .graph_tool_calls
             .iter()
-            .map(tool_call_record_projection_key)
+            .map(tool_call_record_active_read_key)
             .collect::<HashSet<_>>();
         let appendable_tool_calls = tool_calls
             .iter()
-            .filter(|record| seen_tool_call_keys.insert(tool_call_record_projection_key(record)))
+            .filter(|record| seen_tool_call_keys.insert(tool_call_record_active_read_key(record)))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -176,25 +196,30 @@ impl TurnGraphOverlay {
             let nodes = self
                 .append_builder
                 .append_messages(appendable_messages.clone());
+            Arc::make_mut(&mut self.active_events)
+                .extend(nodes.iter().filter_map(|node| node.event().cloned()));
             self.appended_nodes.extend(nodes);
-            self.projected_messages.extend(appendable_messages);
+            self.active_messages.extend(appendable_messages);
         }
         if !appendable_tool_calls.is_empty() {
             let nodes = self
                 .append_builder
                 .append_tool_call_records(appendable_tool_calls.clone());
+            Arc::make_mut(&mut self.active_events)
+                .extend(nodes.iter().filter_map(|node| node.event().cloned()));
             self.appended_nodes.extend(nodes);
-            self.graph_tool_calls.extend(appendable_tool_calls);
+            self.graph_tool_calls.extend(appendable_tool_calls.clone());
+            Arc::make_mut(&mut self.read_tool_calls).extend(appendable_tool_calls);
         }
     }
 
-    pub(super) fn replace_projection(
+    pub(super) fn replace_active_read_state(
         &mut self,
         messages: &[Message],
         tool_calls: &[ToolCallRecord],
     ) {
         let graph = self.materialized_graph_mut();
-        graph.merge_active_projection(messages, tool_calls);
+        graph.replace_active_read_state(messages, tool_calls);
         self.read_tool_calls = Arc::new(tool_calls.to_vec());
         self.refresh_from_materialized();
     }
@@ -255,9 +280,9 @@ impl TurnGraphOverlay {
         match Arc::try_unwrap(self.base_graph) {
             Ok(mut graph) => {
                 let last_appended_id = self.appended_nodes.last().map(|node| node.node_id.clone());
-                // Use the fast incremental cache path so the projected
+                // Use the fast incremental cache path so the active
                 // messages / tool calls / rlm globals carry over instead
-                // of forcing a full `SessionGraphCache::rebuild_projection`
+                // of forcing a full `SessionGraphCache::rebuild_read_model`
                 // on the next access.
                 graph.extend_active_path(self.appended_nodes);
                 // `extend_active_path` advances leaf to the last
@@ -313,10 +338,10 @@ impl TurnGraphOverlay {
         let Some(graph) = self.materialized.as_ref() else {
             return;
         };
-        let projection = graph.shared_projection();
-        self.projected_messages = MessageSequence::from_owned(projection.messages.as_ref().clone());
-        self.active_events = projection.active_events;
-        self.graph_tool_calls = projection.tool_calls.as_ref().clone();
+        let read_model = graph.read_model();
+        self.active_messages = MessageSequence::from_owned(read_model.messages.as_ref().clone());
+        self.active_events = read_model.active_events;
+        self.graph_tool_calls = read_model.tool_calls.as_ref().clone();
         self.read_tool_calls = Arc::new(self.graph_tool_calls.clone());
         self.append_builder = graph.append_builder();
     }
@@ -356,13 +381,8 @@ mod tests {
 
     fn overlay_from_graph(graph: SessionGraph) -> TurnGraphOverlay {
         let base_graph = Arc::new(graph);
-        let projection = base_graph.shared_projection();
-        TurnGraphOverlay::new(
-            Arc::clone(&base_graph),
-            projection.active_events,
-            projection.messages,
-            projection.tool_calls,
-        )
+        let read_model = base_graph.read_model();
+        TurnGraphOverlay::new(Arc::clone(&base_graph), read_model)
     }
 
     fn node_event_kind(node: &SessionNodeRecord) -> &'static str {
@@ -388,12 +408,12 @@ mod tests {
     fn append_overlay_commits_only_unpersisted_tail() {
         let first = text_message("u1", MessageRole::User, "hello");
         let second = text_message("a1", MessageRole::Assistant, "hi");
-        let mut overlay = overlay_from_graph(SessionGraph::from_projection(
+        let mut overlay = overlay_from_graph(SessionGraph::from_active_read_state(
             std::slice::from_ref(&first),
             &[],
         ));
 
-        overlay.append_projected_conversation_messages(std::slice::from_ref(&second));
+        overlay.append_active_conversation_messages(std::slice::from_ref(&second));
         let commit = overlay.graph_commit(1, false);
         let SessionGraphCommit::Append {
             nodes,
@@ -411,7 +431,7 @@ mod tests {
         let graph = overlay.into_session_graph();
         assert_eq!(
             graph
-                .shared_projection()
+                .read_model()
                 .messages
                 .iter()
                 .map(|message| message.id.as_str())
@@ -425,13 +445,13 @@ mod tests {
         let first = text_message("u1", MessageRole::User, "hello");
         let second = text_message("a1", MessageRole::Assistant, "hi");
         let third = text_message("u2", MessageRole::User, "again");
-        let mut overlay = overlay_from_graph(SessionGraph::from_projection(
+        let mut overlay = overlay_from_graph(SessionGraph::from_active_read_state(
             std::slice::from_ref(&first),
             &[],
         ));
 
-        overlay.append_projected_conversation_messages(std::slice::from_ref(&second));
-        overlay.append_projected_conversation_messages(std::slice::from_ref(&third));
+        overlay.append_active_conversation_messages(std::slice::from_ref(&second));
+        overlay.append_active_conversation_messages(std::slice::from_ref(&third));
         let commit = overlay.graph_commit(2, false);
         let SessionGraphCommit::Append {
             nodes,
@@ -472,14 +492,14 @@ mod tests {
             final_output: Some(serde_json::json!("grep worked")),
             output_raw_len: 0,
         };
-        let mut overlay = overlay_from_graph(SessionGraph::from_projection(
+        let mut overlay = overlay_from_graph(SessionGraph::from_active_read_state(
             std::slice::from_ref(&user),
             &[],
         ));
 
         // ExecCode records lashlang tool effects before the RLM driver
         // appends the trajectory and final assistant event. The later
-        // finalization projection sees the same tool call via the live
+        // finalization read model sees the same tool call via the live
         // SessionEvent stream, but must not append a duplicate after the
         // assistant answer.
         overlay.record_tool_calls([tool_call.clone()]);
@@ -487,7 +507,7 @@ mod tests {
             SessionEventRecord::Mode(ModeEvent::rlm(RlmModeEvent::RlmTrajectoryEntry(entry))),
             SessionEventRecord::Conversation(ConversationRecord::from_message(assistant.clone())),
         ]);
-        overlay.append_projection_delta(std::slice::from_ref(&assistant), &[tool_call]);
+        overlay.append_active_read_delta(std::slice::from_ref(&assistant), &[tool_call]);
 
         let graph = overlay.into_session_graph();
         let kinds = graph.nodes.iter().map(node_event_kind).collect::<Vec<_>>();
@@ -499,10 +519,10 @@ mod tests {
         let first = text_message("u1", MessageRole::User, "hello");
         let old = text_message("a1", MessageRole::Assistant, "old");
         let new = text_message("a2", MessageRole::Assistant, "new");
-        let base = SessionGraph::from_projection(&[first.clone(), old], &[]);
+        let base = SessionGraph::from_active_read_state(&[first.clone(), old], &[]);
         let mut overlay = overlay_from_graph(base);
 
-        overlay.replace_projection(&[first, new], &[]);
+        overlay.replace_active_read_state(&[first, new], &[]);
         let commit = overlay.graph_commit(2, false);
         let SessionGraphCommit::Append {
             nodes,
@@ -516,5 +536,58 @@ mod tests {
         assert_eq!(leaf_node_id.as_deref(), Some("a2"));
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_id, "a2");
+    }
+
+    #[test]
+    fn overlay_read_model_matches_materialized_graph_after_append_and_replace() {
+        let first = text_message("u1", MessageRole::User, "hello");
+        let second = text_message("a1", MessageRole::Assistant, "hi");
+        let replacement = text_message("a2", MessageRole::Assistant, "new");
+        let mut overlay = overlay_from_graph(SessionGraph::from_active_read_state(
+            std::slice::from_ref(&first),
+            &[],
+        ));
+
+        overlay.append_active_conversation_messages(std::slice::from_ref(&second));
+        let read_model = overlay.read_model();
+        let materialized = overlay.materialized_graph().read_model();
+        assert_eq!(
+            read_model.active_events.len(),
+            materialized.active_events.len()
+        );
+        assert_eq!(
+            read_model
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            materialized
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(read_model.tool_calls, materialized.tool_calls);
+
+        overlay.replace_active_read_state(&[first, replacement], &[]);
+        let read_model = overlay.read_model();
+        let materialized = overlay.materialized_graph().read_model();
+        assert_eq!(
+            read_model.active_events.len(),
+            materialized.active_events.len()
+        );
+        assert_eq!(
+            read_model
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            materialized
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(read_model.tool_calls, materialized.tool_calls);
     }
 }

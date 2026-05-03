@@ -228,7 +228,7 @@ impl LashRuntime {
             outcome.metadata.produced_summary || outcome.messages.len() != baseline_messages;
         if mutated {
             self.state
-                .replace_projection(&outcome.messages, &outcome.tool_calls);
+                .replace_active_read_state(&outcome.messages, &outcome.tool_calls);
             if let Some(session) = self.session.as_ref() {
                 self.state.dynamic_state_snapshot = session
                     .plugins()

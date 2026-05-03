@@ -651,7 +651,7 @@ mod fork_tests {
     }
 
     fn persisted_graph(messages: Vec<lash::Message>, _iteration: usize) -> lash::SessionGraph {
-        lash::SessionGraph::from_projection(&messages, &[])
+        lash::SessionGraph::from_active_read_state(&messages, &[])
     }
 
     fn persisted_checkpoint(iteration: usize) -> lash::HydratedSessionCheckpoint {
@@ -791,7 +791,7 @@ mod fork_tests {
             .turn_state;
         assert_eq!(child_turn.iteration, 1);
 
-        let child_messages = child_graph.shared_projection().messages;
+        let child_messages = child_graph.read_model().messages;
         assert_eq!(child_messages.len(), 1);
         assert_eq!(child_messages[0].parts[0].content, "hello");
     }

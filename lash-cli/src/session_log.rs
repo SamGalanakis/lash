@@ -12,7 +12,7 @@ use lash::session_model::Message;
 use lash::session_model::{MessageRole, PartKind};
 use lash::{Store, TokenUsage};
 
-use crate::app::{LiveToolOutput, UiTimelineItem, projected_timeline_items_from_projection};
+use crate::app::{LiveToolOutput, UiTimelineItem, timeline_items_from_read_model};
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -301,8 +301,8 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
     let head = store.load_session_head().unwrap_or_default();
     let graph = head.graph;
-    let projection = graph.shared_projection();
-    let messages = projection.messages.as_ref().clone();
+    let read_model = graph.read_model();
+    let messages = read_model.messages.as_ref().clone();
     let ui_state = crate::app::UiProjectionState::default();
     let checkpoint = head
         .checkpoint_ref
@@ -310,11 +310,11 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         .and_then(|blob_ref| store.get_checkpoint(blob_ref));
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
-    let blocks = projected_timeline_items_from_projection(&projection, &ui_state);
+    let blocks = timeline_items_from_read_model(&read_model, &ui_state);
     tracing::debug!(
         session_file = filename,
-        messages = projection.messages.len(),
-        tool_calls = projection.tool_calls.len(),
+        messages = read_model.messages.len(),
+        tool_calls = read_model.tool_calls.len(),
         blocks = blocks.len(),
         plugin_mode_indicators = plugin_mode_indicators.len(),
         graph_nodes = graph.nodes.len(),
@@ -351,7 +351,7 @@ mod tests {
         tool_calls: Vec<ToolCallRecord>,
         token_usage: TokenUsage,
     ) {
-        let graph = lash::SessionGraph::from_projection(&messages, &tool_calls);
+        let graph = lash::SessionGraph::from_active_read_state(&messages, &tool_calls);
         let checkpoint_ref = store
             .put_checkpoint(&lash::HydratedSessionCheckpoint {
                 turn_state: lash::PersistedTurnState {

@@ -371,12 +371,6 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     lash::ToolExecutionMode::Parallel,
                 ),
                 test_tool(
-                    "show_snippet_to_user",
-                    "Show a snippet",
-                    lash::ToolAvailabilityConfig::documented(),
-                    lash::ToolExecutionMode::Parallel,
-                ),
-                test_tool(
                     "read_file",
                     "Read files",
                     lash::ToolAvailabilityConfig::documented(),
@@ -409,13 +403,6 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         surface
             .tools
             .iter()
-            .find(|tool| tool.definition.name == "show_snippet_to_user")
-            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Hidden)
-    );
-    assert!(
-        surface
-            .tools
-            .iter()
             .find(|tool| tool.definition.name == "search_web")
             .is_some_and(|tool| tool.availability == lash::ToolAvailability::Documented)
     );
@@ -432,24 +419,6 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             .iter()
             .any(|note| note.contains(".lash/plans/run-session.md"))
     );
-
-    let snippet_blocked = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "show_snippet_to_user".to_string(),
-            args: json!({
-                "path":"lash/src/plugin_builtin/plan_mode.rs",
-                "start_line": 1,
-                "end_line": 20
-            }),
-            host: Arc::clone(&manager),
-        })
-        .await
-        .expect("before_tool_call");
-    assert!(snippet_blocked.iter().any(|emitted| matches!(
-        &emitted.value,
-        PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
-    )));
 
     let read_allowed = session
         .before_tool_call(ToolCallHookContext {
@@ -644,24 +613,6 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
         .await
         .expect("before_tool_call");
     assert!(allowed.is_empty());
-
-    let blocked = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "show_snippet_to_user".to_string(),
-            args: json!({
-                "path":"lash/src/plugin_builtin/plan_mode.rs",
-                "start_line": 1,
-                "end_line": 20
-            }),
-            host: Arc::clone(&manager),
-        })
-        .await
-        .expect("before_tool_call");
-    assert!(blocked.iter().any(|emitted| matches!(
-        &emitted.value,
-        PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
-    )));
 
     let apply_patch_allowed = session
         .before_tool_call(ToolCallHookContext {

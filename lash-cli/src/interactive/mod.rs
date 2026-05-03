@@ -567,8 +567,8 @@ pub(crate) async fn run_app(
                         }
                     }
 
-                    let projection = state.shared_projection();
-                    history = projection.messages.as_ref().clone();
+                    let read_model = state.read_model();
+                    history = read_model.messages.as_ref().clone();
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
@@ -577,7 +577,7 @@ pub(crate) async fn run_app(
                         iteration = state.iteration,
                         status = ?done.result.status,
                         reason = ?done.result.done_reason,
-                        messages = projection.messages.len(),
+                        messages = read_model.messages.len(),
                         blocks = app.blocks.len(),
                         had_live_turn = app.live_turn.is_some(),
                         running = app.running,
@@ -600,8 +600,8 @@ pub(crate) async fn run_app(
                             "Cancelled.".to_string()
                         };
                         app.stop_turn();
-                        app.blocks = app::project_interrupted_blocks(
-                            &projection,
+                        app.blocks = app::interrupted_blocks_from_read_model(
+                            &read_model,
                             &ui_projection_state,
                             interrupted_message.clone(),
                         );
@@ -643,7 +643,7 @@ pub(crate) async fn run_app(
                         continue;
                     }
 
-                    app.finish_turn_from_projection(&projection);
+                    app.finish_turn_from_read_model(&read_model);
                     app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;

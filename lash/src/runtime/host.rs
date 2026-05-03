@@ -38,10 +38,7 @@ impl ManagedTaskKind {
 pub enum ManagedRunState {
     /// Actively working on a task right now.
     Running,
-    /// Long-lived task is alive but has nothing to do right now. Used for
-    /// subagent sessions that finished their last task and are waiting
-    /// for a follow-up via `followup_task` or `send_message`. A new
-    /// follow-up transitions the task back to `Running`.
+    /// Long-lived task is alive but has nothing to do right now.
     Idle,
     Completed,
     Failed,

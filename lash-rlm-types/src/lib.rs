@@ -106,16 +106,23 @@ pub fn project_trajectory(
     RlmProjection::from_events(events).trajectory
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RlmTermination {
-    #[default]
-    ProseWithoutFence,
     Finish {
         schema: Option<serde_json::Value>,
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         include_submit_prompt: bool,
     },
+}
+
+impl Default for RlmTermination {
+    fn default() -> Self {
+        Self::Finish {
+            schema: None,
+            include_submit_prompt: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -126,8 +133,8 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
-/// RLM-mode session config. Carries the choice of how the model
-/// terminates the session (prose vs `submit`-with-optional-schema).
+/// RLM-mode session config. RLM turns terminate through `submit`,
+/// optionally validated against a schema.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RlmCreateExtras {
     #[serde(default)]

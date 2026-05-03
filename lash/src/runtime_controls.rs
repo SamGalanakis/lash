@@ -179,7 +179,7 @@ pub fn monitor_tool_definition() -> ToolDefinition {
 pub fn tasks_list_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
         "tasks_list",
-        "List every background task registered for this session — monitors and subagents — with their `task_id`, kind, label, and run_state. `run_state` is one of `running` (currently working), `idle` (live subagent waiting for a follow-up task), `completed`, `failed`, or `cancelled`. Use this to see what's still running (or idle and available for `followup_task`) before deciding whether to keep waiting, poll again, or stop something.",
+        "List every background task registered for this session — monitors and subagents — with their `task_id`, kind, label, and run_state. `run_state` is one of `running`, `idle`, `completed`, `failed`, or `cancelled`. Use this to see what's still running before deciding whether to keep waiting, poll again, or stop something.",
         ToolDefinition::default_input_schema(),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )

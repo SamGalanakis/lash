@@ -374,8 +374,8 @@ impl TurnAssembler {
         if let Some(issue) = force_runtime_error {
             issues.push(issue);
         }
-        let projection = state.shared_projection();
-        let max_turn_reached = projection.messages.iter().rev().take(8).any(|msg| {
+        let read_model = state.read_model();
+        let max_turn_reached = read_model.messages.iter().rev().take(8).any(|msg| {
             msg.role == MessageRole::System
                 && msg
                     .parts
@@ -446,8 +446,8 @@ impl TurnAssembler {
 }
 
 pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope) -> String {
-    let projection = state.shared_projection();
-    let messages = projection.messages.as_slice();
+    let read_model = state.read_model();
+    let messages = read_model.messages.as_slice();
     let latest_user_input_idx = messages
         .iter()
         .rposition(|message| {

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use lash::instructions::InstructionSource;
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::tools::{
-    ApplyPatchTool, AskTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory, ShowSnippetToUser,
-    StandardShell, WebSearch, shell_prompt_contributions,
+    ApplyPatchTool, AskTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory, StandardShell,
+    WebSearch, shell_prompt_contributions,
 };
 use lash::{
     BuiltinToolResultProjectionPluginFactory, ExecutionMode, FsInstructionSource, PluginHost,
@@ -150,12 +150,6 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
                     "ask",
                     PluginSpec::new()
                         .with_tool_provider(Arc::new(AskTool::new()) as Arc<dyn ToolProvider>),
-                )));
-                factories.push(Arc::new(StaticPluginFactory::new(
-                    "show_snippet_to_user",
-                    PluginSpec::new().with_tool_provider(
-                        Arc::new(ShowSnippetToUser::new()) as Arc<dyn ToolProvider>
-                    ),
                 )));
             }
             DefaultToolBundle::Web => {

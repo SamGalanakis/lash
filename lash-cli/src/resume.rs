@@ -159,9 +159,9 @@ async fn apply_graph_resume_state(
     if graph.heal_orphaned_leaf() {
         tracing::warn!("session graph leaf was orphaned on resume; healed to most recent message");
     }
-    let projection = graph.shared_projection();
-    let messages = projection.messages.as_ref().clone();
-    let tool_calls = projection.tool_calls.as_ref().clone();
+    let read_model = graph.read_model();
+    let messages = read_model.messages.as_ref().clone();
+    let tool_calls = read_model.tool_calls.as_ref().clone();
     *history = messages.clone();
 
     if let Some(dynamic_state) = checkpoint
@@ -268,7 +268,7 @@ async fn apply_graph_resume_state(
             persisted_graph_node_count,
             graph_replace_required: false,
         };
-        restored_state.replace_projection(&messages, &tool_calls);
+        restored_state.replace_active_read_state(&messages, &tool_calls);
         rt.set_persisted_state(restored_state);
     }
 
@@ -424,7 +424,7 @@ mod tests {
         last_prompt_usage: Option<PromptUsage>,
     ) -> (lash::SessionGraph, lash::HydratedSessionCheckpoint) {
         (
-            lash::SessionGraph::from_projection(&messages, &[]),
+            lash::SessionGraph::from_active_read_state(&messages, &[]),
             lash::HydratedSessionCheckpoint {
                 turn_state: lash::PersistedTurnState {
                     iteration,

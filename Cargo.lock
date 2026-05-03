@@ -2421,6 +2421,7 @@ name = "lash-subagents"
 version = "0.2.83"
 dependencies = [
  "async-trait",
+ "jsonschema",
  "lash",
  "lash-rlm-types",
  "lashlang",

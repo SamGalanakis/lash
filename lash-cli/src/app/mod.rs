@@ -35,13 +35,13 @@ use self::projection::{
 };
 
 pub(crate) use self::projection::{
-    UiTimelineItem, interrupted_assistant_tail, preview_text_lines, project_interrupted_blocks,
-    projected_timeline_items_from_projection, smart_truncate_preview_line,
-    strip_ansi_escape_sequences,
+    UiTimelineItem, interrupted_assistant_tail, interrupted_blocks_from_read_model,
+    preview_text_lines, smart_truncate_preview_line, strip_ansi_escape_sequences,
+    timeline_items_from_read_model,
 };
 #[cfg(test)]
 pub(crate) use self::projection::{
-    project_interrupted_blocks_from_parts, projected_timeline_items_from_parts,
+    interrupted_blocks_from_read_model_parts, timeline_items_from_read_model_parts,
 };
 
 fn user_turn_start_indices(blocks: &[UiTimelineItem]) -> Vec<usize> {
@@ -127,17 +127,23 @@ pub struct BackgroundTaskView {
     pub label: String,
     pub run_state: ManagedRunState,
     pub started_at: std::time::SystemTime,
+    pub terminal_duration: Option<std::time::Duration>,
     pub transient_until: Option<std::time::Instant>,
 }
 
 impl BackgroundTaskView {
-    fn from_status(status: ManagedTaskStatus, transient_until: Option<std::time::Instant>) -> Self {
+    fn from_status(
+        status: ManagedTaskStatus,
+        terminal_duration: Option<std::time::Duration>,
+        transient_until: Option<std::time::Instant>,
+    ) -> Self {
         Self {
             task_id: status.id,
             kind: status.kind,
             label: status.label,
             run_state: status.run_state,
             started_at: status.started_at,
+            terminal_duration,
             transient_until,
         }
     }
@@ -610,13 +616,13 @@ impl App {
         UiProjectionState::from_app(self)
     }
 
-    pub fn finish_turn_from_projection(&mut self, projection: &lash::SessionProjection) {
+    pub fn finish_turn_from_read_model(&mut self, read_model: &lash::SessionReadModel) {
         let current_turn_starts = user_turn_start_indices(&self.blocks);
         let current_turn_start = current_turn_starts.last().copied();
 
         self.stop_turn();
         let ui_state = UiProjectionState::from_app(self);
-        let projected_blocks = projected_timeline_items_from_projection(projection, &ui_state);
+        let projected_blocks = timeline_items_from_read_model(read_model, &ui_state);
         let projected_turn_starts = user_turn_start_indices(&projected_blocks);
         let projected_turn_start = current_turn_start
             .and_then(|_| {
@@ -1732,14 +1738,26 @@ impl App {
         let mut next = Vec::new();
         for task in tasks {
             let old_state = previous.get(&task.id).map(|item| item.run_state);
+            let terminal_duration = if task.run_state.is_terminal() {
+                previous
+                    .get(&task.id)
+                    .and_then(|item| item.terminal_duration)
+                    .or_else(|| task.started_at.elapsed().ok())
+            } else {
+                None
+            };
             let transient_until = if task.run_state.is_terminal()
                 && old_state.is_some_and(|state| state != task.run_state)
             {
-                Some(now + std::time::Duration::from_secs(8))
+                Some(now + std::time::Duration::from_secs(10))
             } else {
                 previous.get(&task.id).and_then(|item| item.transient_until)
             };
-            next.push(BackgroundTaskView::from_status(task, transient_until));
+            next.push(BackgroundTaskView::from_status(
+                task,
+                terminal_duration,
+                transient_until,
+            ));
         }
         next.retain(BackgroundTaskView::is_visible);
         if self.background_tasks != next {

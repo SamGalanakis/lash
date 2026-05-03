@@ -68,7 +68,7 @@ pub use host::{
     ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, RuntimeCoreConfig,
     SessionTaskExecutor, TokioSessionTaskExecutor,
 };
-use io::{normalize_input_items, projection_message_delta_if_base_preserved};
+use io::{active_read_message_delta_if_base_preserved, normalize_input_items};
 pub use state::{PersistedSessionState, SessionStateEnvelope};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,

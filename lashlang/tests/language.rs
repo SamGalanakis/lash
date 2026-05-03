@@ -127,6 +127,56 @@ fn parser_accepts_double_slash_comments() {
 }
 
 #[test]
+fn multiline_strings_are_expression_values() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r####"
+            submit """first\n"quoted"
+second"""
+            "####,
+            &mut state,
+            &host,
+        )
+        .expect("program should run"),
+    );
+
+    assert_eq!(value, Value::String("first\n\"quoted\"\nsecond".into()));
+}
+
+#[test]
+fn raw_multiline_strings_preserve_patch_text() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r####"
+            patch = r"""*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-old
++new
+\n { braces stay raw }
+*** End Patch"""
+            submit patch
+            "####,
+            &mut state,
+            &host,
+        )
+        .expect("program should run"),
+    );
+
+    assert_eq!(
+        value,
+        Value::String(
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n\\n { braces stay raw }\n*** End Patch"
+                .into()
+        )
+    );
+}
+
+#[test]
 fn parser_accepts_comment_only_program() {
     let program = parse(
         r#"

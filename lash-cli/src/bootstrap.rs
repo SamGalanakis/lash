@@ -171,7 +171,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
 }
 
 fn autonomous_tool_allowed(name: &str) -> bool {
-    !matches!(name, "ask" | "show_snippet_to_user" | "showcase")
+    !matches!(name, "ask" | "showcase")
         && !name.starts_with("plan_")
         && name != "request_user_input"
 }

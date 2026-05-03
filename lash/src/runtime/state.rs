@@ -34,22 +34,30 @@ pub struct SessionStateEnvelope {
 }
 
 impl SessionStateEnvelope {
-    pub fn shared_projection(&self) -> crate::SessionProjection {
-        self.session_graph.shared_projection()
+    pub fn read_model(&self) -> crate::SessionReadModel {
+        self.session_graph.read_model()
     }
 
-    pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn replace_active_read_state(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         self.session_graph
-            .merge_active_projection(messages, tool_calls);
+            .replace_active_read_state(messages, tool_calls);
     }
 
-    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
-        self.session_graph.replace_tool_call_projection(tool_calls);
+    pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
+        self.session_graph.replace_active_tool_calls(tool_calls);
     }
 
-    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn append_active_read_delta(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         self.session_graph
-            .append_projection_delta(messages, tool_calls);
+            .append_active_read_delta(messages, tool_calls);
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
@@ -190,29 +198,37 @@ impl PersistedSessionState {
         super::usage::SessionUsageReport::from_entries(&self.token_ledger)
     }
 
-    pub fn shared_projection(&self) -> crate::SessionProjection {
-        self.session_graph.shared_projection()
+    pub fn read_model(&self) -> crate::SessionReadModel {
+        self.session_graph.read_model()
     }
 
-    pub fn replace_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn replace_active_read_state(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         self.session_graph
-            .merge_active_projection(messages, tool_calls);
+            .replace_active_read_state(messages, tool_calls);
         self.graph_replace_required = false;
     }
 
-    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
-        self.session_graph.replace_tool_call_projection(tool_calls);
+    pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
+        self.session_graph.replace_active_tool_calls(tool_calls);
         self.graph_replace_required = false;
     }
 
-    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+    pub fn append_active_read_delta(
+        &mut self,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         self.session_graph
-            .append_projection_delta(messages, tool_calls);
+            .append_active_read_delta(messages, tool_calls);
     }
 
-    pub fn append_projected_conversation_messages(&mut self, messages: &[Message]) {
+    pub fn append_active_conversation_messages(&mut self, messages: &[Message]) {
         self.session_graph
-            .append_projected_conversation_messages(messages);
+            .append_active_conversation_messages(messages);
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {

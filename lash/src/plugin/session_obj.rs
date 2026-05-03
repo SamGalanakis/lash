@@ -717,7 +717,7 @@ impl PluginSession {
                     messages: plugin_messages,
                 } => {
                     let messages = updated_messages.get_or_insert_with(|| {
-                        crate::MessageSequence::from_base(turn.state.shared_projection().messages)
+                        crate::MessageSequence::from_base(turn.state.read_model().messages)
                     });
                     append_plugin_messages(messages, &plugin_messages);
                 }
@@ -761,13 +761,13 @@ impl PluginSession {
             }
         }
         if let Some(messages) = updated_messages.as_ref() {
-            let tool_calls = turn.state.shared_projection().tool_calls.as_ref().clone();
+            let tool_calls = turn.state.read_model().tool_calls.as_ref().clone();
             turn.state
-                .replace_projection(messages.as_slice(), &tool_calls);
+                .replace_active_read_state(messages.as_slice(), &tool_calls);
         }
 
         if self.has_runtime_event_hooks() {
-            let mut history_tool_calls = turn.state.shared_projection().tool_calls.as_ref().clone();
+            let mut history_tool_calls = turn.state.read_model().tool_calls.as_ref().clone();
             let mut history_changed = false;
             for tool_call in &mut history_tool_calls {
                 let projected = self
@@ -794,7 +794,7 @@ impl PluginSession {
                 let mut committed_turn = turn.clone();
                 committed_turn
                     .state
-                    .replace_tool_call_projection(&history_tool_calls);
+                    .replace_active_tool_calls(&history_tool_calls);
                 committed_turn.tool_calls = history_tool_calls;
                 Arc::new(committed_turn)
             } else {

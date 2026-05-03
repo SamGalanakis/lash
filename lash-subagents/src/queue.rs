@@ -156,14 +156,6 @@ pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
     if let Some(value) = &turn.typed_finish {
         return value.clone();
     }
-    if let Some(record) = turn
-        .tool_calls
-        .iter()
-        .rev()
-        .find(|record| record.tool == "submit" && record.success)
-    {
-        return record.args.clone();
-    }
     if !turn.assistant_output.safe_text.trim().is_empty() {
         return json!(turn.assistant_output.safe_text.trim().to_string());
     }
@@ -196,7 +188,7 @@ pub(crate) fn task_completion_event(
             };
             agent.last_task_state = Some(status.to_string());
             agent.last_iterations = Some(turn.state.iteration);
-            agent.last_tool_calls = Some(turn.state.shared_projection().tool_calls.len());
+            agent.last_tool_calls = Some(turn.state.read_model().tool_calls.len());
             agent.last_token_usage = Some(json!({
                 "input_tokens": turn.token_usage.input_tokens,
                 "output_tokens": turn.token_usage.output_tokens,
@@ -272,7 +264,7 @@ pub(crate) fn message_turn_input(from: &str, message: &str) -> TurnInput {
         user_input: None,
         mode: None,
         mode_turn_options: Some(lash::ModeTurnOptions::rlm(
-            lash_rlm_types::RlmTermination::ProseWithoutFence,
+            lash_rlm_types::RlmTermination::default(),
         )),
     }
 }
@@ -287,21 +279,14 @@ pub(crate) fn turn_status_label(status: &TurnStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use lash::{ToolCallRecord, testing::mock_assembled_turn};
+    use lash::testing::mock_assembled_turn;
 
     use super::*;
 
     #[test]
-    fn task_result_value_prefers_standard_submit_tool_args() {
+    fn task_result_value_prefers_typed_finish() {
         let mut turn = mock_assembled_turn("child", "fallback");
-        turn.tool_calls.push(ToolCallRecord {
-            call_id: Some("submit-1".to_string()),
-            tool: "submit".to_string(),
-            args: json!({ "answer": "ok" }),
-            result: json!({ "answer": "ok" }),
-            success: true,
-            duration_ms: 1,
-        });
+        turn.typed_finish = Some(json!({ "answer": "ok" }));
         assert_eq!(task_result_value(&turn), json!({ "answer": "ok" }));
     }
 }

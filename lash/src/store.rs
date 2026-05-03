@@ -1931,7 +1931,7 @@ mod tests {
         let source = mem();
         source.save_session_head(SessionHead {
             session_id: "root".to_string(),
-            graph: crate::SessionGraph::from_projection(
+            graph: crate::SessionGraph::from_active_read_state(
                 &[
                     text_message("u0", MessageRole::User, "hello"),
                     text_message("a0", MessageRole::Assistant, "world"),
@@ -1947,8 +1947,8 @@ mod tests {
         target.head_copy_from_store(&source);
 
         let graph = target.load_session_head().expect("session head").graph;
-        let projection = graph.shared_projection();
-        let messages = projection.messages.as_slice();
+        let read_model = graph.read_model();
+        let messages = read_model.messages.as_slice();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].parts[0].content, "hello");
         assert_eq!(messages[1].parts[0].content, "world");
@@ -1959,7 +1959,7 @@ mod tests {
         let store = mem();
         store.save_session_head(SessionHead {
             session_id: "root".to_string(),
-            graph: crate::SessionGraph::from_projection(
+            graph: crate::SessionGraph::from_active_read_state(
                 &[text_message("u0", MessageRole::User, "old")],
                 &[],
             ),
@@ -1970,7 +1970,7 @@ mod tests {
 
         store.save_session_head(SessionHead {
             session_id: "root".to_string(),
-            graph: crate::SessionGraph::from_projection(
+            graph: crate::SessionGraph::from_active_read_state(
                 &[text_message("u1", MessageRole::User, "updated")],
                 &[],
             ),
@@ -1980,8 +1980,8 @@ mod tests {
         });
 
         let graph = store.load_session_head().expect("session head").graph;
-        let projection = graph.shared_projection();
-        let messages = projection.messages.as_slice();
+        let read_model = graph.read_model();
+        let messages = read_model.messages.as_slice();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].parts[0].content, "updated");
     }
@@ -1999,7 +1999,7 @@ mod tests {
         });
         store.save_session_head(SessionHead {
             session_id: "s1".to_string(),
-            graph: crate::SessionGraph::from_projection(
+            graph: crate::SessionGraph::from_active_read_state(
                 &[
                     text_message("u0", MessageRole::User, "hello there"),
                     text_message("a0", MessageRole::Assistant, "response"),
@@ -2061,7 +2061,7 @@ mod tests {
     async fn runtime_commit_preserves_execution_state_ref_when_snapshot_is_reused() {
         let store = mem();
         let mut state = crate::PersistedSessionState {
-            session_graph: crate::SessionGraph::from_projection(
+            session_graph: crate::SessionGraph::from_active_read_state(
                 &[text_message("u0", MessageRole::User, "hello")],
                 &[],
             ),

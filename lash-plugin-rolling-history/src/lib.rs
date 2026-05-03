@@ -544,8 +544,8 @@ async fn summarize_compaction_prefix(
     snapshot.last_prompt_usage = None;
     let previous_summary = extract_previous_summary(&messages);
     let referenced = referenced_tool_call_ids(&messages);
-    let projection = state.shared_projection();
-    let tool_calls = projection
+    let read_model = state.read_model();
+    let tool_calls = read_model
         .tool_calls
         .iter()
         .filter(|record| {
@@ -556,7 +556,7 @@ async fn summarize_compaction_prefix(
         })
         .cloned()
         .collect::<Vec<_>>();
-    snapshot.replace_projection(&messages, &tool_calls);
+    snapshot.replace_active_read_state(&messages, &tool_calls);
 
     let compaction_session_id = format!("{session_id}-compaction");
     let mut policy = snapshot.policy.clone();
@@ -1173,7 +1173,7 @@ mod tests {
             policy: SessionPolicy::default(),
             ..Default::default()
         };
-        state.replace_projection(&messages, &tool_calls);
+        state.replace_active_read_state(&messages, &tool_calls);
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let host: Arc<dyn SessionManager> = Arc::new(mock_manager());
         let ctx = build_turn_ctx(

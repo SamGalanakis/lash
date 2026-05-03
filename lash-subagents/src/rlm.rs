@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash::{
+    DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     MessageRole, PluginMessage, ProgressSender, PromptContribution, ToolDefinition,
     ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
@@ -23,9 +24,7 @@ use crate::shared::{
     parse_output_schema, render_task_prompt, required_string, rlm_seed_initial_nodes,
     spawn_agent_input_schema, tool_definition, turn_input_for_task, unknown_capability_message,
 };
-use crate::types::{
-    CloseAgentRequest, SpawnAgentRequest, WaitAgentRequest, WaitUntil,
-};
+use crate::types::{CloseAgentRequest, SpawnAgentRequest, WaitAgentRequest, WaitUntil};
 
 pub(crate) struct RlmSubagentToolsProvider {
     pub(crate) registry: Arc<CapabilityRegistry>,
@@ -33,6 +32,62 @@ pub(crate) struct RlmSubagentToolsProvider {
 }
 
 impl RlmSubagentToolsProvider {
+    async fn llm_query(
+        &self,
+        args: &Value,
+        context: &ToolExecutionContext,
+    ) -> Result<Value, String> {
+        let task = required_string(args, "task")?;
+        let inputs = args.get("inputs").cloned().unwrap_or(Value::Null);
+        let output_schema = parse_output_schema(args.get("output"))?;
+        let current_snapshot = context
+            .host
+            .snapshot_session(&context.session_id)
+            .await
+            .map_err(|err| format!("failed to snapshot current session: {err}"))?;
+        let policy =
+            shared::build_session_policy(&self.registry, &current_snapshot.policy, "explore")?;
+        let response_schema = llm_query_response_schema(output_schema.as_ref());
+        let prompt = llm_query_prompt(&task, &inputs, output_schema.as_ref());
+
+        let output = DirectOutputSpec::JsonSchema(DirectJsonSchema {
+            name: "llm_query_result".to_string(),
+            schema: response_schema.clone(),
+            strict: true,
+        });
+
+        let completion = context
+            .host
+            .direct_completion(
+                DirectRequest {
+                    model: policy.model,
+                    model_variant: policy.model_variant,
+                    messages: vec![
+                        DirectMessage {
+                            role: DirectRole::System,
+                            parts: vec![DirectPart::Text(
+                                "You answer a focused sub-question for another agent. Use only the task and inputs supplied. Return only JSON matching the requested result wrapper. Use kind=\"error\" with a concise error only when the task cannot be answered from the supplied inputs."
+                                    .to_string(),
+                            )],
+                        },
+                        DirectMessage {
+                            role: DirectRole::User,
+                            parts: vec![DirectPart::Text(prompt)],
+                        },
+                    ],
+                    attachments: Vec::new(),
+                    output,
+                    stream_events: None,
+                    session_id: Some(format!("{}-llm-query", context.session_id)),
+                },
+                "llm_query",
+            )
+            .await
+            .map_err(|err| format!("llm_query failed: {err}"))?;
+
+        parse_llm_query_result(&completion.text, &response_schema)
+    }
+
     async fn spawn_agent(
         &self,
         args: &Value,
@@ -165,23 +220,18 @@ impl RlmSubagentToolsProvider {
             "task": task,
         }))
     }
-
 }
 
 #[async_trait]
 impl ToolProvider for RlmSubagentToolsProvider {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = rlm_subagent_tool_definitions(&self.registry.names());
-        definitions.push(shared::submit_tool_definition(lash::ToolAvailabilityConfig::hidden()));
         definitions.push(shared::submit_error_tool_definition());
         definitions.push(list_async_handles_definition());
         definitions
     }
 
     async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
-        if name == "submit" {
-            return shared::submit_tool_result(_args);
-        }
         if name == "submit_error" {
             return shared::submit_error_tool_result(_args);
         }
@@ -197,9 +247,9 @@ impl ToolProvider for RlmSubagentToolsProvider {
         context: &ToolExecutionContext,
     ) -> ToolResult {
         let result = match name {
+            "llm_query" => self.llm_query(args, context).await,
             "spawn_agent" => self.spawn_agent(args, context).await,
             "continue_as" => self.continue_as(args, context).await,
-            "submit" => return shared::submit_tool_result(args),
             "submit_error" => return shared::submit_error_tool_result(args),
             _ => Err(format!("Unknown tool: {name}")),
         };
@@ -219,21 +269,27 @@ impl ToolProvider for RlmSubagentToolsProvider {
 
 pub(crate) fn rlm_subagent_prompt_contributions() -> Vec<PromptContribution> {
     vec![PromptContribution::guidance(
-        "Subagents",
-        "Use `spawn_agent` for focused subproblems that benefit from a fresh context. Plain `call spawn_agent { ... }` blocks until the child finishes and returns the child result. For fan-out, use generic lashlang async handles: `h = start call spawn_agent { agent_name: \"auth\", task: \"Summarise auth\", capability: \"explore\", output: { summary: \"str\" } }`, then `result = (await h)?`. Use `parallel` or record-shaped awaits to collect independent handles, and `cancel h` to stop a live child subtree.\n\n`list_async_handles()` returns only live handles, grouped as `subagent.<agent_name>` for normalized subagent names and `tool.<handle_id>` for other async tool calls. Cancel stale subagent handles through those values when the work is no longer needed.\n\nTwo capabilities. `explore` is read-only and cannot recurse. `peer` has full edit + recurse powers. Default to `explore` for parallel investigation; use `peer` only when the subagent must mutate or spawn its own subagents.\n\n`output` defines the typed return shape. Pass either a record of scalar type descriptors (`{ line: \"str\", length: \"int\" }`) or a `Type { ... }` literal. With `output` set the subagent ends with `submit <expr>` and the value flows straight into your bound variable. A child can fail terminally with `call submit_error { reason: \"...\" }`; parent `spawn_agent` returns an error so `?` short-circuits naturally.\n\nCanonical fan-out:\n\n```lashlang\na = start call spawn_agent { agent_name: \"auth\", task: \"Summarise auth flow\", capability: \"explore\", output: { summary: \"str\" } }\nb = start call spawn_agent { agent_name: \"db\", task: \"Summarise migrations\", capability: \"explore\", output: { summary: \"str\" } }\nhandles = (call list_async_handles {})?\nresults = parallel { auth: (await handles.subagent.auth)?, db: (await handles.subagent.db)? }\nsubmit results\n```\n\n`fork_turns` controls inherited context: `none` (default), `all`, or a positive integer string for the most recent N turns. In user-facing prose, call them subagents, not delegates or child agents.",
+        "Subagents and lightweight LLM calls",
+        "`llm_query` is the cheap decomposition primitive: one focused LLM call, no child session, no tools, no REPL loop. Use it for semantic extraction, summarization, classification, judging, or transforming data you already have in variables. Shape it as `call llm_query { task: \"...\", inputs: { text: chunk }, output: { answer: \"str\" } }`. Omit `output` for a plain string. `output` accepts the same record descriptors and `Type { ... }` literals as `spawn_agent`.\n\nUse `spawn_agent` when the subproblem needs tool use, file/repo inspection, shell commands, edits, multi-step exploration, its own context window, cancellation, or recursive subagents. Plain `call spawn_agent { ... }` blocks until the child finishes and returns the child result. For fan-out, use generic lashlang async handles: `h = start call spawn_agent { agent_name: \"auth\", task: \"Summarise auth\", capability: \"explore\", output: { summary: \"str\" } }`, then `result = (await h)?`. Use `parallel` or record-shaped awaits to collect independent handles, and `cancel h` to stop a live child subtree.\n\n`list_async_handles()` returns only live handles, grouped as `subagent.<agent_name>` for normalized subagent names and `tool.<handle_id>` for other async tool calls. Cancel stale subagent handles through those values when the work is no longer needed.\n\nTwo subagent capabilities. `explore` is read-only and cannot recurse. `peer` has full edit + recurse powers. Default to `explore` for parallel investigation; use `peer` only when the subagent must mutate or spawn its own subagents.\n\n`output` defines the typed return shape. Pass either a record of scalar type descriptors (`{ line: \"str\", length: \"int\" }`) or a `Type { ... }` literal. With `output` set the subagent ends with `submit <expr>` and the value flows straight into your bound variable. A child can fail terminally with `call submit_error { reason: \"...\" }`; parent `spawn_agent` returns an error so `?` short-circuits naturally.\n\nCanonical fan-out:\n\n```lashlang\na = start call spawn_agent { agent_name: \"auth\", task: \"Summarise auth flow\", capability: \"explore\", output: { summary: \"str\" } }\nb = start call spawn_agent { agent_name: \"db\", task: \"Summarise migrations\", capability: \"explore\", output: { summary: \"str\" } }\nhandles = (call list_async_handles {})?\nresults = parallel { auth: (await handles.subagent.auth)?, db: (await handles.subagent.db)? }\nsubmit results\n```\n\n`fork_turns` controls inherited context: `none` (default), `all`, or a positive integer string for the most recent N turns. In user-facing prose, call them subagents, not delegates or child agents.",
     )]
 }
 
 pub(crate) fn rlm_continue_as_prompt_contributions() -> Vec<PromptContribution> {
     vec![PromptContribution::guidance(
         "Exploration",
-        "Keep investigation bounded: start with agent_nameed `grep`, `read_file`, and small shell probes. Avoid repo-wide expensive analyzers, full builds, full test suites, or unbounded scripts unless the task explicitly asks for them. Prefer extracting the needed facts over accumulating large raw observations.\n\nWhen a Required output schema is present, finish with `submit <expr>`.\n\nUse `continue_as` when context is tight or the current trajectory has gone stale. Pack `task` and `seed` with the concrete goal, constraints, paths, facts already learned, partial results, and next steps; leave failed attempts and bulky raw output behind.",
+        "Keep investigation bounded: start with agent_nameed `grep`, `read_file`, and small shell probes. Avoid repo-wide expensive analyzers, full builds, full test suites, or unbounded scripts unless the task explicitly asks for them. Prefer extracting the needed facts over accumulating large raw observations.\n\nUse `llm_query` for semantic extraction, summarization, classification, judging, or transforming data already available in variables. It is one lightweight LLM call: no child session, no tools, no REPL loop. Shape it as `call llm_query { task: \"...\", inputs: { text: chunk }, output: { answer: \"str\" } }`. Omit `output` for a plain string.\n\nWhen a Required output schema is present, finish with `submit <expr>`.\n\nUse `continue_as` when context is tight or the current trajectory has gone stale. Pack `task` and `seed` with the concrete goal, constraints, paths, facts already learned, partial results, and next steps; leave failed attempts and bulky raw output behind.",
     )]
 }
 
 pub(crate) fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDefinition> {
     let example_capability = example_capability_name(capability_names);
     vec![
+        llm_query_definition(vec![
+            r#"summary = (call llm_query { task: "Summarize this log in one sentence.", inputs: { log: log_tail } })?"#.into(),
+            r#"facts = (call llm_query { task: "Extract the root cause and confidence.", inputs: { log: log_tail, command: cmd }, output: { root_cause: "str", confidence: "float" } })?"#.into(),
+            r#"Shape = Type { category: enum["config", "code", "network", "unknown"], evidence: list[str] }"#.into(),
+            r#"typed = (call llm_query { task: "Classify the failure.", inputs: { log: log_tail }, output: Shape })?"#.into(),
+        ]),
         spawn_agent_definition(
             capability_names,
             vec![
@@ -267,6 +323,13 @@ pub(crate) fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<
     ]
 }
 
+fn llm_query_definition(examples: Vec<String>) -> ToolDefinition {
+    let mut definition = shared::llm_query_tool_definition();
+    definition.description = "Run one lightweight LLM call and return its result. Use this for semantic extraction, summarization, classification, judging, or transforming data already available in variables. It does not create a child session, cannot use tools, and does not run a REPL loop. Use `spawn_agent` instead when the subproblem needs tool use, repo/file inspection, shell commands, edits, multi-step work, its own context window, or recursive subagents. `inputs` can be any structured value and is rendered for the model as data. `output` is optional and defaults to a string; when present, it accepts the same record descriptors and `Type { ... }` literals as `spawn_agent`.".to_string();
+    definition.examples = examples;
+    definition
+}
+
 fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) -> ToolDefinition {
     let cap_list = capability_list_for_description(capability_names);
     let description = format!(
@@ -279,6 +342,96 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
         examples,
         ToolExecutionMode::Serial,
     )
+}
+
+fn llm_query_prompt(task: &str, inputs: &Value, output_schema: Option<&Value>) -> String {
+    let mut sections = vec![format!("Task\n{task}")];
+    if !inputs.is_null() {
+        let inputs_pretty =
+            serde_json::to_string_pretty(inputs).unwrap_or_else(|_| inputs.to_string());
+        sections.push(format!("Inputs\n```json\n{inputs_pretty}\n```"));
+    }
+    if let Some(schema) = output_schema {
+        let schema_pretty =
+            serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
+        sections.push(format!(
+            "Required output\nReturn `{{\"kind\":\"value\",\"value\":...,\"error\":null}}` where `value` matches this JSON Schema exactly:\n```json\n{schema_pretty}\n```\nIf the task cannot be answered from the supplied inputs, return `{{\"kind\":\"error\",\"value\":null,\"error\":\"...\"}}`."
+        ));
+    } else {
+        sections.push(
+            "Required output\nReturn `{\"kind\":\"value\",\"value\":\"...\",\"error\":null}` with the answer string. If the task cannot be answered from the supplied inputs, return `{\"kind\":\"error\",\"value\":null,\"error\":\"...\"}`."
+                .to_string(),
+        );
+    }
+    sections.join("\n\n")
+}
+
+fn llm_query_response_schema(output_schema: Option<&Value>) -> Value {
+    let value_schema = output_schema
+        .cloned()
+        .unwrap_or_else(|| json!({ "type": "string" }));
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "value", "error"],
+        "properties": {
+            "kind": { "type": "string", "enum": ["value", "error"] },
+            "value": {
+                "anyOf": [
+                    value_schema,
+                    { "type": "null" }
+                ]
+            },
+            "error": {
+                "anyOf": [
+                    { "type": "string" },
+                    { "type": "null" }
+                ]
+            }
+        }
+    })
+}
+
+fn parse_llm_query_result(text: &str, schema: &Value) -> Result<Value, String> {
+    let trimmed = text.trim();
+    let value = serde_json::from_str::<Value>(trimmed).or_else(|err| {
+        let Some(start) = trimmed.find(['{', '[', '"']) else {
+            return Err(format!("llm_query returned non-JSON output: {err}"));
+        };
+        let end = trimmed
+            .rfind(['}', ']', '"'])
+            .ok_or_else(|| format!("llm_query returned malformed JSON output: {err}"))?;
+        if end < start {
+            return Err(format!("llm_query returned malformed JSON output: {err}"));
+        }
+        serde_json::from_str::<Value>(&trimmed[start..=end])
+            .map_err(|parse_err| format!("llm_query returned malformed JSON output: {parse_err}"))
+    })?;
+    let compiled = jsonschema::JSONSchema::compile(schema)
+        .map_err(|err| format!("llm_query output schema is invalid: {err}"))?;
+    if let Err(errors) = compiled.validate(&value) {
+        let message = errors
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("llm_query output did not match schema: {message}"));
+    }
+    match value.get("kind").and_then(Value::as_str) {
+        Some("value") => value
+            .get("value")
+            .cloned()
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| "llm_query returned value result without value".to_string()),
+        Some("error") => Err(value
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .unwrap_or("llm_query returned an error")
+            .to_string()),
+        Some(other) => Err(format!("llm_query returned unknown result kind `{other}`")),
+        None => Err("llm_query returned result without kind field".to_string()),
+    }
 }
 
 fn continue_as_definition(examples: Vec<String>) -> ToolDefinition {

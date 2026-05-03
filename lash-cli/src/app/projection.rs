@@ -75,21 +75,21 @@ pub(crate) enum UiTimelineItem {
     Splash,
 }
 
-pub(crate) fn projected_timeline_items_from_projection(
-    projection: &lash::SessionProjection,
+pub(crate) fn timeline_items_from_read_model(
+    read_model: &lash::SessionReadModel,
     ui_state: &UiProjectionState,
 ) -> Vec<UiTimelineItem> {
-    projected_timeline_from_projection(projection, ui_state).into_items()
+    timeline_from_read_model(read_model, ui_state).into_items()
 }
 
-pub(crate) fn projected_timeline_from_projection(
-    projection: &lash::SessionProjection,
+pub(crate) fn timeline_from_read_model(
+    read_model: &lash::SessionReadModel,
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
     let mut timeline = timeline_from_events(
-        projection.active_events.as_slice(),
-        projection.messages.as_slice(),
-        projection.tool_calls.as_slice(),
+        read_model.active_events.as_slice(),
+        read_model.messages.as_slice(),
+        read_model.tool_calls.as_slice(),
     );
     append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
@@ -103,55 +103,69 @@ pub(crate) fn projected_timeline_from_projection(
 }
 
 #[cfg(test)]
-pub(crate) fn projected_timeline_items_from_parts(
+pub(crate) fn timeline_items_from_read_model_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
 ) -> Vec<UiTimelineItem> {
-    projected_timeline_from_parts(events, messages, tool_calls, ui_state).into_items()
+    let read_model = read_model_from_parts(events, messages, tool_calls);
+    timeline_from_read_model(&read_model, ui_state).into_items()
 }
 
 #[cfg(test)]
-pub(crate) fn projected_timeline_from_parts(
+pub(crate) fn timeline_from_read_model_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
-    let mut timeline = timeline_from_events(events, messages, tool_calls);
-    append_live_projection_items(&mut timeline, ui_state);
-    timeline.extend(
-        ui_state
-            .plugin_panels
-            .iter()
-            .cloned()
-            .map(UiTimelineItem::PluginPanel),
-    );
-    timeline
+    let read_model = read_model_from_parts(events, messages, tool_calls);
+    timeline_from_read_model(&read_model, ui_state)
 }
 
-pub(crate) fn project_interrupted_blocks(
-    projection: &lash::SessionProjection,
+pub(crate) fn interrupted_blocks_from_read_model(
+    read_model: &lash::SessionReadModel,
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
 ) -> Vec<UiTimelineItem> {
-    let mut timeline = projected_timeline_from_projection(projection, ui_state);
+    let mut timeline = timeline_from_read_model(read_model, ui_state);
     push_system_message_item_if_new(&mut timeline, status_message.into());
     timeline.into_items()
 }
 
 #[cfg(test)]
-pub(crate) fn project_interrupted_blocks_from_parts(
+pub(crate) fn interrupted_blocks_from_read_model_parts(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
 ) -> Vec<UiTimelineItem> {
-    let mut timeline = projected_timeline_from_parts(events, messages, tool_calls, ui_state);
+    let read_model = read_model_from_parts(events, messages, tool_calls);
+    let mut timeline = timeline_from_read_model(&read_model, ui_state);
     push_system_message_item_if_new(&mut timeline, status_message.into());
     timeline.into_items()
+}
+
+#[cfg(test)]
+fn read_model_from_parts(
+    events: &[lash::SessionEventRecord],
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+) -> lash::SessionReadModel {
+    lash::SessionReadModel {
+        active_events: std::sync::Arc::new(events.to_vec()),
+        messages: std::sync::Arc::new(messages.to_vec()),
+        tool_calls: std::sync::Arc::new(tool_calls.to_vec()),
+        rlm_globals: std::sync::Arc::new(lash_rlm_types::project_globals(
+            events.iter().filter_map(|event| match event {
+                lash::SessionEventRecord::Mode(event) => event.rlm_event(),
+                _ => None,
+            }),
+        )),
+        prompt_render_cache: std::sync::Arc::new(lash::BaseRenderCache::new()),
+    }
 }
 
 fn timeline_from_events(

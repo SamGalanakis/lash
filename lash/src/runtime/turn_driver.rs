@@ -164,12 +164,12 @@ impl RuntimeTurnDriver {
             .message_delta_if_current_preserved(messages.iter())
         {
             self.progress_graph
-                .append_projected_conversation_messages(&appended_messages);
+                .append_active_conversation_messages(&appended_messages);
         } else {
-            let projected_messages = messages.shared();
+            let read_messages = messages.shared();
             let tool_calls = self.progress_graph.tool_calls_arc();
             self.progress_graph
-                .replace_projection(projected_messages.as_slice(), tool_calls.as_slice());
+                .replace_active_read_state(read_messages.as_slice(), tool_calls.as_slice());
         }
 
         if self.session.execution_state_dirty()
@@ -510,7 +510,7 @@ impl RuntimeTurnDriver {
             model,
             mode: execution_surface.execution_mode,
             messages,
-            events: self.progress_state.shared_projection().active_events,
+            events: self.progress_state.read_model().active_events,
             run_offset,
             tool_surface: execution_surface.tool_surface,
             mode_preamble: execution_surface.mode_preamble,

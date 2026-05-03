@@ -1660,10 +1660,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn run_code_returns_terminal_finish_after_tool_call() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let snippet_path = temp.path().join("note.md");
-        std::fs::write(&snippet_path, "# Note\nship it\n").expect("write snippet");
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::tools::ShowSnippetToUser::new());
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(AsyncTestToolProvider {
+            state: AsyncToolState::default(),
+        });
         let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
             "test_tools",
             PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
@@ -1687,17 +1686,10 @@ mod tests {
                 "root",
                 manager,
                 &event_tx,
-                &format!(
-                    r#"
-call show_snippet_to_user {{
-  path: "{}",
-  start_line: 1,
-  end_line: 1
-}}
+                r#"
+call echo_async { text: "before finish" }
 submit "ok"
 "#,
-                    snippet_path.display()
-                ),
                 false,
             )
             .await
@@ -1708,7 +1700,7 @@ submit "ok"
         // tool call stays successful; no error is surfaced.
         assert_eq!(response.error, None);
         assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].tool, "show_snippet_to_user");
+        assert_eq!(response.tool_calls[0].tool, "echo_async");
         assert!(response.tool_calls[0].success);
         assert_eq!(response.terminal_finish, Some(serde_json::json!("ok")));
     }

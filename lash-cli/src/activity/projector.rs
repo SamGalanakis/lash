@@ -52,5 +52,6 @@ pub struct ProjectCtx<'a> {
     /// projectors to fetch display metadata (capability, model, run_state,
     /// per-completion stats) by target path. Wire shapes don't carry these
     /// fields anymore — the host owns them.
+    #[allow(dead_code)]
     pub subagent_host: Option<&'a Arc<dyn SubagentHost>>,
 }

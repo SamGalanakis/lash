@@ -52,7 +52,7 @@ pub(super) async fn handle_clear(
             last_prompt_usage: None,
             mode_turn_options: rt.export_state().mode_turn_options,
         };
-        state.replace_projection(history, &[]);
+        state.replace_active_read_state(history, &[]);
         rt.set_persisted_state(lash::PersistedSessionState::from_state(state));
         match rt.session_manager() {
             Ok(manager) => *session_manager = manager,

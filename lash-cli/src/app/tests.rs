@@ -39,12 +39,49 @@ fn events_from_messages(messages: &[Message]) -> Vec<lash::SessionEventRecord> {
     messages.iter().cloned().map(conversation_event).collect()
 }
 
-fn projection_from_parts(
+#[test]
+fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let started_at = std::time::SystemTime::now() - std::time::Duration::from_secs(125);
+    app.update_background_tasks(vec![lash::ManagedTaskStatus {
+        id: "subagent:smoke".into(),
+        label: "smoke".into(),
+        kind: lash::ManagedTaskKind::Subagent,
+        producer: "subagent".into(),
+        run_state: lash::ManagedRunState::Running,
+        started_at,
+    }]);
+    assert_eq!(app.background_tasks.len(), 1);
+    assert_eq!(app.background_tasks[0].terminal_duration, None);
+
+    app.update_background_tasks(vec![lash::ManagedTaskStatus {
+        id: "subagent:smoke".into(),
+        label: "smoke".into(),
+        kind: lash::ManagedTaskKind::Subagent,
+        producer: "subagent".into(),
+        run_state: lash::ManagedRunState::Completed,
+        started_at,
+    }]);
+
+    assert_eq!(app.background_tasks.len(), 1);
+    assert_eq!(
+        app.background_tasks[0].run_state,
+        lash::ManagedRunState::Completed
+    );
+    assert!(app.background_tasks[0].transient_until.is_some());
+    assert!(
+        app.background_tasks[0]
+            .terminal_duration
+            .is_some_and(|duration| duration.as_secs() >= 125)
+    );
+}
+
+fn read_model_from_parts(
     _events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
-) -> lash::SessionProjection {
-    lash::SessionGraph::from_projection(messages, tool_calls).shared_projection()
+) -> lash::SessionReadModel {
+    lash::SessionGraph::from_active_read_state(messages, tool_calls).read_model()
 }
 
 fn other_variant_name(block: &UiTimelineItem) -> &'static str {
@@ -396,7 +433,7 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
 }
 
 #[test]
-fn finish_turn_from_projection_rebuilds_current_turn_from_authoritative_state() {
+fn finish_turn_from_read_model_rebuilds_current_turn_from_authoritative_state() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.blocks
         .push(UiTimelineItem::SystemMessage("Local note".into()));
@@ -416,7 +453,7 @@ fn finish_turn_from_projection_rebuilds_current_turn_from_authoritative_state() 
         ),
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_projection(&projection_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &[]));
 
     assert!(!app.running);
     assert!(app.blocks.iter().any(|block| {
@@ -438,7 +475,7 @@ fn finish_turn_from_projection_rebuilds_current_turn_from_authoritative_state() 
 }
 
 #[test]
-fn finish_turn_from_projection_preserves_projected_turns_after_repeated_input() {
+fn finish_turn_from_read_model_preserves_projected_turns_after_repeated_input() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let first_turn = PreparedTurn::new("hi".into(), Vec::new());
     app.push_prepared_user_input(&first_turn);
@@ -455,7 +492,7 @@ fn finish_turn_from_projection_preserves_projected_turns_after_repeated_input() 
     ];
     let events = events_from_messages(&messages);
 
-    app.finish_turn_from_projection(&projection_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &[]));
 
     let user_inputs = app
         .blocks
@@ -472,7 +509,7 @@ fn finish_turn_from_projection_preserves_projected_turns_after_repeated_input() 
 }
 
 #[test]
-fn finish_turn_from_projection_does_not_duplicate_assistant_text_after_tool_activity() {
+fn finish_turn_from_read_model_does_not_duplicate_assistant_text_after_tool_activity() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Fix it".into(), Vec::new());
     app.push_prepared_user_input(&turn);
@@ -514,7 +551,7 @@ fn finish_turn_from_projection_does_not_duplicate_assistant_text_after_tool_acti
         duration_ms: 12,
     }];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_projection(&projection_from_parts(&events, &messages, &tool_calls));
+    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &tool_calls));
 
     let assistant_texts: Vec<&str> = app
         .blocks
@@ -528,7 +565,7 @@ fn finish_turn_from_projection_does_not_duplicate_assistant_text_after_tool_acti
 }
 
 #[test]
-fn finish_turn_from_projection_uses_authoritative_reasoning_and_text() {
+fn finish_turn_from_read_model_uses_authoritative_reasoning_and_text() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Write a poem".into(), Vec::new());
     app.push_prepared_user_input(&turn);
@@ -563,7 +600,7 @@ fn finish_turn_from_projection_uses_authoritative_reasoning_and_text() {
         message,
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_projection(&projection_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &[]));
 
     let assistant_texts: Vec<&str> = app
         .blocks
@@ -589,7 +626,7 @@ fn finish_turn_from_projection_uses_authoritative_reasoning_and_text() {
 }
 
 #[test]
-fn projected_assistant_message_places_reasoning_before_text() {
+fn read_model_timeline_places_reasoning_before_text() {
     let message = Message {
         id: "a1".into(),
         role: MessageRole::Assistant,
@@ -603,7 +640,7 @@ fn projected_assistant_message_places_reasoning_before_text() {
     };
 
     let events = events_from_messages(std::slice::from_ref(&message));
-    let blocks = projected_timeline_items_from_parts(
+    let blocks = timeline_items_from_read_model_parts(
         &events,
         &[message],
         &[],
@@ -614,7 +651,7 @@ fn projected_assistant_message_places_reasoning_before_text() {
 }
 
 #[test]
-fn projected_timeline_round_trips_to_existing_display_blocks() {
+fn read_model_timeline_round_trips_to_existing_display_blocks() {
     let user = text_message("u1", MessageRole::User, "Summarize this");
     let assistant = text_message("a1", MessageRole::Assistant, "Summary.");
     let events = events_from_messages(&[user.clone(), assistant.clone()]);
@@ -625,8 +662,8 @@ fn projected_timeline_round_trips_to_existing_display_blocks() {
     };
 
     let timeline =
-        projection::projected_timeline_from_parts(&events, &[user, assistant], &[], &ui_state);
-    let blocks = projected_timeline_items_from_parts(
+        projection::timeline_from_read_model_parts(&events, &[user, assistant], &[], &ui_state);
+    let blocks = timeline_items_from_read_model_parts(
         &events,
         &[
             text_message("u1", MessageRole::User, "Summarize this"),
@@ -685,7 +722,7 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
     ))];
 
     let blocks =
-        projected_timeline_items_from_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_read_model_parts(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 
@@ -715,7 +752,7 @@ fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversat
     ))];
 
     let blocks =
-        projected_timeline_items_from_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_read_model_parts(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 }
@@ -744,7 +781,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
         conversation_event(assistant.clone()),
     ];
 
-    let blocks = projected_timeline_items_from_parts(
+    let blocks = timeline_items_from_read_model_parts(
         &events,
         &[user, assistant],
         &[],
@@ -792,7 +829,7 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
     ))];
 
     let blocks =
-        projected_timeline_items_from_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_read_model_parts(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(
         variants,
@@ -855,7 +892,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
         conversation_event(assistant.clone()),
     ];
 
-    let blocks = projected_timeline_items_from_parts(
+    let blocks = timeline_items_from_read_model_parts(
         &events,
         &[assistant],
         &[],
@@ -877,7 +914,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
 }
 
 #[test]
-fn finish_turn_from_projection_uses_authoritative_transcript_even_when_streamed_text_differs() {
+fn finish_turn_from_read_model_uses_authoritative_transcript_even_when_streamed_text_differs() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("Shorten it".into(), Vec::new());
     app.push_prepared_user_input(&turn);
@@ -891,7 +928,7 @@ fn finish_turn_from_projection_uses_authoritative_transcript_even_when_streamed_
         text_message("a1", MessageRole::Assistant, "Visible"),
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_projection(&projection_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_model(&read_model_from_parts(&events, &messages, &[]));
 
     let last_block = app
         .blocks
@@ -1310,8 +1347,8 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
 }
 
 #[test]
-fn interrupted_projection_preserves_partial_assistant_text() {
-    let blocks = project_interrupted_blocks_from_parts(
+fn interrupted_read_model_preserves_partial_assistant_text() {
+    let blocks = interrupted_blocks_from_read_model_parts(
         &[],
         &[],
         &[],
@@ -1333,19 +1370,19 @@ fn interrupted_projection_preserves_partial_assistant_text() {
 }
 
 #[test]
-fn interrupted_projection_does_not_duplicate_already_committed_prose() {
+fn interrupted_read_model_does_not_duplicate_already_committed_prose() {
     // Codex emits multiple prose chunks intermixed with tool calls. Each
     // prose chunk is committed as a separate assistant message, and on
     // interrupt the runtime hands the UI the entire concatenation as
     // `live_assistant_text`. The projection must not re-render that
-    // concat as an additional block on top of the already-projected ones.
+    // concat as an additional block on top of the already-rendered ones.
     let messages = vec![
         text_message("m0", MessageRole::User, "go"),
         text_message("m1", MessageRole::Assistant, "first prose"),
         text_message("m2", MessageRole::Assistant, "second prose"),
     ];
     let events = events_from_messages(&messages);
-    let blocks = project_interrupted_blocks_from_parts(
+    let blocks = interrupted_blocks_from_read_model_parts(
         &events,
         &messages,
         &[],
@@ -1367,13 +1404,13 @@ fn interrupted_projection_does_not_duplicate_already_committed_prose() {
 }
 
 #[test]
-fn interrupted_projection_appends_only_uncommitted_tail() {
+fn interrupted_read_model_appends_only_uncommitted_tail() {
     // If the streamed text contains everything in the committed messages
     // PLUS a trailing chunk the model was mid-stream on when the abort
     // landed, only that trailing chunk should be appended as a new block.
     let messages = vec![text_message("m0", MessageRole::Assistant, "first prose")];
     let events = events_from_messages(&messages);
-    let blocks = project_interrupted_blocks_from_parts(
+    let blocks = interrupted_blocks_from_read_model_parts(
         &events,
         &messages,
         &[],
@@ -1419,13 +1456,13 @@ fn interrupted_assistant_tail_ignores_visible_blocks_already_on_screen() {
 }
 
 #[test]
-fn interrupted_projection_hides_rlm_execution_result_user_message() {
+fn interrupted_read_model_hides_rlm_execution_result_user_message() {
     let result_message = Message {
         id: "m1".to_string(),
         role: MessageRole::User,
         parts: vec![Part {
             // Legacy RLM exec results were stored as user text with
-            // `tool_call_id` + `tool_name` preserved. Projection should
+            // `tool_call_id` + `tool_name` preserved. Read-model rendering should
             // hide them without rendering a fake execute_lashlang
             // activity.
             id: "m1.p0".to_string(),
@@ -1457,7 +1494,7 @@ fn interrupted_projection_hides_rlm_execution_result_user_message() {
     }];
     let messages = vec![text_message("m0", MessageRole::User, "go"), result_message];
     let events = events_from_messages(&messages);
-    let blocks = project_interrupted_blocks_from_parts(
+    let blocks = interrupted_blocks_from_read_model_parts(
         &events,
         &messages,
         &tool_calls,

@@ -29,12 +29,6 @@ pub(crate) enum ForkTurns {
     Recent(usize),
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum TaskPromptKind {
-    Initial,
-    Followup,
-}
-
 pub(crate) fn fresh_child_request(
     parent_session_id: String,
     start: SessionStartPoint,
@@ -124,7 +118,7 @@ pub(crate) async fn build_spawn_create_request(
                 schema: Some(schema),
                 include_submit_prompt: true,
             },
-            None => RlmTermination::ProseWithoutFence,
+            None => RlmTermination::default(),
         };
         mode_extras = ModeExtras::typed(
             lash::ExecutionMode::new("rlm"),
@@ -290,31 +284,13 @@ fn type_descriptor_to_json_schema(descriptor: &str) -> Result<Value, String> {
 }
 
 pub(crate) fn render_task_prompt(task: &str, output_schema: Option<&Value>) -> String {
-    render_task_prompt_with_kind(task, output_schema, TaskPromptKind::Initial)
-}
-
-pub(crate) fn render_task_prompt_with_kind(
-    task: &str,
-    output_schema: Option<&Value>,
-    kind: TaskPromptKind,
-) -> String {
     let mut sections = vec![task.to_string()];
     if let Some(schema) = output_schema {
         let schema_pretty =
             serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
-        let replaces_note = match kind {
-            TaskPromptKind::Initial => "",
-            TaskPromptKind::Followup => {
-                "\n\nThis replaces any output schema from earlier tasks in this session."
-            }
-        };
         sections.push(format!(
-            "## Required output\n\nWhen done, end the task with `submit <expr>`. The value MUST match this JSON Schema exactly:\n\n```json\n{schema_pretty}\n```{replaces_note}"
+            "## Required output\n\nWhen done, end the task with `submit <expr>`. The value MUST match this JSON Schema exactly:\n\n```json\n{schema_pretty}\n```"
         ));
-    } else if matches!(kind, TaskPromptKind::Followup) {
-        sections.push(
-            "## Required output\n\nNo structured output schema is required for this follow-up task. Return the result directly in your final answer.".to_string(),
-        );
     }
     sections.join("\n\n")
 }
@@ -328,35 +304,6 @@ pub(crate) fn required_string(args: &Value, key: &str) -> Result<String, String>
         .ok_or_else(|| format!("missing required parameter: {key}"))
 }
 
-pub(crate) fn optional_string_list(args: &Value, key: &str) -> Result<Vec<String>, String> {
-    let Some(value) = args.get(key) else {
-        return Ok(Vec::new());
-    };
-    let items = value
-        .as_array()
-        .ok_or_else(|| format!("invalid `{key}`: expected a list of strings"))?;
-    items
-        .iter()
-        .map(|item| {
-            item.as_str()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| format!("invalid `{key}`: expected a list of strings"))
-        })
-        .collect()
-}
-
-pub(crate) fn optional_u64(args: &Value, key: &str) -> Result<Option<u64>, String> {
-    let Some(value) = args.get(key) else {
-        return Ok(None);
-    };
-    value
-        .as_u64()
-        .map(Some)
-        .ok_or_else(|| format!("invalid `{key}`: expected a positive integer"))
-}
-
 pub(crate) fn turn_input_for_task(text: String) -> TurnInput {
     TurnInput {
         items: vec![InputItem::Text { text }],
@@ -364,22 +311,6 @@ pub(crate) fn turn_input_for_task(text: String) -> TurnInput {
         user_input: None,
         mode: None,
         mode_turn_options: None,
-    }
-}
-
-/// Build a `TurnInput` for a follow-up task with an optional per-turn
-/// RLM termination override. Standard mode passes `None` for the
-/// override; RLM passes a concrete `RlmTermination` value.
-pub(crate) fn turn_input_for_followup(
-    text: String,
-    mode_turn_options: Option<lash::ModeTurnOptions>,
-) -> TurnInput {
-    TurnInput {
-        items: vec![InputItem::Text { text }],
-        image_blobs: std::collections::HashMap::new(),
-        user_input: None,
-        mode: None,
-        mode_turn_options,
     }
 }
 
@@ -428,14 +359,6 @@ pub(crate) fn tool_definition(
     .with_execution_mode(execution_mode)
 }
 
-pub(crate) fn delivery_schema() -> Value {
-    json!({
-        "type": "string",
-        "enum": ["next_possible", "interrupt", "next_turn"],
-        "default": "next_possible"
-    })
-}
-
 pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
     let enum_values: Vec<Value> = capability_names
         .iter()
@@ -460,130 +383,15 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
     })
 }
 
-pub(crate) fn send_message_input_schema() -> Value {
+pub(crate) fn llm_query_input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "agent_name": { "type": "string" },
-            "message": { "type": "string" },
-            "delivery": delivery_schema()
-        },
-        "required": ["agent_name", "message"],
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn followup_task_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "agent_name": { "type": "string" },
             "task": { "type": "string" },
-            "delivery": delivery_schema(),
+            "inputs": {},
             "output": { "type": "object", "additionalProperties": true }
         },
-        "required": ["agent_name", "task"],
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn wait_agent_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "agents": { "type": "array", "items": { "type": "string" } },
-            "until": {
-                "type": "string",
-                "enum": ["task_completed", "terminal", "message", "any_result"],
-                "default": "task_completed"
-            },
-            "timeout_ms": { "type": "integer", "minimum": 0 },
-            "all": { "type": "boolean", "default": false }
-        },
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn optional_bool(args: &Value, key: &str) -> Result<Option<bool>, String> {
-    let Some(value) = args.get(key) else {
-        return Ok(None);
-    };
-    match value {
-        Value::Null => Ok(None),
-        Value::Bool(flag) => Ok(Some(*flag)),
-        _ => Err(format!("invalid `{key}`: expected a boolean")),
-    }
-}
-
-pub(crate) fn wait_agent_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "timed_out": { "type": "boolean" },
-            "completed": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "agent_name": { "type": "string" },
-                        "task": { "type": "string" },
-                        "status": { "type": "string" },
-                        "result": {
-                            "description": "Subagent result value; typed by spawn_agent.output when provided."
-                        },
-                        "error": { "type": ["string", "null"] }
-                    },
-                    "required": ["agent_name", "task", "status", "result"],
-                    "additionalProperties": false
-                }
-            },
-            "pending": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "agent_name": { "type": "string" },
-                        "task": { "type": ["string", "null"] },
-                        "status": { "type": "string" }
-                    },
-                    "required": ["agent_name", "status"],
-                    "additionalProperties": false
-                }
-            },
-            "messages": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "from_agent": { "type": "string" },
-                            "message": { "type": "string" }
-                        },
-                        "required": ["from_agent", "message"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "closed": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": { "agent_name": { "type": "string" } },
-                    "required": ["agent_name"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        "required": ["timed_out", "completed", "pending", "messages", "closed"],
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn list_agents_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {},
+        "required": ["task"],
         "additionalProperties": false
     })
 }
@@ -628,22 +436,19 @@ pub(crate) fn explore_tools(output_schema: Option<Value>) -> Vec<ToolDefinition>
         )
     });
     let _ = output_schema;
+    tools.push(llm_query_tool_definition());
     tools.push(continue_as_tool_definition());
     tools
 }
 
-pub(crate) fn submit_tool_definition(availability: lash::ToolAvailabilityConfig) -> ToolDefinition {
-    ToolDefinition::new(
-        "submit",
-        "Hidden compatibility endpoint for legacy Standard explore output submission. RLM explore sessions should use native `submit <expr>` instead.",
-        ToolDefinition::default_input_schema(),
-        json!({ "type": "object", "additionalProperties": true }),
+pub(crate) fn llm_query_tool_definition() -> ToolDefinition {
+    tool_definition(
+        "llm_query",
+        "Run one lightweight LLM call and return its result. Use this for semantic extraction, summarization, classification, judging, or transforming data already available in variables. It does not create a child session, cannot use tools, and does not run a REPL loop. `inputs` can be any structured value. `output` is optional and defaults to a string; when present, it accepts the same record descriptors and `Type { ... }` literals as `spawn_agent`.",
+        llm_query_input_schema(),
+        Vec::new(),
+        ToolExecutionMode::Parallel,
     )
-    .with_availability(availability)
-}
-
-pub(crate) fn submit_tool_result(args: &Value) -> ToolResult {
-    ToolResult::ok(args.clone())
 }
 
 pub(crate) fn submit_error_tool_definition() -> ToolDefinition {

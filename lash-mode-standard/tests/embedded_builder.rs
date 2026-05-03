@@ -56,7 +56,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
         .checkpoint_ref;
     store.save_session_head(SessionHead {
         session_id: "stored-session".to_string(),
-        graph: SessionGraph::from_projection(
+        graph: SessionGraph::from_active_read_state(
             &[text_message("u0", MessageRole::User, "stored question")],
             &[],
         ),
@@ -82,9 +82,9 @@ async fn embedded_runtime_builder_loads_state_from_store() {
         .expect("runtime");
 
     let state = runtime.export_state();
-    let projection = state.shared_projection();
-    assert_eq!(projection.messages.len(), 1);
-    assert_eq!(projection.messages[0].parts[0].content, "stored question");
+    let read_model = state.read_model();
+    assert_eq!(read_model.messages.len(), 1);
+    assert_eq!(read_model.messages[0].parts[0].content, "stored question");
     assert_eq!(state.iteration, 3);
     assert_eq!(state.token_usage.input_tokens, 20);
     assert_eq!(state.policy.model, "gpt-5.4-mini");

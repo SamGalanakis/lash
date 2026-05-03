@@ -15,7 +15,7 @@ pub(in crate::runtime::session_manager) use usage::{
 #[derive(Clone)]
 enum CurrentSnapshot {
     Owned(SessionSnapshot),
-    Projection {
+    ReadModel {
         meta: SessionSnapshot,
         messages: Arc<Vec<Message>>,
         tool_calls: Arc<Vec<ToolCallRecord>>,
@@ -26,13 +26,13 @@ impl CurrentSnapshot {
     fn to_snapshot(&self) -> SessionSnapshot {
         match self {
             Self::Owned(snapshot) => snapshot.clone(),
-            Self::Projection {
+            Self::ReadModel {
                 meta,
                 messages,
                 tool_calls,
             } => {
                 let mut snapshot = meta.clone();
-                snapshot.replace_projection(messages.as_slice(), tool_calls.as_slice());
+                snapshot.replace_active_read_state(messages.as_slice(), tool_calls.as_slice());
                 snapshot
             }
         }
@@ -122,11 +122,11 @@ impl RuntimeSessionManager {
             current_snapshot: if persist_usage_to_store {
                 CurrentSnapshot::Owned(runtime.export_graph_first_state())
             } else {
-                let projection = runtime.state.shared_projection();
-                CurrentSnapshot::Projection {
+                let read_model = runtime.state.read_model();
+                CurrentSnapshot::ReadModel {
                     meta: Self::current_snapshot_meta_without_graph(runtime),
-                    messages: projection.messages,
-                    tool_calls: projection.tool_calls,
+                    messages: read_model.messages,
+                    tool_calls: read_model.tool_calls,
                 }
             },
             current_policy: runtime.policy.clone(),

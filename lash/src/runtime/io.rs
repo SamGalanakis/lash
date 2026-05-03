@@ -11,7 +11,7 @@ use crate::session_model::Message;
 
 use super::{InputItem, NormalizedItem, PathResolver};
 
-pub(super) fn projection_message_delta_if_base_preserved<'a>(
+pub(super) fn active_read_message_delta_if_base_preserved<'a>(
     base: &[Message],
     next: impl IntoIterator<Item = &'a Message>,
 ) -> Option<Vec<Message>> {

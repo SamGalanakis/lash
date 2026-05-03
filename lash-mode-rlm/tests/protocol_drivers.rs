@@ -370,7 +370,7 @@ fn standard_max_turns_stops_iteration() {
 }
 
 #[test]
-fn rlm_prose_only_response_emits_done() {
+fn rlm_prose_only_response_requests_submit_by_default() {
     let config = test_config(ExecutionMode::new("rlm"));
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -388,7 +388,14 @@ fn rlm_prose_only_response_emits_done() {
 
     let effects = drain_effects(&mut machine);
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-    assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+    assert_eq!(checkpoint, CheckpointKind::AfterWork);
+    assert!(machine.messages().iter().any(|message| {
+        message.role == MessageRole::User
+            && message.parts.iter().any(|part| {
+                part.content.contains("final answer must be delivered")
+                    && part.content.contains("submit")
+            })
+    }));
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
         messages: Vec::new(),
@@ -396,7 +403,7 @@ fn rlm_prose_only_response_emits_done() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(find_done(&effects).is_some());
+    assert!(find_llm_call(&effects).is_some());
 }
 
 #[test]

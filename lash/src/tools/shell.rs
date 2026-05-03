@@ -85,7 +85,7 @@ struct CommonCommandParams {
     workdir: PathBuf,
     shell_path: String,
     login: bool,
-    allow_failure: bool,
+    allow_nonzero_exit: bool,
     max_output_tokens: Option<usize>,
 }
 
@@ -95,7 +95,7 @@ struct ExecCommandParams {
     workdir: PathBuf,
     shell_path: String,
     login: bool,
-    allow_failure: bool,
+    allow_nonzero_exit: bool,
     timeout_ms: u64,
     max_output_tokens: Option<usize>,
 }
@@ -106,7 +106,7 @@ struct StartCommandParams {
     workdir: PathBuf,
     shell_path: String,
     login: bool,
-    allow_failure: bool,
+    allow_nonzero_exit: bool,
     poll_ms: u64,
     max_output_tokens: Option<usize>,
 }
@@ -902,8 +902,8 @@ impl StandardShell {
             .get("login")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let allow_failure = args
-            .get("allow_failure")
+        let allow_nonzero_exit = args
+            .get("allow_nonzero_exit")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         let max_output_tokens = args
@@ -916,7 +916,7 @@ impl StandardShell {
             workdir,
             shell_path,
             login,
-            allow_failure,
+            allow_nonzero_exit,
             max_output_tokens,
         })
     }
@@ -937,7 +937,7 @@ impl StandardShell {
             workdir: common.workdir,
             shell_path: common.shell_path,
             login: common.login,
-            allow_failure: common.allow_failure,
+            allow_nonzero_exit: common.allow_nonzero_exit,
             timeout_ms,
             max_output_tokens: common.max_output_tokens,
         })
@@ -958,7 +958,7 @@ impl StandardShell {
             workdir: common.workdir,
             shell_path: common.shell_path,
             login: common.login,
-            allow_failure: common.allow_failure,
+            allow_nonzero_exit: common.allow_nonzero_exit,
             poll_ms,
             max_output_tokens: common.max_output_tokens,
         })
@@ -1013,7 +1013,7 @@ impl StandardShell {
                 original_token_count,
                 full_output_path.as_deref(),
                 started.elapsed().as_secs_f64(),
-                params.allow_failure,
+                params.allow_nonzero_exit,
             ),
             Ok(PollOutcome::Cancelled) => ToolResult::err_fmt("tool call cancelled"),
             Err(err) => ToolResult::err(json!(err)),
@@ -1078,7 +1078,7 @@ impl StandardShell {
                     original_token_count,
                     full_output_path.as_deref(),
                     started.elapsed().as_secs_f64(),
-                    params.allow_failure,
+                    params.allow_nonzero_exit,
                 )
             }
             Ok(PollOutcome::Cancelled) => {
@@ -1114,8 +1114,8 @@ impl StandardShell {
             .get("close_stdin")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let allow_failure = args
-            .get("allow_failure")
+        let allow_nonzero_exit = args
+            .get("allow_nonzero_exit")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         let max_output_tokens = args
@@ -1174,7 +1174,7 @@ impl StandardShell {
                     original_token_count,
                     full_output_path.as_deref(),
                     started.elapsed().as_secs_f64(),
-                    allow_failure,
+                    allow_nonzero_exit,
                 )
             }
             Ok(PollOutcome::Cancelled) => {
@@ -1214,10 +1214,10 @@ impl ToolProvider for StandardShell {
                     "default": false,
                     "description": "Whether to run the shell with -l semantics. Defaults to false to avoid startup prompts and shell init noise."
                 },
-                "allow_failure": {
+                "allow_nonzero_exit": {
                     "type": "boolean",
                     "default": false,
-                    "description": "When true, nonzero exit codes are returned as successful tool results instead of failed tool calls. Defaults to false."
+                    "description": "Shell-only flag. When true, nonzero exit codes are returned as successful tool results instead of failed tool calls; inspect `exit_code` yourself. Defaults to false."
                 },
                 "max_output_tokens": {
                     "type": "integer",
@@ -1230,7 +1230,7 @@ impl ToolProvider for StandardShell {
         vec![
             ToolDefinition::new(
                 "exec_command",
-                "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 {
                     let mut properties = command_common("Shell command to execute.");
                     properties["timeout_ms"] = json!({
@@ -1247,7 +1247,7 @@ impl ToolProvider for StandardShell {
             .with_execution_mode(ToolExecutionMode::Serial),
             ToolDefinition::new(
                 "start_command",
-                "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. Continue the session with `write_stdin`. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. Use `poll_ms` only to choose the initial observation window; use `exec_command.timeout_ms` for bounded one-shot commands. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.",
+                "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. Continue the session with `write_stdin`. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. Use `poll_ms` only to choose the initial observation window; use `exec_command.timeout_ms` for bounded one-shot commands. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.",
                 {
                     let mut properties = command_common("Shell command to start.");
                     properties["poll_ms"] = json!({
@@ -1267,7 +1267,7 @@ impl ToolProvider for StandardShell {
             .with_execution_mode(ToolExecutionMode::Serial),
             ToolDefinition::new(
                 "write_stdin",
-                "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_failure: true` to receive them as normal completed results. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 object_schema(
                     json!({
                         "session_id": {
@@ -1290,10 +1290,10 @@ impl ToolProvider for StandardShell {
                             "default": false,
                             "description": "Close stdin after writing to send EOF to the process."
                         },
-                        "allow_failure": {
+                        "allow_nonzero_exit": {
                             "type": "boolean",
                             "default": false,
-                            "description": "When true, nonzero process exit codes are returned as successful tool results instead of failed tool calls. Defaults to false."
+                            "description": "Shell-only flag. When true, nonzero process exit codes are returned as successful tool results instead of failed tool calls; inspect `exit_code` yourself. Defaults to false."
                         },
                         "max_output_tokens": {
                             "type": "integer",
@@ -1642,7 +1642,7 @@ fn shell_io_result(
     original_token_count: Option<usize>,
     full_output_path: Option<&Path>,
     wall_time_seconds: f64,
-    allow_failure: bool,
+    allow_nonzero_exit: bool,
 ) -> ToolResult {
     let mut record = standard_shell_io_record(
         id,
@@ -1654,7 +1654,7 @@ fn shell_io_result(
     );
     if let Some(code) = exit_code
         && code != 0
-        && !allow_failure
+        && !allow_nonzero_exit
     {
         if let Some(object) = record.as_object_mut() {
             object.insert(
@@ -1853,7 +1853,7 @@ mod tests {
         let result = shell
             .execute(
                 "exec_command",
-                &json!({"cmd": cmd, "timeout_ms": 50, "allow_failure": true}),
+                &json!({"cmd": cmd, "timeout_ms": 50, "allow_nonzero_exit": true}),
             )
             .await;
 
@@ -2001,12 +2001,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_command_allow_failure_returns_nonzero_as_success() {
+    async fn exec_command_allow_nonzero_exit_returns_nonzero_as_success() {
         let shell = test_shell();
         let result = shell
             .execute(
                 "exec_command",
-                &json!({"cmd": "echo expected failure; exit 7", "allow_failure": true}),
+                &json!({"cmd": "echo expected failure; exit 7", "allow_nonzero_exit": true}),
             )
             .await;
         assert!(result.success, "{}", result.result);

@@ -178,8 +178,8 @@ pub fn truncate_snapshot_to_recent_turns(
         return snapshot;
     }
 
-    let projection = snapshot.shared_projection();
-    let messages = projection.messages.as_slice();
+    let read_model = snapshot.read_model();
+    let messages = read_model.messages.as_slice();
     let user_turn_starts = messages
         .iter()
         .enumerate()
@@ -195,7 +195,7 @@ pub fn truncate_snapshot_to_recent_turns(
         .flat_map(|message| message.parts.iter())
         .filter_map(|part| part.tool_call_id.clone())
         .collect::<HashSet<_>>();
-    let kept_tool_calls = projection
+    let kept_tool_calls = read_model
         .tool_calls
         .iter()
         .filter(|tool_call| {
@@ -206,6 +206,6 @@ pub fn truncate_snapshot_to_recent_turns(
         })
         .cloned()
         .collect::<Vec<_>>();
-    snapshot.replace_projection(&kept_messages, &kept_tool_calls);
+    snapshot.replace_active_read_state(&kept_messages, &kept_tool_calls);
     snapshot
 }

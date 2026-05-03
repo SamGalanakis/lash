@@ -134,9 +134,9 @@ impl<'a> ModeRuntimeContext<'a> {
         Self { runtime }
     }
 
-    /// Set how the session's embedded lashlang runtime terminates:
-    /// `ProseWithoutFence` for chat-style sessions, or `Finish` with
-    /// an optional output schema for typed-RLM sessions.
+    /// Set how the session's embedded lashlang runtime terminates.
+    /// RLM sessions finish through `submit`; legacy prose-only config
+    /// values are treated as submit-required.
     pub fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
         self.runtime.set_mode_turn_options(options);
     }
@@ -293,7 +293,7 @@ mod tests {
         let extras = ModeExtras::typed(
             ExecutionMode::new("rlm"),
             RlmCreateExtras {
-                termination: lash_rlm_types::RlmTermination::ProseWithoutFence,
+                termination: lash_rlm_types::RlmTermination::default(),
             },
         )
         .expect("encode");

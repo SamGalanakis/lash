@@ -812,7 +812,7 @@ async fn run_once(
         export_state_ms,
         total_ms: elapsed_ms(total_started),
         session_nodes: state.session_graph.nodes.len(),
-        active_path_messages: state.shared_projection().messages.len(),
+        active_path_messages: state.read_model().messages.len(),
         memory: RuntimePerfMemoryRunResult {
             rss_before_kb: before_memory.rss_kb,
             rss_after_build_kb: after_build_memory.rss_kb,
@@ -964,7 +964,7 @@ async fn seed_runtime_state(
     if matches!(scenario, RuntimePerfScenario::ObservationalMemory) {
         let observed_through_message_id = runtime
             .export_state()
-            .shared_projection()
+            .read_model()
             .messages
             .last()
             .map(|message| message.id.clone())

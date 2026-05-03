@@ -13,8 +13,8 @@ pub async fn restore_execution_state_and_globals(
     if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
         ctx.restore_execution_state(&snapshot).await?;
     }
-    let projection = state.shared_projection();
-    apply_globals_patch_events(ctx, projection.active_events.iter()).await
+    let read_model = state.read_model();
+    apply_globals_patch_events(ctx, read_model.active_events.iter()).await
 }
 
 pub async fn apply_globals_patch_nodes(
@@ -182,7 +182,7 @@ pub fn budget_prompt_contributions(
 }
 
 pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
-    let globals = ctx.state.shared_projected_rlm_globals();
+    let globals = ctx.state.shared_rlm_globals();
     if globals.is_empty() {
         return Vec::new();
     }
@@ -211,7 +211,7 @@ impl BoundVariablesCache {
     }
 
     pub fn contributions(&self, ctx: &PromptHookContext) -> Vec<PromptContribution> {
-        let globals = ctx.state.shared_projected_rlm_globals();
+        let globals = ctx.state.shared_rlm_globals();
         if globals.is_empty() {
             return Vec::new();
         }

@@ -187,8 +187,7 @@ impl CapabilityRegistry {
 /// subagents that scan, summarise, or verify without mutating state. The
 /// `peer` tier is a parallel-self with the parent's full affordances:
 /// edits, recursion, anything the parent can do, in a fresh window.
-/// Interactive-only tools (`ask`, `show_snippet_to_user`, `showcase`,
-/// `plan_exit`) are stripped from every subagent surface regardless of
+/// Interactive-only tools (`ask`, `showcase`, `plan_exit`) are stripped from every subagent surface regardless of
 /// capability — see `subagent_surface_contribution`.
 pub fn default_registry(
     tier_models: &BTreeMap<String, String>,
