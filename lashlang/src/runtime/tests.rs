@@ -1268,6 +1268,83 @@ async fn async_tool_handles_can_be_started_awaited_and_cancelled() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn sync_steps_resume_correctly_after_tool_effects() {
+    let value = exec(
+        r#"
+        before = 20 + 2
+        echoed = (call echo { value: before })?
+        after = echoed + 1
+        submit [before, echoed, after]
+        "#,
+    )
+    .await
+    .expect("program should run");
+
+    assert_eq!(
+        value,
+        Value::List(
+            vec![
+                Value::Number(22.0),
+                Value::Number(22.0),
+                Value::Number(23.0)
+            ]
+            .into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn traced_async_tool_errors_keep_original_instruction_span() {
+    let source = r#"
+        before = 1
+        value = (call err {})?
+        submit value
+        "#;
+    let program = crate::parse(source).expect("program should parse");
+    let compiled = compile_program(&program);
+    let mut state = State::new();
+    let failure = execute_compiled_traced(&compiled, &mut state, &Host)
+        .await
+        .expect_err("unwrapped tool error should fail");
+    let message = crate::format_runtime_diagnostic(source, &failure.error, failure.span);
+
+    assert!(
+        message.contains("`?` unwrapped failed tool result: boom"),
+        "{message}"
+    );
+    assert!(message.contains("--> line 3, column 9"), "{message}");
+    assert!(message.contains("value = (call err {})?"), "{message}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn profiled_tool_effect_keeps_sync_instruction_counts() {
+    let source = r#"
+        before = 20 + 2
+        echoed = (call echo { value: before })?
+        after = echoed + 1
+        submit after
+        "#;
+    let program = crate::parse(source).expect("program should parse");
+    let compiled = compile_program(&program);
+    let mut state = State::new();
+    let (_outcome, report) = profile_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("profile should succeed");
+    let count = |name| {
+        report
+            .instruction_stats()
+            .iter()
+            .find(|stat| stat.name == name)
+            .map_or(0, |stat| stat.count)
+    };
+
+    assert!(count("call_tool") > 0, "{:?}", report.instruction_stats());
+    assert!(count("binary") > 0, "{:?}", report.instruction_stats());
+    assert!(count("load_name") > 0, "{:?}", report.instruction_stats());
+    assert!(count("store_name") >= 3, "{:?}", report.instruction_stats());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn await_unknown_handle_surfaces_runtime_error() {
     let program = crate::parse(
         r#"

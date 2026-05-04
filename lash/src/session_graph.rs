@@ -1461,6 +1461,13 @@ mod tests {
         assert_eq!(projection.tool_call_by_call_id("call_1"), Some(&tool_call));
         let history = projection.rlm_history();
         assert_eq!(history.len(), projection.entries().len());
+        match &history[0] {
+            lash_rlm_types::RlmHistoryItem::Message { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].reference, "att-1");
+            }
+            other => panic!("expected first history item to be a message, got {other:?}"),
+        }
         assert_eq!(
             read_model.rlm_globals.get("topic"),
             Some(&serde_json::json!("chronology"))
@@ -1471,5 +1478,75 @@ mod tests {
         );
         assert!(!labels.iter().any(|label| label.contains("inactive")));
         assert!(!labels.iter().any(|label| label.contains("transient")));
+    }
+
+    #[test]
+    fn chronological_projection_normalizes_duplicate_tool_calls_inside_rlm_steps() {
+        let mut graph = SessionGraph::default();
+        let shell_call = ToolCallRecord {
+            call_id: Some("call_shell".to_string()),
+            tool: "exec_command".to_string(),
+            args: serde_json::json!({"cmd": "date"}),
+            result: serde_json::json!({"output": "now\n", "exit_code": 0}),
+            success: true,
+            duration_ms: 7,
+        };
+        let lookup_call = ToolCallRecord {
+            call_id: Some("call_lookup".to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({"q": "now"}),
+            result: serde_json::json!({"answer": "now"}),
+            success: true,
+            duration_ms: 4,
+        };
+
+        graph.append_event(SessionEventRecord::Tool(ToolEvent::Invocation {
+            stable_key: "call_shell".to_string(),
+            record: shell_call.clone(),
+        }));
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
+                id: "rlm_step_1".to_string(),
+                iteration: 1,
+                reasoning: "inspect".to_string(),
+                code: "print now".to_string(),
+                output: vec!["now".to_string()],
+                tool_calls: vec![shell_call.clone(), lookup_call.clone(), lookup_call.clone()],
+                images: Vec::new(),
+                error: None,
+                final_output: None,
+            }),
+        )));
+        graph.append_event(SessionEventRecord::Tool(ToolEvent::Invocation {
+            stable_key: "call_lookup".to_string(),
+            record: lookup_call,
+        }));
+
+        let projection = crate::ChronologicalProjection::from_read_model(&graph.read_model());
+        let tool_counts = projection
+            .entries()
+            .iter()
+            .map(|entry| match &entry.payload {
+                crate::ChronologicalPayload::ToolCall(_) => 1,
+                crate::ChronologicalPayload::RlmStep(entry) => entry.tool_calls.len(),
+                crate::ChronologicalPayload::Message(_) => 0,
+            })
+            .sum::<usize>();
+
+        assert_eq!(tool_counts, 2);
+        assert_eq!(
+            projection
+                .entries()
+                .iter()
+                .map(|entry| match &entry.payload {
+                    crate::ChronologicalPayload::ToolCall(record) => record.tool.as_str(),
+                    crate::ChronologicalPayload::RlmStep(entry) =>
+                        entry.tool_calls[0].tool.as_str(),
+                    crate::ChronologicalPayload::Message(_) => "message",
+                })
+                .collect::<Vec<_>>(),
+            vec!["exec_command", "lookup"]
+        );
+        assert_eq!(projection.rlm_history().len(), 2);
     }
 }

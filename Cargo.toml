@@ -5,6 +5,8 @@ members = [
     "lash-trace-viewer",
     "lash-rlm-types",
     "lash",
+    "lash-sqlite-store",
+    "lash-embed",
     "lash-default-tools",
     "lash-mode-rlm",
     "lash-mode-standard",
@@ -28,9 +30,12 @@ members = [
     "lash-export",
     "lash-file-index",
     "lashlang",
+    "examples/mock-chat-service",
+    "examples/openrouter-chat-ui",
     "bench/longcot/runner",
     "bench/longmemeval-rlm/runner",
     "bench/swebench/runner",
+    "bench/continual-learning-bench/runner",
 ]
 resolver = "3"
 

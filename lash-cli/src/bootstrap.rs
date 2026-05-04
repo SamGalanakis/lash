@@ -81,7 +81,6 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
             capability_registry.add(Arc::new(TierCapability::new(
                 name,
                 None,
-                Vec::<String>::new(),
                 TierExecutionMode::Inherit,
             )));
         }

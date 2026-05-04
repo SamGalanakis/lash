@@ -1,12 +1,14 @@
 use super::*;
 
-impl RuntimeSessionManager {
+impl DirectCompletionCapability {
     pub(in crate::runtime::session_manager) async fn direct_completion(
         &self,
+        current: &CurrentSessionCapability,
+        usage_capability: &UsageCapability,
         mut request: crate::DirectRequest,
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
-        let mut provider = self.current.policy.provider.clone();
+        let mut provider = current.policy.provider.clone();
         let model = if let Some(selection) = provider.default_agent_model(&request.model) {
             if request.model_variant.is_none() {
                 request.model_variant = selection.variant;
@@ -25,13 +27,13 @@ impl RuntimeSessionManager {
             .await
             .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
         let llm_request = crate::direct::build_llm_request(&provider, request, model.clone());
-        let llm_call_id = if self.current.host.core.trace_sink.is_some() {
+        let llm_call_id = if current.host.core.trace_sink.is_some() {
             let id = uuid::Uuid::new_v4().to_string();
             crate::trace::emit_trace(
-                &self.current.host.core.trace_sink,
-                &self.current.host.core.trace_context,
+                &current.host.core.trace_sink,
+                &current.host.core.trace_context,
                 lash_trace::TraceContext::default()
-                    .for_session(self.current.session_id.clone())
+                    .for_session(current.session_id.clone())
                     .for_llm_call(id.clone()),
                 lash_trace::TraceEvent::LlmCallStarted {
                     request: crate::trace::trace_llm_request(&llm_request),
@@ -46,10 +48,10 @@ impl RuntimeSessionManager {
             Err(err) => {
                 if let Some(llm_call_id) = llm_call_id {
                     crate::trace::emit_trace(
-                        &self.current.host.core.trace_sink,
-                        &self.current.host.core.trace_context,
+                        &current.host.core.trace_sink,
+                        &current.host.core.trace_context,
                         lash_trace::TraceContext::default()
-                            .for_session(self.current.session_id.clone())
+                            .for_session(current.session_id.clone())
                             .for_llm_call(llm_call_id),
                         lash_trace::TraceEvent::LlmCallFailed {
                             error: lash_trace::TraceError {
@@ -67,10 +69,10 @@ impl RuntimeSessionManager {
         };
         if let Some(llm_call_id) = llm_call_id {
             crate::trace::emit_trace(
-                &self.current.host.core.trace_sink,
-                &self.current.host.core.trace_context,
+                &current.host.core.trace_sink,
+                &current.host.core.trace_context,
                 lash_trace::TraceContext::default()
-                    .for_session(self.current.session_id.clone())
+                    .for_session(current.session_id.clone())
                     .for_llm_call(llm_call_id),
                 lash_trace::TraceEvent::LlmCallCompleted {
                     response: crate::trace::trace_llm_response(
@@ -90,8 +92,10 @@ impl RuntimeSessionManager {
             cached_input_tokens: response.usage.cached_input_tokens,
             reasoning_tokens: response.usage.reasoning_tokens,
         };
-        self.record_token_usage(usage_source, &model, &usage);
-        self.persist_current_usage_ledger().await?;
+        usage_capability.record_token_usage(usage_source, &model, &usage);
+        usage_capability
+            .persist_current_usage_ledger(current)
+            .await?;
         Ok(crate::DirectCompletion {
             text: response.full_text,
             usage,

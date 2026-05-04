@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use lash::{PersistedSessionConfig, SessionGraph, SessionHead, Store};
+use lash::{PersistedSessionConfig, SessionGraph, SessionHead};
+use lash_sqlite_store::Store;
 
 use crate::session_log::{self, SessionLogger, SessionStart};
 

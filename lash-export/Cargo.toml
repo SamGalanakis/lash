@@ -5,7 +5,8 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash", features = ["sqlite-store"] }
+lash = { path = "../lash" }
+lash-sqlite-store = { path = "../lash-sqlite-store" }
 lash-rlm-types = { path = "../lash-rlm-types" }
 anyhow = "1"
 pulldown-cmark = "0.13"

@@ -379,14 +379,20 @@ def run_task(
         env = os.environ.copy()
         env["LASH_HOME"] = str(lash_home)
         env.pop("APPWORLD_ROOT", None)
-        proc = subprocess.run(
-            cmd,
-            cwd=workspace,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=args.timeout_seconds,
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=workspace,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=args.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            (task_dir / "stdout.txt").write_text(exc.stdout or "")
+            (task_dir / "stderr.txt").write_text(exc.stderr or "")
+            (task_dir / "return-code.txt").write_text("timeout\n")
+            raise
         (task_dir / "stdout.txt").write_text(proc.stdout)
         (task_dir / "stderr.txt").write_text(proc.stderr)
         (task_dir / "return-code.txt").write_text(str(proc.returncode) + "\n")

@@ -3,6 +3,7 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow};
 use lash::provider::ProviderHandle;
+use lash_sqlite_store::Store;
 
 use crate::persistence::{persist_committed_runtime_state, snapshot_execution_state};
 use crate::session_bootstrap::SessionBootstrap;
@@ -10,7 +11,7 @@ use crate::session_log::SessionLogger;
 
 async fn persist_parent_root_snapshot(
     runtime: &mut lash::LashRuntime,
-    store: &lash::Store,
+    store: &Store,
 ) -> Result<()> {
     let mut state = runtime.export_persistence_state();
     snapshot_execution_state(runtime, &mut state)
@@ -549,8 +550,8 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn materialize_child_from_graph(
     child_session_id: &str,
-    child_store: &lash::Store,
-    parent_store: &lash::Store,
+    child_store: &Store,
+    parent_store: &Store,
     graph: &lash::SessionGraph,
     config: &lash::PersistedSessionConfig,
     checkpoint_ref: Option<&lash::BlobRef>,
@@ -679,7 +680,7 @@ mod fork_tests {
         }
     }
 
-    fn save_persisted_root(store: &lash::Store, graph: lash::SessionGraph, iteration: usize) {
+    fn save_persisted_root(store: &Store, graph: lash::SessionGraph, iteration: usize) {
         let checkpoint_ref = store
             .put_checkpoint(&persisted_checkpoint(iteration))
             .checkpoint_ref;
@@ -730,7 +731,7 @@ mod fork_tests {
 
         let parent_filename = "parent.db".to_string();
         let parent_path = session_log::sessions_dir().join(&parent_filename);
-        let parent_store = Arc::new(lash::Store::open(&parent_path).expect("parent store"));
+        let parent_store = Arc::new(Store::open(&parent_path).expect("parent store"));
         let parent_logger = SessionLogger::new(
             Arc::clone(&parent_store),
             parent_filename.clone(),
@@ -774,8 +775,8 @@ mod fork_tests {
 
         let child_filename = session_log::filename_for_session_identifier(&child.session_id)
             .expect("child filename");
-        let child_store = lash::Store::open(&session_log::sessions_dir().join(child_filename))
-            .expect("child store");
+        let child_store =
+            Store::open(&session_log::sessions_dir().join(child_filename)).expect("child store");
         let child_meta = child_store.load_session_meta().expect("child meta");
         assert_eq!(child.session_id, child_meta.session_id);
         assert_eq!(child.session_name, child_meta.session_name);

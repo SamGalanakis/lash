@@ -4,8 +4,9 @@ use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState, fres
 use lash::{
     CachedModelCatalog, DynamicStateSnapshot, DynamicToolProvider, ExecutionMode, LashRuntime,
     PersistedSessionConfig, PersistedSessionState, PersistedTurnState, PromptUsage, ProviderHandle,
-    Store, TokenUsage,
+    TokenUsage,
 };
+use lash_sqlite_store::Store;
 
 use crate::app::{App, UiTimelineItem};
 use crate::session_log;

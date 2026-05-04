@@ -917,29 +917,25 @@ pub enum PluginRuntimeEvent {
 
 #[derive(Clone, Debug)]
 pub struct TurnResultSummary {
-    pub status: crate::TurnStatus,
+    pub outcome: crate::TurnOutcome,
     pub assistant_output: crate::runtime::AssistantOutput,
     pub has_plugin_visible_output: bool,
-    pub done_reason: crate::runtime::DoneReason,
     pub execution: crate::runtime::ExecutionSummary,
     pub token_usage: crate::TokenUsage,
     pub tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     pub errors: Arc<Vec<crate::runtime::TurnIssue>>,
-    pub typed_finish: Option<serde_json::Value>,
 }
 
 impl TurnResultSummary {
     pub fn from_assembled(turn: &AssembledTurn) -> Self {
         Self {
-            status: turn.status.clone(),
+            outcome: turn.outcome.clone(),
             assistant_output: turn.assistant_output.clone(),
             has_plugin_visible_output: turn.has_plugin_visible_output,
-            done_reason: turn.done_reason.clone(),
             execution: turn.execution.clone(),
             token_usage: turn.token_usage.clone(),
             tool_calls: Arc::new(turn.tool_calls.clone()),
             errors: Arc::new(turn.errors.clone()),
-            typed_finish: turn.typed_finish.clone(),
         }
     }
 }

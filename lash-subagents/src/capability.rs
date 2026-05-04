@@ -1,44 +1,71 @@
 //! Pluggable capability model for subagents.
 //!
 //! A `Capability` describes how to translate a `spawn_agent { capability: "name" }`
-//! call into the model, execution mode, and tool denylist of the spawned
-//! session. Built-in `low` / `medium` / `high` tiers are tiny `TierCapability`
-//! instances; downstream code can register arbitrary additional impls
-//! (different model lookup, dynamic inheritance, config-driven, …) without
-//! touching the spawn pipeline.
+//! call into the model, execution mode, tool surface, and recursion authority
+//! of the spawned session. Built-in `explore` / `peer` tiers are tiny
+//! `TierCapability` instances; downstream code can register arbitrary
+//! additional impls (different model lookup, dynamic inheritance,
+//! config-driven, ...) without touching the spawn pipeline.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use lash::{ExecutionMode, ProviderHandle, SessionPolicy};
+use lash::{ExecutionMode, ProviderHandle, SessionPolicy, ToolDefinition};
 
 /// State the registry exposes to a `Capability` while it resolves a spawn.
 pub struct CapabilityContext<'a> {
     pub parent_policy: &'a SessionPolicy,
-    pub parent_denied_tools: &'a HashSet<String>,
 }
 
-/// Resolved spawn configuration. Each field with `None` means "inherit from
-/// the parent session"; concrete values override.
+/// Required policy field resolved by a capability.
+#[derive(Clone, Debug)]
+pub enum CapabilityField<T> {
+    Inherit,
+    Set(T),
+}
+
+/// Optional policy field resolved by a capability.
+#[derive(Clone, Debug)]
+pub enum CapabilityOptionalField<T> {
+    Inherit,
+    Set(T),
+    Clear,
+}
+
+/// Tool definitions a child session should receive.
+#[derive(Clone, Debug)]
+pub enum CapabilityToolSurface {
+    InheritParent,
+    BuiltinExplore,
+    CognitionOnly,
+    Explicit(Vec<ToolDefinition>),
+}
+
+/// Whether a spawned session may expose recursive subagent tools.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityRecursion {
+    Inherit,
+    Disabled,
+}
+
+/// Resolved spawn configuration.
+#[derive(Clone, Debug)]
 pub struct CapabilitySpec {
-    pub model: Option<String>,
-    pub model_variant: Option<String>,
-    pub execution_mode: Option<ExecutionMode>,
-    pub denied_tools: DenyList,
+    pub model: CapabilityField<String>,
+    pub model_variant: CapabilityOptionalField<String>,
+    pub execution_mode: CapabilityField<ExecutionMode>,
+    pub tool_surface: CapabilityToolSurface,
+    pub recursion: CapabilityRecursion,
 }
 
-/// Tool denylist semantics. `Replace` discards whatever the parent denied;
-/// `AddTo` extends the parent's list with extra entries.
-pub enum DenyList {
-    Replace(HashSet<String>),
-    AddTo(HashSet<String>),
-}
-
-impl DenyList {
-    pub fn apply(self, parent: &HashSet<String>) -> HashSet<String> {
-        match self {
-            DenyList::Replace(set) => set,
-            DenyList::AddTo(extra) => parent.union(&extra).cloned().collect(),
+impl CapabilitySpec {
+    pub fn inherit() -> Self {
+        Self {
+            model: CapabilityField::Inherit,
+            model_variant: CapabilityOptionalField::Inherit,
+            execution_mode: CapabilityField::Inherit,
+            tool_surface: CapabilityToolSurface::InheritParent,
+            recursion: CapabilityRecursion::Inherit,
         }
     }
 }
@@ -46,6 +73,32 @@ impl DenyList {
 pub trait Capability: Send + Sync {
     fn name(&self) -> &str;
     fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilitySpec;
+}
+
+/// Fixed capability for callers that already know the exact child authority
+/// they want and do not need provider-tier lookup.
+pub struct StaticCapability {
+    name: String,
+    spec: CapabilitySpec,
+}
+
+impl StaticCapability {
+    pub fn new(name: impl Into<String>, spec: CapabilitySpec) -> Self {
+        Self {
+            name: name.into(),
+            spec,
+        }
+    }
+}
+
+impl Capability for StaticCapability {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn resolve(&self, _ctx: &CapabilityContext<'_>) -> CapabilitySpec {
+        self.spec.clone()
+    }
 }
 
 /// How a tier picks its execution mode relative to the parent session.
@@ -56,13 +109,12 @@ pub enum TierExecutionMode {
 }
 
 /// Built-in capability that maps a tier name to: an optional explicit
-/// model, a denylist, and an execution mode policy. Reproduces the historic
-/// low/medium/high behaviour exactly when registered through
-/// [`default_registry`].
+/// model, execution mode policy, and the conventional `explore` / `peer`
+/// authority split. Reproduces the historic tiered model behaviour when
+/// registered through [`default_registry`].
 pub struct TierCapability {
     name: String,
     model: Option<String>,
-    denied_tools: HashSet<String>,
     execution_mode: TierExecutionMode,
 }
 
@@ -70,13 +122,11 @@ impl TierCapability {
     pub fn new(
         name: impl Into<String>,
         model: Option<String>,
-        denied_tools: impl IntoIterator<Item = String>,
         execution_mode: TierExecutionMode,
     ) -> Self {
         Self {
             name: name.into(),
             model,
-            denied_tools: denied_tools.into_iter().collect(),
             execution_mode,
         }
     }
@@ -90,14 +140,28 @@ impl Capability for TierCapability {
     fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilitySpec {
         let (model, variant) = pick_tier_model(self, ctx.parent_policy);
         let execution_mode = match &self.execution_mode {
-            TierExecutionMode::Inherit => None,
-            TierExecutionMode::Explicit(mode) => Some(mode.clone()),
+            TierExecutionMode::Inherit => CapabilityField::Inherit,
+            TierExecutionMode::Explicit(mode) => CapabilityField::Set(mode.clone()),
         };
+        let model_variant = match variant {
+            Some(variant) => CapabilityOptionalField::Set(variant),
+            None => CapabilityOptionalField::Inherit,
+        };
+        let is_explore = self.name == "explore";
         CapabilitySpec {
-            model: Some(model),
-            model_variant: variant,
+            model: CapabilityField::Set(model),
+            model_variant,
             execution_mode,
-            denied_tools: DenyList::Replace(self.denied_tools.clone()),
+            tool_surface: if is_explore {
+                CapabilityToolSurface::BuiltinExplore
+            } else {
+                CapabilityToolSurface::InheritParent
+            },
+            recursion: if is_explore {
+                CapabilityRecursion::Disabled
+            } else {
+                CapabilityRecursion::Inherit
+            },
         }
     }
 }
@@ -198,13 +262,11 @@ pub fn default_registry(
     registry.add(Arc::new(TierCapability::new(
         "explore",
         model_for("explore"),
-        ["apply_patch".to_string(), "spawn_agent".to_string()],
         TierExecutionMode::Explicit(explore_tier_execution_mode),
     )));
     registry.add(Arc::new(TierCapability::new(
         "peer",
         model_for("peer"),
-        Vec::<String>::new(),
         TierExecutionMode::Inherit,
     )));
     registry

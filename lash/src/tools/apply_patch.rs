@@ -52,7 +52,6 @@ It is important to remember:
 #[derive(Default)]
 pub struct ApplyPatchTool;
 
-#[cfg(feature = "sqlite-store")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchAction {
     Add,
@@ -60,7 +59,6 @@ pub enum PatchAction {
     Update,
 }
 
-#[cfg(feature = "sqlite-store")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchFileOp {
     pub action: PatchAction,
@@ -181,7 +179,6 @@ fn execute_apply_patch_sync(input: &str, workdir: Option<&str>) -> ToolResult {
     }))
 }
 
-#[cfg(feature = "sqlite-store")]
 pub fn inspect_patch_ops(input: &str, workdir: Option<&str>) -> Result<Vec<PatchFileOp>, String> {
     let patch = parse_patch(input)?;
     let cwd = resolve_patch_workdir(workdir)?;

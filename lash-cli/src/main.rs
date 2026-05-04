@@ -659,8 +659,10 @@ mod tests {
     fn autonomous_renderer_reports_session_handoff() {
         let mut renderer = AutonomousRenderer::new();
         let handoff = renderer
-            .handle(SessionEvent::SessionHandoff {
-                session_id: "next".to_string(),
+            .handle(SessionEvent::TurnOutcome {
+                outcome: lash::TurnOutcome::Handoff {
+                    session_id: "next".to_string(),
+                },
             })
             .expect("handle handoff");
 
@@ -671,14 +673,15 @@ mod tests {
     fn turn_has_visible_output_accepts_plugin_rendered_turns() {
         let turn = AssembledTurn {
             state: SessionStateEnvelope::default(),
-            status: TurnStatus::Completed,
+            outcome: lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+                text: String::new(),
+            }),
             assistant_output: AssistantOutput {
                 safe_text: String::new(),
                 raw_text: String::new(),
                 state: OutputState::Usable,
             },
             has_plugin_visible_output: true,
-            done_reason: DoneReason::ModelStop,
             execution: ExecutionSummary {
                 mode: ExecutionMode::standard(),
                 had_tool_calls: false,
@@ -687,8 +690,6 @@ mod tests {
             token_usage: TokenUsage::default(),
             tool_calls: Vec::new(),
             errors: Vec::new(),
-            typed_finish: None,
-            handoff_successor_session_id: None,
         };
 
         assert!(turn_has_visible_output(&turn));

@@ -43,7 +43,9 @@ impl AutonomousRenderer {
 
     pub(crate) fn handle(&mut self, event: SessionEvent) -> Result<Option<String>, String> {
         let handoff_session_id = match &event {
-            SessionEvent::SessionHandoff { session_id } => Some(session_id.clone()),
+            SessionEvent::TurnOutcome {
+                outcome: lash::TurnOutcome::Handoff { session_id },
+            } => Some(session_id.clone()),
             _ => None,
         };
         match event {
@@ -145,9 +147,8 @@ impl AutonomousRenderer {
             | SessionEvent::ChildTokenUsage { .. }
             | SessionEvent::InjectedTurnInputAccepted { .. }
             | SessionEvent::InjectedMessagesCommitted { .. }
-            | SessionEvent::SessionHandoff { .. }
-            | SessionEvent::LlmResponse { .. }
-            | SessionEvent::TypedFinish { .. } => {}
+            | SessionEvent::TurnOutcome { .. }
+            | SessionEvent::LlmResponse { .. } => {}
         }
         Ok(handoff_session_id)
     }
@@ -322,7 +323,10 @@ pub(crate) async fn run_autonomous(
         let outcome = run_autonomous_turn(runtime, turn_input, &mut renderer, stream_id).await?;
         let mut turn_done = outcome.done;
         if let Some(session_id) = outcome.handoff_session_id {
-            if turn_done.result.status != TurnStatus::Completed {
+            if !matches!(
+                &turn_done.result.outcome,
+                lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+            ) {
                 break (turn_done, outcome.cancel);
             }
             turn_input = activate_autonomous_handoff(&mut turn_done.runtime, &session_id).await?;
@@ -373,8 +377,8 @@ pub(crate) async fn run_autonomous(
         std::fs::write(path, serde_json::to_vec_pretty(&usage_artifact)?)?;
     }
 
-    match done.result.status {
-        TurnStatus::Completed => {
+    match &done.result.outcome {
+        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => {
             let turn = &done.result;
             if !turn.assistant_output.safe_text.is_empty() {
                 renderer.finish_output(&turn.assistant_output.safe_text);
@@ -402,7 +406,7 @@ pub(crate) async fn run_autonomous(
                 std::process::exit(1);
             }
         }
-        _ => {
+        lash::TurnOutcome::Stopped(_) => {
             for issue in &done.result.errors {
                 eprintln!("error: {}", issue.message);
             }

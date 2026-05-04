@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use lash::{AssembledTurn, TurnInput, TurnStatus};
+use lash::{AssembledTurn, TurnFinish, TurnInput, TurnOutcome, TurnStop};
 use serde_json::{Value, json};
 
 use crate::types::WaitAgentEvent;
@@ -135,16 +135,16 @@ pub(crate) fn queue_event(tree: &mut AgentTree, event: WaitAgentEvent) {
 }
 
 pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
-    if let Some(record) = turn
-        .tool_calls
-        .iter()
-        .rev()
-        .find(|record| record.tool == "submit_error" && record.success)
-    {
-        return record.args.clone();
-    }
-    if let Some(value) = &turn.typed_finish {
-        return value.clone();
+    match &turn.outcome {
+        TurnOutcome::Finished(TurnFinish::Submission { value, .. }) => return value.clone(),
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) => {
+            if !text.trim().is_empty() {
+                return json!(text.trim().to_string());
+            }
+        }
+        TurnOutcome::Stopped(TurnStop::SubmittedError { value, .. }) => return value.clone(),
+        TurnOutcome::Handoff { session_id } => return json!({ "session_id": session_id }),
+        TurnOutcome::Stopped(_) => {}
     }
     if !turn.assistant_output.safe_text.trim().is_empty() {
         return json!(turn.assistant_output.safe_text.trim().to_string());
@@ -159,16 +159,7 @@ pub(crate) fn task_completion_event(
 ) -> WaitAgentEvent {
     match outcome {
         Ok(turn) => {
-            let submitted_error = turn
-                .tool_calls
-                .iter()
-                .rev()
-                .find(|record| record.tool == "submit_error" && record.success);
-            let status = if submitted_error.is_some() {
-                "failed"
-            } else {
-                turn_status_label(&turn.status)
-            };
+            let status = turn_outcome_label(&turn.outcome);
             agent.last_task_state = Some(status.to_string());
             agent.last_iterations = Some(turn.state.iteration);
             agent.last_tool_calls = Some(turn.state.read_view().tool_calls().len());
@@ -185,14 +176,7 @@ pub(crate) fn task_completion_event(
                 task,
                 status: status.to_string(),
                 result: task_result_value(turn),
-                error: submitted_error.map(|record| {
-                    record
-                        .args
-                        .get("reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Subagent reported an error.")
-                        .to_string()
-                }),
+                error: submitted_error_message(&turn.outcome),
             }
         }
         Err(_) => {
@@ -218,12 +202,25 @@ pub(crate) fn task_completion_event(
     }
 }
 
-pub(crate) fn turn_status_label(status: &TurnStatus) -> &'static str {
-    match status {
-        TurnStatus::Completed => "completed",
-        TurnStatus::Interrupted => "interrupted",
-        TurnStatus::Failed => "failed",
+pub(crate) fn turn_outcome_label(outcome: &TurnOutcome) -> &'static str {
+    match outcome {
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => "completed",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "interrupted",
+        TurnOutcome::Stopped(_) => "failed",
     }
+}
+
+pub(crate) fn submitted_error_message(outcome: &TurnOutcome) -> Option<String> {
+    if let TurnOutcome::Stopped(TurnStop::SubmittedError { value, .. }) = outcome {
+        return Some(
+            value
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("Subagent reported an error.")
+                .to_string(),
+        );
+    }
+    None
 }
 
 #[cfg(test)]
@@ -233,9 +230,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_result_value_prefers_typed_finish() {
+    fn task_result_value_prefers_submission_outcome() {
         let mut turn = mock_assembled_turn("child", "fallback");
-        turn.typed_finish = Some(json!({ "answer": "ok" }));
+        turn.outcome = TurnOutcome::Finished(TurnFinish::Submission {
+            channel_id: "rlm.submit".to_string(),
+            value: json!({ "answer": "ok" }),
+        });
         assert_eq!(task_result_value(&turn), json!({ "answer": "ok" }));
     }
 }

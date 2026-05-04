@@ -1,14 +1,17 @@
 use super::*;
 use std::sync::atomic::Ordering;
 
-impl RuntimeSessionManager {
+impl CurrentSessionCapability {
     pub(in crate::runtime::session_manager) async fn append_session_nodes(
         &self,
+        managed: &ManagedSessionCapability,
+        usage: &UsageCapability,
+        background: &BackgroundTaskCapability,
         session_id: &str,
         request: crate::AppendSessionNodesRequest,
     ) -> Result<crate::AppendSessionNodesResult, crate::PluginError> {
         if let Some(runtime) = {
-            let registry = self.managed.registry.lock().await;
+            let registry = managed.registry.lock().await;
             registry.get(session_id).cloned()
         } {
             let mut runtime = runtime.lock().await;
@@ -18,27 +21,27 @@ impl RuntimeSessionManager {
                 .map_err(|err| crate::PluginError::Session(err.to_string()));
         }
 
-        if session_id != self.current.session_id {
+        if session_id != self.session_id {
             return Err(crate::PluginError::Session(format!(
                 "unknown session `{session_id}`"
             )));
         }
 
-        let Some(store) = &self.current.store else {
+        let Some(store) = &self.store else {
             return Err(crate::PluginError::Session(
                 "session graph mutation requires a runtime store".to_string(),
             ));
         };
 
-        let mut state = if self.usage.persist_to_store {
+        let mut state = if usage.persist_to_store {
             self.current_snapshot_for_store_write().await
         } else {
-            let mut state = self.current.snapshot.to_snapshot();
+            let mut state = self.snapshot.to_snapshot();
             super::normalize_session_graph(&mut state);
             state
         };
-        let usage_deltas = if self.usage.persist_to_store {
-            self.merge_drained_token_ledger(&mut state)
+        let usage_deltas = if usage.persist_to_store {
+            usage.merge_drained_token_ledger(&mut state)
         } else {
             Vec::new()
         };
@@ -68,7 +71,7 @@ impl RuntimeSessionManager {
             .await
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         state.apply_persisted_commit_result(result);
-        self.background.sync_needed.store(true, Ordering::Release);
+        background.sync_needed.store(true, Ordering::Release);
         Ok(crate::AppendSessionNodesResult::Appended {
             node_ids,
             leaf_node_id,

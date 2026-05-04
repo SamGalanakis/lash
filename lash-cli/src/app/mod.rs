@@ -34,10 +34,6 @@ pub(crate) use self::projection::{
     preview_text_lines, smart_truncate_preview_line, strip_ansi_escape_sequences,
     timeline_from_read_view,
 };
-#[cfg(test)]
-pub(crate) use self::projection::{
-    interrupted_blocks_from_read_view_parts, timeline_items_from_read_view_parts,
-};
 
 fn user_turn_start_indices(blocks: &[UiTimelineItem]) -> Vec<usize> {
     blocks
@@ -1600,8 +1596,7 @@ impl App {
             SessionEvent::InjectedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
-            SessionEvent::SessionHandoff { .. } => {}
-            SessionEvent::TypedFinish { .. } => {}
+            SessionEvent::TurnOutcome { .. } => {}
             SessionEvent::LlmResponse { .. } => {}
             SessionEvent::Prompt { .. } => {
                 // Handled by the main event loop, not here

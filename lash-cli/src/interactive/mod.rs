@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossterm::event::Event as TermEvent;
 use lash::session_model::Message;
 use lash::*;
+use lash_sqlite_store::Store;
 use lash_subagents::SubagentHost;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_ui::{UiCommandInvocation, UiContext, UiExtensions};
@@ -411,8 +412,7 @@ pub(crate) async fn run_app(
                 Ok(done) => {
                     tracing::debug!(
                         stream_id = done.stream_id,
-                        status = ?done.result.status,
-                        done_reason = ?done.result.done_reason,
+                        outcome = ?done.result.outcome,
                         active_stream_id,
                         "runtime return received in interactive loop"
                     );
@@ -515,14 +515,18 @@ pub(crate) async fn run_app(
                         );
                         continue;
                     }
-                    let interrupted = matches!(done.result.status, TurnStatus::Interrupted);
-                    let no_visible_output = matches!(done.result.status, TurnStatus::Completed)
-                        && !turn_has_visible_output(&done.result);
+                    let interrupted = matches!(
+                        &done.result.outcome,
+                        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
+                    );
+                    let no_visible_output = matches!(
+                        &done.result.outcome,
+                        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+                    ) && !turn_has_visible_output(&done.result);
                     let state = done.result.state;
                     tracing::info!(
                         iteration = state.iteration,
-                        status = ?done.result.status,
-                        reason = ?done.result.done_reason,
+                        outcome = ?done.result.outcome,
                         assistant_chars = done.result.assistant_output.safe_text.len(),
                         plugin_visible_output = done.result.has_plugin_visible_output,
                         "runtime turn completed"
@@ -558,8 +562,7 @@ pub(crate) async fn run_app(
                     tracing::debug!(
                         stream_id = done.stream_id,
                         iteration = state.iteration,
-                        status = ?done.result.status,
-                        reason = ?done.result.done_reason,
+                        outcome = ?done.result.outcome,
                         messages = read_view.messages().len(),
                         blocks = app.timeline.len(),
                         had_live_turn = app.live_turn.is_some(),
@@ -1018,7 +1021,10 @@ pub(crate) async fn run_app(
                     if let SessionEvent::InjectedTurnInputAccepted { messages, .. } = &event {
                         app.acknowledge_monitor_wakes(messages);
                     }
-                    if let SessionEvent::SessionHandoff { session_id } = &event {
+                    if let SessionEvent::TurnOutcome {
+                        outcome: lash::TurnOutcome::Handoff { session_id },
+                    } = &event
+                    {
                         pending_handoff_session_id = Some(session_id.clone());
                     }
                     app.handle_session_event(event);

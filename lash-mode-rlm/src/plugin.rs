@@ -329,12 +329,10 @@ impl ModeSessionPlugin for RlmModeSession {
         if let Ok(Some(RlmCreateExtras { termination })) = request
             .mode_extras
             .decode::<RlmCreateExtras>(&ExecutionMode::new("rlm"))
-        {
-            if let Ok(options) =
+            && let Ok(options) =
                 lash::ModeTurnOptions::typed(ExecutionMode::new("rlm"), termination)
-            {
-                ctx.set_mode_turn_options(options);
-            }
+        {
+            ctx.set_mode_turn_options(options);
         }
     }
 }

@@ -537,15 +537,12 @@ fn subagent_terminal_state(outcome: &Result<AssembledTurn, lash::PluginError>) -
     let Ok(turn) = outcome else {
         return ManagedRunState::Failed;
     };
-    let submitted_error = turn
-        .tool_calls
-        .iter()
-        .rev()
-        .any(|record| record.tool == "submit_error" && record.success);
-    if submitted_error || turn.status != lash::TurnStatus::Completed {
-        ManagedRunState::Failed
-    } else {
-        ManagedRunState::Completed
+    match &turn.outcome {
+        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => {
+            ManagedRunState::Completed
+        }
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => ManagedRunState::Cancelled,
+        lash::TurnOutcome::Stopped(_) => ManagedRunState::Failed,
     }
 }
 

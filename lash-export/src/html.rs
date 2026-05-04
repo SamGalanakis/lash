@@ -11,11 +11,10 @@
 //! offline the page falls back to system mono and stays fully readable.
 //! All CSS and JS are inlined — drop the file anywhere.
 //!
-//! Tool calls are rendered exactly once. The chronological projection emits
-//! both an assistant `Message` containing a `PartKind::ToolCall` part *and*
-//! a separate `ChronologicalPayload::ToolCall` entry with the full record;
-//! we suppress the in-message part because the standalone entry is the
-//! canonical view (args + result + duration + status).
+//! Tool calls are rendered from the chronological projection only. Assistant
+//! `Message` parts that describe tool calls are suppressed because the
+//! projection's tool-call payloads are the canonical view (args + result +
+//! duration + status).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -87,7 +86,6 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
         ..SessionStats::default()
     };
     let mut tool_counts: HashMap<String, usize> = HashMap::new();
-    let mut seen_tool_keys = std::collections::HashSet::new();
 
     let record_tool_call = |s: &mut SessionStats,
                             tool_counts: &mut HashMap<String, usize>,
@@ -124,10 +122,7 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
                 }
             }
             ChronologicalPayload::ToolCall(record) => {
-                let key = lash::chronological_tool_call_key(record);
-                if seen_tool_keys.insert(key) {
-                    record_tool_call(&mut s, &mut tool_counts, record);
-                }
+                record_tool_call(&mut s, &mut tool_counts, record);
             }
             ChronologicalPayload::RlmStep(step) => {
                 s.rlm_iterations += 1;
@@ -137,10 +132,7 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
                 s.total_chars = s.total_chars.saturating_add(step.output_chars());
                 s.total_chars = s.total_chars.saturating_add(step.code.chars().count());
                 for record in &step.tool_calls {
-                    let key = lash::chronological_tool_call_key(record);
-                    if seen_tool_keys.insert(key) {
-                        record_tool_call(&mut s, &mut tool_counts, record);
-                    }
+                    record_tool_call(&mut s, &mut tool_counts, record);
                 }
             }
         }
@@ -153,10 +145,9 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
     s
 }
 
-// ─── render context (used during walk to dedupe tool calls) ─────────────────
+// ─── render context ─────────────────────────────────────────────────────────
 
 struct RenderCtx<'a> {
-    seen_tool_keys: std::collections::HashSet<String>,
     next_index: usize,
     stats: &'a SessionStats,
 }
@@ -164,7 +155,6 @@ struct RenderCtx<'a> {
 impl<'a> RenderCtx<'a> {
     fn new(stats: &'a SessionStats) -> Self {
         Self {
-            seen_tool_keys: std::collections::HashSet::new(),
             next_index: 0,
             stats,
         }
@@ -401,23 +391,6 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
     let mut last_hash: Option<String> = None;
     let mut first_seen: HashMap<String, PromptAnchor> = HashMap::new();
 
-    // Collect every tool_call key that belongs to an RlmStep so we can skip
-    // its standalone chronological entry — it'll render nested under the
-    // step instead, putting the lashlang body that fired it directly above.
-    let nested_tool_keys: HashSet<String> = session
-        .chronological
-        .iter()
-        .filter_map(|entry| match &entry.payload {
-            ChronologicalPayload::RlmStep(step) => Some(step),
-            _ => None,
-        })
-        .flat_map(|step| {
-            step.tool_calls
-                .iter()
-                .map(lash::chronological_tool_call_key)
-        })
-        .collect();
-
     // Identify assistant messages that just echo the prior RlmStep's submit
     // value — they're a runtime side-effect of `submit`, not a separate
     // model utterance. Suppressing avoids showing the same text twice.
@@ -488,13 +461,6 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
                 render_message(&mut entries, &mut spine, ctx, message);
             }
             ChronologicalPayload::ToolCall(record) => {
-                let key = lash::chronological_tool_call_key(record);
-                if nested_tool_keys.contains(&key) {
-                    continue;
-                }
-                if !ctx.seen_tool_keys.insert(key) {
-                    continue;
-                }
                 render_tool_call_entry(&mut entries, &mut spine, ctx, record, None);
             }
             ChronologicalPayload::RlmStep(step) => {
@@ -1299,10 +1265,6 @@ fn render_rlm_step(
 
     // Render nested tool calls as child entries.
     for record in &step.tool_calls {
-        let key = lash::chronological_tool_call_key(record);
-        if !ctx.seen_tool_keys.insert(key) {
-            continue;
-        }
         render_tool_call_entry(out, spine, ctx, record, Some(&id));
     }
 }

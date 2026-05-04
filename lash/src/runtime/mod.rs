@@ -44,7 +44,7 @@ use crate::{
     CheckpointKind, ExecutionMode, ExternalInvokeError, PersistentRuntimeServices,
     PromptHookContext, RuntimeServices, RuntimeSessionHost, SandboxMessage, Session,
     SessionCreateRequest, SessionError, SessionHandle, SessionSnapshot, SessionStartPoint,
-    ToolCallRecord,
+    ToolCallRecord, TurnFinish, TurnOutcome, TurnStop,
 };
 use crate::{Effect, TurnMachine};
 
@@ -155,26 +155,6 @@ pub enum OutputState {
     RecoveredFromError,
 }
 
-/// Structured terminal status for a turn.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnStatus {
-    Completed,
-    Interrupted,
-    Failed,
-}
-
-/// Canonical reason a turn ended.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DoneReason {
-    ModelStop,
-    MaxTurns,
-    UserAbort,
-    ToolFailure,
-    RuntimeError,
-}
-
 /// RLM code execution output observed during a turn.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CodeOutputRecord {
@@ -208,11 +188,10 @@ pub struct TurnIssue {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AssembledTurn {
     pub state: SessionStateEnvelope,
-    pub status: TurnStatus,
+    pub outcome: crate::TurnOutcome,
     pub assistant_output: AssistantOutput,
     #[serde(default)]
     pub has_plugin_visible_output: bool,
-    pub done_reason: DoneReason,
     pub execution: ExecutionSummary,
     #[serde(default)]
     pub token_usage: TokenUsage,
@@ -220,15 +199,6 @@ pub struct AssembledTurn {
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
     pub errors: Vec<TurnIssue>,
-    /// When the session was started in typed RLM termination mode AND
-    /// the lashlang program ended with `submit <expr>`, this is the
-    /// captured (and schema-validated, if a schema was supplied) value.
-    /// `None` for chat-style sessions and for typed sessions that
-    /// timed out without finishing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub typed_finish: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff_successor_session_id: Option<String>,
 }
 
 /// Runtime error for unexpected failures.

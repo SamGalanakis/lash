@@ -3,7 +3,7 @@
 //!
 //! Anything that is genuinely mode-agnostic — argument parsing, schema
 //! validation, child-session request shaping, capability lookup,
-//! tool-surface deny resolution, output-schema rendering — lives here.
+//! tool-surface authority resolution, output-schema rendering — lives here.
 //! Per-mode prose, tool descriptions, and dispatch live in `standard.rs`
 //! and `rlm.rs`.
 
@@ -19,7 +19,10 @@ use lash::{
 use lash_rlm_types::RlmTermination;
 use serde_json::{Value, json};
 
-use crate::capability::{CapabilityContext, CapabilityRegistry};
+use crate::capability::{
+    CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRecursion,
+    CapabilityRegistry, CapabilitySpec, CapabilityToolSurface,
+};
 
 pub(crate) fn fresh_child_request(
     parent_session_id: String,
@@ -49,36 +52,54 @@ pub(crate) fn build_session_policy(
     current_policy: &SessionPolicy,
     capability_name: &str,
 ) -> Result<SessionPolicy, String> {
+    let spec = resolve_capability_spec(registry, current_policy, capability_name)?;
+    Ok(session_policy_from_spec(&spec, current_policy))
+}
+
+pub(crate) fn resolve_capability_spec(
+    registry: &CapabilityRegistry,
+    current_policy: &SessionPolicy,
+    capability_name: &str,
+) -> Result<CapabilitySpec, String> {
     let capability = registry
         .get(capability_name)
         .ok_or_else(|| unknown_capability_message(capability_name, registry))?;
-    // Subagent denylist semantics today never read the parent's denylist
-    // (TierCapability returns DenyList::Replace), so passing an empty
-    // parent set is correct. When a future Capability uses
-    // DenyList::AddTo, this is the right hook to thread the parent's
-    // actual denylist through.
-    let parent_denied: HashSet<String> = HashSet::new();
-    let spec = capability.resolve(&CapabilityContext {
+    Ok(capability.resolve(&CapabilityContext {
         parent_policy: current_policy,
-        parent_denied_tools: &parent_denied,
-    });
-    Ok(SessionPolicy {
-        model: spec
-            .model
-            .clone()
-            .unwrap_or_else(|| current_policy.model.clone()),
-        model_variant: spec
-            .model_variant
-            .clone()
-            .or_else(|| current_policy.model_variant.clone()),
+    }))
+}
+
+fn session_policy_from_spec(
+    spec: &CapabilitySpec,
+    current_policy: &SessionPolicy,
+) -> SessionPolicy {
+    SessionPolicy {
+        model: resolve_field(&spec.model, &current_policy.model),
+        model_variant: resolve_optional_field(&spec.model_variant, &current_policy.model_variant),
         provider: current_policy.provider.clone(),
         max_context_tokens: current_policy.max_context_tokens,
         max_turns: None,
-        execution_mode: spec
-            .execution_mode
-            .unwrap_or_else(|| current_policy.execution_mode.clone()),
+        execution_mode: resolve_field(&spec.execution_mode, &current_policy.execution_mode),
         ..Default::default()
-    })
+    }
+}
+
+fn resolve_field<T: Clone>(field: &CapabilityField<T>, inherited: &T) -> T {
+    match field {
+        CapabilityField::Inherit => inherited.clone(),
+        CapabilityField::Set(value) => value.clone(),
+    }
+}
+
+fn resolve_optional_field<T: Clone>(
+    field: &CapabilityOptionalField<T>,
+    inherited: &Option<T>,
+) -> Option<T> {
+    match field {
+        CapabilityOptionalField::Inherit => inherited.clone(),
+        CapabilityOptionalField::Set(value) => Some(value.clone()),
+        CapabilityOptionalField::Clear => None,
+    }
 }
 
 pub(crate) fn normalize_context_policy(policy: &mut SessionPolicy) {
@@ -98,8 +119,11 @@ pub(crate) async fn build_spawn_create_request(
         .snapshot_session(&context.session_id)
         .await
         .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-    let mut policy = build_session_policy(registry, &current_snapshot.policy, capability_name)?;
-    if capability_name != "explore" && output_schema.is_some() {
+    let spec = resolve_capability_spec(registry, &current_snapshot.policy, capability_name)?;
+    let mut policy = session_policy_from_spec(&spec, &current_snapshot.policy);
+    if !matches!(spec.tool_surface, CapabilityToolSurface::BuiltinExplore)
+        && output_schema.is_some()
+    {
         policy.execution_mode = lash::ExecutionMode::new("rlm");
     }
     let mut mode_extras = ModeExtras::default();
@@ -119,7 +143,7 @@ pub(crate) async fn build_spawn_create_request(
     }
     normalize_context_policy(&mut policy);
 
-    let hidden_tools = resolve_hidden_tools(registry, &policy, capability_name, 0)?;
+    let hidden_tools = hidden_tools_for_spec(&spec, 0);
     let mut request = fresh_child_request(
         context.session_id.clone(),
         SessionStartPoint::Empty,
@@ -128,11 +152,7 @@ pub(crate) async fn build_spawn_create_request(
         "subagent",
     );
     request.tool_access = SessionToolAccess {
-        tools: if capability_name == "explore" {
-            explore_tools(output_schema)
-        } else {
-            Vec::new()
-        },
+        tools: tools_for_surface(&spec.tool_surface, output_schema),
         hidden_tools: hidden_tools.into_iter().collect(),
     };
     Ok(request)
@@ -349,7 +369,7 @@ pub(crate) fn llm_query_input_schema() -> Value {
 /// Tools that are inert in any subagent session because there is no
 /// human attached to the session: prompts return nothing, UI surfaces
 /// have no thread to render against. Hidden universally on top of
-/// whatever the capability's denylist resolves to. `update_plan` is
+/// the capability's explicit surface. `update_plan` is
 /// already gated to root-only by `UpdatePlanPluginFactory`, so it is
 /// not listed here.
 pub(crate) const SUBAGENT_INTERACTIVE_DENY: &[&str] =
@@ -382,6 +402,22 @@ pub(crate) fn explore_tools(output_schema: Option<Value>) -> Vec<ToolDefinition>
     tools.push(llm_query_tool_definition());
     tools.push(continue_as_tool_definition());
     tools
+}
+
+pub(crate) fn cognition_tools() -> Vec<ToolDefinition> {
+    vec![llm_query_tool_definition(), continue_as_tool_definition()]
+}
+
+fn tools_for_surface(
+    surface: &CapabilityToolSurface,
+    output_schema: Option<Value>,
+) -> Vec<ToolDefinition> {
+    match surface {
+        CapabilityToolSurface::InheritParent => Vec::new(),
+        CapabilityToolSurface::BuiltinExplore => explore_tools(output_schema),
+        CapabilityToolSurface::CognitionOnly => cognition_tools(),
+        CapabilityToolSurface::Explicit(tools) => tools.clone(),
+    }
 }
 
 pub(crate) fn llm_query_tool_definition() -> ToolDefinition {
@@ -450,34 +486,20 @@ pub(crate) fn continue_as_input_schema() -> Value {
     })
 }
 
-pub(crate) fn resolve_hidden_tools(
-    registry: &CapabilityRegistry,
-    current_policy: &SessionPolicy,
-    capability_name: &str,
-    child_depth: u8,
-) -> Result<HashSet<String>, String> {
-    let capability = registry
-        .get(capability_name)
-        .ok_or_else(|| unknown_capability_message(capability_name, registry))?;
-    let parent_denied: HashSet<String> = HashSet::new();
-    let spec = capability.resolve(&CapabilityContext {
-        parent_policy: current_policy,
-        parent_denied_tools: &parent_denied,
-    });
-    let mut denied = spec.denied_tools.apply(&parent_denied);
+pub(crate) fn hidden_tools_for_spec(spec: &CapabilitySpec, child_depth: u8) -> HashSet<String> {
+    let mut denied = HashSet::new();
     denied.extend(
         SUBAGENT_INTERACTIVE_DENY
             .iter()
             .map(|name| name.to_string()),
     );
-    if capability_name == "explore" || child_depth >= MAX_SUBAGENT_DEPTH {
+    if spec.recursion == CapabilityRecursion::Disabled || child_depth >= MAX_SUBAGENT_DEPTH {
         denied.extend(SUBAGENT_SUITE_DENY.iter().map(|name| name.to_string()));
     }
-    Ok(denied)
+    denied
 }
 
-/// Apply the spawned subagent's denied-tool list as a tool surface
-/// override. Shared between the standard and rlm provider builds.
+/// Apply the spawned subagent's tool authority as a tool surface override.
 pub(crate) fn subagent_surface_contribution(
     ctx: lash::plugin::ToolSurfaceContext,
 ) -> Result<ToolSurfaceContribution, PluginError> {

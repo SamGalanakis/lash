@@ -1,0 +1,128 @@
+name: Docs Pages
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish docs
+    if: github.ref_name == 'main' || github.ref_name == 'staging'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build branch-routed docs
+        env:
+          CURRENT_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          site_dir="_site"
+          rm -rf "${site_dir}"
+          mkdir -p "${site_dir}/main" "${site_dir}/staging"
+
+          copy_branch_docs() {
+            local branch="$1"
+            local target="${site_dir}/${branch}"
+            local tmp
+            tmp="$(mktemp -d)"
+
+            if [ "${branch}" = "${CURRENT_BRANCH}" ]; then
+              rsync -a --delete docs/ "${target}/"
+              return
+            fi
+
+            if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+              git fetch --depth=1 origin "${branch}"
+              git archive FETCH_HEAD docs | tar -x -C "${tmp}"
+              rsync -a --delete "${tmp}/docs/" "${target}/"
+            else
+              cat > "${target}/index.html" <<HTML
+          <!doctype html>
+          <html lang="en">
+          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>lash ${branch} docs</title></head>
+          <body><main><h1>lash ${branch} docs</h1><p>The ${branch} branch has not published docs yet.</p></main></body>
+          </html>
+          HTML
+            fi
+
+            if [ ! -f "${target}/index.html" ]; then
+              cat > "${target}/index.html" <<HTML
+          <!doctype html>
+          <html lang="en">
+          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>lash ${branch} docs</title></head>
+          <body>
+            <main>
+              <h1>lash ${branch} docs</h1>
+              <p><a href="./architecture.html">Architecture</a></p>
+              <p><a href="./design-language.html">Design language</a></p>
+            </main>
+          </body>
+          </html>
+          HTML
+            fi
+          }
+
+          copy_branch_docs main
+          copy_branch_docs staging
+
+          cat > "${site_dir}/index.html" <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>lash Docs</title>
+            <style>
+              body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0e0d0b; color: #e8e4d0; font: 16px/1.6 monospace; }
+              main { width: min(680px, calc(100% - 32px)); border: 1px solid rgba(232,228,208,.16); padding: 28px; background: rgba(20,20,18,.82); }
+              h1 { margin: 0 0 16px; color: #e8a33c; }
+              a { color: #e8e4d0; display: inline-block; margin-right: 16px; }
+            </style>
+          </head>
+          <body>
+            <main>
+              <h1>lash docs</h1>
+              <p>Branch-published documentation.</p>
+              <p><a href="./main/">main</a><a href="./staging/">staging</a></p>
+            </main>
+          </body>
+          </html>
+          HTML
+
+          touch "${site_dir}/.nojekyll"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

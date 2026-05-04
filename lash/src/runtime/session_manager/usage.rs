@@ -44,18 +44,18 @@ impl ChildUsageEventRelay {
     }
 }
 
-impl RuntimeSessionManager {
+impl UsageCapability {
     pub(in crate::runtime::session_manager) fn record_token_usage(
         &self,
         source: &str,
         model: &str,
         usage: &TokenUsage,
     ) {
-        record_token_usage_shared(&self.usage.token_ledger, source, model, usage);
+        record_token_usage_shared(&self.token_ledger, source, model, usage);
     }
 
     pub(in crate::runtime::session_manager) fn drain_token_ledger(&self) -> Vec<TokenLedgerEntry> {
-        let mut ledger = self.usage.token_ledger.lock().expect("token ledger lock");
+        let mut ledger = self.token_ledger.lock().expect("token ledger lock");
         std::mem::take(&mut *ledger)
     }
 
@@ -72,14 +72,15 @@ impl RuntimeSessionManager {
 
     pub(in crate::runtime::session_manager) async fn persist_current_usage_ledger(
         &self,
+        current: &CurrentSessionCapability,
     ) -> Result<(), crate::PluginError> {
-        if !self.usage.persist_to_store {
+        if !self.persist_to_store {
             return Ok(());
         }
-        let Some(store) = &self.current.store else {
+        let Some(store) = &current.store else {
             return Ok(());
         };
-        let mut state = self.current_snapshot_for_store_write().await;
+        let mut state = current.current_snapshot_for_store_write().await;
         let drained = self.drain_token_ledger();
         if drained.is_empty() {
             return Ok(());

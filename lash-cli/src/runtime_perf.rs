@@ -40,12 +40,13 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    const DEFAULTS: [Self; 5] = [
+    const DEFAULTS: [Self; 6] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmToolCalls,
         Self::RlmGlobals,
         Self::ObservationalMemory,
+        Self::OpenAiCompatStream,
     ];
     const KNOWN: [Self; 6] = [
         Self::Standard,
@@ -763,9 +764,17 @@ fn resolve_scenarios(filters: &[String]) -> anyhow::Result<Vec<RuntimePerfScenar
 
     let mut scenarios = Vec::with_capacity(filters.len());
     for filter in filters {
+        if filter == "all" {
+            for scenario in RuntimePerfScenario::KNOWN {
+                if !scenarios.contains(&scenario) {
+                    scenarios.push(scenario);
+                }
+            }
+            continue;
+        }
         let scenario = RuntimePerfScenario::parse(filter).ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown runtime perf scenario `{filter}`; expected one of: {}",
+                "unknown runtime perf scenario `{filter}`; expected one of: {}, all",
                 RuntimePerfScenario::KNOWN
                     .iter()
                     .map(|scenario| scenario.name())
@@ -1237,15 +1246,29 @@ submit first.value
 
 fn openai_compat_sse_body(profile: &BenchmarkStreamProfile) -> Vec<u8> {
     let mut body = String::new();
+    let message_id = "msg_runtime_perf";
+    body.push_str("data: ");
+    body.push_str(
+        &serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "message",
+                "id": message_id,
+                "status": "in_progress",
+                "role": "assistant",
+                "content": []
+            }
+        })
+        .to_string(),
+    );
+    body.push_str("\n\n");
     for delta in &profile.deltas {
         body.push_str("data: ");
         body.push_str(
             &serde_json::json!({
-                "choices": [{
-                    "delta": {
-                        "content": delta,
-                    }
-                }]
+                "type": "response.output_text.delta",
+                "item_id": message_id,
+                "delta": delta,
             })
             .to_string(),
         );
@@ -1254,15 +1277,50 @@ fn openai_compat_sse_body(profile: &BenchmarkStreamProfile) -> Vec<u8> {
     body.push_str("data: ");
     body.push_str(
         &serde_json::json!({
-            "usage": {
-                "prompt_tokens": 1024,
-                "completion_tokens": 64,
-                "prompt_tokens_details": {
-                    "cached_tokens": 512,
+            "type": "response.output_item.done",
+            "item": {
+                "type": "message",
+                "id": message_id,
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": profile.full_text,
+                    "annotations": []
+                }]
+            }
+        })
+        .to_string(),
+    );
+    body.push_str("\n\n");
+    body.push_str("data: ");
+    body.push_str(
+        &serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_runtime_perf",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "id": message_id,
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": profile.full_text,
+                        "annotations": []
+                    }]
+                }],
+                "usage": {
+                    "input_tokens": 1024,
+                    "output_tokens": 64,
+                    "input_tokens_details": {
+                        "cached_tokens": 512,
+                    },
+                    "output_tokens_details": {
+                        "reasoning_tokens": 48,
+                    }
                 },
-                "completion_tokens_details": {
-                    "reasoning_tokens": 48,
-                }
             }
         })
         .to_string(),
@@ -1836,6 +1894,48 @@ fn elapsed_ms(started: Instant) -> f64 {
 
 fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_scenarios_cover_all_synthetic_runtime_paths() {
+        assert_eq!(
+            resolve_scenarios(&[]).unwrap(),
+            RuntimePerfScenario::KNOWN.to_vec()
+        );
+        assert_eq!(
+            resolve_scenarios(&["all".to_string()]).unwrap(),
+            RuntimePerfScenario::KNOWN.to_vec()
+        );
+        assert_eq!(
+            resolve_scenarios(&["standard".to_string(), "all".to_string()])
+                .unwrap()
+                .len(),
+            RuntimePerfScenario::KNOWN.len()
+        );
+    }
+
+    #[test]
+    fn openai_compat_stream_fixture_uses_responses_sse_shape() {
+        let profile = benchmark_stream_profile(RuntimePerfScenario::OpenAiCompatStream);
+        let body = String::from_utf8(openai_compat_sse_body(&profile)).unwrap();
+        assert!(
+            body.contains(r#""type":"response.output_item.added""#)
+                || body.contains(r#""type": "response.output_item.added""#)
+        );
+        assert!(
+            body.contains(r#""type":"response.output_text.delta""#)
+                || body.contains(r#""type": "response.output_text.delta""#)
+        );
+        assert!(
+            body.contains(r#""type":"response.completed""#)
+                || body.contains(r#""type": "response.completed""#)
+        );
+        assert!(!body.contains(r#""choices""#));
+    }
 }
 
 #[cfg(not(feature = "dhat-heap"))]

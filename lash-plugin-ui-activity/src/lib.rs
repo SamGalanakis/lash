@@ -19,12 +19,12 @@ impl PluginFactory for UiActivityPluginFactory {
                 Ok(lash::plugin::PluginSpec::new()
                     .with_after_turn(Arc::new(|ctx| {
                         Box::pin(async move {
-                            let body = match ctx.turn.status {
-                                lash::TurnStatus::Completed => {
+                            let body = match &ctx.turn.outcome {
+                                lash::TurnOutcome::Finished(_)
+                                | lash::TurnOutcome::Handoff { .. } => {
                                     Some("Response complete".to_string())
                                 }
-                                lash::TurnStatus::Interrupted => None,
-                                lash::TurnStatus::Failed => None,
+                                lash::TurnOutcome::Stopped(_) => None,
                             };
                             let Some(body) = body else {
                                 return Ok(Vec::new());

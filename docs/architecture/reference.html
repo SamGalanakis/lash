@@ -3,140 +3,56 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>lash Architecture - Reference</title>
+<link rel="canonical" href="files.html">
+<title>Reference — moved · lash Architecture</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./styles.css">
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" defer></script>
-<script src="./mermaid.js" defer></script>
+<style>
+  .redirect {
+    display: grid;
+    place-items: center;
+    min-height: 60vh;
+    padding: var(--space-3xl) var(--space-xl);
+    text-align: center;
+  }
+  .redirect h1 {
+    margin: 0 0 var(--space-sm);
+    font-size: clamp(2.4rem, 5vw, 3.6rem);
+  }
+  .redirect p {
+    margin: 0 auto;
+    max-width: 48ch;
+    font-size: 1.05rem;
+  }
+  .redirect a {
+    display: inline-block;
+    margin-top: var(--space-lg);
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--sodium);
+    color: var(--sodium);
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .redirect a:hover {
+    background: var(--sodium);
+    color: var(--form-deep);
+    text-decoration: none;
+  }
+</style>
 </head>
 <body>
   <div class="page">
     <main class="frame">
-      <header class="hero">
+      <div class="redirect">
         <div>
-          <div class="eyebrow">Architecture page 04</div>
-          <h1>reference<span class="slash">/</span>map</h1>
-          <p>A file and abstraction index for the current workspace. This page is intentionally concrete so it can be used as a maintenance checklist when the runtime changes.</p>
+          <div class="eyebrow">Page moved</div>
+          <h1>reference<span class="slash">/</span>moved</h1>
+          <p>The reference page is now part of Files.</p>
+          <a href="./files.html">Continue to Files →</a>
         </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">Docs root</div><strong><code>docs/architecture/</code></strong><span>Multi-page architecture docs.</span></article>
-          <article class="card"><div class="micro-label">Compatibility</div><strong><code>docs/architecture.html</code></strong><span>Redirects to the new entrypoint.</span></article>
-          <article class="card"><div class="micro-label">Main seam</div><strong><code>lash-sansio</code></strong><span>Turn machine contracts used by all runtimes.</span></article>
-        </div>
-      </header>
-
-      <nav class="nav" aria-label="Architecture pages">
-        <a href="./index.html">Overview</a>
-        <a href="./runtime.html">Modules + Runtime</a>
-        <a href="./execution-modes.html">Execution Modes</a>
-        <a href="./lashlang.html">Lashlang</a>
-        <a class="active" href="./reference.html">Reference</a>
-      </nav>
-
-      <section class="content">
-        <div class="section">
-          <div class="section-header">
-            <h2>Crate Topology</h2>
-            <p>The repo is split around a sans-io turn machine, an async host runtime, mode plugins, tool plugins, provider plugins, and the end-user CLI.</p>
-          </div>
-          <div class="diagram">
-            <div class="diagram-title">Dependency direction</div>
-            <div class="mermaid">
-flowchart TD
-  CLI["lash-cli<br/>TUI, setup, commands"] --> Runtime["lash<br/>async runtime, store, session graph"]
-  Runtime --> Sansio["lash-sansio<br/>messages, prompts, turn machine"]
-  Runtime --> Providers["provider crates<br/>OpenAI, Anthropic, Gemini, Codex OAuth, compat"]
-  Runtime --> Plugins["plugin crates<br/>tools, history, memory, plan, skills"]
-  Runtime --> Modes["mode crates<br/>standard, rlm, rlmpure"]
-  Modes --> Sansio
-  Plugins --> Sansio
-  Providers --> Sansio
-  DefaultTools["lash-default-tools"] --> Runtime
-  Subagents["lash-subagents"] --> Runtime
-            </div>
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="section-header">
-            <h2>Important Files</h2>
-            <p>These paths are the highest-value places to inspect when the runtime, prompts, or execution modes change.</p>
-          </div>
-          <div class="table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Path</th>
-                  <th>Responsibility</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr><td><code>lash-sansio/src/turn.rs</code></td><td>Builds <code>TurnMachineConfig</code> from mode, prompt, messages, events, trajectory, and tool surface.</td></tr>
-                <tr><td><code>lash-sansio/src/mode.rs</code></td><td>Defines <code>ModeConfig</code>, <code>ModePreamble</code>, and mode build inputs.</td></tr>
-                <tr><td><code>lash-sansio/src/sansio/mod.rs</code></td><td>Owns <code>ContextProjector</code>, <code>ProtocolDriverHandle</code>, turn effects, and the sans-io state machine.</td></tr>
-                <tr><td><code>lash-sansio/src/session_model/prompt.rs</code></td><td>Defines prompt templates, prompt slots, and built-in prompt sections.</td></tr>
-                <tr><td><code>lash-mode-standard/src/lib.rs</code></td><td>Standard mode prompt contribution and native tool-calling protocol setup.</td></tr>
-                <tr><td><code>lash-mode-rlm/src/driver.rs</code></td><td>RLM prompt, lashlang language reference, trajectory formatting, fence extraction, and protocol driver.</td></tr>
-                <tr><td><code>lash-mode-rlmpure/src/driver.rs</code></td><td>RLMPure compact context projection and execution discipline.</td></tr>
-                <tr><td><code>lash/src/runtime/turn_driver.rs</code></td><td>Async turn loop that executes effects, calls tools, records graph events, and resumes the turn machine.</td></tr>
-                <tr><td><code>lash/src/runtime/turn_graph.rs</code></td><td>Projection and ordering tests for user, tool, RLM trajectory, and assistant events.</td></tr>
-                <tr><td><code>lash/src/session.rs</code></td><td>Session bootstrap, plugin composition, persistence, and embedded/session API coverage.</td></tr>
-                <tr><td><code>docs/architecture/index.html</code></td><td>Architecture docs entrypoint.</td></tr>
-                <tr><td><code>docs/architecture/execution-modes.html</code></td><td>Mode-by-mode context diagrams.</td></tr>
-                <tr><td><code>docs/architecture/lashlang.html</code></td><td>Lashlang reference for RLM and RLMPure.</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="section-header">
-            <h2>Core Abstractions</h2>
-            <p>The runtime stays flexible because mode behavior is data and traits, not special-cased branches in the provider loop.</p>
-          </div>
-          <div class="table compact">
-            <table>
-              <thead>
-                <tr>
-                  <th>Abstraction</th>
-                  <th>Current role</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr><td><code>ExecutionMode</code></td><td>User-facing selection for <code>standard</code>, <code>rlm</code>, and <code>rlmpure</code>.</td></tr>
-                <tr><td><code>PromptTemplate</code></td><td>Ordered sections and slots used to construct the system prompt.</td></tr>
-                <tr><td><code>PromptContribution</code></td><td>Mode, plugin, project, runtime, and environment prompt fragments merged into template slots.</td></tr>
-                <tr><td><code>ModePreamble</code></td><td>Mode-owned protocol, projector, tool specs, tool names, execution prompt, and prompt contributions.</td></tr>
-                <tr><td><code>ContextProjector</code></td><td>Turns prepared state into an <code>LlmRequest</code>. Standard/RLM use chat projection; RLMPure uses explicit inputs plus REPL history.</td></tr>
-                <tr><td><code>ProtocolDriverHandle</code></td><td>Interprets provider responses and tool results into declarative driver actions.</td></tr>
-                <tr><td><code>TurnMachine</code></td><td>Sans-io state machine that alternates model calls, effects, retries, checkpoints, and terminal responses.</td></tr>
-                <tr><td><code>RuntimeCoreConfig</code></td><td>Runtime-level configuration used to wire providers, tools, modes, and persistence.</td></tr>
-                <tr><td><code>EmbeddedRuntimeBuilder</code></td><td>Embeddable construction API for host applications and tests.</td></tr>
-                <tr><td><code>PluginFactory</code> / <code>SessionPlugin</code></td><td>Plugin lifecycle for tools, prompts, UI activity, storage, and session hooks.</td></tr>
-                <tr><td><code>ProviderFactory</code> / <code>ProviderHandle</code></td><td>Provider registration and streaming/completion boundary.</td></tr>
-                <tr><td><code>RuntimePersistence</code></td><td>Composite runtime persistence capability over blob, head, graph, usage, and retention stores.</td></tr>
-                <tr><td><code>SessionGraph</code></td><td>Durable event graph used for replay, projection, ordering, and TUI rendering.</td></tr>
-                <tr><td><code>RlmTrajectoryEntry</code></td><td>Persistent record of one lashlang iteration: reasoning, code, output, observations, tool calls, errors, and final output.</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="section-header">
-            <h2>Maintenance Rules</h2>
-            <p>These are the rules this documentation expects the codebase to preserve.</p>
-          </div>
-          <div class="cards">
-            <article class="card"><div class="micro-label">Mode parity</div><strong>All modes should render chronological events.</strong><span>Thinking, tool calls, tool results, lashlang observations, and final assistant output should appear in causal order.</span></article>
-            <article class="card"><div class="micro-label">Prompt reuse</div><strong>Lashlang docs should stay single-sourced.</strong><span>RLM and RLMPure both reuse the shared language reference; documentation should mirror that shared text instead of inventing mode-specific variants.</span></article>
-            <article class="card"><div class="micro-label">Provider contract</div><strong>Native tool schemas belong only to Standard mode.</strong><span>RLM and RLMPure document tools in prompt text and execute through lashlang.</span></article>
-            <article class="card"><div class="micro-label">Event order</div><strong>Record tool results before RLM trajectory entries.</strong><span>This keeps replay and UI projection aligned with what happened during execution.</span></article>
-          </div>
-        </div>
-      </section>
-
-      <footer class="footer">Architecture reference updated for the current execution-mode split.</footer>
+      </div>
     </main>
   </div>
 </body>
