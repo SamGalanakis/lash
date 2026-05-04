@@ -246,13 +246,11 @@ mod tests {
             iteration: 0,
             reasoning: "I'll inspect with grep.".to_string(),
             code: "submit \"grep worked\"".to_string(),
-            output: String::new(),
-            observations: Vec::new(),
+            output: Vec::new(),
             tool_calls: vec![record.clone()],
             images: Vec::new(),
             error: None,
             final_output: Some(serde_json::json!("grep worked")),
-            output_raw_len: 0,
         };
         let mut progress = progress_from_graph(SessionGraph::from_active_read_state(
             std::slice::from_ref(&user),

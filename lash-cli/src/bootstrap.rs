@@ -53,7 +53,7 @@ struct PluginFactorySurfaceInput<'a> {
     instruction_source: Arc<dyn InstructionSource>,
     session_policy: SessionPolicy,
     lash_config: &'a LashConfig,
-    host_docs_dir: std::path::PathBuf,
+    host_docs_dir: Option<std::path::PathBuf>,
 }
 
 struct PluginFactoriesForSurface {
@@ -137,11 +137,12 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
     )) as Arc<dyn PluginFactory>);
-    plugin_factories.push(
-        Arc::new(crate::host_docs::HostDocsPluginFactory::new(host_docs_dir))
-            as Arc<dyn PluginFactory>,
-    );
     if profile.interactive_extras {
+        if let Some(host_docs_dir) = host_docs_dir {
+            plugin_factories.push(Arc::new(crate::host_docs::HostDocsPluginFactory::new(
+                host_docs_dir,
+            )) as Arc<dyn PluginFactory>);
+        }
         plugin_factories.push(Arc::new(PlanModePluginFactory::new(Default::default())));
         plugin_factories.push(Arc::new(UiActivityPluginFactory));
         // `update_plan` drives the sticky plan dock at the bottom of
@@ -389,8 +390,14 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     if args.print_prompt.is_none() {
         lash_config.save(&crate::paths::config_file())?;
     }
-    let host_docs = crate::host_docs::ensure_host_docs()
-        .map_err(|err| anyhow::anyhow!("failed to prepare Lash CLI host docs: {err}"))?;
+    let host_docs = if interactive_startup {
+        Some(
+            crate::host_docs::ensure_host_docs()
+                .map_err(|err| anyhow::anyhow!("failed to prepare Lash CLI host docs: {err}"))?,
+        )
+    } else {
+        None
+    };
     let model_catalog = models_dev_catalog().map_err(anyhow::Error::msg)?;
     if let Err(err) = model_catalog
         .refresh_if_stale(lash::model_info::DEFAULT_REFRESH_INTERVAL)
@@ -603,7 +610,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         instruction_source: Arc::clone(&instruction_source),
         session_policy: session_policy.clone(),
         lash_config: &lash_config,
-        host_docs_dir: host_docs.dir().to_path_buf(),
+        host_docs_dir: host_docs.as_ref().map(|docs| docs.dir().to_path_buf()),
     });
     let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
     let resolved_session_id = run_session_id
@@ -797,6 +804,38 @@ mod tests {
         async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
             ToolResult::err_fmt(format_args!("unexpected tool call: {name}"))
         }
+    }
+
+    fn plugin_factory_ids_for_autonomous(autonomous: bool) -> Vec<&'static str> {
+        let provider = ProviderHandle::new(Box::new(OpenAiGenericProvider::new("test", "")));
+        let lash_config = LashConfig::new(&provider);
+        plugin_factories_for_surface(PluginFactorySurfaceInput {
+            tool_surface: CliToolSurface::Default,
+            autonomous,
+            execution_mode: ExecutionMode::standard(),
+            tavily_key: String::new(),
+            instruction_source: Arc::new(FsInstructionSource::default()),
+            session_policy: SessionPolicy {
+                provider,
+                ..Default::default()
+            },
+            lash_config: &lash_config,
+            host_docs_dir: (!autonomous)
+                .then(|| std::path::PathBuf::from("/tmp/lash-home/docs/lash-cli")),
+        })
+        .factories
+        .into_iter()
+        .map(|factory| factory.id())
+        .collect()
+    }
+
+    #[test]
+    fn host_docs_prompt_is_interactive_only() {
+        let interactive_ids = plugin_factory_ids_for_autonomous(false);
+        assert!(interactive_ids.contains(&"lash_cli_host_docs"));
+
+        let autonomous_ids = plugin_factory_ids_for_autonomous(true);
+        assert!(!autonomous_ids.contains(&"lash_cli_host_docs"));
     }
 
     #[test]

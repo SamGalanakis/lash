@@ -13,6 +13,10 @@ use lash::{ChronologicalEntry, SessionGraph, SessionMeta, SessionStateEnvelope, 
 
 pub mod html;
 pub mod json;
+pub mod markdown;
+pub mod trace;
+
+pub use trace::LlmPromptSnapshot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -36,6 +40,10 @@ impl ExportFormat {
 pub struct LoadedSession {
     pub meta: Option<SessionMeta>,
     pub chronological: Vec<ChronologicalEntry>,
+    /// One snapshot per `llm_call_started` event found in the sibling
+    /// `<basename>.trace.jsonl`, in trace order. Empty when the trace is
+    /// missing or unreadable — exporting must not require it.
+    pub llm_prompts: Vec<LlmPromptSnapshot>,
 }
 
 /// Load a session by its SQLite store path (the `.db` file).
@@ -49,9 +57,11 @@ pub fn load_session_from_path(store_path: &Path) -> Result<LoadedSession> {
         ..SessionStateEnvelope::default()
     };
     let chronological = state.read_view().chronological_projection().into_entries();
+    let llm_prompts = trace::load_prompts_from_trace(&trace::trace_path_for_session_db(store_path));
     Ok(LoadedSession {
         meta,
         chronological,
+        llm_prompts,
     })
 }
 

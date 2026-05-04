@@ -538,7 +538,10 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
     let trajectory = machine_trajectory(&machine);
     let entry = trajectory.last().expect("rlm trajectory entry");
     assert_eq!(entry.code, "print \"hi\"");
-    assert_eq!(entry.output, "hi\n");
+    // Raw lashlang stdout (rare) is folded into the trajectory's
+    // `output: Vec<String>` as a single anonymous entry alongside any
+    // `print` results.
+    assert_eq!(entry.output, vec!["hi\n".to_string()]);
     assert!(entry.final_output.is_none());
 
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");

@@ -31,22 +31,15 @@ REMOTE_LASH_CONFIG = f"{REMOTE_LASH_HOME}/config.json"
 REMOTE_CA_CERT_DIR = "/etc/ssl/certs"
 REMOTE_CA_CERT_BUNDLE = f"{REMOTE_CA_CERT_DIR}/ca-certificates.crt"
 
-BENCHMARK_GUIDELINES_APPEND = """## Benchmark run context
-
-You are running autonomously in a benchmark harness. There is no user
-watching this session and no one to ask for clarification. You have a
-bounded wall-clock budget — make concrete progress continuously and
-stop promptly once the required end state exists.
-
-## What "finishing" means for this task
+BENCHMARK_GUIDELINES_APPEND = """## What "finishing" means for this task
 
 Most terminal-bench tasks are graded by inspecting the environment
 after you stop — files, services, running processes, configuration
 state. For these tasks:
 
 - Make the required changes directly to the filesystem / services.
-- Verify the end state from inside lashlang (re-open files, re-run the
-  service's own check, probe the port, read the expected output).
+- Verify the end state (re-open files, re-run the service's own check,
+  probe the port, read the expected output).
 - Submit the final result with `submit <expr>` once you've confirmed the
   required end state.
 
@@ -60,26 +53,10 @@ it were the answer — the grader is not reading your response.
 - You are graded by exact checks. Match required filenames, file
   contents, output formats, ports, protocols, and process state
   precisely. Approximate solutions fail.
-- `exec_command` is the completing shell tool: use it for builds,
-  installs, tests, migrations, service setup, and verification. Do not
-  move on, verify, or submit until its result has `status:
-  "completed"`, `done: true`, and an `exit_code`.
-- `start_command` and `write_stdin` can return `status: "running"` with
-  a `session_id`; that output is partial and is not proof that a build,
-  install, test, service setup, or verifier command finished.
 - If the task implies a service or port must be reachable, confirm it
   yourself (curl / nc / the service's own healthcheck) before stopping.
 - Prefer direct verification over assumption. Re-open the exact file
   and check the exact bytes; re-run the check the task describes.
-
-## Budget discipline
-
-- Work in short evidence-based loops: inspect enough to choose the next
-  action, make the change, verify the exact expected state, then finish.
-- Keep scope tight. Do not repeat the same searches or re-read the same
-  artifact unless new evidence changes what you are checking.
-- When time is tight, prioritize the required end state and direct
-  verification over refactors or broader investigation.
 """
 
 INSTALL_GNU_TIME_COMMAND = """
@@ -210,11 +187,9 @@ class LashAgent(BaseInstalledAgent):
 
     def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
         execution_mode = os.environ.get("LASH_BENCH_EXECUTION_MODE", "").strip()
-        if execution_mode == "native-tools":
-            execution_mode = "standard"
-        if execution_mode not in {"rlm", "rlmpure", "standard"}:
+        if execution_mode not in {"rlm", "standard"}:
             raise ValueError(
-                "LASH_BENCH_EXECUTION_MODE must be set to 'rlm', 'rlmpure', or 'standard'"
+                "LASH_BENCH_EXECUTION_MODE must be set to 'rlm' or 'standard'"
             )
 
         env: dict[str, str] = {
@@ -265,11 +240,10 @@ class LashAgent(BaseInstalledAgent):
         # `--prompt-disable` flags were removed from the lash CLI.
         # Instead, we own one benchmark-specific guidance block
         # (`BENCHMARK_GUIDELINES_APPEND`) and fold it into the user
-        # prompt. The block covers run-context, the terminal-bench
-        # task shape (environment-state, not submit-value), strict
-        # verifier rules, and budget discipline in one place.
-        # `LASH_BENCH_PROMPT_APPEND_GUIDELINES` overrides the default
-        # for ad-hoc runs.
+        # prompt. The block covers the terminal-bench task shape
+        # (environment-state, not submit-value) and strict verifier
+        # rules. `LASH_BENCH_PROMPT_APPEND_GUIDELINES` overrides the
+        # default for ad-hoc runs.
         bench_guidelines = os.environ.get(
             "LASH_BENCH_PROMPT_APPEND_GUIDELINES", BENCHMARK_GUIDELINES_APPEND
         ).strip()

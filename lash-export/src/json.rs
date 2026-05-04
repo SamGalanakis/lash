@@ -19,6 +19,7 @@ pub fn render(session: &LoadedSession) -> String {
     let document = json!({
         "meta": meta,
         "chronological": session.chronological,
+        "llm_prompts": session.llm_prompts,
     });
 
     serde_json::to_string_pretty(&document).unwrap_or_else(|_| document.to_string())
@@ -44,6 +45,7 @@ mod tests {
                     duration_ms: 4,
                 }),
             }],
+            llm_prompts: Vec::new(),
         };
 
         let rendered = render(&session);

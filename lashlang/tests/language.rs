@@ -177,6 +177,33 @@ fn raw_multiline_strings_preserve_patch_text() {
 }
 
 #[test]
+fn raw_triple_single_strings_preserve_script_text() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r####"
+            script = r'''python3 - <<'PY'
+print("""hello""")
+\n { braces stay raw }
+PY'''
+            submit script
+            "####,
+            &mut state,
+            &host,
+        )
+        .expect("program should run"),
+    );
+
+    assert_eq!(
+        value,
+        Value::String(
+            "python3 - <<'PY'\nprint(\"\"\"hello\"\"\")\n\\n { braces stay raw }\nPY".into()
+        )
+    );
+}
+
+#[test]
 fn parser_accepts_comment_only_program() {
     let program = parse(
         r#"

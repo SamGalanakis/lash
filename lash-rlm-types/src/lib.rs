@@ -7,9 +7,13 @@ pub struct RlmTrajectoryEntry {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reasoning: String,
     pub code: String,
-    pub output: String,
-    #[serde(default)]
-    pub observations: Vec<String>,
+    /// One entry per `print` (and any raw stdout-style emission from the
+    /// lashlang executor). Replaces the old split between a combined
+    /// `output: String` and `observations: Vec<String>` — those carried
+    /// the same content twice, wasting tokens on every history-bearing
+    /// iteration.
+    #[serde(default, alias = "observations")]
+    pub output: Vec<String>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -18,13 +22,12 @@ pub struct RlmTrajectoryEntry {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_output: Option<serde_json::Value>,
-    #[serde(default)]
-    pub output_raw_len: usize,
 }
 
 impl RlmTrajectoryEntry {
-    pub fn output_preview(&self, max_chars: usize) -> String {
-        lash_sansio::head_tail_truncate(&self.output, max_chars).0
+    /// Total characters across every `print`/output entry, summed.
+    pub fn output_chars(&self) -> usize {
+        self.output.iter().map(|s| s.chars().count()).sum()
     }
 }
 
@@ -82,9 +85,8 @@ pub enum RlmHistoryItem {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         reasoning: String,
         code: String,
-        #[serde(default)]
-        observations: Vec<String>,
-        output: String,
+        #[serde(default, alias = "observations")]
+        output: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCallRecord>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -1,10 +1,10 @@
 //! Mode-agnostic runtime-control tools (`monitor`, `tasks_list`,
 //! `tasks_stop`).
 //!
-//! Dedicated plugins register these tools into the native-tools surface
-//! for any execution mode, so mode crates do not own or duplicate
-//! runtime control behavior. Task controls are split from `monitor`
-//! because `monitor` starts a shell-backed background process.
+//! Dedicated plugins register these tools into the native-tools surface,
+//! so mode crates do not own or duplicate runtime control behavior. RLM
+//! hides `tasks_list` / `tasks_stop` because it exposes the same
+//! background control through lashlang async handles.
 
 use std::sync::Arc;
 
@@ -35,12 +35,16 @@ impl PluginFactory for BuiltinTaskControlsPluginFactory {
         "task_controls"
     }
 
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(TaskControlsPlugin))
+    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(TaskControlsPlugin {
+            enabled: ctx.execution_mode != crate::ExecutionMode::new("rlm"),
+        }))
     }
 }
 
-struct TaskControlsPlugin;
+struct TaskControlsPlugin {
+    enabled: bool,
+}
 
 impl SessionPlugin for TaskControlsPlugin {
     fn id(&self) -> &'static str {
@@ -48,7 +52,10 @@ impl SessionPlugin for TaskControlsPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.mode().native_tools(Arc::new(TaskControlsNativeTools))
+        if self.enabled {
+            reg.mode().native_tools(Arc::new(TaskControlsNativeTools))?;
+        }
+        Ok(())
     }
 }
 
@@ -139,7 +146,7 @@ impl ModeNativeToolsPlugin for MonitorNativeTool {
 pub fn monitor_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
         "monitor",
-        "Run a background script that turns each stdout line into a new turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, just run the command synchronously instead. Returns a `task_id` that `tasks_stop` accepts.\n\nEvents arrive automatically as user-like input — do not call another tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) — stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals ≥30s for remote APIs, 0.5–1s for local checks.\n\n**Coverage — silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit — and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nWrong: `tail -f run.log | grep --line-buffered \"elapsed_steps=\"`\nRight: `tail -f run.log | grep -E --line-buffered \"elapsed_steps=|Traceback|Error|FAILED|Killed|OOM\"`\n\nSet `persistent: true` for session-length watches. Timeout → killed; exit ends the watch (exit code is reported).",
+        "Run a background script that turns each stdout line into a new turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, just run the command synchronously instead. In RLM mode this returns a lashlang async handle; use `list_async_handles` to rediscover live monitors and `cancel handle` to stop one.\n\nEvents arrive automatically as user-like input — do not call another tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) — stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals ≥30s for remote APIs, 0.5–1s for local checks.\n\n**Coverage — silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit — and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nWrong: `tail -f run.log | grep --line-buffered \"elapsed_steps=\"`\nRight: `tail -f run.log | grep -E --line-buffered \"elapsed_steps=|Traceback|Error|FAILED|Killed|OOM\"`\n\nSet `persistent: true` for session-length watches. Timeout → killed; exit ends the watch (exit code is reported).",
         serde_json::json!({
             "type": "object",
             "properties": {

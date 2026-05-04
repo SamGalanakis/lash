@@ -167,6 +167,7 @@ struct AsyncToolHandleMetadata {
 
 #[derive(Clone, PartialEq, Eq)]
 enum AsyncToolHandleNamespace {
+    Monitor,
     Subagent,
     Tool,
 }
@@ -532,6 +533,29 @@ impl Session {
         })
     }
 
+    fn background_task_status_value(status: &crate::ManagedTaskStatus) -> serde_json::Value {
+        json!({
+            "task_id": status.id,
+            "label": status.label,
+            "kind": status.kind.as_str(),
+            "producer": status.producer,
+            "run_state": match status.run_state {
+                crate::ManagedRunState::Running => "running",
+                crate::ManagedRunState::Idle => "idle",
+                crate::ManagedRunState::Completed => "completed",
+                crate::ManagedRunState::Failed => "failed",
+                crate::ManagedRunState::Cancelled => "cancelled",
+            },
+        })
+    }
+
+    fn monitor_handle_identifier(task_id: &str) -> String {
+        task_id
+            .strip_prefix("monitor:")
+            .unwrap_or(task_id)
+            .to_string()
+    }
+
     fn async_tool_handle_metadata(
         id: &str,
         tool_name: &str,
@@ -596,6 +620,31 @@ impl Session {
 
     fn async_tool_handle_entry(&self, id: &str) -> Option<AsyncToolHandleEntry> {
         self.async_tool_handles.lock().ok()?.get(id).cloned()
+    }
+
+    fn ensure_monitor_async_handle(&self, status: &crate::ManagedTaskStatus) -> serde_json::Value {
+        let mut handles = self
+            .async_tool_handles
+            .lock()
+            .expect("async tool handle map lock");
+        handles
+            .entry(status.id.clone())
+            .or_insert_with(|| AsyncToolHandleEntry {
+                state: Arc::new(StdMutex::new(AsyncToolHandleState {
+                    join_handle: None,
+                    buffered_messages: Vec::new(),
+                    terminal: None,
+                })),
+                done_notify: Arc::new(Notify::new()),
+                progress_notify: Arc::new(Notify::new()),
+                cancellation: CancellationToken::new(),
+                metadata: AsyncToolHandleMetadata {
+                    tool_name: "monitor".to_string(),
+                    namespace: AsyncToolHandleNamespace::Monitor,
+                    identifier: Self::monitor_handle_identifier(&status.id),
+                },
+            });
+        Self::async_tool_handle_value(&status.id, "monitor")
     }
 
     fn flush_async_tool_messages(&self, entry: &AsyncToolHandleEntry) {
@@ -699,13 +748,82 @@ impl Session {
         AsyncToolReply::success(handle_value).into_lashlang_reply()
     }
 
-    fn list_async_handles(&self) -> LashlangToolReply {
+    async fn start_monitor_handle_call(
+        &mut self,
+        call_id: String,
+        dispatch: Arc<ToolDispatchContext>,
+        args: serde_json::Value,
+        tc_num: usize,
+        msg_tx: Option<UnboundedSender<SandboxMessage>>,
+    ) -> LashlangToolReply {
+        let mut outcome = dispatch_parallel_tool_call(
+            Arc::clone(&dispatch),
+            ParallelToolCallSpec {
+                index: tc_num,
+                tool_name: "monitor".to_string(),
+                args,
+            },
+            msg_tx,
+        )
+        .await;
+        outcome.record.call_id = Some(call_id);
+
+        let reply = if outcome.record.success {
+            let task_id = outcome
+                .record
+                .result
+                .get("task_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            match task_id {
+                Some(task_id) => {
+                    let status = crate::ManagedTaskStatus {
+                        id: task_id.clone(),
+                        label: outcome
+                            .record
+                            .result
+                            .get("description")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("monitor")
+                            .to_string(),
+                        kind: crate::ManagedTaskKind::Monitor,
+                        producer: "monitor".to_string(),
+                        run_state: crate::ManagedRunState::Running,
+                        started_at: std::time::SystemTime::now(),
+                    };
+                    let handle_value = self.ensure_monitor_async_handle(&status);
+                    AsyncToolReply::success(handle_value).into_lashlang_reply()
+                }
+                None => {
+                    LashlangToolReply::error(json!("monitor started but did not return a task_id"))
+                }
+            }
+        } else {
+            LashlangToolReply::error(outcome.record.result.clone())
+        };
+
+        self.tool_images.extend(outcome.images.clone());
+        self.tool_calls.push(outcome.record);
+        reply
+    }
+
+    fn list_async_handles(
+        &self,
+        live_monitor_tasks: Vec<crate::ManagedTaskStatus>,
+    ) -> LashlangToolReply {
+        for task in &live_monitor_tasks {
+            self.ensure_monitor_async_handle(task);
+        }
+
         let entries = self
             .async_tool_handles
             .lock()
             .expect("async tool handle map lock")
             .iter()
             .filter_map(|(id, entry)| {
+                if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
+                    return None;
+                }
                 let is_terminal = entry
                     .state
                     .lock()
@@ -716,11 +834,15 @@ impl Session {
             })
             .collect::<Vec<_>>();
 
+        let mut monitor = serde_json::Map::new();
         let mut subagent = serde_json::Map::new();
         let mut tool = serde_json::Map::new();
         for (id, metadata) in entries {
             let value = Self::async_tool_handle_value(&id, &metadata.tool_name);
             match metadata.namespace {
+                AsyncToolHandleNamespace::Monitor => {
+                    monitor.insert(metadata.identifier, value);
+                }
                 AsyncToolHandleNamespace::Subagent => {
                     subagent.insert(metadata.identifier, value);
                 }
@@ -729,7 +851,14 @@ impl Session {
                 }
             }
         }
+        for task in live_monitor_tasks {
+            monitor.insert(
+                Self::monitor_handle_identifier(&task.id),
+                Self::async_tool_handle_value(&task.id, "monitor"),
+            );
+        }
         AsyncToolReply::success(json!({
+            "monitor": monitor,
             "subagent": subagent,
             "tool": tool,
         }))
@@ -739,16 +868,33 @@ impl Session {
     async fn await_async_tool_handle(
         &mut self,
         _call_id: String,
+        context: &ToolDispatchContext,
         handle: serde_json::Value,
     ) -> LashlangToolReply {
-        let (handle_id, _hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
+        let (handle_id, hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => return AsyncToolReply::error(json!(err)).into_lashlang_reply(),
         };
         let Some(entry) = self.async_tool_handle_entry(&handle_id) else {
+            if hinted_tool_name.as_deref() == Some("monitor") || handle_id.starts_with("monitor:") {
+                return Self::await_monitor_handle(
+                    Arc::clone(&self.async_tool_handles),
+                    context,
+                    &handle_id,
+                )
+                .await;
+            }
             return AsyncToolReply::error(json!(format!("Unknown async handle: {handle_id}")))
                 .into_lashlang_reply();
         };
+        if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
+            return Self::await_monitor_handle(
+                Arc::clone(&self.async_tool_handles),
+                context,
+                &handle_id,
+            )
+            .await;
+        }
 
         loop {
             self.flush_async_tool_messages(&entry);
@@ -808,19 +954,95 @@ impl Session {
         }
     }
 
+    async fn await_monitor_handle(
+        async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
+        context: &ToolDispatchContext,
+        task_id: &str,
+    ) -> LashlangToolReply {
+        loop {
+            let tasks = match context
+                .host
+                .list_background_tasks(&context.session_id)
+                .await
+            {
+                Ok(tasks) => tasks,
+                Err(err) => {
+                    return AsyncToolReply::error(json!(err.to_string())).into_lashlang_reply();
+                }
+            };
+            let Some(status) = tasks.into_iter().find(|task| task.id == task_id) else {
+                return AsyncToolReply::error(json!(format!("Unknown monitor handle: {task_id}")))
+                    .into_lashlang_reply();
+            };
+            if status.run_state.is_terminal() {
+                if let Some(entry) = async_tool_handles
+                    .lock()
+                    .ok()
+                    .and_then(|handles| handles.get(task_id).cloned())
+                {
+                    let mut guard = entry.state.lock().expect("async tool state lock");
+                    if guard.terminal.is_none() {
+                        guard.terminal = Some(match status.run_state {
+                            crate::ManagedRunState::Cancelled => AsyncToolTerminal::Cancelled,
+                            crate::ManagedRunState::Failed => {
+                                AsyncToolTerminal::Failed("monitor failed".to_string())
+                            }
+                            _ => AsyncToolTerminal::Completed(ToolDispatchOutcome {
+                                record: ToolCallRecord {
+                                    call_id: None,
+                                    tool: "monitor".into(),
+                                    args: json!({}),
+                                    result: Self::background_task_status_value(&status),
+                                    success: true,
+                                    duration_ms: 0,
+                                },
+                                images: Vec::new(),
+                            }),
+                        });
+                    }
+                }
+                let value = Self::background_task_status_value(&status);
+                return match status.run_state {
+                    crate::ManagedRunState::Failed | crate::ManagedRunState::Cancelled => {
+                        AsyncToolReply::error(value).into_lashlang_reply()
+                    }
+                    _ => AsyncToolReply::success(value).into_lashlang_reply(),
+                };
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
     async fn cancel_async_tool_handle(
         &mut self,
         _call_id: String,
+        context: &ToolDispatchContext,
         handle: serde_json::Value,
     ) -> LashlangToolReply {
-        let (handle_id, _hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
+        let (handle_id, hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
             Ok(parsed) => parsed,
             Err(err) => return AsyncToolReply::error(json!(err)).into_lashlang_reply(),
         };
         let Some(entry) = self.async_tool_handle_entry(&handle_id) else {
+            if hinted_tool_name.as_deref() == Some("monitor") || handle_id.starts_with("monitor:") {
+                return Self::cancel_monitor_handle(
+                    Arc::clone(&self.async_tool_handles),
+                    context,
+                    &handle_id,
+                )
+                .await;
+            }
             return AsyncToolReply::error(json!(format!("Unknown async handle: {handle_id}")))
                 .into_lashlang_reply();
         };
+        if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
+            return Self::cancel_monitor_handle(
+                Arc::clone(&self.async_tool_handles),
+                context,
+                &handle_id,
+            )
+            .await;
+        }
 
         entry.cancellation.cancel();
         let _ = tokio::time::timeout(
@@ -852,6 +1074,34 @@ impl Session {
         self.flush_async_tool_messages(&entry);
 
         AsyncToolReply::success(serde_json::Value::Null).into_lashlang_reply()
+    }
+
+    async fn cancel_monitor_handle(
+        async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
+        context: &ToolDispatchContext,
+        task_id: &str,
+    ) -> LashlangToolReply {
+        match context
+            .host
+            .cancel_background_task(&context.session_id, task_id)
+            .await
+        {
+            Ok(status) => {
+                if let Some(entry) = async_tool_handles
+                    .lock()
+                    .ok()
+                    .and_then(|handles| handles.get(task_id).cloned())
+                {
+                    let mut guard = entry.state.lock().expect("async tool state lock");
+                    guard.terminal = Some(AsyncToolTerminal::Cancelled);
+                    entry.progress_notify.notify_waiters();
+                    entry.done_notify.notify_waiters();
+                }
+                AsyncToolReply::success(Self::background_task_status_value(&status))
+                    .into_lashlang_reply()
+            }
+            Err(err) => AsyncToolReply::error(json!(err.to_string())).into_lashlang_reply(),
+        }
     }
 
     async fn cancel_all_async_tool_handles(&self) {
@@ -969,7 +1219,33 @@ impl Session {
                     result_tx,
                 } => {
                     if name == "list_async_handles" {
-                        let reply = self.list_async_handles();
+                        let live_monitor_tasks = dispatch
+                            .host
+                            .list_background_tasks(&dispatch.session_id)
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|task| {
+                                task.kind == crate::ManagedTaskKind::Monitor
+                                    && !task.run_state.is_terminal()
+                            })
+                            .collect::<Vec<_>>();
+                        let reply = self.list_async_handles(live_monitor_tasks);
+                        let _ = result_tx.send(reply);
+                        continue;
+                    }
+                    if name == "monitor" {
+                        let tc_num = tool_call_count;
+                        tool_call_count += 1;
+                        let reply = self
+                            .start_monitor_handle_call(
+                                call_id,
+                                Arc::clone(&dispatch),
+                                args,
+                                tc_num,
+                                self.message_tx.clone(),
+                            )
+                            .await;
                         let _ = result_tx.send(reply);
                         continue;
                     }
@@ -1100,9 +1376,21 @@ impl Session {
                     args,
                     result_tx,
                 } => {
-                    let reply = self
-                        .start_async_tool_call(call_id, Arc::clone(&dispatch), name, args)
-                        .await;
+                    let reply = if name == "monitor" {
+                        let tc_num = tool_call_count;
+                        tool_call_count += 1;
+                        self.start_monitor_handle_call(
+                            call_id,
+                            Arc::clone(&dispatch),
+                            args,
+                            tc_num,
+                            self.message_tx.clone(),
+                        )
+                        .await
+                    } else {
+                        self.start_async_tool_call(call_id, Arc::clone(&dispatch), name, args)
+                            .await
+                    };
                     let _ = result_tx.send(reply);
                 }
                 LashlangResponse::AwaitToolHandle {
@@ -1110,7 +1398,9 @@ impl Session {
                     handle,
                     result_tx,
                 } => {
-                    let reply = self.await_async_tool_handle(call_id, handle).await;
+                    let reply = self
+                        .await_async_tool_handle(call_id, &dispatch, handle)
+                        .await;
                     let _ = result_tx.send(reply);
                 }
                 LashlangResponse::CancelToolHandle {
@@ -1118,7 +1408,9 @@ impl Session {
                     handle,
                     result_tx,
                 } => {
-                    let reply = self.cancel_async_tool_handle(call_id, handle).await;
+                    let reply = self
+                        .cancel_async_tool_handle(call_id, &dispatch, handle)
+                        .await;
                     let _ = result_tx.send(reply);
                 }
                 LashlangResponse::ExecResult {
@@ -1505,11 +1797,12 @@ mod tests {
         TraceHost, TurnHost,
     };
     use crate::{
-        PluginError, PluginHost, PluginSpec, SessionHandle, SessionSnapshot, ToolDefinition,
-        ToolResult, TurnInput,
+        BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, ManagedRunState,
+        ManagedTaskKind, ManagedTaskStatus, PluginError, PluginHost, PluginSpec, SessionHandle,
+        SessionSnapshot, ToolDefinition, ToolResult, TurnInput,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     struct NoopManager;
 
@@ -1584,6 +1877,148 @@ mod tests {
     impl PromptHost for NoopManager {}
     impl DirectCompletionHost for NoopManager {}
     impl TraceHost for NoopManager {}
+
+    #[derive(Clone, Default)]
+    struct MonitorTestManager {
+        tasks: Arc<StdMutex<HashMap<String, ManagedTaskStatus>>>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionSnapshotHost for MonitorTestManager {
+        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+            Err(PluginError::Session("snapshot unavailable".to_string()))
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<SessionSnapshot, PluginError> {
+            Err(PluginError::Session("snapshot unavailable".to_string()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolCatalogHost for MonitorTestManager {
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Err(PluginError::Session("tool catalog unavailable".to_string()))
+        }
+    }
+
+    impl DynamicToolHost for MonitorTestManager {}
+
+    #[async_trait::async_trait]
+    impl SessionLifecycleHost for MonitorTestManager {
+        async fn create_session(
+            &self,
+            _request: crate::SessionCreateRequest,
+        ) -> Result<SessionHandle, PluginError> {
+            Err(PluginError::Session(
+                "session creation unavailable".to_string(),
+            ))
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
+            Err(PluginError::Session(
+                "session close unavailable".to_string(),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TurnHost for MonitorTestManager {
+        async fn start_turn_stream(
+            &self,
+            _session_id: &str,
+            _input: TurnInput,
+        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+            Err(PluginError::Session(
+                "turn streaming unavailable".to_string(),
+            ))
+        }
+
+        async fn await_turn(&self, _turn_id: &str) -> Result<crate::AssembledTurn, PluginError> {
+            Err(PluginError::Session("await turn unavailable".to_string()))
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
+            Err(PluginError::Session("cancel turn unavailable".to_string()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TaskHost for MonitorTestManager {
+        async fn list_background_tasks(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ManagedTaskStatus>, PluginError> {
+            Ok(self
+                .tasks
+                .lock()
+                .expect("monitor test tasks")
+                .values()
+                .cloned()
+                .collect())
+        }
+
+        async fn cancel_background_task(
+            &self,
+            _session_id: &str,
+            task_id: &str,
+        ) -> Result<ManagedTaskStatus, PluginError> {
+            self.cancelled.store(true, Ordering::SeqCst);
+            let mut tasks = self.tasks.lock().expect("monitor test tasks");
+            let status = tasks.get_mut(task_id).ok_or_else(|| {
+                PluginError::Session(format!("unknown background task `{task_id}`"))
+            })?;
+            status.run_state = ManagedRunState::Cancelled;
+            Ok(status.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MonitorHost for MonitorTestManager {
+        async fn start_monitor(
+            &self,
+            _session_id: &str,
+            spec: crate::MonitorSpec,
+        ) -> Result<crate::MonitorSnapshot, PluginError> {
+            let task_id = format!("monitor:{}", spec.id);
+            let status = ManagedTaskStatus {
+                id: task_id.clone(),
+                label: spec.label.clone(),
+                kind: ManagedTaskKind::Monitor,
+                producer: "monitor".to_string(),
+                run_state: ManagedRunState::Running,
+                started_at: SystemTime::now(),
+            };
+            self.tasks
+                .lock()
+                .expect("monitor test tasks")
+                .insert(task_id, status);
+            Ok(crate::MonitorSnapshot {
+                revision: 1,
+                active_count: 1,
+                monitors: vec![crate::MonitorStatus {
+                    spec,
+                    armed: false,
+                    run_state: crate::MonitorRunState::Running,
+                    last_event: None,
+                    last_error: None,
+                    last_exit_status: None,
+                    event_count: 0,
+                }],
+            })
+        }
+    }
+
+    impl SessionGraphHost for MonitorTestManager {}
+    impl PromptHost for MonitorTestManager {}
+    impl DirectCompletionHost for MonitorTestManager {}
+    impl TraceHost for MonitorTestManager {}
 
     #[derive(Clone, Default)]
     struct AsyncToolState {
@@ -1998,6 +2433,96 @@ print after
             "observations were: {:?}",
             response.observations
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rlm_monitor_returns_listable_cancelable_async_handle() {
+        let plugin_host = PluginHost::new(vec![Arc::new(BuiltinMonitorToolPluginFactory::new())]);
+        let plugin_session = plugin_host
+            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
+            .expect("plugin session");
+        let mut session = Session::new(
+            crate::RuntimeServices::new(plugin_session),
+            "root",
+            crate::ExecutionMode::new("rlm"),
+        )
+        .await
+        .expect("session");
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let manager = Arc::new(MonitorTestManager::default());
+
+        let response = session
+            .run_code(
+                "root",
+                manager.clone(),
+                &event_tx,
+                r#"
+monitor_handle = (call monitor { command: "tail -f app.log", description: "app log" })?
+handles = (call list_async_handles {})?
+print handles
+cancel monitor_handle
+after = (call list_async_handles {})?
+print after
+"#,
+                false,
+            )
+            .await
+            .expect("exec response");
+
+        assert!(
+            response.error.is_none(),
+            "unexpected rlm error: {:?}",
+            response.error
+        );
+        assert!(manager.cancelled.load(Ordering::SeqCst));
+        assert!(
+            response
+                .observations
+                .iter()
+                .any(|text| text.contains("\"monitor\"") && text.contains("\"tool\":\"monitor\"")),
+            "observations were: {:?}",
+            response.observations
+        );
+        assert!(
+            response
+                .observations
+                .iter()
+                .any(|text| text.contains("\"monitor\":{}")),
+            "observations were: {:?}",
+            response.observations
+        );
+    }
+
+    #[test]
+    fn task_controls_are_not_registered_for_rlm_sessions() {
+        let plugin_host = PluginHost::new(vec![Arc::new(BuiltinTaskControlsPluginFactory::new())]);
+        let rlm_session = plugin_host
+            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
+            .expect("rlm plugin session");
+        let rlm_tools = rlm_session
+            .mode_native_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(!rlm_tools.iter().any(|name| name == "tasks_list"));
+        assert!(!rlm_tools.iter().any(|name| name == "tasks_stop"));
+
+        let standard_session = plugin_host
+            .build_session(
+                "standard-root",
+                crate::ExecutionMode::standard(),
+                Some(crate::StandardContextApproach::default()),
+                None,
+            )
+            .expect("standard plugin session");
+        let standard_tools = standard_session
+            .mode_native_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(standard_tools.iter().any(|name| name == "tasks_list"));
+        assert!(standard_tools.iter().any(|name| name == "tasks_stop"));
     }
 
     // `rlm_run_code_caps_observe_output_via_mode_plugin_config` moved

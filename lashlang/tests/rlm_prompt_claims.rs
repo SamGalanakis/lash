@@ -105,6 +105,7 @@ impl ToolHost for MockHost {
                     subagent.insert(name, Value::Record(handle.into()));
                 }
                 let mut out = Record::default();
+                out.insert("monitor".into(), Value::Record(Record::default().into()));
                 out.insert("subagent".into(), Value::Record(subagent.into()));
                 out.insert("tool".into(), Value::Record(Record::default().into()));
                 Ok(Value::Record(out.into()))
@@ -215,6 +216,23 @@ fn prompt_claim_value_literals_parse_and_evaluate() {
     };
     assert_eq!(rec["a"], Value::Number(1.0));
     assert_eq!(rec["b"], Value::Number(2.0));
+}
+
+#[test]
+fn prompt_claim_raw_triple_single_strings_parse_and_evaluate() {
+    let host = MockHost::default();
+    assert_eq!(
+        run(
+            &host,
+            r####"submit r'''python3 - <<'PY'
+print("""hello""")
+\n { braces stay raw }
+PY'''"####
+        ),
+        Value::String(
+            "python3 - <<'PY'\nprint(\"\"\"hello\"\"\")\n\\n { braces stay raw }\nPY".into()
+        )
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────

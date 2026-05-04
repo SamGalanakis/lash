@@ -88,10 +88,18 @@ pub struct TraceRecord {
 
 impl TraceRecord {
     pub fn new(context: TraceContext, event: TraceEvent) -> Self {
+        Self::new_with_timestamp(context, event, chrono::Utc::now())
+    }
+
+    pub fn new_with_timestamp(
+        context: TraceContext,
+        event: TraceEvent,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
         Self {
             schema_version: TRACE_SCHEMA_VERSION,
             id: uuid::Uuid::new_v4().to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: timestamp.to_rfc3339(),
             context,
             event,
         }
