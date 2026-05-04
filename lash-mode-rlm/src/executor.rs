@@ -103,6 +103,24 @@ impl RlmExecutionState {
         self.dirty = true;
         Ok(())
     }
+
+    pub fn sync_projected_globals(
+        &mut self,
+        globals: &serde_json::Map<String, Value>,
+    ) -> Result<(), SessionError> {
+        let Some(history) = globals.get("history") else {
+            return Ok(());
+        };
+
+        // Projection-owned globals must be refreshed for execution, but explicit
+        // globals such as `diary` are mutated by the executor and must not be
+        // replaced by the read model's last patch value.
+        let mut set = serde_json::Map::new();
+        set.insert("history".to_string(), history.clone());
+        patch_globals(&mut self.rlm, set, Vec::new()).map_err(SessionError::Protocol)?;
+        self.dirty = true;
+        Ok(())
+    }
 }
 
 pub async fn execute_code(
@@ -744,5 +762,66 @@ fn clear_dir(root: &Path) {
                 let _ = std::fs::remove_file(&path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct NoopHost;
+
+    impl ToolHost for NoopHost {
+        async fn call(&self, name: String, _args: FlowRecord) -> Result<FlowValue, ToolHostError> {
+            Err(ToolHostError::new(format!("unknown tool: {name}")))
+        }
+    }
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    }
+
+    #[test]
+    fn projected_history_is_available_without_clobbering_executor_globals() {
+        block_on(async {
+            let mut state =
+                RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+            let mut set = serde_json::Map::new();
+            set.insert("diary".to_string(), serde_json::json!(["kept"]));
+            state
+                .patch_globals(&lash_rlm_types::RlmGlobalsPatchPluginBody {
+                    set,
+                    unset: Vec::new(),
+                })
+                .expect("patch diary");
+
+            let mut projected = serde_json::Map::new();
+            projected.insert("diary".to_string(), serde_json::json!([]));
+            projected.insert(
+                "history".to_string(),
+                serde_json::json!([{ "role": "user", "content": "hello" }]),
+            );
+            state
+                .sync_projected_globals(&projected)
+                .expect("sync history");
+
+            let outcome = lashlang::execute(
+                "submit { history_len: len(history), diary_len: len(diary) }",
+                &mut state.rlm,
+                &NoopHost,
+            )
+            .await
+            .expect("execute");
+            let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
+                panic!("expected submitted record");
+            };
+            assert_eq!(record["history_len"], FlowValue::Number(1.0));
+            assert_eq!(record["diary_len"], FlowValue::Number(1.0));
+        });
     }
 }

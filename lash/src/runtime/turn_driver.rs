@@ -385,7 +385,9 @@ impl RuntimeTurnDriver {
                             );
                         }
                         let exec_started_at = chrono::Utc::now();
-                        let result = self.run_exec_code(&code, &event_tx).await;
+                        let result = self
+                            .run_exec_code(&code, machine.message_sequence(), iteration, &event_tx)
+                            .await;
                         if let Ok(output) = &result {
                             if self.host.core.trace_sink.is_some() {
                                 self.emit_rlm_exec_step(

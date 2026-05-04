@@ -232,6 +232,7 @@ pub struct ModeExecutionContext {
     async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
+    rlm_projected_globals: Arc<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl ModeExecutionContext {
@@ -245,6 +246,10 @@ impl ModeExecutionContext {
 
     pub fn attachment_store(&self) -> Arc<dyn crate::AttachmentStore> {
         Arc::clone(&self.attachment_store)
+    }
+
+    pub fn rlm_projected_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
+        Arc::clone(&self.rlm_projected_globals)
     }
 
     pub async fn call_tool(
@@ -1117,6 +1122,7 @@ impl Session {
         session_id: &str,
         host: Arc<dyn RuntimeSessionHost>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
+        rlm_projected_globals: Arc<serde_json::Map<String, serde_json::Value>>,
     ) -> ModeExecutionContext {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
@@ -1135,6 +1141,7 @@ impl Session {
             async_tool_handles: Arc::clone(&self.async_tool_handles),
             message_tx: self.message_tx.clone(),
             attachment_store: Arc::clone(&self.services.attachment_store),
+            rlm_projected_globals,
         }
     }
 
