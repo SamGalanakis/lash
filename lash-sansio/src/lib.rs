@@ -39,8 +39,8 @@ pub use session_model::{
     Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind, PromptBuiltin,
     PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate,
     PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, RetryPolicy,
-    SessionEvent, SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent,
-    default_prompt_template, messages_are_prompt_resume_safe, shared_parts,
+    SessionEvent, SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent, TurnFinish,
+    TurnOutcome, TurnStop, default_prompt_template, messages_are_prompt_resume_safe, shared_parts,
 };
 pub use tool_surface::{
     ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceEntry,

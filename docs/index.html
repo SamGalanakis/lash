@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lash Docs</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./architecture/styles.css">
+<style>
+  /* docs root · hero adjustments and the 2-card entry rail */
+  .home-hero {
+    grid-template-columns: minmax(0, 1.32fr) minmax(280px, 0.68fr);
+  }
+  .home-hero h1 {
+    font-size: clamp(3.4rem, 8vw, 6rem);
+  }
+  .home-hero p {
+    font-size: 1.18rem;
+    line-height: 1.6;
+  }
+  .entry-rail {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-md);
+    padding: var(--space-xl);
+  }
+  .entry {
+    position: relative;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    gap: var(--space-md);
+    min-height: 280px;
+    padding: var(--space-xl);
+    border: 1px solid var(--line);
+    background: var(--form-raised);
+    color: var(--chalk);
+    text-decoration: none;
+    transition: border-color 200ms ease, transform 200ms ease;
+  }
+  .entry::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, transparent 0, transparent 70%, oklch(0.74 0.155 65 / 0.06) 100%);
+    pointer-events: none;
+  }
+  .entry:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-2px);
+    text-decoration: none;
+  }
+  .entry:focus-visible {
+    border-color: var(--line-strong);
+    transform: translateY(-2px);
+    outline: none;
+    box-shadow: var(--focus-ring);
+    text-decoration: none;
+  }
+  .entry h2 {
+    margin: 0;
+    font-size: clamp(2.4rem, 5vw, 3.2rem);
+    line-height: 0.92;
+  }
+  .entry p {
+    margin: 0;
+    color: var(--chalk-mid);
+    font-family: var(--font-body);
+    font-size: 1rem;
+    max-width: none;
+  }
+  .entry-foot {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    color: var(--ash-text);
+    font-size: 0.74rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .entry-arrow {
+    color: var(--sodium);
+    font-family: var(--font-ui);
+    font-size: 1.1rem;
+    transition: transform 200ms ease;
+  }
+  .entry:hover .entry-arrow,
+  .entry:focus-visible .entry-arrow {
+    transform: translateX(4px);
+  }
+  @media (max-width: 860px) {
+    .home-hero,
+    .entry-rail {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+</head>
+<body>
+  <main class="page">
+    <div class="frame">
+      <header class="hero home-hero">
+        <div>
+          <div class="eyebrow">lash · documentation</div>
+          <h1>system<span class="slash">/</span>manual</h1>
+          <p>Two views of the same terminal agent. Architecture for how the runtime is built. Design language for how the interface should feel in long working sessions.</p>
+        </div>
+        <div class="hero-meta">
+          <article class="card">
+            <div class="micro-label">Architecture</div>
+            <strong>Runtime, modes, providers, graph, tools</strong>
+            <span class="stat-note">Chaptered source map for changing the system safely.</span>
+          </article>
+          <article class="card">
+            <div class="micro-label">Design language</div>
+            <strong>Warm Iron / Fast Amber</strong>
+            <span class="stat-note">Visual and interaction rules for the TUI surface.</span>
+          </article>
+          <article class="card">
+            <div class="micro-label">Published paths</div>
+            <strong><code>/main</code> and <code>/staging</code></strong>
+            <span class="stat-note">GitHub Pages publishes each branch into its own public path.</span>
+          </article>
+        </div>
+      </header>
+
+      <section class="entry-rail" aria-label="Documentation sections">
+        <a class="entry" href="./architecture/">
+          <div class="micro-label">Read the system</div>
+          <div>
+            <h2>Architecture<span class="accent">.</span></h2>
+            <p>Crates, execution paths, graph storage, providers, plugin contracts, Lashlang, UI projection, and high-signal files.</p>
+          </div>
+          <div class="entry-foot">
+            <span>8 chapters</span>
+            <span class="entry-arrow">→</span>
+          </div>
+        </a>
+        <a class="entry" href="./design-language.html">
+          <div class="micro-label">Shape the interface</div>
+          <div>
+            <h2>Design Language<span class="accent">.</span></h2>
+            <p>The terminal product vocabulary. Sodium intent, ash structure, chalk text, plan dock, activity rendering, type, color, texture.</p>
+          </div>
+          <div class="entry-foot">
+            <span>7 sections</span>
+            <span class="entry-arrow">→</span>
+          </div>
+        </a>
+      </section>
+
+      <footer class="footer">Docs root · <code>docs/index.html</code></footer>
+    </div>
+  </main>
+</body>
+</html>

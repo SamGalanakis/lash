@@ -7,7 +7,6 @@ license.workspace = true
 [features]
 # Keep core portable by default.
 default = []
-sqlite-store = ["dep:rusqlite", "dep:flate2"]
 otel-trace = ["lash-trace/otel"]
 tool-impls = [
     "dep:fff-search",
@@ -21,7 +20,7 @@ fff-zlob = ["tool-impls", "fff-search/zlob"]
 # session-manager/turn fixtures with lash's own tests.
 testing = []
 # Convenience umbrella for first-party consumers (e.g. lash-cli).
-full = ["sqlite-store", "tool-impls"]
+full = ["tool-impls"]
 
 [dependencies]
 lash-sansio = { path = "../lash-sansio" }
@@ -31,7 +30,6 @@ tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt",
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 jsonschema = "0.18"
-rmp-serde = "1"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
@@ -45,8 +43,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 base64 = "0.22"
 bytes = "1"
 sha2 = "0.10"
-rusqlite = { version = "0.33", features = ["bundled"], optional = true }
-flate2 = { version = "1", optional = true }
 chrono = "0.4"
 similar = "2"
 pdf-extract = { version = "0.7", optional = true }

@@ -13,7 +13,7 @@ use lash::plugin::{
 };
 use lash::{
     MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolDefinition,
-    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult, TurnStatus,
+    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -182,7 +182,12 @@ impl SessionPlugin for AutoresearchPlugin {
                 let state = turn_state
                     .lock()
                     .map_err(|_| PluginError::Session("autoresearch state poisoned".to_string()))?;
-                if !state.mode.active || ctx.turn.status != TurnStatus::Completed {
+                if !state.mode.active
+                    || !matches!(
+                        &ctx.turn.outcome,
+                        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+                    )
+                {
                     return Ok(Vec::new());
                 }
                 let summary = compute_summary(

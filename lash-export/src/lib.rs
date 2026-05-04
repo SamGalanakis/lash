@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
-use lash::{ChronologicalEntry, SessionGraph, SessionMeta, SessionStateEnvelope, Store};
+use lash::{ChronologicalEntry, SessionGraph, SessionMeta, SessionStateEnvelope};
+use lash_sqlite_store::Store;
 
 pub mod html;
 pub mod json;

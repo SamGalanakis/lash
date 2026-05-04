@@ -37,8 +37,8 @@ use lash::tools::batch::batch_tool_definition;
 use lash::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
     ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolDefinition,
-    ToolResult, append_assistant_text_part, normalized_response_parts, reasoning_part,
-    turn_limit_exhausted_message,
+    ToolResult, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
+    normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
 };
 use serde_json::Value;
 
@@ -421,7 +421,11 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     // "do nothing else" after the tool action.
                     actions.push(DriverAction::StartCheckpoint {
                         checkpoint: CheckpointKind::BeforeCompletion,
-                        on_empty: CheckpointResumeAction::Finish,
+                        on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
+                            TurnFinish::AssistantMessage {
+                                text: String::new(),
+                            },
+                        )),
                     });
                     return actions;
                 }
@@ -431,7 +435,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     "Model returned no assistant text or tool calls.",
                     None,
                 )));
-                actions.push(DriverAction::Finish);
+                actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+                    TurnStop::ProviderError,
+                )));
                 return actions;
             }
 
@@ -465,7 +471,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     "Model returned no assistant text or tool calls.",
                     None,
                 )));
-                actions.push(DriverAction::Finish);
+                actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+                    TurnStop::ProviderError,
+                )));
                 return actions;
             }
             actions.push(DriverAction::AppendEvents(vec![conversation_event(
@@ -479,7 +487,11 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
             )]));
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
-                on_empty: CheckpointResumeAction::Finish,
+                on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
+                    TurnFinish::AssistantMessage {
+                        text: assistant_text.clone(),
+                    },
+                )),
             });
             return actions;
         }
@@ -651,7 +663,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
             actions.push(DriverAction::AppendEvents(vec![conversation_event(
                 turn_limit_exhausted_message(max_turns),
             )]));
-            actions.push(DriverAction::Finish);
+            actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+                TurnStop::MaxTurns,
+            )));
             return actions;
         }
 

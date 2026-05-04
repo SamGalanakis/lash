@@ -184,16 +184,10 @@ pub enum SessionEvent {
         plugin_id: String,
         event: PluginSurfaceEvent,
     },
-    /// Emitted when a typed execution session terminates via `submit <expr>`.
-    /// The `value` is the captured (and schema-validated) result.
-    /// Hosts that want the typed shape back (e.g. the parent of a
-    /// typed subagent workflow) listen for this event on the child's stream;
-    /// it is also stamped onto `AssembledTurn::typed_finish` for
-    /// non-streaming consumers.
-    #[serde(rename = "typed_finish")]
-    TypedFinish { value: serde_json::Value },
-    #[serde(rename = "session_handoff")]
-    SessionHandoff { session_id: String },
+    /// Semantic result for a completed turn. `Done` remains the machine
+    /// lifecycle marker emitted after this event.
+    #[serde(rename = "turn_outcome")]
+    TurnOutcome { outcome: TurnOutcome },
     #[serde(rename = "done")]
     Done,
     #[serde(rename = "error")]
@@ -207,6 +201,42 @@ pub enum SessionEvent {
         request: PromptRequest,
         #[serde(skip)]
         response_tx: std::sync::mpsc::Sender<PromptResponse>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOutcome {
+    Finished(TurnFinish),
+    Handoff { session_id: String },
+    Stopped(TurnStop),
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnFinish {
+    AssistantMessage {
+        text: String,
+    },
+    Submission {
+        channel_id: String,
+        value: serde_json::Value,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStop {
+    Cancelled,
+    InvalidInput,
+    MaxTurns,
+    ToolFailure,
+    ProviderError,
+    PluginAbort,
+    RuntimeError,
+    SubmittedError {
+        channel_id: String,
+        value: serde_json::Value,
     },
 }
 

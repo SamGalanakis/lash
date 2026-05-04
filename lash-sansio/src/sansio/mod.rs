@@ -23,7 +23,7 @@ use crate::session_model::{
     SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, fresh_message_id,
     make_error_envelope, make_error_event, reassign_part_ids,
 };
-use crate::{CheckpointKind, PluginMessage, ToolResult};
+use crate::{CheckpointKind, PluginMessage, ToolResult, TurnOutcome, TurnStop};
 
 // ─── Public types ───
 
@@ -234,10 +234,10 @@ impl WaitingExecState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CheckpointResumeAction {
     PrepareIteration,
-    Finish,
+    Finish(TurnOutcome),
 }
 
 pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
@@ -260,7 +260,7 @@ pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
     },
     AdvanceIteration,
     ScheduleTurnLimitFinal,
-    Finish,
+    Finish(TurnOutcome),
 }
 
 pub struct DriverContextView<'a, M: ModeProtocol = UnitModeProtocol> {
@@ -548,10 +548,11 @@ impl<M: ModeProtocol> TurnMachine<M> {
 
     pub fn fail_turn(&mut self, event: SessionEvent) {
         self.emit(event);
-        self.finish();
+        self.finish(TurnOutcome::Stopped(TurnStop::RuntimeError));
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, outcome: TurnOutcome) {
+        self.emit(SessionEvent::TurnOutcome { outcome });
         self.emit(SessionEvent::Done);
         let msgs = std::mem::take(&mut self.messages);
         let events = Arc::clone(&self.events);
@@ -731,12 +732,12 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     );
                     progress_dirty = true;
                 }
-                DriverAction::Finish => {
+                DriverAction::Finish(outcome) => {
                     if progress_dirty {
                         self.emit_progress();
                         progress_dirty = false;
                     }
-                    self.finish();
+                    self.finish(outcome);
                     break;
                 }
             }
@@ -893,7 +894,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 self.iteration += 1;
                 if self.termination.should_force_exit_after_grace_turn() {
                     self.emit_progress();
-                    self.finish();
+                    self.finish(TurnOutcome::Stopped(TurnStop::MaxTurns));
                     return;
                 }
                 self.termination.maybe_schedule_turn_limit_final(
@@ -912,7 +913,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             CheckpointResumeAction::PrepareIteration => {
                 self.state = MachineState::PrepareIteration;
             }
-            CheckpointResumeAction::Finish => self.finish(),
+            CheckpointResumeAction::Finish(outcome) => self.finish(outcome),
         }
     }
 
@@ -1100,7 +1101,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             format!("LLM error: {}", error.message),
             error.raw,
         ));
-        self.finish();
+        self.finish(TurnOutcome::Stopped(TurnStop::ProviderError));
     }
 
     fn handle_tool_results(&mut self, id: EffectId, completed: Vec<CompletedToolCall>) {

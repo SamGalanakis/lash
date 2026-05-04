@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modules - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<script src="./mermaid.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Architecture chapter 02</div>
+          <h1>modules<span class="slash">/</span>crates</h1>
+          <p>The workspace is split by responsibility: pure protocol, async runtime, mode drivers, provider transports, plugin/tool surfaces, host UI, trace/export utilities, and benchmark runners.</p>
+        </div>
+        <div class="hero-meta">
+          <article class="card"><div class="micro-label">Core seam</div><strong><code>lash-sansio</code> -> <code>lash</code></strong><span>The runtime satisfies effects emitted by the pure turn machine.</span></article>
+          <article class="card"><div class="micro-label">Mode seam</div><strong><code>lash-mode-standard</code>, <code>lash-mode-rlm</code></strong><span>Protocol drivers are plugins, not branches baked into provider code.</span></article>
+          <article class="card"><div class="micro-label">UI seam</div><strong><code>lash-ui</code>, <code>lash-tui</code>, <code>lash-cli</code></strong><span>Core runtime stays free of CLI/TUI projection vocabulary.</span></article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a class="active" href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>Crate Families</h2>
+            <p>These are the high-value ownership groups to inspect before changing behavior.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><small>Pure protocol</small><h3>lash-sansio</h3><p>Owns <code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>, <code>ModePreamble</code>, prompt templates, messages, attachments, and tool definitions/output contracts.</p><code class="path">lash-sansio/src/{sansio,turn,mode,prompt,tool_surface}.rs</code></article>
+            <article class="panel"><small>Async runtime</small><h3>lash</h3><p>Owns <code>LashRuntime</code>, <code>Session</code>, <code>SessionGraph</code>, and <code>RuntimePersistence</code> — plus tool dispatch, provider registry, MCP, OAuth, attachments, tracing, and runtime controls.</p><code class="path">lash/src/runtime/*, lash/src/session.rs</code></article>
+            <article class="panel"><small>Mode plugins</small><h3>standard + rlm</h3><p>Standard drives native provider tool calls. RLM extracts <code>lashlang</code> code fences, runs persistent REPL state, snapshots execution globals, and records RLM trajectory.</p><code class="path">lash-mode-standard, lash-mode-rlm, lashlang</code></article>
+            <article class="panel"><small>Provider plugins</small><h3>OpenAI, Codex, Anthropic, Google</h3><p>Each provider implements state, auth, readiness, transport, and model policy components behind <code>ProviderHandle</code>.</p><code class="path">lash-provider-*, lash-providers-builtin</code></article>
+            <article class="panel"><small>Tool plugins</small><h3>default tools + subagents + discovery</h3><p>Default tools, subagents, monitors, plan mode, prompt context, rolling history, observational memory, and UI activity all register through plugin factories. Tool discovery is itself split — catalog projection, definitions, provider execution, lexical ranking, LLM rerank, and schema indexing.</p><code class="path">lash-default-tools, lash-subagents, lash-plugin-*</code></article>
+            <article class="panel"><small>Host UI</small><h3>CLI, TUI, UI surfaces</h3><p>The CLI bootstraps runtime, plugins, and providers, then renders the authoritative <code>SessionReadView</code> through <code>ChronologicalProjection</code> into <code>UiTimeline</code>.</p><code class="path">lash-cli, lash-ui, lash-tui</code></article>
+            <article class="panel"><small>Inspection tools</small><h3>trace + export + file index</h3><p><code>lash-trace</code> defines JSONL trace records. <code>lash-export</code> renders saved sessions. <code>lash-file-index</code> powers async fuzzy file completion.</p><code class="path">lash-trace, lash-trace-viewer, lash-export, lash-file-index</code></article>
+            <article class="panel"><small>Experimentation</small><h3>autoresearch + GEPA + benches</h3><p>Autoresearch adds hidden tools and UI surfaces. GEPA and benchmark runners sit at the edge for evaluation and performance work.</p><code class="path">lash-autoresearch, lash-gepa, bench/*/runner</code></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Module Dependency Direction</h2>
+            <p>Provider crates depend on runtime contracts; mode and plugin crates register behavior; the CLI composes the concrete app.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Crate families</div>
+            <div class="mermaid">
+flowchart TD
+  CLI["lash-cli"] --> Runtime["lash"]
+  CLI --> Tui["lash-ui / lash-tui"]
+  CLI --> Builtins["lash-providers-builtin"]
+  Runtime --> Sansio["lash-sansio"]
+  Runtime --> Lang["lashlang"]
+  Modes["lash-mode-standard<br/>lash-mode-rlm"] --> Runtime
+  Modes --> Sansio
+  Plugins["lash-plugin-*<br/>lash-subagents<br/>lash-default-tools"] --> Runtime
+  Providers["lash-provider-*"] --> Runtime
+  Builtins --> Providers
+  Export["lash-export"] --> Runtime
+  Trace["lash-trace-viewer"] --> TraceCore["lash-trace"]
+  Runtime --> TraceCore
+  FileIndex["lash-file-index"] --> CLI
+            </div>
+          </div>
+        </div>
+
+        <div class="section-nav">
+          <a href="./overview.html"><span>Previous</span><strong>Overview</strong></a>
+          <a href="./flow.html"><span>Next</span><strong>Data Flow</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Module map based on current workspace members in <code>Cargo.toml</code>.</footer>
+    </main>
+  </div>
+</body>
+</html>

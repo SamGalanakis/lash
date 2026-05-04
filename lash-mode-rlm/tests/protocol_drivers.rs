@@ -617,7 +617,7 @@ fn rlm_exec_tool_call_events_keep_call_id() {
 }
 
 #[test]
-fn typed_rlm_finish_emits_typed_finish_and_done() {
+fn typed_rlm_finish_emits_turn_outcome_and_done() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
         RlmTermination::Finish {
@@ -672,11 +672,6 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
         Effect::Emit(lash_sansio::SessionEvent::Message { text, kind })
             if text.contains("\"ok\": true") && kind == "final"
     )));
-    assert!(effects.iter().any(|e| matches!(
-        e,
-        Effect::Emit(lash_sansio::SessionEvent::TypedFinish { value })
-            if *value == serde_json::json!({ "ok": true })
-    )));
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
@@ -686,6 +681,14 @@ fn typed_rlm_finish_emits_typed_finish_and_done() {
     });
 
     let effects = drain_effects(&mut machine);
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::Emit(lash_sansio::SessionEvent::TurnOutcome {
+            outcome: lash_sansio::TurnOutcome::Finished(
+                lash_sansio::TurnFinish::Submission { channel_id, value }
+            )
+        }) if channel_id == "rlm.submit" && *value == serde_json::json!({ "ok": true })
+    )));
     assert!(find_done(&effects).is_some());
 }
 
@@ -838,4 +841,70 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
 
     let effects = drain_effects(&mut machine);
     assert!(find_llm_call(&effects).is_some());
+}
+
+#[test]
+fn typed_rlm_schema_mismatch_checks_any_of() {
+    let config = test_config_with_termination(
+        ExecutionMode::new("rlm"),
+        RlmTermination::Finish {
+            schema: Some(serde_json::json!({
+                "anyOf": [
+                    { "type": "string" },
+                    { "type": "integer" }
+                ]
+            })),
+            include_submit_prompt: true,
+        },
+    );
+    let msgs = vec![user_message("return typed data")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "```lashlang\nsubmit true\n```".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "```lashlang\nsubmit true\n```".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let exec_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("exec effect");
+    machine.handle_response(Response::ExecResult {
+        id: exec_id,
+        result: Ok(lash_sansio::ExecResponse {
+            output: String::new(),
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: None,
+            duration_ms: 1,
+            terminal_finish: Some(serde_json::json!(true)),
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(find_checkpoint(&effects).is_some());
+    assert!(machine.messages().iter().any(|message| {
+        message.role == MessageRole::System
+            && message.parts.iter().any(|part| {
+                part.content
+                    .contains("didn't match the required output schema")
+            })
+    }));
 }

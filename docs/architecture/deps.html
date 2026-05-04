@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dependencies - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<script src="./mermaid.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Architecture chapter 06</div>
+          <h1>deps<span class="slash">/</span>edges</h1>
+          <p>Lash keeps external systems at explicit edges — LLM transports, OAuth flows, MCP stdio servers, Tavily search/extract, models.dev metadata, trace sinks, file watchers, and SQLite-backed session storage.</p>
+        </div>
+        <div class="hero-meta">
+          <article class="card"><div class="micro-label">LLM APIs</div><strong>OpenAI-compatible, Codex, Anthropic, Google</strong><span>Provider crates translate common <code>LlmRequest</code> contracts to wire APIs.</span></article>
+          <article class="card"><div class="micro-label">Tool APIs</div><strong>MCP + Tavily</strong><span>Dynamic tool import and web search/fetch live outside the core protocol.</span></article>
+          <article class="card"><div class="micro-label">Local services</div><strong>SQLite, file watch, JSONL traces</strong><span>Durable sessions, fuzzy file index, and trace capture are local-first.</span></article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a class="active" href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>External Integration Map</h2>
+            <p>The runtime uses provider handles and dynamic tool providers to isolate external protocols from turn logic.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Runtime dependency edges</div>
+            <div class="mermaid">
+flowchart TD
+  CLI["lash-cli"] --> Config["LashConfig"]
+  Config --> Providers["ProviderSpec -> ProviderHandle"]
+  Providers --> OpenAI["OpenAI-compatible<br/>/responses"]
+  Providers --> Codex["OpenAI Codex OAuth<br/>chatgpt.com backend responses"]
+  Providers --> Anthropic["Anthropic Messages<br/>/v1/messages"]
+  Providers --> Google["Google Code Assist<br/>generateContent / streamGenerateContent"]
+  Config --> MCP["MCP stdio servers"]
+  Config --> Tavily["Tavily search / extract"]
+  Config --> Models["models.dev catalog<br/>file cache + bundled fallback"]
+  CLI --> FileIndex["lash-file-index<br/>ignore + notify + nucleo"]
+  Runtime["LashRuntime"] --> Store["SQLite Store<br/>session graph + blobs + usage"]
+  Runtime --> Trace["JsonlTraceSink<br/>optional OTel"]
+  MCP --> Dynamic["DynamicToolProvider"]
+  Tavily --> DefaultTools["lash-default-tools"]
+  Dynamic --> Runtime
+  DefaultTools --> Runtime
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Provider Details</h2>
+            <p>Provider crates share the same runtime interface but own their own auth, readiness, model policy, and request transport.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Provider</th><th>Kind</th><th>Transport / Auth</th></tr></thead>
+              <tbody>
+                <tr><td>OpenAI-compatible</td><td><code>openai-compatible</code></td><td>Posts to <code>{base_url}/responses</code> with bearer API key; default OpenRouter base URL is supported.</td></tr>
+                <tr><td>Codex subscription</td><td><code>codex</code></td><td>Posts to ChatGPT Codex Responses backend with OAuth device-code tokens and Codex-specific headers.</td></tr>
+                <tr><td>Anthropic</td><td><code>anthropic</code></td><td>Posts to <code>/v1/messages</code> with API key, Anthropic version header, and beta flags.</td></tr>
+                <tr><td>Google Gemini / Code Assist</td><td><code>google_oauth</code></td><td>Uses Google OAuth PKCE/manual-code flow and Code Assist generate/stream endpoints.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Local And Optional Dependencies</h2>
+            <p>These dependencies are important operationally because they affect startup, discovery, observability, or tool availability.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3>MCP</h3><p><code>attach_mcp_servers</code> imports stdio MCP <code>tools/list</code> entries as <code>mcp__server__tool</code> dynamic tools, preserving input and output schemas where available.</p></article>
+            <article class="panel"><h3>Tavily</h3><p>Web search and URL extraction register only when <code>LashConfig.auxiliary_secrets.tavily_api_key</code> is present.</p></article>
+            <article class="panel"><h3>models.dev</h3><p><code>CachedModelCatalog</code> reads a file cache, can fetch <code>https://models.dev/api.json</code>, and has a bundled snapshot fallback.</p></article>
+            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Optional OTel maps turns, LLM calls, tools, and streams to spans/events.</p></article>
+            <article class="panel"><h3>File index</h3><p><code>lash-file-index</code> combines <code>ignore</code> walking, <code>notify</code> watching, and <code>nucleo</code> matching for async <code>@</code> completion.</p></article>
+            <article class="panel"><h3>Store</h3><p>The local SQLite store commits session heads, graph nodes, and checkpoint blobs. It also tracks usage deltas, tombstones, and garbage-collection metadata.</p></article>
+          </div>
+        </div>
+
+        <div class="section-nav">
+          <a href="./abstractions.html"><span>Previous</span><strong>Abstractions</strong></a>
+          <a href="./files.html"><span>Next</span><strong>Files</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Dependency anchors: <code>lash/src/provider.rs</code>, <code>lash/src/mcp.rs</code>, <code>lash/src/model_info.rs</code>, <code>lash-file-index/src/lib.rs</code>.</footer>
+    </main>
+  </div>
+</body>
+</html>

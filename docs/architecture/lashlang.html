@@ -3,10 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>lash Architecture - Lashlang</title>
+<title>Lashlang - lash Architecture</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./styles.css">
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" defer></script>
 <script src="./mermaid.js" defer></script>
 </head>
 <body>
@@ -14,221 +13,103 @@
     <main class="frame">
       <header class="hero">
         <div>
-          <div class="eyebrow">Architecture page 03</div>
-          <h1>lash<span class="slash">/</span>lang</h1>
-          <p>Lashlang is the local execution language used by RLM and RLMPure. The model writes one fenced block, Lash executes it in a persistent turn-local REPL, and observations feed the next model iteration.</p>
+          <div class="eyebrow">Architecture chapter 08</div>
+          <h1>lashlang<span class="slash">/</span>rlm</h1>
+          <p>Lashlang is the agent-facing execution language for RLM mode. It lets the model run local programs against host tools, preserve state across turns, use async handles, and pass typed values through <code>print</code> and <code>submit</code>.</p>
         </div>
         <div class="hero-meta">
-          <article class="card"><div class="micro-label">Fence</div><strong><code>```lashlang</code></strong><span>The prompt-standard label. The extractor also accepts <code>rlm</code> and <code>lash</code> aliases.</span></article>
-          <article class="card"><div class="micro-label">Observe</div><strong><code>print &lt;expr&gt;</code></strong><span>Returns output to the next iteration without ending the turn.</span></article>
-          <article class="card"><div class="micro-label">Finish</div><strong><code>submit &lt;expr&gt;</code></strong><span>Ends the turn and turns the value into the assistant reply.</span></article>
+          <article class="card"><div class="micro-label">Runtime</div><strong><code>lashlang/src/runtime</code></strong><span>Persistent VM state, values, tool host, compiled program cache, image values, and profiling hooks.</span></article>
+          <article class="card"><div class="micro-label">Prompt source</div><strong><code>LASHLANG_LANGUAGE_REFERENCE</code></strong><span>The RLM prompt text is tested against language behavior.</span></article>
+          <article class="card"><div class="micro-label">Multimodal seam</div><strong><code>print(image)</code></strong><span>Image values are backed by runtime attachments and sent to providers through content blocks.</span></article>
         </div>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="./index.html">Overview</a>
-        <a href="./runtime.html">Modules + Runtime</a>
-        <a href="./execution-modes.html">Execution Modes</a>
-        <a class="active" href="./lashlang.html">Lashlang</a>
-        <a href="./reference.html">Reference</a>
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a class="active" href="./lashlang.html">Lashlang</a>
       </nav>
 
       <section class="content">
         <div class="section">
           <div class="section-header">
-            <h2>Execution Flow</h2>
-            <p>Lashlang is deliberately not a provider-native tool call. It is parsed from model text, executed locally, and then converted into durable session events.</p>
+            <h2>Language Surface</h2>
+            <p>The prompt-facing language is intentionally Python-shaped while staying typed enough for tool contracts and structured output.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3>Values</h3><p><code>null</code>, booleans, numbers, strings, lists, records, results, async handles, and immutable <code>Image</code> handles. Images expose <code>.id</code>, <code>.label</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>.</p></article>
+            <article class="panel"><h3>Control flow</h3><p>Assignments, functions, loops, conditionals, <code>?</code> fail-fast unwrapping, <code>parallel</code>, <code>start call</code>, <code>await</code>, and <code>cancel</code>.</p></article>
+            <article class="panel"><h3>Tools</h3><p><code>call tool { ... }</code> returns a result wrapper; <code>(call tool { ... })?</code> unwraps success or stops the program with the tool error.</p></article>
+            <article class="panel"><h3>Output</h3><p><code>print</code> sends observations to the next model call. <code>submit</code> ends the turn with final text or JSON-compatible metadata.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>RLM Execution Path</h2>
+            <p>The model emits code, the runtime executes it locally, and the resulting trajectory is persisted as mode events.</p>
           </div>
           <div class="diagram">
-            <div class="diagram-title">From model text to next context</div>
+            <div class="diagram-title">RLM and Lashlang execution</div>
             <div class="mermaid">
-flowchart LR
-  Model["Model output<br/>reasoning + first lashlang fence"] --> Extract["RlmDriver extracts first accepted fence"]
-  Extract --> Exec["Effect::ExecCode"]
-  Exec --> Runtime["Persistent lashlang runtime"]
-  Runtime --> Calls["Tool calls<br/>call / start call / parallel"]
-  Calls --> ToolEvents["ToolEvent records<br/>visible in chronological graph"]
-  Runtime --> Entry["RlmTrajectoryEntry<br/>reasoning, code, output, tool_calls, final_output"]
-  Entry --> Context["Next RLM/RLMPure context"]
-  Runtime --> Final["submit value<br/>assistant response"]
+sequenceDiagram
+  participant Model as LLM
+  participant Driver as RlmDriver
+  participant Runtime as RuntimeTurnDriver
+  participant Executor as RlmExecutionState
+  participant Host as HostBridge / ModeExecutionContext
+  participant Graph as SessionGraph
+
+  Model-->>Driver: prose + ```lashlang fence
+  Driver-->>Runtime: DriverAction::StartExec(code)
+  Runtime->>Executor: execute_code(code)
+  Executor->>Host: call / start / await / cancel tool
+  Host-->>Executor: ToolResult / handle / error
+  Executor-->>Runtime: ExecResponse + observations + images
+  Runtime->>Graph: tool calls then RLM trajectory event
+  Runtime-->>Driver: Response::ExecResult
             </div>
           </div>
         </div>
 
         <div class="section">
           <div class="section-header">
-            <h2>Core Syntax</h2>
-            <p>The language reference is shared by RLM and RLMPure. Keep docs here aligned with <code>LASHLANG_LANGUAGE_REFERENCE</code>.</p>
+            <h2>Images And Attachments</h2>
+            <p>Image support is a first-class runtime feature, not a plain record convention.</p>
           </div>
           <div class="two-col">
-            <div class="panel">
-              <h3>Values And State</h3>
-              <ul>
-                <li>Values: <code>null</code>, booleans, numbers, strings, lists, records, and immutable <code>Image</code> handles.</li>
-                <li>Images expose read-only metadata fields: <code>.id</code>, <code>.name</code>, <code>.mime</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>. <code>print(image)</code> attaches the actual image to the next model call; <code>submit(image)</code> serializes only the descriptor.</li>
-                <li>Literals: <code>[a, b]</code> and <code>{ a: 1, b: 2 }</code>.</li>
-                <li>Strings: <code>"..."</code> supports common escapes; <code>"""..."""</code> is escaped multiline; <code>r"""..."""</code> and <code>r'''...'''</code> are raw multiline strings for patches, scripts, JSON, Markdown, and heredocs.</li>
-                <li>Assignment: <code>name = expr</code>, plus variable-rooted path updates like <code>record.field = value</code>, <code>record[key] = value</code>, <code>list[i] = value</code>, and <code>state.groups[g].count = count + 1</code>.</li>
-                <li>Record assignment inserts or replaces fields. Dynamic record indexing reads string-coerced keys and returns <code>null</code> when absent, so <code>counts[g] = counts[g] + 1</code> is a compact histogram pattern.</li>
-                <li>List assignment replaces an existing integer index, including negative indexes; it does not grow the list.</li>
-                <li>Variables persist across fenced blocks within the same turn.</li>
-                <li>Bare expressions are valid statements. Inside <code>parallel { ... }</code>, a bare expression contributes to the positional result list.</li>
-              </ul>
-            </div>
-            <div class="panel">
-              <h3>Control Flow</h3>
-              <ul>
-                <li>Statement control flow: <code>if</code> and <code>for</code>.</li>
-                <li><code>break</code> exits the nearest <code>for</code>; <code>continue</code> skips to that loop's next iteration.</li>
-                <li>Expression conditional: <code>cond ? yes : no</code>.</li>
-                <li>There is no expression-form <code>if</code>.</li>
-                <li>Boolean negation: <code>!cond</code> or <code>not cond</code>.</li>
-                <li><code>submit</code> is not loop control. It exits the whole program and delivers the turn's final value.</li>
-                <li>If a prompt includes bound variables, those names are already in scope.</li>
-              </ul>
-            </div>
+            <article class="panel"><h3><code>print(image)</code></h3><p>Collects image values recursively, registers their attachment refs, and sends provider-visible <code>LlmContentBlock::Image</code> content alongside descriptor text.</p></article>
+            <article class="panel"><h3><code>submit(image)</code></h3><p>Serializes metadata only, using a JSON-compatible descriptor with id, label, size, width, and height. It does not embed base64 data.</p></article>
           </div>
-          <pre class="code"><code>files = (call glob { pattern: "lash-*/src/**/*.rs" })?
-matches = (call grep { query: "ExecutionMode", path: "." })?
-first = null
-for file in files {
-  if ends_with(file, "/tests.rs") {
-    continue
-  }
-  first = file
-  break
-}
-print format("saw {} files, {} matches, first={}", len(files), len(matches.matches), first)</code></pre>
         </div>
 
         <div class="section">
           <div class="section-header">
-            <h2>Tool Calls</h2>
-            <p>Every mode-owned tool listed under Available Tools is callable from lashlang, even though RLM and RLMPure send no native provider tool schema.</p>
+            <h2>Important Files</h2>
+            <p>Keep prompt reference, parser/runtime behavior, tests, and docs synchronized when changing the language.</p>
           </div>
           <div class="table">
             <table>
-              <thead>
-                <tr>
-                  <th>Form</th>
-                  <th>Meaning</th>
-                  <th>Result shape</th>
-                </tr>
-              </thead>
+              <thead><tr><th>Path</th><th>Role</th></tr></thead>
               <tbody>
-                <tr>
-                  <td><code>call tool { arg: expr }</code></td>
-                  <td>Run a tool synchronously.</td>
-                  <td><code>{ ok: true, value: ... }</code> or <code>{ ok: false, error: "..." }</code></td>
-                </tr>
-                <tr>
-                  <td><code>(call tool { ... })?</code></td>
-                  <td>Fail-fast unwrap for the common happy path.</td>
-                  <td>Returns <code>.value</code> or aborts the block with the tool error.</td>
-                </tr>
-                <tr>
-                  <td><code>start call tool { ... }</code></td>
-                  <td>Start a background call.</td>
-                  <td>A handle. Resolve with <code>await handle</code>.</td>
-                </tr>
-                <tr>
-                  <td><code>await [h1, h2]</code></td>
-                  <td>Wait for multiple handles.</td>
-                  <td>A list of wrapper records in order.</td>
-                </tr>
-                <tr>
-                  <td><code>cancel handle</code></td>
-                  <td>Best-effort cancellation.</td>
-                  <td>Cancellation status from the runtime.</td>
-                </tr>
-                <tr>
-                  <td><code>parallel { a: call ... b: call ... }</code></td>
-                  <td>Run independent branches concurrently.</td>
-                  <td>A record for named branches, or a list for positional branches.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <pre class="code"><code>fanout = parallel {
-  cargo: call exec_command { cmd: "cargo check --workspace" }
-  fmt: call exec_command { cmd: "cargo fmt --check" }
-}
-print { cargo_ok: fanout.cargo.ok, fmt_ok: fanout.fmt.ok }</code></pre>
-        </div>
-
-        <div class="section">
-          <div class="section-header">
-            <h2>Builtins</h2>
-            <p>Builtins are plain functions. <code>slice</code> accepts <code>null</code> bounds for start or end, and negative bounds count from the end.</p>
-          </div>
-          <div class="table compact">
-            <table>
-              <tbody>
-                <tr><td><code>len(x)</code>, <code>empty(x)</code></td><td>Length and emptiness checks for strings, lists, records, and null. Use <code>image.size</code> for images.</td></tr>
-                <tr><td><code>slice(s, start, end)</code></td><td>Substring or sublist.</td></tr>
-                <tr><td><code>range(end)</code>, <code>range(start, end)</code></td><td>Integer list, end-exclusive.</td></tr>
-                <tr><td><code>push(list, item)</code></td><td>Returns a new list with one item appended.</td></tr>
-                <tr><td><code>split(s, sep)</code>, <code>join(list, sep)</code>, <code>trim(s)</code></td><td>String helpers.</td></tr>
-                <tr><td><code>starts_with</code>, <code>ends_with</code>, <code>contains</code></td><td>String/list membership helpers.</td></tr>
-                <tr><td><code>keys(record)</code>, <code>values(record)</code></td><td>Record helpers.</td></tr>
-                <tr><td><code>to_string</code>, <code>to_int</code>, <code>to_float</code></td><td>Conversions.</td></tr>
-                <tr><td><code>json_parse(s)</code></td><td>Parse JSON into a lashlang value.</td></tr>
-                <tr><td><code>format(template, arg0, arg1, ...)</code></td><td>Positional interpolation. Use <code>format("It is {}.", trim(now.output))</code>, not a list-wrapped argument.</td></tr>
-                <tr><td><code>validate(value, Type { ... })</code></td><td>Validate an intermediate value against a type literal.</td></tr>
+                <tr><td><code>lashlang/src/lexer.rs</code></td><td>Tokens, including raw triple-single-quote strings used for embedded code and heredoc-like content.</td></tr>
+                <tr><td><code>lashlang/src/parser.rs</code></td><td>AST construction for expressions, statements, type literals, calls, async, and control flow.</td></tr>
+                <tr><td><code>lashlang/src/runtime/mod.rs</code></td><td>Evaluator, value semantics, async handles, image values, serialization, built-ins, and profiling.</td></tr>
+                <tr><td><code>lashlang/src/runtime/schema.rs</code></td><td>Runtime schema validation and Lash type descriptor support.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt and language reference shown to the model.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td>Bridge between Lashlang tool calls and runtime tool execution, including image conversion.</td></tr>
+                <tr><td><code>lashlang/tests/rlm_prompt_claims.rs</code></td><td>Tests that prompt claims about language behavior remain true.</td></tr>
+                <tr><td><code>lashlang/examples/perf.rs</code>, <code>profile.rs</code></td><td>Whole-language profiling and benchmark entrypoints.</td></tr>
               </tbody>
             </table>
           </div>
         </div>
 
-        <div class="section">
-          <div class="section-header">
-            <h2>Type Literals</h2>
-            <p>Type literals describe expected shapes for validation and typed RLM outputs.</p>
-          </div>
-          <div class="two-col">
-            <div class="panel">
-              <h3>Shapes</h3>
-              <ul>
-                <li>Record type: <code>Type { field: shape, ... }</code>.</li>
-                <li>Scalars: <code>str</code>, <code>int</code>, <code>float</code>, <code>bool</code>, <code>dict</code>, <code>any</code>, <code>null</code>.</li>
-                <li>Collections: <code>list[shape]</code>, <code>enum["a", "b"]</code>, nested <code>Type { ... }</code>.</li>
-                <li>Unions: <code>a | b | c</code>, for example <code>status: str | int</code>.</li>
-              </ul>
-            </div>
-            <div class="panel">
-              <h3>Absent Versus Null</h3>
-              <ul>
-                <li>Optional field: <code>email: str?</code> means the field may be absent. If present, it must be a string.</li>
-                <li>Nullable field: <code>email: str | null</code> means the field is required and may be string or null.</li>
-                <li>Nested record types require <code>Type</code>. Bare <code>{ ok: bool }</code> is a record value, not a type.</li>
-              </ul>
-            </div>
-          </div>
-          <pre class="code"><code>candidate = { title: "Architecture", status: "draft", tags: ["docs"] }
-validated = validate(candidate, Type {
-  title: str,
-  status: enum["draft", "ready"],
-  tags: list[str],
-  reviewer: str?,
-  published_at: str | null,
-})</code></pre>
-        </div>
-
-        <div class="section">
-          <div class="section-header">
-            <h2>Protocol Rules</h2>
-            <p>These rules are what keep RLM/RLMPure chronological and inspectable in the UI.</p>
-          </div>
-          <div class="cards">
-            <article class="card"><div class="micro-label">One block</div><strong>Only the first accepted fenced lashlang block executes.</strong><span>Trailing prose and later fences do not drive execution. Prompts tell the model to emit exactly one block.</span></article>
-            <article class="card"><div class="micro-label">Observe first</div><strong><code>print</code> before acting on uncertain outputs.</strong><span>The next iteration receives the observation in trajectory history.</span></article>
-            <article class="card"><div class="micro-label">Submit last</div><strong>Do not submit in the same block that gathers fresh evidence.</strong><span>Run the block, inspect the observation, then submit in a later block if ready.</span></article>
-            <article class="card"><div class="micro-label">Tool results</div><strong>Tool events are recorded before the trajectory entry.</strong><span>The timeline can render thinking, tool results, observations, and final response in causal order.</span></article>
-          </div>
+        <div class="section-nav">
+          <a href="./files.html"><span>Previous</span><strong>Files</strong></a>
+          <span></span>
         </div>
       </section>
 
-      <footer class="footer">Language source: <code>lash-mode-rlm/src/driver.rs</code>.</footer>
+      <footer class="footer">Lashlang docs should stay aligned with <code>lash-mode-rlm/src/protocol.rs</code> and prompt-claim tests.</footer>
     </main>
   </div>
 </body>

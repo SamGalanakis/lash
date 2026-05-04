@@ -52,12 +52,12 @@ impl HostPromptBridge {
     }
 }
 
-impl RuntimeSessionManager {
+impl PromptCapability {
     pub(in crate::runtime::session_manager) async fn prompt_user(
         &self,
         request: crate::PromptRequest,
     ) -> Result<crate::PromptResponse, crate::PluginError> {
-        let Some(prompt_bridge) = &self.current.prompt_bridge else {
+        let Some(prompt_bridge) = &self.prompt_bridge else {
             return Err(crate::PluginError::Session(
                 "user prompts are unavailable in this session".to_string(),
             ));

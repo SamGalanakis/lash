@@ -76,7 +76,7 @@ fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     );
 }
 
-fn read_view_from_parts(
+fn test_read_view(
     events: &[lash::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
@@ -87,6 +87,41 @@ fn read_view_from_parts(
         std::sync::Arc::new(messages.to_vec()),
         std::sync::Arc::new(tool_calls.to_vec()),
     )
+}
+
+fn timeline_items_from_test_read_view(
+    events: &[lash::SessionEventRecord],
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+    ui_state: &UiProjectionState,
+) -> Vec<UiTimelineItem> {
+    let read_view = test_read_view(events, messages, tool_calls);
+    timeline_from_read_view(&read_view, ui_state)
+        .items()
+        .to_vec()
+}
+
+fn timeline_from_test_read_view(
+    events: &[lash::SessionEventRecord],
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+    ui_state: &UiProjectionState,
+) -> UiTimeline {
+    let read_view = test_read_view(events, messages, tool_calls);
+    timeline_from_read_view(&read_view, ui_state)
+}
+
+fn interrupted_blocks_from_test_read_view(
+    events: &[lash::SessionEventRecord],
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+    ui_state: &UiProjectionState,
+    status_message: impl Into<String>,
+) -> Vec<UiTimelineItem> {
+    let read_view = test_read_view(events, messages, tool_calls);
+    interrupted_blocks_from_read_view(&read_view, ui_state, status_message)
+        .items()
+        .to_vec()
 }
 
 fn other_variant_name(block: &UiTimelineItem) -> &'static str {
@@ -458,7 +493,7 @@ fn finish_turn_from_read_view_rebuilds_current_turn_from_authoritative_state() {
         ),
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_view(&test_read_view(&events, &messages, &[]));
 
     assert!(!app.running);
     assert!(app.timeline.iter().any(|block| {
@@ -498,7 +533,7 @@ fn finish_turn_from_read_view_preserves_projected_turns_after_repeated_input() {
     ];
     let events = events_from_messages(&messages);
 
-    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_view(&test_read_view(&events, &messages, &[]));
 
     let user_inputs = app
         .timeline
@@ -557,7 +592,7 @@ fn finish_turn_from_read_view_does_not_duplicate_assistant_text_after_tool_activ
         duration_ms: 12,
     }];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &tool_calls));
+    app.finish_turn_from_read_view(&test_read_view(&events, &messages, &tool_calls));
 
     let assistant_texts: Vec<&str> = app
         .timeline
@@ -606,7 +641,7 @@ fn finish_turn_from_read_view_uses_authoritative_reasoning_and_text() {
         message,
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_view(&test_read_view(&events, &messages, &[]));
 
     let assistant_texts: Vec<&str> = app
         .timeline
@@ -646,12 +681,8 @@ fn read_view_timeline_places_reasoning_before_text() {
     };
 
     let events = events_from_messages(std::slice::from_ref(&message));
-    let blocks = timeline_items_from_read_view_parts(
-        &events,
-        &[message],
-        &[],
-        &UiProjectionState::default(),
-    );
+    let blocks =
+        timeline_items_from_test_read_view(&events, &[message], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "AssistantText"]);
 }
@@ -667,9 +698,8 @@ fn read_view_timeline_round_trips_to_existing_display_blocks() {
         ..UiProjectionState::default()
     };
 
-    let timeline =
-        projection::timeline_from_read_view_parts(&events, &[user, assistant], &[], &ui_state);
-    let blocks = timeline_items_from_read_view_parts(
+    let timeline = timeline_from_test_read_view(&events, &[user, assistant], &[], &ui_state);
+    let blocks = timeline_items_from_test_read_view(
         &events,
         &[
             text_message("u1", MessageRole::User, "Summarize this"),
@@ -727,7 +757,7 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
     ))];
 
     let blocks =
-        timeline_items_from_read_view_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 
@@ -756,7 +786,7 @@ fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversat
     ))];
 
     let blocks =
-        timeline_items_from_read_view_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 }
@@ -784,7 +814,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
         conversation_event(assistant.clone()),
     ];
 
-    let blocks = timeline_items_from_read_view_parts(
+    let blocks = timeline_items_from_test_read_view(
         &events,
         &[user, assistant],
         &[],
@@ -831,7 +861,7 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
     ))];
 
     let blocks =
-        timeline_items_from_read_view_parts(&events, &[], &[], &UiProjectionState::default());
+        timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(
         variants,
@@ -892,7 +922,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
         conversation_event(assistant.clone()),
     ];
 
-    let blocks = timeline_items_from_read_view_parts(
+    let blocks = timeline_items_from_test_read_view(
         &events,
         &[assistant],
         &[],
@@ -928,7 +958,7 @@ fn finish_turn_from_read_view_uses_authoritative_transcript_even_when_streamed_t
         text_message("a1", MessageRole::Assistant, "Visible"),
     ];
     let events = events_from_messages(&messages);
-    app.finish_turn_from_read_view(&read_view_from_parts(&events, &messages, &[]));
+    app.finish_turn_from_read_view(&test_read_view(&events, &messages, &[]));
 
     let last_block = app
         .timeline
@@ -1348,7 +1378,7 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
 
 #[test]
 fn interrupted_read_view_preserves_partial_assistant_text() {
-    let blocks = interrupted_blocks_from_read_view_parts(
+    let blocks = interrupted_blocks_from_test_read_view(
         &[],
         &[],
         &[],
@@ -1382,7 +1412,7 @@ fn interrupted_read_view_does_not_duplicate_already_committed_prose() {
         text_message("m2", MessageRole::Assistant, "second prose"),
     ];
     let events = events_from_messages(&messages);
-    let blocks = interrupted_blocks_from_read_view_parts(
+    let blocks = interrupted_blocks_from_test_read_view(
         &events,
         &messages,
         &[],
@@ -1410,7 +1440,7 @@ fn interrupted_read_view_appends_only_uncommitted_tail() {
     // landed, only that trailing chunk should be appended as a new block.
     let messages = vec![text_message("m0", MessageRole::Assistant, "first prose")];
     let events = events_from_messages(&messages);
-    let blocks = interrupted_blocks_from_read_view_parts(
+    let blocks = interrupted_blocks_from_test_read_view(
         &events,
         &messages,
         &[],
@@ -1494,7 +1524,7 @@ fn interrupted_read_view_hides_rlm_execution_result_user_message() {
     }];
     let messages = vec![text_message("m0", MessageRole::User, "go"), result_message];
     let events = events_from_messages(&messages);
-    let blocks = interrupted_blocks_from_read_view_parts(
+    let blocks = interrupted_blocks_from_test_read_view(
         &events,
         &messages,
         &tool_calls,

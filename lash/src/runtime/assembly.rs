@@ -12,12 +12,13 @@ use crate::ToolCallRecord;
 use crate::llm::types::{LlmOutputPart, LlmResponse, LlmUsage};
 use crate::plugin::plugin_surface_event_renders_visible_output;
 use crate::session_model::{MessageRole, PartKind, SessionEvent, TokenUsage};
+use crate::{TurnFinish, TurnOutcome, TurnStop};
 
 use super::state::SessionStateEnvelope;
 use super::turn_driver::llm_response_has_content;
 use super::{
-    AssembledTurn, AssistantOutput, DoneReason, ExecutionSummary, OutputState, SanitizerPolicy,
-    TerminationPolicy, TurnIssue, TurnStatus,
+    AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, SanitizerPolicy,
+    TerminationPolicy, TurnIssue,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -265,8 +266,7 @@ pub(super) struct TurnAssembler {
     pub(super) saw_done: bool,
     pub(super) saw_tool_failure: bool,
     pub(super) has_plugin_visible_output: bool,
-    pub(super) typed_finish: Option<serde_json::Value>,
-    pub(super) handoff_successor_session_id: Option<String>,
+    pub(super) outcome: Option<TurnOutcome>,
 }
 
 impl Default for TurnAssembler {
@@ -288,8 +288,7 @@ impl TurnAssembler {
             saw_done: false,
             saw_tool_failure: false,
             has_plugin_visible_output: false,
-            typed_finish: None,
-            handoff_successor_session_id: None,
+            outcome: None,
         }
     }
 
@@ -347,11 +346,8 @@ impl TurnAssembler {
             SessionEvent::Done => {
                 self.saw_done = true;
             }
-            SessionEvent::TypedFinish { value } => {
-                self.typed_finish = Some(value.clone());
-            }
-            SessionEvent::SessionHandoff { session_id } => {
-                self.handoff_successor_session_id = Some(session_id.clone());
+            SessionEvent::TurnOutcome { outcome } => {
+                self.outcome = Some(outcome.clone());
             }
             SessionEvent::PluginEvent { event, .. }
                 if plugin_surface_event_renders_visible_output(event) =>
@@ -401,20 +397,31 @@ impl TurnAssembler {
         let safe_output = sanitize_assistant_output(raw_output.clone(), sanitizer);
         let output_state = classify_output_state(&raw_output, &safe_output, &issues);
 
-        let (status, done_reason) = if interrupted {
-            (TurnStatus::Interrupted, DoneReason::UserAbort)
+        let outcome = if interrupted {
+            TurnOutcome::Stopped(TurnStop::Cancelled)
+        } else if let Some(outcome) = self.outcome.take() {
+            match outcome {
+                TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => {
+                    TurnOutcome::Finished(TurnFinish::AssistantMessage {
+                        text: safe_output.clone(),
+                    })
+                }
+                other => other,
+            }
         } else if !self.saw_done && termination.treat_missing_done_as_failure {
-            (TurnStatus::Failed, DoneReason::RuntimeError)
+            TurnOutcome::Stopped(TurnStop::RuntimeError)
         } else if !issues.is_empty() {
             if self.saw_tool_failure {
-                (TurnStatus::Failed, DoneReason::ToolFailure)
+                TurnOutcome::Stopped(TurnStop::ToolFailure)
             } else {
-                (TurnStatus::Failed, DoneReason::RuntimeError)
+                TurnOutcome::Stopped(TurnStop::RuntimeError)
             }
         } else if max_turn_reached {
-            (TurnStatus::Completed, DoneReason::MaxTurns)
+            TurnOutcome::Stopped(TurnStop::MaxTurns)
         } else {
-            (TurnStatus::Completed, DoneReason::ModelStop)
+            TurnOutcome::Finished(TurnFinish::AssistantMessage {
+                text: safe_output.clone(),
+            })
         };
 
         AssembledTurn {
@@ -424,19 +431,16 @@ impl TurnAssembler {
                 had_code_execution: false,
             },
             state,
-            status,
+            outcome,
             assistant_output: AssistantOutput {
                 safe_text: safe_output,
                 raw_text: raw_output,
                 state: output_state,
             },
             has_plugin_visible_output: self.has_plugin_visible_output,
-            done_reason,
             token_usage: self.token_usage,
             tool_calls: self.tool_calls,
             errors: issues,
-            typed_finish: self.typed_finish.take(),
-            handoff_successor_session_id: self.handoff_successor_session_id.take(),
         }
     }
 

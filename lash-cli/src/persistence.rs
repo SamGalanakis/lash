@@ -1,5 +1,6 @@
 use anyhow::Context;
-use lash::{LashRuntime, PersistedSessionState, Store};
+use lash::{LashRuntime, PersistedSessionState};
+use lash_sqlite_store::Store;
 
 pub(crate) async fn persist_committed_runtime_state(
     store: &Store,

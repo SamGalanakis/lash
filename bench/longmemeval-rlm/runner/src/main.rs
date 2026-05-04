@@ -20,13 +20,14 @@ use lash::{
     PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate, PromptTemplateEntry,
     PromptTemplateSection, ProviderHandle, RuntimeCoreConfig, RuntimePersistence,
     SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
-    Store, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
+use lash_sqlite_store::Store;
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -675,7 +676,7 @@ async fn run_question(
     let partial_output = sink
         .last_llm_response()
         .or_else(|| non_empty_text(&turn.assistant_output.safe_text));
-    let answer = if matches!(turn.status, lash::TurnStatus::Completed) && token_budget.is_none() {
+    let answer = if turn_completed(&turn.outcome) && token_budget.is_none() {
         partial_output.clone().unwrap_or_default()
     } else {
         String::new()
@@ -717,12 +718,12 @@ async fn run_question(
         status: if token_budget.is_some() {
             "failed".to_string()
         } else {
-            turn_status_label(&turn.status).to_string()
+            turn_status_label(&turn.outcome).to_string()
         },
         done_reason: if token_budget.is_some() {
             "token_budget".to_string()
         } else {
-            done_reason_label(&turn.done_reason).to_string()
+            done_reason_label(&turn.outcome).to_string()
         },
         iterations: trace_metrics.iterations.max(sink.iteration_count()),
         llm_calls: trace_metrics.llm_calls.max(sink.llm_call_count()),
@@ -1385,21 +1386,36 @@ impl EventSink for JsonlEventSink {
     }
 }
 
-fn turn_status_label(status: &lash::TurnStatus) -> &'static str {
-    match status {
-        lash::TurnStatus::Completed => "completed",
-        lash::TurnStatus::Interrupted => "interrupted",
-        lash::TurnStatus::Failed => "failed",
+fn turn_completed(outcome: &lash::TurnOutcome) -> bool {
+    matches!(
+        outcome,
+        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+    )
+}
+
+fn turn_status_label(outcome: &lash::TurnOutcome) -> &'static str {
+    match outcome {
+        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => "completed",
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "interrupted",
+        lash::TurnOutcome::Stopped(_) => "failed",
     }
 }
 
-fn done_reason_label(reason: &lash::DoneReason) -> &'static str {
-    match reason {
-        lash::DoneReason::ModelStop => "model_stop",
-        lash::DoneReason::MaxTurns => "max_turns",
-        lash::DoneReason::UserAbort => "user_abort",
-        lash::DoneReason::ToolFailure => "tool_failure",
-        lash::DoneReason::RuntimeError => "runtime_error",
+fn done_reason_label(outcome: &lash::TurnOutcome) -> &'static str {
+    match outcome {
+        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. }) => {
+            "assistant_message"
+        }
+        lash::TurnOutcome::Finished(lash::TurnFinish::Submission { .. }) => "submission",
+        lash::TurnOutcome::Handoff { .. } => "handoff",
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
+        lash::TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
+        lash::TurnOutcome::Stopped(lash::TurnStop::MaxTurns) => "max_turns",
+        lash::TurnOutcome::Stopped(lash::TurnStop::ToolFailure) => "tool_failure",
+        lash::TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
+        lash::TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
+        lash::TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
+        lash::TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
     }
 }
 
@@ -1425,7 +1441,7 @@ fn format_failure_reason(
     turn: &lash::AssembledTurn,
     error_records: &[SinkErrorRecord],
 ) -> Option<String> {
-    if matches!(turn.status, lash::TurnStatus::Completed) {
+    if turn_completed(&turn.outcome) {
         return None;
     }
     if let Some(error) = error_records.last() {
@@ -1447,8 +1463,8 @@ fn format_failure_reason(
         .or_else(|| {
             Some(format!(
                 "turn ended with status={} reason={}",
-                turn_status_label(&turn.status),
-                done_reason_label(&turn.done_reason)
+                turn_status_label(&turn.outcome),
+                done_reason_label(&turn.outcome)
             ))
         })
 }

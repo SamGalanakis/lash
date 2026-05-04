@@ -12,7 +12,6 @@ pub mod plugin;
 pub mod provider;
 pub mod runtime;
 pub mod runtime_controls;
-#[cfg(feature = "sqlite-store")]
 pub mod search;
 pub mod session;
 pub mod session_graph;
@@ -39,9 +38,7 @@ pub use attachments::{
     AttachmentStore, AttachmentStoreError, FileAttachmentStore, InMemoryAttachmentStore,
     StoredAttachment,
 };
-pub use chronological::{
-    ChronologicalEntry, ChronologicalPayload, ChronologicalProjection, chronological_tool_call_key,
-};
+pub use chronological::{ChronologicalEntry, ChronologicalPayload, ChronologicalProjection};
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
@@ -63,11 +60,11 @@ pub use lash_sansio::{
     PruneState, RenderedPrompt, Response, SessionEvent, TextProjectionMetadata, TokenUsage,
     ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolDefinition,
     ToolDiscoveryMetadata, ToolExecutionMode, ToolImage, ToolOutputContract, ToolResult,
-    ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, UserInputProvenance,
-    UserInputTransform, append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
-    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
-    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part, shared_parts,
-    turn_limit_exhausted_message,
+    ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, TurnFinish,
+    TurnOutcome, TurnStop, UserInputProvenance, UserInputTransform, append_assistant_text_part,
+    build_prompt, build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
+    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
+    normalized_response_parts, reasoning_part, shared_parts, turn_limit_exhausted_message,
 };
 pub use standard_context_approach::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
@@ -186,14 +183,14 @@ pub use provider::{
 };
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
-    DoneReason, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
-    InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
+    EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, InputItem,
+    LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
     ManagedTaskStatus, NoopEventSink, OutputState, ParkedSession, PathResolver,
     PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig, RuntimeEnvironment,
     RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy, SessionStateEnvelope,
     SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, SessionUsageReport,
     TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
-    TurnStatus, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
+    UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use session::{
@@ -214,13 +211,10 @@ pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
 pub use store::{
-    BlobArtifactDescriptor, BlobCompression, BlobRef, BlobStorageHint, GcReport, GraphCommitDelta,
-    HydratedSessionCheckpoint, PersistedArtifactKind, PersistedSessionRead, RetainedArtifactRef,
+    BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
     RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionHead,
-    SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, VacuumReport,
+    SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
     load_persisted_session_state, load_persisted_session_state_active_path,
     refresh_persisted_session_state,
 };
-#[cfg(feature = "sqlite-store")]
-pub use store::{BuiltinBlobProfile, SqliteStore, Store, StoreGcPolicy, StoreOptions};
 pub use tool_provider::{ProgressSender, SandboxMessage, ToolExecutionContext, ToolProvider};

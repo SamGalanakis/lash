@@ -3,6 +3,8 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::provider::ProviderHandle;
 use lash::*;
+#[cfg(test)]
+use lash_sqlite_store::Store;
 use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
 

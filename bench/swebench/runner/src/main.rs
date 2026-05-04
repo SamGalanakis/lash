@@ -19,13 +19,14 @@ use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
     EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
     PersistentRuntimeServices, PluginHost, ProviderHandle, RuntimeCoreConfig, RuntimePersistence,
-    SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach, Store,
+    SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
 use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
+use lash_sqlite_store::Store;
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -691,20 +692,10 @@ async fn run_instance(
     fs::write(instance_dir.join("model.patch"), &model_patch)
         .with_context(|| format!("write {}", instance_dir.join("model.patch").display()))?;
 
-    let turn_status = match turn.status {
-        lash::TurnStatus::Completed => "completed",
-        lash::TurnStatus::Interrupted => "interrupted",
-        lash::TurnStatus::Failed => "failed",
-    };
-    let done_reason = match turn.done_reason {
-        lash::DoneReason::ModelStop => "model_stop",
-        lash::DoneReason::MaxTurns => "max_turns",
-        lash::DoneReason::UserAbort => "user_abort",
-        lash::DoneReason::ToolFailure => "tool_failure",
-        lash::DoneReason::RuntimeError => "runtime_error",
-    };
+    let turn_status = turn_status_label(&turn.outcome);
+    let done_reason = done_reason_label(&turn.outcome);
 
-    let grade = if !matches!(turn.status, lash::TurnStatus::Completed) {
+    let grade = if !turn_completed(&turn.outcome) {
         "error"
     } else if model_patch.trim().is_empty() {
         "fail"
@@ -768,6 +759,39 @@ async fn run_instance(
     let _ = remove_worktree(workspace_root, instance, &repo_dir);
 
     Ok(result)
+}
+
+fn turn_completed(outcome: &lash::TurnOutcome) -> bool {
+    matches!(
+        outcome,
+        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+    )
+}
+
+fn turn_status_label(outcome: &lash::TurnOutcome) -> &'static str {
+    match outcome {
+        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => "completed",
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "interrupted",
+        lash::TurnOutcome::Stopped(_) => "failed",
+    }
+}
+
+fn done_reason_label(outcome: &lash::TurnOutcome) -> &'static str {
+    match outcome {
+        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. }) => {
+            "assistant_message"
+        }
+        lash::TurnOutcome::Finished(lash::TurnFinish::Submission { .. }) => "submission",
+        lash::TurnOutcome::Handoff { .. } => "handoff",
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
+        lash::TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
+        lash::TurnOutcome::Stopped(lash::TurnStop::MaxTurns) => "max_turns",
+        lash::TurnOutcome::Stopped(lash::TurnStop::ToolFailure) => "tool_failure",
+        lash::TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
+        lash::TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
+        lash::TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
+        lash::TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
+    }
 }
 
 fn checkout_instance(
@@ -961,7 +985,6 @@ fn build_plugin_session(
     let registry = Arc::new(CapabilityRegistry::new().with(Arc::new(TierCapability::new(
         "default",
         None,
-        std::iter::empty::<String>(),
         TierExecutionMode::Inherit,
     ))));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());

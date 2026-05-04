@@ -20,9 +20,9 @@ use crate::provider::{
 };
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
-    AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, ExecutionSummary, OutputState,
+    AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, OutputState,
     PersistedSessionState, ProviderOptions, SessionPolicy, SessionStateEnvelope, TokenUsage,
-    TurnInput, TurnStatus,
+    TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 
 type CompletionFuture =
@@ -325,14 +325,15 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
             },
             ..Default::default()
         },
-        status: TurnStatus::Completed,
+        outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+            text: summary.to_string(),
+        }),
         assistant_output: AssistantOutput {
             safe_text: summary.to_string(),
             raw_text: summary.to_string(),
             state: OutputState::Usable,
         },
         has_plugin_visible_output: false,
-        done_reason: DoneReason::ModelStop,
         execution: ExecutionSummary {
             mode: ExecutionMode::standard(),
             had_tool_calls: false,
@@ -341,8 +342,6 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
         token_usage: TokenUsage::default(),
         tool_calls: Vec::new(),
         errors: Vec::new(),
-        typed_finish: None,
-        handoff_successor_session_id: None,
     }
 }
 
@@ -685,12 +684,10 @@ mod test_mode_fakes {
                 && let Ok(Some(extras)) = request
                     .mode_extras
                     .decode::<lash_rlm_types::RlmCreateExtras>(&ExecutionMode::new("rlm"))
-            {
-                if let Ok(options) =
+                && let Ok(options) =
                     crate::ModeTurnOptions::typed(ExecutionMode::new("rlm"), extras.termination)
-                {
-                    ctx.set_mode_turn_options(options);
-                }
+            {
+                ctx.set_mode_turn_options(options);
             }
         }
     }
@@ -922,10 +919,13 @@ mod test_mode_fakes {
                         "Model returned no assistant text or tool calls.",
                         None,
                     )));
-                    actions.push(DriverAction::Finish);
+                    actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+                        TurnStop::ProviderError,
+                    )));
                     return actions;
                 }
                 let asst_id = fresh_message_id();
+                let outcome_text = assistant_text.clone();
                 let parts_out = vec![Part {
                     id: format!("{asst_id}.p0"),
                     kind: PartKind::Prose,
@@ -950,7 +950,9 @@ mod test_mode_fakes {
                 ]));
                 actions.push(DriverAction::StartCheckpoint {
                     checkpoint: CheckpointKind::BeforeCompletion,
-                    on_empty: CheckpointResumeAction::Finish,
+                    on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
+                        TurnFinish::AssistantMessage { text: outcome_text },
+                    )),
                 });
                 return actions;
             }
@@ -1066,7 +1068,9 @@ mod test_mode_fakes {
                         crate::turn_limit_exhausted_message(max_turns),
                     )),
                 ]));
-                actions.push(DriverAction::Finish);
+                actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+                    TurnStop::MaxTurns,
+                )));
                 let _ = SessionEvent::Done;
                 return actions;
             }

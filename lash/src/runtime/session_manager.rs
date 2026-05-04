@@ -52,19 +52,18 @@ pub(super) struct ManagedSessionTurn {
 }
 
 #[derive(Clone)]
-struct CurrentSessionBacking {
+struct CurrentSessionCapability {
     session_id: String,
     snapshot: CurrentSnapshot,
     policy: SessionPolicy,
     host: RuntimeHost,
     plugins: Arc<crate::PluginSession>,
     tool_catalog: Arc<Vec<serde_json::Value>>,
-    prompt_bridge: Option<HostPromptBridge>,
     store: Option<Arc<dyn crate::store::RuntimePersistence>>,
 }
 
 #[derive(Clone)]
-struct ManagedSessionsBacking {
+struct ManagedSessionCapability {
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     /// Maps child session_id → seed PluginMessage queued via
@@ -74,7 +73,7 @@ struct ManagedSessionsBacking {
 }
 
 #[derive(Clone)]
-struct UsageBridgeBacking {
+struct UsageCapability {
     /// Session-scoped token cost ledger shared with the parent
     /// `LashRuntime`. All managers created from the same runtime
     /// write to the same Arc. Drained at turn-commit time.
@@ -95,21 +94,31 @@ struct UsageBridgeBacking {
 }
 
 #[derive(Clone)]
-struct BackgroundTaskBacking {
+struct BackgroundTaskCapability {
     runtime_scope_id: Arc<str>,
     sync_needed: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
-pub(super) struct RuntimeSessionManager {
-    current: CurrentSessionBacking,
-    managed: ManagedSessionsBacking,
-    usage: UsageBridgeBacking,
-    background: BackgroundTaskBacking,
+struct PromptCapability {
+    prompt_bridge: Option<HostPromptBridge>,
 }
 
-impl RuntimeSessionManager {
-    fn current_snapshot_meta_without_graph(runtime: &LashRuntime) -> SessionSnapshot {
+#[derive(Clone, Default)]
+struct DirectCompletionCapability;
+
+#[derive(Clone)]
+pub(super) struct RuntimeSessionManager {
+    current: CurrentSessionCapability,
+    managed: ManagedSessionCapability,
+    background: BackgroundTaskCapability,
+    usage: UsageCapability,
+    prompt: PromptCapability,
+    direct: DirectCompletionCapability,
+}
+
+impl CurrentSessionCapability {
+    fn snapshot_meta_without_graph(runtime: &LashRuntime) -> SessionSnapshot {
         SessionSnapshot {
             session_id: runtime.state.session_id.clone(),
             policy: runtime.state.policy.clone(),
@@ -133,6 +142,74 @@ impl RuntimeSessionManager {
         }
     }
 
+    fn new(
+        runtime: &LashRuntime,
+        plugins: Arc<crate::PluginSession>,
+        persist_usage_to_store: bool,
+    ) -> Self {
+        Self {
+            session_id: runtime.state.session_id.clone(),
+            snapshot: if persist_usage_to_store {
+                CurrentSnapshot::Owned(runtime.export_graph_first_state())
+            } else {
+                let read_model = runtime.state.read_model();
+                CurrentSnapshot::ReadModel {
+                    meta: Self::snapshot_meta_without_graph(runtime),
+                    messages: read_model.messages,
+                    tool_calls: read_model.tool_calls,
+                }
+            },
+            policy: runtime.policy.clone(),
+            host: runtime.host.clone(),
+            plugins,
+            tool_catalog: runtime.active_tool_catalog_shared(),
+            store: runtime.services.store.clone(),
+        }
+    }
+}
+
+impl ManagedSessionCapability {
+    fn new(runtime: &LashRuntime) -> Self {
+        Self {
+            registry: Arc::clone(&runtime.managed_sessions),
+            turns: Arc::clone(&runtime.managed_turns),
+            pending_first_turn_inputs: Arc::clone(&runtime.pending_first_turn_inputs),
+        }
+    }
+}
+
+impl BackgroundTaskCapability {
+    fn new(runtime: &LashRuntime) -> Self {
+        Self {
+            runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
+            sync_needed: Arc::clone(&runtime.background_sync_needed),
+        }
+    }
+}
+
+impl UsageCapability {
+    fn new(
+        runtime: &LashRuntime,
+        persist_to_store: bool,
+        child_usage_event_relay: Option<ChildUsageEventRelay>,
+    ) -> Self {
+        Self {
+            token_ledger: Arc::clone(&runtime.shared_token_ledger),
+            child_sources: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            child_turn_live_usage: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            child_usage_event_relay,
+            persist_to_store,
+        }
+    }
+}
+
+impl PromptCapability {
+    fn new(prompt_bridge: Option<HostPromptBridge>) -> Self {
+        Self { prompt_bridge }
+    }
+}
+
+impl RuntimeSessionManager {
     pub(super) fn new(
         runtime: &LashRuntime,
         prompt_bridge: Option<HostPromptBridge>,
@@ -143,41 +220,16 @@ impl RuntimeSessionManager {
             return Err(ExternalInvokeError::Unknown("session_manager".to_string()));
         };
         Ok(Self {
-            current: CurrentSessionBacking {
-                session_id: runtime.state.session_id.clone(),
-                snapshot: if persist_usage_to_store {
-                    CurrentSnapshot::Owned(runtime.export_graph_first_state())
-                } else {
-                    let read_model = runtime.state.read_model();
-                    CurrentSnapshot::ReadModel {
-                        meta: Self::current_snapshot_meta_without_graph(runtime),
-                        messages: read_model.messages,
-                        tool_calls: read_model.tool_calls,
-                    }
-                },
-                policy: runtime.policy.clone(),
-                host: runtime.host.clone(),
-                plugins: Arc::clone(session.plugins()),
-                tool_catalog: runtime.active_tool_catalog_shared(),
-                prompt_bridge,
-                store: runtime.services.store.clone(),
-            },
-            managed: ManagedSessionsBacking {
-                registry: Arc::clone(&runtime.managed_sessions),
-                turns: Arc::clone(&runtime.managed_turns),
-                pending_first_turn_inputs: Arc::clone(&runtime.pending_first_turn_inputs),
-            },
-            usage: UsageBridgeBacking {
-                token_ledger: Arc::clone(&runtime.shared_token_ledger),
-                child_sources: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                child_turn_live_usage: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                child_usage_event_relay,
-                persist_to_store: persist_usage_to_store,
-            },
-            background: BackgroundTaskBacking {
-                runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
-                sync_needed: Arc::clone(&runtime.background_sync_needed),
-            },
+            current: CurrentSessionCapability::new(
+                runtime,
+                Arc::clone(session.plugins()),
+                persist_usage_to_store,
+            ),
+            managed: ManagedSessionCapability::new(runtime),
+            background: BackgroundTaskCapability::new(runtime),
+            usage: UsageCapability::new(runtime, persist_usage_to_store, child_usage_event_relay),
+            prompt: PromptCapability::new(prompt_bridge),
+            direct: DirectCompletionCapability,
         })
     }
 }

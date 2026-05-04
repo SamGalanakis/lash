@@ -93,7 +93,9 @@ impl RecordingSink {
 #[derive(Default)]
 struct RecordingStore {
     session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
+    session_meta: Mutex<Option<crate::SessionMeta>>,
     session_graph: Mutex<crate::SessionGraph>,
+    checkpoint: Mutex<Option<crate::HydratedSessionCheckpoint>>,
     usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
 }
 
@@ -119,8 +121,10 @@ impl crate::store::RuntimePersistence for RecordingStore {
             config: meta.config,
             graph,
             checkpoint_ref: meta.checkpoint_ref,
-            checkpoint: None,
-            token_ledger: self.usage_deltas.lock().expect("lock usage deltas").clone(),
+            checkpoint: self.checkpoint.lock().expect("lock checkpoint").clone(),
+            token_ledger: merge_usage_delta_entries(
+                self.usage_deltas.lock().expect("lock usage deltas").clone(),
+            ),
         }))
     }
 
@@ -178,12 +182,13 @@ impl crate::store::RuntimePersistence for RecordingStore {
             .extend(commit.usage_deltas.iter().cloned());
         let checkpoint_ref = crate::BlobRef(format!("recording-checkpoint-{}", actual + 1));
         let manifest = crate::store::SessionCheckpoint {
-            turn_state: commit.checkpoint.turn_state,
-            dynamic_state_ref: commit.checkpoint.dynamic_state_ref,
-            plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
+            turn_state: commit.checkpoint.turn_state.clone(),
+            dynamic_state_ref: commit.checkpoint.dynamic_state_ref.clone(),
+            plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref.clone(),
             plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
-            execution_state_ref: commit.checkpoint.execution_state_ref,
+            execution_state_ref: commit.checkpoint.execution_state_ref.clone(),
         };
+        *self.checkpoint.lock().expect("lock checkpoint") = Some(commit.checkpoint);
         let head_revision = actual + 1;
         *meta = Some(crate::SessionHeadMeta {
             session_id: commit.session_id,
@@ -203,15 +208,16 @@ impl crate::store::RuntimePersistence for RecordingStore {
 
     async fn save_session_meta(
         &self,
-        _meta: crate::store::SessionMeta,
+        meta: crate::store::SessionMeta,
     ) -> Result<(), crate::store::StoreError> {
+        *self.session_meta.lock().expect("lock session meta") = Some(meta);
         Ok(())
     }
 
     async fn load_session_meta(
         &self,
     ) -> Result<Option<crate::store::SessionMeta>, crate::store::StoreError> {
-        Ok(None)
+        Ok(self.session_meta.lock().expect("lock session meta").clone())
     }
 
     async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), crate::store::StoreError> {
@@ -286,27 +292,24 @@ fn test_host_config_with_trace_path_and_stream_events(path: PathBuf) -> Embedded
     )
 }
 
-#[cfg(feature = "sqlite-store")]
 #[derive(Clone, Default)]
 struct RecordingSessionStoreFactory {
-    stores: Arc<StdMutex<Vec<Arc<crate::store::Store>>>>,
+    stores: Arc<StdMutex<Vec<Arc<RecordingStore>>>>,
 }
 
-#[cfg(feature = "sqlite-store")]
 impl RecordingSessionStoreFactory {
-    fn stores(&self) -> Vec<Arc<crate::store::Store>> {
+    fn stores(&self) -> Vec<Arc<RecordingStore>> {
         self.stores.lock().expect("store factory").clone()
     }
 }
 
-#[cfg(feature = "sqlite-store")]
 impl SessionStoreFactory for RecordingSessionStoreFactory {
     fn create_store(
         &self,
         request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn crate::store::RuntimePersistence>, String> {
-        let store = Arc::new(crate::store::Store::memory().map_err(|err| err.to_string())?);
-        store.save_session_meta(crate::SessionMeta {
+        let store = Arc::new(RecordingStore::default());
+        *store.session_meta.lock().expect("lock session meta") = Some(crate::SessionMeta {
             session_id: request.session_id.clone(),
             session_name: request.session_id.clone(),
             created_at: "2026-04-06T00:00:00Z".to_string(),
@@ -605,7 +608,7 @@ async fn rlm_mode_with_transport(transport: TestProvider) -> LashRuntime {
     runtime
 }
 
-#[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
+#[cfg(feature = "tool-impls")]
 async fn rlm_mode_with_transport_and_store(
     transport: TestProvider,
     store: Arc<dyn crate::store::RuntimePersistence>,
@@ -996,8 +999,11 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
         .await
         .expect("turn");
 
-    assert_eq!(turn.status, TurnStatus::Failed);
-    assert_eq!(turn.done_reason, DoneReason::RuntimeError);
+    assert!(matches!(&turn.outcome, TurnOutcome::Stopped(_)));
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Stopped(TurnStop::PluginAbort)
+    ));
     assert!(turn.errors.iter().any(|issue| issue.kind == "plugin"));
     assert!(
         active_conversation_messages(&turn.state)
@@ -1125,8 +1131,11 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
         .await
         .expect("turn");
 
-    assert_eq!(turn.status, TurnStatus::Failed);
-    assert_eq!(turn.done_reason, DoneReason::RuntimeError);
+    assert!(matches!(&turn.outcome, TurnOutcome::Stopped(_)));
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Stopped(TurnStop::ProviderError)
+    ));
     assert!(turn.errors.iter().any(|issue| issue.kind == "llm_provider"));
     assert!(
         turn.errors
@@ -1673,7 +1682,6 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
     assert_eq!(assembled.state.session_id, "child");
 }
 
-#[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn session_manager_persists_child_sessions_in_separate_store() {
     let factory = RecordingSessionStoreFactory::default();
@@ -1732,20 +1740,25 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     assert_eq!(handle.session_id, "child-store");
     let stores = factory.stores();
     assert_eq!(stores.len(), 1);
-    let meta = stores[0].load_session_meta().expect("session meta");
+    let meta = crate::store::RuntimePersistence::load_session_meta(stores[0].as_ref())
+        .await
+        .expect("load session meta")
+        .expect("session meta");
     assert_eq!(meta.session_id, "child-store");
     assert_eq!(meta.parent_session_id.as_deref(), Some("root"));
-    let head = stores[0].load_session_head().expect("session head");
-    let graph = head.graph;
+    let read = crate::store::RuntimePersistence::load_session(
+        stores[0].as_ref(),
+        crate::store::SessionReadScope::FullGraph,
+    )
+    .await
+    .expect("load session")
+    .expect("session read");
+    let graph = read.graph;
     let read_model = graph.read_model();
     let messages = read_model.messages.as_slice();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].parts[0].content, "parent hello");
-    let checkpoint = head
-        .checkpoint_ref
-        .as_ref()
-        .and_then(|blob_ref| stores[0].get_checkpoint(blob_ref))
-        .expect("checkpoint");
+    let checkpoint = read.checkpoint.expect("checkpoint");
     let turn_state = checkpoint.turn_state;
     assert_eq!(turn_state.iteration, 3);
 }
@@ -2125,7 +2138,10 @@ async fn parent_turn_receives_live_child_token_usage_events() {
         .await
         .expect("parent turn");
 
-    assert_eq!(turn.status, TurnStatus::Completed);
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
     let events = sink.snapshot();
     let child_usage_event = events
         .clone()
@@ -2270,8 +2286,14 @@ fn assembler_prefers_final_message() {
         &SanitizerPolicy::default(),
         &TerminationPolicy::default(),
     );
-    assert_eq!(out.status, TurnStatus::Completed);
-    assert_eq!(out.done_reason, DoneReason::ModelStop);
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. })
+    ));
     assert_eq!(out.assistant_output.safe_text, "final");
     assert_eq!(out.assistant_output.raw_text, "final");
     assert_eq!(out.assistant_output.state, OutputState::Usable);
@@ -2313,8 +2335,14 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
         &SanitizerPolicy::default(),
         &TerminationPolicy::default(),
     );
-    assert_eq!(out.status, TurnStatus::Completed);
-    assert_eq!(out.done_reason, DoneReason::ModelStop);
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. })
+    ));
     assert_eq!(out.assistant_output.safe_text, "stored");
     assert_eq!(out.assistant_output.raw_text, "stored");
     assert_eq!(out.assistant_output.state, OutputState::Usable);
@@ -2382,7 +2410,10 @@ fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
         &TerminationPolicy::default(),
     );
 
-    assert_eq!(out.status, TurnStatus::Interrupted);
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Stopped(TurnStop::Cancelled)
+    ));
     assert!(out.assistant_output.safe_text.is_empty());
     assert!(out.assistant_output.raw_text.is_empty());
 }
@@ -2494,7 +2525,10 @@ fn assembler_state_output_excludes_tool_call_payload() {
         &SanitizerPolicy::default(),
         &TerminationPolicy::default(),
     );
-    assert_eq!(out.status, TurnStatus::Interrupted);
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Stopped(TurnStop::Cancelled)
+    ));
     assert_eq!(
         out.assistant_output.safe_text,
         "Searching for the relevant code."
@@ -2525,8 +2559,11 @@ fn assembler_marks_tool_failure() {
         &SanitizerPolicy::default(),
         &TerminationPolicy::default(),
     );
-    assert_eq!(out.status, TurnStatus::Failed);
-    assert_eq!(out.done_reason, DoneReason::ToolFailure);
+    assert!(matches!(&out.outcome, TurnOutcome::Stopped(_)));
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Stopped(TurnStop::ToolFailure)
+    ));
     assert_eq!(out.tool_calls.len(), 1);
 }
 
@@ -2543,8 +2580,11 @@ fn assembler_marks_missing_done_as_failure() {
         &SanitizerPolicy::default(),
         &TerminationPolicy::default(),
     );
-    assert_eq!(out.status, TurnStatus::Failed);
-    assert_eq!(out.done_reason, DoneReason::RuntimeError);
+    assert!(matches!(&out.outcome, TurnOutcome::Stopped(_)));
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Stopped(TurnStop::RuntimeError)
+    ));
 }
 
 #[test]
@@ -2582,8 +2622,10 @@ fn assembler_detects_max_turn_message() {
         &SanitizerPolicy::default(),
         &TerminationPolicy::default(),
     );
-    assert_eq!(out.status, TurnStatus::Completed);
-    assert_eq!(out.done_reason, DoneReason::MaxTurns);
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Stopped(TurnStop::MaxTurns)
+    ));
 }
 
 #[test]
@@ -2605,7 +2647,10 @@ fn assembler_tracks_plugin_panel_output() {
         &SanitizerPolicy::default(),
         &TerminationPolicy::default(),
     );
-    assert_eq!(out.status, TurnStatus::Completed);
+    assert!(matches!(
+        &out.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
     assert!(out.has_plugin_visible_output);
 }
 
@@ -2717,8 +2762,14 @@ async fn standard_runtime_assembles_stream_only_text_response() {
         .await
         .expect("turn");
 
-    assert_eq!(turn.status, TurnStatus::Completed);
-    assert_eq!(turn.done_reason, DoneReason::ModelStop);
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. })
+    ));
     assert_eq!(turn.assistant_output.safe_text, "What time is it?");
 
     let streamed_text: String = sink
@@ -2766,8 +2817,14 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
         .await
         .expect("turn");
 
-    assert_eq!(turn.status, TurnStatus::Completed);
-    assert_eq!(turn.done_reason, DoneReason::ModelStop);
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. })
+    ));
     assert_eq!(turn.assistant_output.safe_text, expected);
     assert!(turn.errors.is_empty());
 
@@ -3182,7 +3239,10 @@ async fn standard_runtime_trace_records_stream_event_entries() {
         .await
         .expect("turn");
 
-    assert_eq!(turn.status, TurnStatus::Completed);
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
 
     let logged = std::fs::read_to_string(&trace_path).expect("read trace");
     let entries = logged
@@ -3344,7 +3404,10 @@ async fn extended_runtime_trace_records_provider_stream_events() {
         .await
         .expect("turn");
 
-    assert_eq!(turn.status, TurnStatus::Completed);
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
 
     let logged = std::fs::read_to_string(&trace_path).expect("read trace");
     let entries = logged
@@ -3425,7 +3488,10 @@ async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
         .await
         .expect("turn");
 
-    assert_eq!(turn.status, TurnStatus::Completed);
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+    ));
 
     let logged = std::fs::read_to_string(&trace_path).expect("read trace");
     let entries = logged
@@ -3494,7 +3560,7 @@ async fn standard_runtime_trace_records_failed_llm_calls() {
         .await
         .expect("turn");
 
-    assert_eq!(turn.status, TurnStatus::Failed);
+    assert!(matches!(&turn.outcome, TurnOutcome::Stopped(_)));
     assert_eq!(turn.errors.len(), 1);
     assert_eq!(turn.errors[0].raw.as_deref(), Some("transport raw body"));
 
@@ -3802,7 +3868,6 @@ async fn park_returns_error_when_final_commit_fails() {
     assert!(message.contains("park-session"));
 }
 
-#[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn completed_turns_are_persisted_in_session_graph() {
     let transport = mock_provider(vec![MockCall {
@@ -3831,7 +3896,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
         }),
     }]);
 
-    let store = Arc::new(crate::store::Store::memory().expect("store"));
+    let store = Arc::new(RecordingStore::default());
     let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let base_provider_factory = Arc::clone(&base_provider);
     let plugin_host = crate::PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
@@ -3870,19 +3935,21 @@ async fn completed_turns_are_persisted_in_session_graph() {
         .await
         .expect("turn");
 
-    let head = store.load_session_head().expect("session head");
-    let graph = head.graph;
+    let read = crate::store::RuntimePersistence::load_session(
+        store.as_ref(),
+        crate::store::SessionReadScope::FullGraph,
+    )
+    .await
+    .expect("load session")
+    .expect("session read");
+    let graph = read.graph;
     let read_model = graph.read_model();
     let messages = read_model.messages.as_slice();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
     assert_eq!(messages[1].parts[0].content, "Stored answer");
-    let _checkpoint = head
-        .checkpoint_ref
-        .as_ref()
-        .and_then(|blob_ref| store.get_checkpoint(blob_ref))
-        .expect("checkpoint");
-    let ledger = head.token_ledger;
+    let _checkpoint = read.checkpoint.expect("checkpoint");
+    let ledger = read.token_ledger;
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].source, "turn");
     assert_eq!(ledger[0].model, standard_test_policy().model);
@@ -3892,7 +3959,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
     assert_eq!(ledger[0].usage.reasoning_tokens, 2);
 }
 
-#[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
+#[cfg(feature = "tool-impls")]
 #[tokio::test]
 async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
     let first_usage = LlmUsage {
@@ -3940,7 +4007,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
         },
     ]);
 
-    let store = Arc::new(crate::store::Store::memory().expect("store"));
+    let store = Arc::new(RecordingStore::default());
     let store_trait = store.clone() as Arc<dyn crate::store::RuntimePersistence>;
 
     let mut runtime = rlm_mode_with_transport_and_store(transport.clone(), store_trait).await;
@@ -3964,12 +4031,14 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
     assert_eq!(first_turn.token_usage.cached_input_tokens, 1);
     assert_eq!(first_turn.token_usage.reasoning_tokens, 2);
 
-    let resumed_head = store.load_session_head().expect("resumed head");
-    let resumed_checkpoint = resumed_head
-        .checkpoint_ref
-        .as_ref()
-        .and_then(|blob_ref| store.get_checkpoint(blob_ref))
-        .expect("resumed checkpoint");
+    let resumed_read = crate::store::RuntimePersistence::load_session(
+        store.as_ref(),
+        crate::store::SessionReadScope::FullGraph,
+    )
+    .await
+    .expect("load resumed session")
+    .expect("resumed head");
+    let resumed_checkpoint = resumed_read.checkpoint.clone().expect("resumed checkpoint");
     let mut resumed = LashRuntime::from_persistent_embedded_state(
         rlm_test_policy(),
         test_host_config(),
@@ -3985,7 +4054,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 standard_context_approach: None,
                 ..Default::default()
             },
-            session_graph: resumed_head.graph,
+            session_graph: resumed_read.graph,
             iteration: resumed_checkpoint.turn_state.iteration,
             token_usage: resumed_checkpoint.turn_state.token_usage.clone(),
             last_prompt_usage: resumed_checkpoint.turn_state.last_prompt_usage.clone(),
@@ -3998,8 +4067,8 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
             plugin_snapshot_ref: resumed_checkpoint.plugin_snapshot_ref.clone(),
             plugin_snapshot: resumed_checkpoint.plugin_snapshot.clone(),
             execution_state_snapshot: None,
-            token_ledger: resumed_head.token_ledger.clone(),
-            checkpoint_ref: resumed_head.checkpoint_ref.clone(),
+            token_ledger: resumed_read.token_ledger.clone(),
+            checkpoint_ref: resumed_read.checkpoint_ref.clone(),
             ..PersistedSessionState::default()
         },
     )
@@ -4027,19 +4096,21 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
     assert_eq!(second_turn.token_usage.cached_input_tokens, 5);
     assert_eq!(second_turn.token_usage.reasoning_tokens, 6);
 
-    let head = store.load_session_head().expect("session head");
-    let checkpoint = head
-        .checkpoint_ref
-        .as_ref()
-        .and_then(|blob_ref| store.get_checkpoint(blob_ref))
-        .expect("checkpoint");
+    let read = crate::store::RuntimePersistence::load_session(
+        store.as_ref(),
+        crate::store::SessionReadScope::FullGraph,
+    )
+    .await
+    .expect("load session")
+    .expect("session head");
+    let checkpoint = read.checkpoint.expect("checkpoint");
     let turn_state = checkpoint.turn_state;
     assert_eq!(turn_state.token_usage.input_tokens, 30);
     assert_eq!(turn_state.token_usage.output_tokens, 7);
     assert_eq!(turn_state.token_usage.cached_input_tokens, 5);
     assert_eq!(turn_state.token_usage.reasoning_tokens, 6);
 
-    let ledger = head.token_ledger;
+    let ledger = read.token_ledger;
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].source, "turn");
     assert_eq!(ledger[0].usage.input_tokens, 42);
@@ -4191,7 +4262,7 @@ async fn await_background_work_does_not_cross_runtime_sessions_with_same_logical
     assert!(observed.load(Ordering::SeqCst));
 }
 
-#[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
+#[cfg(feature = "tool-impls")]
 #[tokio::test]
 async fn environment_park_resume_preserves_active_path() {
     // Build a RuntimeEnvironment with the usual test tool factories +
@@ -4213,8 +4284,7 @@ async fn environment_park_resume_preserves_active_path() {
         .build();
 
     // In-memory SQLite store — shared across park/resume.
-    let store: Arc<dyn crate::store::RuntimePersistence> =
-        Arc::new(crate::store::Store::memory().expect("in-memory store"));
+    let store: Arc<dyn crate::store::RuntimePersistence> = Arc::new(RecordingStore::default());
 
     // Initial state: one user message. Force the active leaf to this
     // node so later reads find it.

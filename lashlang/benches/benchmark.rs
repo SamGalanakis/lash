@@ -22,11 +22,7 @@ fn lashlang_benchmarks(c: &mut Criterion) {
     group.sample_size(60);
 
     for scenario in Scenario::ALL {
-        if matches!(scenario, Scenario::Baseline | Scenario::LanguageSurface) {
-            benchmark_full_block_modes(&mut group, &rt, &host, *scenario);
-        } else {
-            benchmark_execute_only(&mut group, &rt, &host, *scenario);
-        }
+        benchmark_full_block_modes(&mut group, &rt, &host, *scenario);
     }
 
     group.finish();
@@ -103,27 +99,6 @@ fn benchmark_full_block_modes(
             let encoded = serde_json::to_vec(&snapshot).expect("snapshot encode");
             let decoded = serde_json::from_slice(&encoded).expect("snapshot decode");
             state = State::from_snapshot(decoded);
-            let outcome = rt
-                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
-                .expect("benchmark execution");
-            black_box(expect_finished(outcome));
-        });
-    });
-}
-
-fn benchmark_execute_only(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    rt: &tokio::runtime::Runtime,
-    host: &BenchHost,
-    scenario: Scenario,
-) {
-    let source = benchmark_program(scenario);
-    let program = parse(source).expect("benchmark program should parse");
-    let compiled = compile_program(&program);
-
-    group.bench_function(BenchmarkId::new("execute_only", scenario), |b| {
-        b.iter(|| {
-            let mut state = seeded_state();
             let outcome = rt
                 .block_on(execute_compiled(black_box(&compiled), &mut state, host))
                 .expect("benchmark execution");

@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Files - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Architecture chapter 07</div>
+          <h1>files<span class="slash">/</span>map</h1>
+          <p>This is the maintenance map for the files most likely to matter when runtime, provider, plugin, UI projection, or Lashlang behavior changes.</p>
+        </div>
+        <div class="hero-meta">
+          <article class="card"><div class="micro-label">Core runtime</div><strong><code>lash/src/runtime</code></strong><span>Turn loop, driver, lifecycle, session manager, commits, usage, and state.</span></article>
+          <article class="card"><div class="micro-label">Public seams</div><strong><code>provider.rs</code>, <code>plugin/*</code>, <code>session_graph.rs</code></strong><span>Provider registry, plugin hooks, durable graph, and read model.</span></article>
+          <article class="card"><div class="micro-label">Host projection</div><strong><code>lash-cli/src/app/projection.rs</code></strong><span>Authoritative read view becomes CLI render timeline here.</span></article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a class="active" href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>Runtime And Persistence</h2>
+            <p>Start here for turn behavior, graph commits, runtime state, session APIs, and store bugs.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Path</th><th>Responsibility</th></tr></thead>
+              <tbody>
+                <tr><td><code>lash/src/runtime/mod.rs</code></td><td><code>LashRuntime</code>, public runtime types, stream event contracts, and runtime module exports.</td></tr>
+                <tr><td><code>lash/src/runtime/builder.rs</code></td><td><code>EmbeddedRuntimeBuilder</code>; resolves store or initial state and constructs runtime services.</td></tr>
+                <tr><td><code>lash/src/runtime/lifecycle.rs</code></td><td>Runtime hydration, graph normalization, session creation, restore hooks, and parked/background runtime setup.</td></tr>
+                <tr><td><code>lash/src/runtime/turn_loop.rs</code></td><td>Host turn entrypoint: input normalization, plugin preparation, event stream, finalization, and commit handoff.</td></tr>
+                <tr><td><code>lash/src/runtime/turn_driver.rs</code></td><td>Effect loop: provider calls, native tools, Lashlang execution, checkpoints, progress, streaming, and final output assembly.</td></tr>
+                <tr><td><code>lash/src/runtime/turn_commit_pipeline.rs</code></td><td>Turn-scoped persistence policy, checkpoint boundaries, graph deltas, read view generation, and final commit.</td></tr>
+                <tr><td><code>lash/src/runtime/session_manager.rs</code></td><td><code>RuntimeSessionManager</code> capability bundle: current session, managed sessions, background tasks, usage, prompt, and direct completion.</td></tr>
+                <tr><td><code>lash/src/runtime/session_manager/*</code></td><td>Focused host-capability implementations for API traits, background tasks, current snapshots, direct completion, graph access, managed sessions, monitors, prompts, turns, and usage.</td></tr>
+                <tr><td><code>lash/src/session_graph.rs</code></td><td>Durable graph records, active path read model, append builders, message tree, and stable node IDs.</td></tr>
+                <tr><td><code>lash/src/chronological.rs</code></td><td>Derived semantic projection over active messages, tool calls, RLM steps, and image references.</td></tr>
+                <tr><td><code>lash/src/store.rs</code></td><td>SQLite persistence, graph commits, checkpoint blobs, session heads, usage ledger, tombstones, vacuum, and GC.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Protocol, Tools, Providers</h2>
+            <p>These files define what the model can see, what the runtime can execute, and how provider APIs are reached.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Path</th><th>Responsibility</th></tr></thead>
+              <tbody>
+                <tr><td><code>lash-sansio/src/sansio/mod.rs</code></td><td><code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code>.</td></tr>
+                <tr><td><code>lash-sansio/src/lib.rs</code></td><td><code>ExecutionMode</code>, <code>ToolDefinition</code>, <code>ToolOutputContract</code>, availability, activation, and compact contracts.</td></tr>
+                <tr><td><code>lash-sansio/src/tool_surface.rs</code></td><td><code>ToolSurface</code>, contributions, overrides, model tool specs, and documented tool names.</td></tr>
+                <tr><td><code>lash/src/session.rs</code></td><td>Per-session tool surface, mode preamble, prompt cache, <code>ModeExecutionContext</code>, async handles, and <code>list_async_handles</code>.</td></tr>
+                <tr><td><code>lash/src/tool_dispatch.rs</code></td><td>Tool validation, native mode tools, dynamic tools, execution context, images, and dispatch result conversion.</td></tr>
+                <tr><td><code>lash/src/provider.rs</code></td><td>Provider components, registry, persisted provider handles, model defaults, variants, readiness, and transport traits.</td></tr>
+                <tr><td><code>lash-provider-openai/src/lib.rs</code></td><td>OpenAI-compatible Responses transport and provider-boundary schema/request shaping.</td></tr>
+                <tr><td><code>lash-provider-codex/src/lib.rs</code></td><td>Codex OAuth provider, ChatGPT backend Responses transport, stream assembly, and Codex request headers.</td></tr>
+                <tr><td><code>lash-provider-anthropic/src/lib.rs</code></td><td>Anthropic Messages provider and model/thinking variant policy.</td></tr>
+                <tr><td><code>lash-provider-google/src/lib.rs</code></td><td>Google OAuth / Code Assist Gemini transport and thinking-level policy.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Modes, Plugins, UI, Export</h2>
+            <p>These files define agent-facing execution, plugin composition, terminal projection, and offline inspection.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Path</th><th>Responsibility</th></tr></thead>
+              <tbody>
+                <tr><td><code>lash-mode-standard/src/lib.rs</code></td><td>Standard mode protocol driver, native tool-call handling, and Standard-only <code>batch</code> tool.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>RLM execution instructions and shared Lashlang language reference used by prompt tests.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/driver.rs</code></td><td>RLM protocol driver, context projection, history rendering, image references, and final submission handling.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td><code>RlmExecutionState</code>, <code>HostBridge</code>, tool execution, snapshot/restore, and image conversion.</td></tr>
+                <tr><td><code>lash-subagents/src/rlm.rs</code></td><td>RLM-facing <code>spawn_agent</code>, <code>llm_query</code>, <code>continue_as</code>, and <code>list_async_handles</code> definitions.</td></tr>
+                <tr><td><code>lash-plugin-tool-discovery/src/lib.rs</code></td><td>Plugin registration and RLM tool-surface override for discovery/load tools.</td></tr>
+                <tr><td><code>lash-plugin-tool-discovery/src/catalog.rs</code></td><td><code>CatalogTool</code> parsing and compact tool contract projection.</td></tr>
+                <tr><td><code>lash-plugin-tool-discovery/src/provider.rs</code></td><td><code>ToolDiscoveryToolsProvider</code>, <code>search_tools</code>, <code>load_tools</code>, cache reuse, promotion, and host calls.</td></tr>
+                <tr><td><code>lash-plugin-tool-discovery/src/ranking.rs</code>, <code>rerank.rs</code>, <code>schema_index.rs</code></td><td>Lexical/BM25/fuzzy candidate ranking, direct-LLM selection merge, and schema-aware search material.</td></tr>
+                <tr><td><code>lash-cli/src/bootstrap.rs</code></td><td>Provider setup, plugin factory composition, MCP attachment, runtime construction, TUI/autonomous branch.</td></tr>
+                <tr><td><code>lash-cli/src/app/projection.rs</code></td><td><code>SessionReadView -> ChronologicalProjection -> UiTimeline</code> conversion and interrupted-turn projection.</td></tr>
+                <tr><td><code>lash-cli/src/render/mod.rs</code></td><td>Timeline item rendering dispatch into terminal lines and surfaces.</td></tr>
+                <tr><td><code>lash-export/src/lib.rs</code></td><td>Read-only store loading and chronological projection export entrypoint.</td></tr>
+                <tr><td><code>lash-trace/src/lib.rs</code></td><td>Trace schema version 2, JSONL records, trace context, and sinks.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section-nav">
+          <a href="./deps.html"><span>Previous</span><strong>Dependencies</strong></a>
+          <a href="./lashlang.html"><span>Next</span><strong>Lashlang</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">File map updated from live source inspection.</footer>
+    </main>
+  </div>
+</body>
+</html>

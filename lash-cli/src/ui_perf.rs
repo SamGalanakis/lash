@@ -479,9 +479,17 @@ fn resolve_scenarios(filters: &[String]) -> anyhow::Result<Vec<UiPerfScenario>> 
 
     let mut scenarios = Vec::with_capacity(filters.len());
     for filter in filters {
+        if filter == "all" {
+            for scenario in UiPerfScenario::KNOWN {
+                if !scenarios.contains(&scenario) {
+                    scenarios.push(scenario);
+                }
+            }
+            continue;
+        }
         let scenario = UiPerfScenario::parse(filter).ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown UI perf scenario `{filter}`; expected one of: {}",
+                "unknown UI perf scenario `{filter}`; expected one of: {}, all",
                 UiPerfScenario::KNOWN
                     .iter()
                     .map(|scenario| scenario.name())
@@ -1565,6 +1573,10 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+        assert_eq!(
+            resolve_scenarios(&["all".to_string()]).unwrap(),
+            UiPerfScenario::KNOWN.to_vec()
         );
         assert!(resolve_scenarios(&["missing".to_string()]).is_err());
         assert_eq!(

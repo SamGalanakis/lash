@@ -2,7 +2,7 @@ use super::artifact::render_snippet_preview;
 use super::prompt::prompt_content_lines_snapshot;
 use super::*;
 use crate::activity::ActivityState;
-use crate::app::timeline_items_from_read_view_parts;
+use crate::app::timeline_from_read_view;
 use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use async_trait::async_trait;
@@ -12,6 +12,23 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
+
+fn timeline_items_from_test_read_view(
+    events: &[lash::SessionEventRecord],
+    messages: &[lash::Message],
+    tool_calls: &[lash::ToolCallRecord],
+    ui_state: &crate::app::UiProjectionState,
+) -> Vec<crate::app::UiTimelineItem> {
+    let read_view = lash::SessionReadView::from_derived_message_view(
+        lash::SessionStateEnvelope::default(),
+        Arc::new(events.to_vec()),
+        Arc::new(messages.to_vec()),
+        Arc::new(tool_calls.to_vec()),
+    );
+    timeline_from_read_view(&read_view, ui_state)
+        .items()
+        .to_vec()
+}
 
 fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
     let root = std::env::temp_dir().join(format!("lash-render-skills-{}", uuid::Uuid::new_v4()));
@@ -344,7 +361,7 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
         origin: None,
     };
 
-    let blocks = timeline_items_from_read_view_parts(
+    let blocks = timeline_items_from_test_read_view(
         &[],
         &[message],
         &[],

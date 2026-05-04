@@ -1,0 +1,21 @@
+[package]
+name = "lash-embed"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+lash = { path = "../lash" }
+lash-mode-rlm = { path = "../lash-mode-rlm" }
+lash-mode-standard = { path = "../lash-mode-standard" }
+lash-trace = { path = "../lash-trace" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+lash = { path = "../lash", features = ["testing"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

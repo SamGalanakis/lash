@@ -10,7 +10,8 @@ use lash::ToolCallRecord;
 use lash::session_model::Message;
 #[cfg(test)]
 use lash::session_model::{MessageRole, PartKind};
-use lash::{SessionStateEnvelope, Store, TokenUsage};
+use lash::{SessionStateEnvelope, TokenUsage};
+use lash_sqlite_store::Store;
 
 #[cfg(test)]
 use crate::app::UiTimelineItem;

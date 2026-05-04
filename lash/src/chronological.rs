@@ -49,9 +49,14 @@ impl ChronologicalProjection {
         let mut seen_tool_calls = projection
             .entries
             .iter()
-            .filter_map(|entry| match &entry.payload {
-                ChronologicalPayload::ToolCall(record) => Some(tool_call_record_key(record)),
-                ChronologicalPayload::Message(_) | ChronologicalPayload::RlmStep(_) => None,
+            .flat_map(|entry| match &entry.payload {
+                ChronologicalPayload::ToolCall(record) => vec![tool_call_record_key(record)],
+                ChronologicalPayload::RlmStep(entry) => entry
+                    .tool_calls
+                    .iter()
+                    .map(tool_call_record_key)
+                    .collect::<Vec<_>>(),
+                ChronologicalPayload::Message(_) => Vec::new(),
             })
             .collect::<HashSet<_>>();
 
@@ -68,7 +73,9 @@ impl ChronologicalProjection {
         projection
     }
 
-    pub fn from_events<'a>(events: impl IntoIterator<Item = &'a SessionEventRecord>) -> Self {
+    pub(crate) fn from_events<'a>(
+        events: impl IntoIterator<Item = &'a SessionEventRecord>,
+    ) -> Self {
         let mut projection = Self::default();
         let mut seen_messages = HashSet::new();
         let mut seen_tool_calls = HashSet::new();
@@ -87,7 +94,10 @@ impl ChronologicalProjection {
                     }
                 }
                 SessionEventRecord::Mode(event) => {
-                    if let Some(RlmModeEvent::RlmTrajectoryEntry(entry)) = event.rlm_event() {
+                    if let Some(RlmModeEvent::RlmTrajectoryEntry(mut entry)) = event.rlm_event() {
+                        entry
+                            .tool_calls
+                            .retain(|record| seen_tool_calls.insert(tool_call_record_key(record)));
                         projection.push(ChronologicalPayload::RlmStep(entry));
                     }
                 }
@@ -166,7 +176,6 @@ impl ChronologicalProjection {
     }
 
     pub fn rlm_history(&self) -> Vec<RlmHistoryItem> {
-        let mut seen_tool_calls = HashSet::new();
         let mut history = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             match &entry.payload {
@@ -176,15 +185,10 @@ impl ChronologicalProjection {
                     }
                 }
                 ChronologicalPayload::ToolCall(record) => {
-                    seen_tool_calls.insert(tool_call_record_key(record));
                     history.push(history_item_from_tool_call(record));
                 }
                 ChronologicalPayload::RlmStep(entry) => {
-                    let mut entry = entry.clone();
-                    entry
-                        .tool_calls
-                        .retain(|record| seen_tool_calls.insert(tool_call_record_key(record)));
-                    history.push(history_item_from_rlm_step(&entry));
+                    history.push(history_item_from_rlm_step(entry))
                 }
             }
         }
@@ -213,10 +217,6 @@ pub(crate) fn project_rlm_globals_from_events<'a>(
         ChronologicalProjection::from_events(events).rlm_history_value(),
     );
     globals
-}
-
-pub fn chronological_tool_call_key(record: &ToolCallRecord) -> String {
-    tool_call_record_key(record)
 }
 
 fn tool_call_record_key(record: &ToolCallRecord) -> String {

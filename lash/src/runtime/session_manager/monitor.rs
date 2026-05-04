@@ -1,26 +1,29 @@
 use super::*;
 
-impl RuntimeSessionManager {
+impl BackgroundTaskCapability {
     pub(in crate::runtime::session_manager) async fn invoke_monitor_external(
         &self,
+        current: &CurrentSessionCapability,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
         name: &str,
         args: serde_json::Value,
     ) -> Result<crate::ToolResult, crate::PluginError> {
-        self.current
+        current
             .plugins
             .host()
-            .invoke_external_for_session(session_id, name, args, Arc::new(self.clone()))
+            .invoke_external_for_session(session_id, name, args, host)
             .await
             .map_err(|err| crate::PluginError::Session(err.to_string()))
     }
 
     pub(in crate::runtime::session_manager) async fn ensure_registered_monitor_specs(
         &self,
+        current: &CurrentSessionCapability,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
     ) -> Result<(), crate::PluginError> {
-        let specs = self
-            .current
+        let specs = current
             .plugins
             .host()
             .monitor_specs_for_session(session_id)
@@ -39,6 +42,8 @@ impl RuntimeSessionManager {
             .collect::<Vec<_>>();
         let result = self
             .invoke_monitor_external(
+                current,
+                host,
                 session_id,
                 "monitor.register_specs",
                 serde_json::json!({
@@ -55,11 +60,20 @@ impl RuntimeSessionManager {
 
     pub(in crate::runtime::session_manager) async fn monitor_snapshot(
         &self,
+        current: &CurrentSessionCapability,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
     ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.ensure_registered_monitor_specs(session_id).await?;
+        self.ensure_registered_monitor_specs(current, Arc::clone(&host), session_id)
+            .await?;
         let result = self
-            .invoke_monitor_external(session_id, "monitor.status", serde_json::json!({}))
+            .invoke_monitor_external(
+                current,
+                host,
+                session_id,
+                "monitor.status",
+                serde_json::json!({}),
+            )
             .await?;
         if !result.success {
             return Err(crate::PluginError::Session(result.result.to_string()));
@@ -70,11 +84,20 @@ impl RuntimeSessionManager {
 
     pub(in crate::runtime::session_manager) async fn take_monitor_updates(
         &self,
+        current: &CurrentSessionCapability,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
     ) -> Result<crate::MonitorUpdateBatch, crate::PluginError> {
-        self.ensure_registered_monitor_specs(session_id).await?;
+        self.ensure_registered_monitor_specs(current, Arc::clone(&host), session_id)
+            .await?;
         let result = self
-            .invoke_monitor_external(session_id, "monitor.take_updates", serde_json::json!({}))
+            .invoke_monitor_external(
+                current,
+                host,
+                session_id,
+                "monitor.take_updates",
+                serde_json::json!({}),
+            )
             .await?;
         if !result.success {
             return Err(crate::PluginError::Session(result.result.to_string()));
@@ -85,12 +108,17 @@ impl RuntimeSessionManager {
 
     pub(in crate::runtime::session_manager) async fn start_monitor(
         &self,
+        current: &CurrentSessionCapability,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
         spec: crate::MonitorSpec,
     ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.ensure_registered_monitor_specs(session_id).await?;
+        self.ensure_registered_monitor_specs(current, Arc::clone(&host), session_id)
+            .await?;
         let result = self
             .invoke_monitor_external(
+                current,
+                host,
                 session_id,
                 "monitor.start",
                 serde_json::json!({ "spec": spec }),
@@ -105,12 +133,17 @@ impl RuntimeSessionManager {
 
     pub(in crate::runtime::session_manager) async fn stop_monitor(
         &self,
+        current: &CurrentSessionCapability,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
         monitor_id: &str,
     ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.ensure_registered_monitor_specs(session_id).await?;
+        self.ensure_registered_monitor_specs(current, Arc::clone(&host), session_id)
+            .await?;
         let result = self
             .invoke_monitor_external(
+                current,
+                host,
                 session_id,
                 "monitor.stop",
                 serde_json::json!({ "id": monitor_id }),

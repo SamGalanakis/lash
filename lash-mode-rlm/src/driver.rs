@@ -4,10 +4,10 @@ use lash::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmT
 use lash::sansio::ContextProjector;
 use lash::{
     LlmRequest, ModeBuildInput, ModeConfig, ModePreamble, ProjectorContext, PromptContribution,
-    head_tail_truncate, session_model::SessionEventRecord,
+    head_tail_truncate,
 };
 use lash_rlm_types::{
-    RlmAttachmentRef, RlmHistoryItem, RlmHistoryRole, RlmImageRef, RlmModeEvent, RlmTermination,
+    RlmAttachmentRef, RlmHistoryItem, RlmHistoryRole, RlmImageRef, RlmTermination,
 };
 
 #[derive(Clone, Debug)]
@@ -332,7 +332,8 @@ fn rlm_termination(options: &lash::ModeTurnOptions) -> RlmTermination {
 
 impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
     fn project(&self, ctx: ProjectorContext<'_>) -> LlmRequest {
-        let history = self.format_history(ctx.events);
+        let projection = projection_from_projector_context(&ctx);
+        let history = self.format_history(&projection);
         let termination = rlm_termination(&ctx.config.termination);
         let finalization = rlm_finalization_prompt(&termination);
         let user_prompt = format!(
@@ -352,7 +353,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
             text: user_prompt.into(),
             response_meta: None,
         }];
-        append_history_image_blocks(ctx.events, &mut attachments, &mut user_blocks);
+        append_history_image_blocks(&projection, &mut attachments, &mut user_blocks);
         messages.push(LlmMessage::new(LlmRole::User, user_blocks));
 
         LlmRequest {
@@ -388,10 +389,30 @@ fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
 }
 
 impl RlmContextProjector {
-    fn format_history(&self, events: &[SessionEventRecord]) -> String {
-        let projection = lash::ChronologicalProjection::from_events(events.iter());
+    fn format_history(&self, projection: &lash::ChronologicalProjection) -> String {
         render_history_prompt(&projection.rlm_history(), self.max_output_chars)
     }
+}
+
+fn projection_from_projector_context(ctx: &ProjectorContext<'_>) -> lash::ChronologicalProjection {
+    let read_view = lash::SessionReadView::from_derived_message_view(
+        lash::SessionStateEnvelope::default(),
+        Arc::new(ctx.events.to_vec()),
+        Arc::new(ctx.messages.iter().cloned().collect()),
+        Arc::new(Vec::new()),
+    );
+    read_view.chronological_projection()
+}
+
+#[cfg(test)]
+fn projection_from_events(events: &[lash::SessionEventRecord]) -> lash::ChronologicalProjection {
+    let read_view = lash::SessionReadView::from_derived_message_view(
+        lash::SessionStateEnvelope::default(),
+        Arc::new(events.to_vec()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    );
+    read_view.chronological_projection()
 }
 
 fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) -> String {
@@ -507,14 +528,14 @@ fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
 }
 
 fn append_history_image_blocks(
-    events: &[SessionEventRecord],
+    projection: &lash::ChronologicalProjection,
     attachments: &mut Vec<LlmAttachment>,
     blocks: &mut Vec<LlmContentBlock>,
 ) {
-    for event in events {
-        match event {
-            SessionEventRecord::Conversation(record) => {
-                for part in record.parts.iter() {
+    for entry in projection.entries() {
+        match &entry.payload {
+            lash::ChronologicalPayload::Message(message) => {
+                for part in message.parts.iter() {
                     let Some(attachment) = part.attachment.as_ref() else {
                         continue;
                     };
@@ -523,17 +544,14 @@ fn append_history_image_blocks(
                     blocks.push(LlmContentBlock::Image { attachment_idx });
                 }
             }
-            SessionEventRecord::Mode(event) => {
-                let Some(RlmModeEvent::RlmTrajectoryEntry(entry)) = event.rlm_event() else {
-                    continue;
-                };
+            lash::ChronologicalPayload::RlmStep(entry) => {
                 for image in &entry.images {
                     let attachment_idx = attachments.len();
                     attachments.push(LlmAttachment::reference(image.clone()));
                     blocks.push(LlmContentBlock::Image { attachment_idx });
                 }
             }
-            SessionEventRecord::Tool(_) | SessionEventRecord::StateSnapshot(_) => {}
+            lash::ChronologicalPayload::ToolCall(_) => {}
         }
     }
 }
@@ -727,8 +745,10 @@ fn reasoning_without_first_fence(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::session_model::{ConversationRecord, MessageRole, Part, PartKind, PruneState};
-    use lash_rlm_types::RlmTrajectoryEntry;
+    use lash::session_model::{
+        ConversationRecord, MessageRole, Part, PartKind, PruneState, SessionEventRecord,
+    };
+    use lash_rlm_types::{RlmModeEvent, RlmTrajectoryEntry};
 
     fn user_event(id: &str, text: &str) -> SessionEventRecord {
         SessionEventRecord::Conversation(ConversationRecord {
@@ -800,7 +820,7 @@ mod tests {
             user_event("u2", "second"),
             step_event(1, "print 2", "2"),
         ];
-        let history = projector.format_history(&events);
+        let history = projector.format_history(&projection_from_events(&events));
 
         assert!(history.contains("--- history[0] · user message · 5 chars ---\n\nfirst"));
         assert!(history.contains("--- history[1] · rlm step · iteration 0 ---"));
@@ -826,7 +846,7 @@ mod tests {
             tool_event(),
             step_event(0, "x = 1", "1"),
         ];
-        let history = projector.format_history(&events);
+        let history = projector.format_history(&projection_from_events(&events));
 
         assert!(history.contains("--- history[0] · user message"));
         assert!(history.contains("--- history[1] · tool_call · lookup · ok · 4 ms ---"));
@@ -837,7 +857,10 @@ mod tests {
     #[test]
     fn long_user_message_gets_full_history_reference() {
         let projector = projector(10);
-        let history = projector.format_history(&[user_event("u1", "abcdefghijklmnopqrstuvwxyz")]);
+        let history = projector.format_history(&projection_from_events(&[user_event(
+            "u1",
+            "abcdefghijklmnopqrstuvwxyz",
+        )]));
 
         assert!(history.contains("full: history[0].content"));
         assert!(history.contains("... (16 characters omitted) ..."));
@@ -871,7 +894,7 @@ mod tests {
             }),
         });
 
-        let history = projector.format_history(&[event]);
+        let history = projector.format_history(&projection_from_events(&[event]));
         assert!(history.contains("--- history[0] · user message"));
         assert!(history.contains("synthetic plugin message"));
         assert!(!history.contains("from plugin"));
@@ -903,7 +926,8 @@ mod tests {
         let mut attachments = Vec::new();
         let mut blocks = Vec::new();
 
-        append_history_image_blocks(&[event], &mut attachments, &mut blocks);
+        let projection = projection_from_events(&[event]);
+        append_history_image_blocks(&projection, &mut attachments, &mut blocks);
 
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].mime, "image/png");
@@ -924,17 +948,19 @@ mod tests {
     #[test]
     fn incremental_render_extends_cached_prefix_on_subsequent_calls() {
         let projector = projector(100);
-        let initial =
-            projector.format_history(&[user_event("u1", "first"), step_event(0, "print 1", "1")]);
+        let initial = projector.format_history(&projection_from_events(&[
+            user_event("u1", "first"),
+            step_event(0, "print 1", "1"),
+        ]));
         assert!(initial.contains("--- history[0] · user message"));
         assert!(initial.contains("--- history[1] · rlm step · iteration 0 ---"));
 
-        let extended = projector.format_history(&[
+        let extended = projector.format_history(&projection_from_events(&[
             user_event("u1", "first"),
             step_event(0, "print 1", "1"),
             user_event("u2", "second"),
             step_event(1, "print 2", "2"),
-        ]);
+        ]));
         assert!(extended.starts_with(&initial));
         assert!(extended.contains("--- history[2] · user message"));
         assert!(extended.contains("--- history[3] · rlm step · iteration 1 ---"));

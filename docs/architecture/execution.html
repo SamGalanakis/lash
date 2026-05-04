@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Execution - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<script src="./mermaid.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Architecture chapter 04</div>
+          <h1>execution<span class="slash">/</span>runtime</h1>
+          <p>Execution starts in the CLI bootstrap path, then branches into interactive TUI or autonomous <code>--print</code>. Inside a turn, the active mode decides whether model output becomes native tool calls or Lashlang code execution.</p>
+        </div>
+        <div class="hero-meta">
+          <article class="card"><div class="micro-label">Bootstrap</div><strong><code>bootstrap::run</code></strong><span>Resolves provider, model, execution mode, plugins, dynamic tools, MCP, trace path, and runtime.</span></article>
+          <article class="card"><div class="micro-label">Standard</div><strong>Native tools</strong><span>Provider tool calls become <code>DriverAction::StartTools</code>.</span></article>
+          <article class="card"><div class="micro-label">RLM</div><strong>Lashlang REPL</strong><span>Model emits fenced code; runtime executes it locally against host tools.</span></article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a class="active" href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>CLI Startup</h2>
+            <p>The CLI resolves durable session state and runtime composition before entering the terminal UI or single-shot autonomous runner.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Command execution path</div>
+            <div class="mermaid">
+flowchart TD
+  Args["lash-cli Args<br/>--print, --export, trace flags, provider/model"] --> Main["main()"]
+  Main --> Export{"--export?"}
+  Export -->|yes| ExportRun["lash-export"]
+  Export -->|no| Bootstrap["bootstrap::run"]
+  Bootstrap --> SessionBootstrap["SessionBootstrap<br/>new/resume/fork"]
+  Bootstrap --> Providers["lash-providers-builtin::register_all"]
+  Bootstrap --> Plugins["PluginHost + plugin factories"]
+  Bootstrap --> Dynamic["DynamicToolProvider + MCP"]
+  Bootstrap --> Runtime["EmbeddedRuntimeBuilder -> LashRuntime"]
+  Runtime --> Mode{"Host mode"}
+  Mode -->|--print| Auto["run_autonomous"]
+  Mode -->|interactive| Terminal["Terminal::enter + run_app"]
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Mode Execution</h2>
+            <p>Modes contribute protocol drivers and preambles. The runtime loop does not need provider-specific branches to understand Standard versus RLM behavior.</p>
+          </div>
+          <div class="mode-grid">
+            <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p><code>StandardDriver::handle_llm_success</code> interprets provider output. Tool calls become <code>StartTools</code>, then <code>RuntimeTurnDriver::run_tool_calls</code> dispatches native mode tools first and then registered <code>ToolProvider</code>s.</p></article>
+            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p><code>RlmDriver</code> extracts a closed <code>lashlang</code> fence, starts <code>ExecCode</code>, and <code>RlmModeSession::execute_code</code> runs the program through <code>RlmExecutionState</code> and <code>HostBridge</code>.</p></article>
+            <article class="panel"><small>background</small><h3>Subagents and monitors</h3><p>Subagents, monitor tasks, and async tool calls share handle-shaped background work. RLM discovers live handles with <code>list_async_handles</code> and resolves them with <code>await</code>.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Background Work</h2>
+            <p>Subagents are sessions, not special messages. Monitors are background tasks that wake future turns from stdout lines. Generic async tool calls are tracked inside the session.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Subagent and monitor path</div>
+            <div class="mermaid">
+flowchart LR
+  Rlm["RLM lashlang<br/>start call spawn_agent / call monitor"] --> Provider["RlmSubagentToolsProvider<br/>or RuntimeControls"]
+  Provider --> Host["LocalSubagentHost / MonitorHost"]
+  Host --> Manager["RuntimeSessionManager"]
+  Manager --> Child["create_session + start_turn_stream"]
+  Manager --> Registry["background task registry"]
+  Registry --> Handles["list_async_handles<br/>monitor.*, subagent.*, tool.*"]
+  Handles --> Await["await / cancel"]
+  Child --> Parent["usage relay + final result"]
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Host Rendering</h2>
+            <p>The terminal receives both live stream events and completed authoritative read views.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel"><h3>Interactive TUI</h3><p><code>run_app</code> drives event handling. Completed turns reconcile with <code>finish_turn_from_read_view</code>; live markdown lanes and activity state bridge partial output until the final projection arrives.</p></article>
+            <article class="panel"><h3>Export and trace</h3><p><code>lash-export</code> reads store state and renders chronological projections. <code>lash-trace-viewer</code> reads JSONL traces and displays timeline, LLM calls, stream events, and raw records.</p></article>
+          </div>
+        </div>
+
+        <div class="section-nav">
+          <a href="./flow.html"><span>Previous</span><strong>Data Flow</strong></a>
+          <a href="./abstractions.html"><span>Next</span><strong>Abstractions</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Execution anchors: <code>lash-cli/src/main.rs</code>, <code>bootstrap.rs</code>, <code>lash-mode-standard/src/lib.rs</code>, <code>lash-mode-rlm/src/*</code>, <code>lash-subagents/src/*</code>.</footer>
+    </main>
+  </div>
+</body>
+</html>

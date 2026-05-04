@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Overview - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<script src="./mermaid.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Architecture chapter 01</div>
+          <h1>overview<span class="slash">/</span>map</h1>
+          <p>Lash is organized as a narrow protocol kernel plus an async host runtime. The CLI composes first-party providers, mode plugins, default tools, subagents, MCP tools, UI extensions, persistence, tracing, and the TUI.</p>
+        </div>
+        <div class="hero-meta">
+          <article class="card"><div class="micro-label">Kernel</div><strong><code>lash-sansio</code></strong><span>Pure turn machine, prompts, messages, mode preambles, effects, and model request contracts.</span></article>
+          <article class="card"><div class="micro-label">Runtime</div><strong><code>lash</code></strong><span>Sessions, graph, stores, providers, plugins, tools, attachments, tracing, subagent host APIs, and turn execution.</span></article>
+          <article class="card"><div class="micro-label">Host</div><strong><code>lash-cli</code></strong><span>Interactive TUI, <code>--print</code>, bootstrap, setup, resume/fork, logs, trace wiring, and export entrypoints.</span></article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a class="active" href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>System Shape</h2>
+            <p>Dependency direction runs from host surfaces inward to the runtime, then into the sans-IO protocol model. Providers, modes, tools, and plugins are replaceable edges around the runtime core.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Workspace topology</div>
+            <div class="mermaid">
+flowchart TD
+  subgraph Host["Host applications"]
+    CLI["lash-cli<br/>TUI, setup, resume/fork, --print"]
+    Export["lash-export<br/>HTML / JSON / markdown session export"]
+    TraceViewer["lash-trace-viewer<br/>JSONL trace browser"]
+  end
+
+  subgraph Runtime["Async host runtime"]
+    L["lash<br/>LashRuntime, Session, Store, PluginHost"]
+    Graph["SessionGraph<br/>durable event graph"]
+    Read["SessionReadView<br/>public read seam"]
+    Tools["Tool dispatch<br/>dynamic tools, MCP, built-ins"]
+  end
+
+  subgraph Kernel["Pure protocol kernel"]
+    S["lash-sansio<br/>TurnMachine, Effect, Response"]
+    LL["lashlang<br/>parser, AST, VM, persistent REPL state"]
+  end
+
+  subgraph Extensions["Replaceable edges"]
+    Modes["mode plugins<br/>standard + rlm"]
+    Providers["provider crates<br/>OpenAI, Codex, Anthropic, Google"]
+    Plugins["tool/plugin crates<br/>subagents, plan, memory, context, UI activity"]
+  end
+
+  CLI --> L
+  Export --> Read
+  TraceViewer --> L
+  L --> S
+  L --> LL
+  L --> Graph
+  Graph --> Read
+  L --> Tools
+  Modes --> L
+  Providers --> L
+  Plugins --> L
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Current KPIs</h2>
+            <p>These figures are workspace-level and exclude generated build output.</p>
+          </div>
+          <div class="stats">
+            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">31</span><span class="stat-note">Runtime, app, provider, plugin, language, export, tracing, file-index, and benchmark crates.</span></article>
+            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">139,942 LOC</span><span class="stat-note">Measured with <code>tokei</code>; Rust dominates the workspace.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">277</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, benches, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang.</span></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Authority Boundaries</h2>
+            <p>The durable source of truth is the session graph. Everything else is either an execution surface, an external transport, or a projection.</p>
+          </div>
+          <ol class="principle-list">
+            <li>
+              <div>
+                <h3>Graph is durable.</h3>
+                <p><code>SessionGraph</code> stores conversation records, tool events, mode events, plugin nodes, active-path metadata, checkpoint references, and replay material.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Projection is derived.</h3>
+                <p><code>SessionReadView</code> and <code>ChronologicalProjection</code> read graph state into semantic order. The CLI's <code>UiTimeline</code> is downstream of that — never a persistence owner.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Modes own protocol behavior.</h3>
+                <p><code>ModePreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Runtime host capabilities are split.</h3>
+                <p><code>RuntimeSessionManager</code> delegates to focused capability modules — current session, managed sessions, background tasks, usage, prompt, and direct completion.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <div class="section-nav">
+          <span></span>
+          <a href="./modules.html"><span>Next</span><strong>Modules</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Source anchors: <code>Cargo.toml</code>, <code>README.md</code>, <code>lash/src/runtime</code>, <code>lash-sansio/src</code>.</footer>
+    </main>
+  </div>
+</body>
+</html>

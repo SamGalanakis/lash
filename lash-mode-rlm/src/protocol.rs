@@ -18,7 +18,8 @@ use lash::session_model::{
 };
 use lash::{
     AttachmentRef, CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart,
-    LlmResponse, ToolCallRecord, append_assistant_text_part, normalized_response_parts,
+    LlmResponse, ToolCallRecord, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
+    normalized_response_parts,
 };
 use lash_rlm_types::{RlmDiagnosticEvent, RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
@@ -266,7 +267,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 "Model returned no assistant text.",
                 None,
             )));
-            actions.push(DriverAction::Finish);
+            actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+                TurnStop::ProviderError,
+            )));
             return actions;
         }
 
@@ -360,6 +363,12 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     .tool_calls
                     .iter()
                     .find_map(continue_as_successor_from_tool_result);
+                let submitted_error = response
+                    .tool_calls
+                    .iter()
+                    .rev()
+                    .find(|record| record.tool == "submit_error" && record.success)
+                    .map(|record| record.args.clone());
                 for tool_call in &response.tool_calls {
                     actions.push(DriverAction::Emit(SessionEvent::ToolCall {
                         call_id: tool_call.call_id.clone(),
@@ -392,12 +401,26 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     actions.push(DriverAction::AppendEvents(vec![trajectory_event(
                         trajectory_entry(ctx.iteration(), &state, None, None),
                     )]));
-                    actions.push(DriverAction::Emit(SessionEvent::SessionHandoff {
-                        session_id: successor_session_id,
-                    }));
                     actions.push(DriverAction::StartCheckpoint {
                         checkpoint: CheckpointKind::BeforeCompletion,
-                        on_empty: CheckpointResumeAction::Finish,
+                        on_empty: CheckpointResumeAction::Finish(TurnOutcome::Handoff {
+                            session_id: successor_session_id,
+                        }),
+                    });
+                    return actions;
+                }
+                if let Some(value) = submitted_error {
+                    actions.push(DriverAction::AppendEvents(vec![trajectory_event(
+                        trajectory_entry(ctx.iteration(), &state, None, None),
+                    )]));
+                    actions.push(DriverAction::StartCheckpoint {
+                        checkpoint: CheckpointKind::BeforeCompletion,
+                        on_empty: CheckpointResumeAction::Finish(TurnOutcome::Stopped(
+                            TurnStop::SubmittedError {
+                                channel_id: "subagent.submit_error".to_string(),
+                                value,
+                            },
+                        )),
                     });
                     return actions;
                 }
@@ -451,12 +474,14 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     assistant_prose_message(rendered),
                 )]));
             }
-            actions.push(DriverAction::Emit(SessionEvent::TypedFinish {
-                value: finish_value.clone(),
-            }));
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
-                on_empty: CheckpointResumeAction::Finish,
+                on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
+                    TurnFinish::Submission {
+                        channel_id: "rlm.submit".to_string(),
+                        value: finish_value.clone(),
+                    },
+                )),
             });
             return actions;
         }
@@ -466,7 +491,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
         )]));
         actions.push(DriverAction::AdvanceIteration);
         if ctx.should_force_exit_after_grace_turn() {
-            actions.push(DriverAction::Finish);
+            actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+                TurnStop::MaxTurns,
+            )));
             return actions;
         }
         actions.push(DriverAction::ScheduleTurnLimitFinal);
@@ -739,80 +766,16 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
 }
 
 fn validate_finish_value(value: &Value, schema: &Value) -> Result<(), String> {
-    fn matches_type(value: &Value, expected: &str) -> bool {
-        match expected {
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "integer" => value
-                .as_f64()
-                .is_some_and(|n| n.is_finite() && n.fract() == 0.0),
-            "boolean" => value.is_boolean(),
-            "array" => value.is_array(),
-            "object" => value.is_object(),
-            "null" => value.is_null(),
-            _ => true,
-        }
+    let compiled = jsonschema::JSONSchema::compile(schema)
+        .map_err(|err| format!("required output schema is invalid: {err}"))?;
+    if let Err(errors) = compiled.validate(value) {
+        let message = errors
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(message);
     }
-
-    fn type_name(value: &Value) -> &'static str {
-        match value {
-            Value::Null => "null",
-            Value::Bool(_) => "boolean",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-        }
-    }
-
-    fn check(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
-        let Some(schema_obj) = schema.as_object() else {
-            return Ok(());
-        };
-
-        if let Some(ty) = schema_obj.get("type").and_then(Value::as_str)
-            && !matches_type(value, ty)
-        {
-            return Err(format!("{path}: expected {ty}, got {}", type_name(value)));
-        }
-
-        if let Some(properties) = schema_obj.get("properties").and_then(Value::as_object)
-            && let Some(obj) = value.as_object()
-        {
-            if let Some(required) = schema_obj.get("required").and_then(Value::as_array) {
-                for required_field in required {
-                    if let Some(name) = required_field.as_str()
-                        && !obj.contains_key(name)
-                    {
-                        return Err(format!("{path}: missing required field `{name}`"));
-                    }
-                }
-            }
-            for (name, sub_schema) in properties {
-                if let Some(sub_value) = obj.get(name) {
-                    let sub_path = if path.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{path}.{name}")
-                    };
-                    check(sub_value, sub_schema, &sub_path)?;
-                }
-            }
-        }
-
-        if let Some(items_schema) = schema_obj.get("items")
-            && let Some(arr) = value.as_array()
-        {
-            for (idx, item) in arr.iter().enumerate() {
-                let sub_path = format!("{path}[{idx}]");
-                check(item, items_schema, &sub_path)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    check(value, schema, "")
+    Ok(())
 }
 
 #[cfg(test)]

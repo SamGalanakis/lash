@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Abstractions - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<script src="./mermaid.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Architecture chapter 05</div>
+          <h1>types<span class="slash">/</span>contracts</h1>
+          <p>The important architecture lives in small contracts. Provider components, protocol drivers, tool definitions, output contracts, plugin hooks, store commits, read projections, and UI surfaces — each a named seam.</p>
+        </div>
+        <div class="hero-meta">
+          <article class="card"><div class="micro-label">Public read seam</div><strong><code>SessionReadView</code></strong><span>Plugins and UI read state here instead of cloning runtime internals.</span></article>
+          <article class="card"><div class="micro-label">Tool truth</div><strong><code>ToolOutputContract</code></strong><span>Discovery can describe dynamic return schemas for tools like <code>spawn_agent</code> and <code>llm_query</code>.</span></article>
+          <article class="card"><div class="micro-label">Provider boundary</div><strong><code>ProviderComponents</code></strong><span>State, auth, readiness, transport, and model policy stay separated.</span></article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a class="active" href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>Core Contracts</h2>
+            <p>These abstractions define the system more precisely than crate names do.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Abstraction</th><th>Owner</th><th>Role</th></tr></thead>
+              <tbody>
+                <tr><td><code>TurnMachine</code>, <code>Effect</code>, <code>Response</code></td><td><code>lash-sansio</code></td><td>Pure turn state machine and host-effect protocol.</td></tr>
+                <tr><td><code>ModePreamble</code>, <code>ContextProjector</code>, <code>ProtocolDriverHandle</code></td><td><code>lash-sansio</code> + mode crates</td><td>Mode-specific prompt, request projection, and model-output interpretation.</td></tr>
+                <tr><td><code>LashRuntime</code>, <code>Session</code></td><td><code>lash</code></td><td>Live async runtime and per-session tool/mode/prompt execution surface.</td></tr>
+                <tr><td><code>CurrentSessionCapability</code>, <code>ManagedSessionCapability</code>, <code>BackgroundTaskCapability</code></td><td><code>lash/src/runtime/session_manager*</code></td><td>Focused runtime-host capability split behind <code>RuntimeSessionManager</code>.</td></tr>
+                <tr><td><code>TurnCommitPipeline</code>, <code>TurnProgress</code>, <code>TurnGraphOverlay</code></td><td><code>lash/src/runtime</code></td><td>Turn-scoped graph, checkpoint, usage, and read-state commit policy.</td></tr>
+                <tr><td><code>SessionGraph</code>, <code>SessionReadView</code>, <code>ChronologicalProjection</code></td><td><code>lash</code></td><td>Durable event storage, public read seam, and semantic timeline projection.</td></tr>
+                <tr><td><code>RuntimePersistence</code>, <code>RuntimeCommit</code>, <code>GraphCommitDelta</code></td><td><code>lash/src/store.rs</code></td><td>SQLite-backed runtime persistence and optimistic head revision commits.</td></tr>
+                <tr><td><code>ProviderHandle</code>, <code>ProviderComponents</code></td><td><code>lash/src/provider.rs</code></td><td>Persisted provider handle split by state, auth, readiness, transport, and model policy.</td></tr>
+                <tr><td><code>ToolDefinition</code>, <code>ToolSurface</code>, <code>ToolOutputContract</code></td><td><code>lash-sansio</code></td><td>Tool visibility, model schema, examples, compact docs, and dynamic return contracts.</td></tr>
+                <tr><td><code>PluginFactory</code>, <code>SessionPlugin</code>, <code>PluginRegistrar</code></td><td><code>lash/src/plugin</code></td><td>Plugin lifecycle and hook registration for tools, prompts, modes, runtime events, and external ops.</td></tr>
+                <tr><td><code>ToolDiscoveryIndex</code>, <code>CatalogTool</code>, <code>llm_rerank_request</code></td><td><code>lash-plugin-tool-discovery/src/*</code></td><td>Search/load tool discovery pipeline split across catalog, provider, ranking, rerank, and schema-index modules.</td></tr>
+                <tr><td><code>UiTimeline</code>, <code>ActivityBlock</code>, <code>UiExtension</code></td><td><code>lash-cli</code> / <code>lash-ui</code></td><td>CLI render projection, tool activity display, and host-owned surface slots.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Plugin Registration</h2>
+            <p>Plugins are assembled per session. Each plugin can contribute mode drivers, native tools, tool-surface entries, prompt text, lifecycle hooks, external operations, and UI activity.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Plugin contract shape</div>
+            <div class="mermaid">
+flowchart LR
+  Factory["PluginFactory"] --> SessionPlugin["SessionPlugin"]
+  SessionPlugin --> Registrar["PluginRegistrar"]
+  Registrar --> Mode["mode hooks<br/>session + driver + native tools"]
+  Registrar --> Tools["ToolProvider<br/>ToolSurfaceContributor"]
+  Registrar --> Prompt["PromptContributor<br/>context transforms"]
+  Registrar --> Runtime["runtime events<br/>external ops"]
+  Registrar --> UI["UI activity / panels"]
+  Mode --> Session["Session"]
+  Tools --> Session
+  Prompt --> Session
+  Runtime --> Session
+  UI --> CLI["lash-cli projection"]
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Boundary Rules</h2>
+            <p>The current codebase relies on these separations staying explicit.</p>
+          </div>
+          <ol class="principle-list">
+            <li>
+              <div>
+                <h3>No UI vocabulary in core runtime.</h3>
+                <p><code>UiTimeline</code> and rendering stay in <code>lash-cli</code>.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Provider quirks stay at provider boundary.</h3>
+                <p>OpenAI-compatible schema normalization belongs in request builders, not canonical tool definitions.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Graph storage is not chronological policy.</h3>
+                <p>Dedupe and ordering live in projections such as <code>ChronologicalProjection</code>.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Background work is handle-shaped.</h3>
+                <p>Monitors, subagents, and async tool calls are rediscovered through <code>list_async_handles</code>.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <div class="section-nav">
+          <a href="./execution.html"><span>Previous</span><strong>Execution</strong></a>
+          <a href="./deps.html"><span>Next</span><strong>Dependencies</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Abstraction anchors: <code>lash-sansio/src/lib.rs</code>, <code>lash/src/plugin</code>, <code>lash/src/provider.rs</code>, <code>lash/src/plugin/history.rs</code>.</footer>
+    </main>
+  </div>
+</body>
+</html>

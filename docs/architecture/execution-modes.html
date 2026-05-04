@@ -3,194 +3,56 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>lash Architecture - Execution Modes</title>
+<link rel="canonical" href="execution.html">
+<title>Execution modes — moved · lash Architecture</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./styles.css">
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" defer></script>
-<script src="./mermaid.js" defer></script>
+<style>
+  .redirect {
+    display: grid;
+    place-items: center;
+    min-height: 60vh;
+    padding: var(--space-3xl) var(--space-xl);
+    text-align: center;
+  }
+  .redirect h1 {
+    margin: 0 0 var(--space-sm);
+    font-size: clamp(2.4rem, 5vw, 3.6rem);
+  }
+  .redirect p {
+    margin: 0 auto;
+    max-width: 48ch;
+    font-size: 1.05rem;
+  }
+  .redirect a {
+    display: inline-block;
+    margin-top: var(--space-lg);
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--sodium);
+    color: var(--sodium);
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .redirect a:hover {
+    background: var(--sodium);
+    color: var(--form-deep);
+    text-decoration: none;
+  }
+</style>
 </head>
 <body>
   <div class="page">
     <main class="frame">
-      <header class="hero">
+      <div class="redirect">
         <div>
-          <div class="eyebrow">Architecture page 02</div>
-          <h1>execution<span class="slash">/</span>modes</h1>
-          <p>Each mode is a plugin-owned pairing of a protocol driver and context projector. The same runtime loop executes all modes; what changes is the provider request shape, tool surface, context history, and completion protocol.</p>
+          <div class="eyebrow">Page moved</div>
+          <h1>execution<span class="slash">/</span>moved</h1>
+          <p>Execution-mode documentation moved to Execution.</p>
+          <a href="./execution.html">Continue to Execution →</a>
         </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">Enum</div><strong><code>ExecutionMode</code></strong><span><code>Rlm</code>, <code>Rlmpure</code>, and default <code>Standard</code>.</span></article>
-          <article class="card"><div class="micro-label">Driver seam</div><strong><code>ProtocolDriverHandle</code></strong><span>Interprets model output and schedules effects.</span></article>
-          <article class="card"><div class="micro-label">Context seam</div><strong><code>ContextProjector</code></strong><span>Builds the provider-facing request for the active mode.</span></article>
-        </div>
-      </header>
-
-      <nav class="nav" aria-label="Architecture pages">
-        <a href="./index.html">Overview</a>
-        <a href="./runtime.html">Modules + Runtime</a>
-        <a class="active" href="./execution-modes.html">Execution Modes</a>
-        <a href="./lashlang.html">Lashlang</a>
-        <a href="./reference.html">Reference</a>
-      </nav>
-
-      <section class="content">
-        <div class="section">
-          <div class="section-header">
-            <h2>Mode Matrix</h2>
-            <p>Standard gives the model native tool calls. RLM and RLMPure intentionally send no native tool schema; the model writes lashlang, and Lash executes it.</p>
-          </div>
-          <div class="table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Mode</th>
-                  <th>Provider tools</th>
-                  <th>Context projector</th>
-                  <th>Execution language</th>
-                  <th>Completion</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><code>standard</code></td>
-                  <td><span class="status">Native tool specs, auto tool choice</span></td>
-                  <td><code>ChatContextProjector</code></td>
-                  <td>Provider-native tool calls</td>
-                  <td>Assistant text after native tool loop completes</td>
-                </tr>
-                <tr>
-                  <td><code>rlm</code></td>
-                  <td><span class="status warn">No native tool schema</span></td>
-                  <td><code>ChatContextProjector</code></td>
-                  <td>Persistent <code>lashlang</code> REPL</td>
-                  <td><code>submit</code> for typed/final modes, or prose-without-fence for legacy root chat</td>
-                </tr>
-                <tr>
-                  <td><code>rlmpure</code></td>
-                  <td><span class="status warn">No native tool schema</span></td>
-                  <td><code>RlmpureContextProjector</code></td>
-                  <td>Persistent <code>lashlang</code> REPL</td>
-                  <td><code>submit</code> after observing REPL outputs</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="section" id="standard">
-          <div class="section-header">
-            <h2>Standard</h2>
-            <p>Standard mode is closest to ordinary tool-calling chat. The provider receives the rendered conversation plus native model tool specs.</p>
-          </div>
-          <div class="two-col">
-            <div class="diagram">
-              <div class="diagram-title">Standard context shape</div>
-              <div class="mermaid">
-flowchart TD
-  Messages["MessageSequence.render_prompt()<br/>conversation + attachments"] --> Projector["ChatContextProjector"]
-  System["Prepared system prompt<br/>PromptTemplate + contributions"] --> Projector
-  ToolSpecs["ModePreamble.tool_specs<br/>model_tool_specs()"] --> Projector
-  Projector --> Request["LlmRequest<br/>messages: system + conversation<br/>tools: native specs<br/>tool_choice: Auto"]
-  Request --> Provider["Provider"]
-  Provider --> Driver["StandardDriver"]
-  Driver --> NativeTools["Effect::ToolCalls"]
-  NativeTools --> Provider
-  Driver --> Answer["Assistant text + reasoning parts"]
-              </div>
-            </div>
-            <div class="panel">
-              <h3>What Goes In Context</h3>
-              <ul>
-                <li>Rendered conversation messages from <code>MessageSequence</code>.</li>
-                <li>Attachments extracted by prompt rendering.</li>
-                <li>System prompt from the active <code>PromptTemplate</code>.</li>
-                <li>Native provider tool schemas from <code>ToolSurface::model_tool_specs()</code>.</li>
-                <li>No RLM trajectory field is rendered separately.</li>
-              </ul>
-              <h3>Execution Notes</h3>
-              <p><code>StandardDriver</code> consumes text, reasoning, and native tool-call parts. The runtime records tool invocations through <code>TurnGraphOverlay</code> as tools complete.</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="section" id="rlm">
-          <div class="section-header">
-            <h2>RLM</h2>
-            <p>RLM still uses chat-shaped context, but tools are only callable from lashlang. The provider sees an empty native tool schema.</p>
-          </div>
-          <div class="two-col">
-            <div class="diagram">
-              <div class="diagram-title">RLM context and effects</div>
-              <div class="mermaid">
-flowchart TD
-  Messages["Chat-shaped MessageSequence<br/>conversation + RLM feedback messages"] --> Projector["ChatContextProjector"]
-  System["System prompt<br/>RLM execution section + lashlang reference + decomposition"] --> Projector
-  EmptyTools["tools: []<br/>tool_choice: None"] --> Projector
-  Projector --> Request["LlmRequest"]
-  Request --> Model["Model emits reasoning + fenced lashlang"]
-  Model --> Driver["RlmDriver extracts first lashlang fence"]
-  Driver --> Exec["Effect::ExecCode"]
-  Exec --> Repl["persistent lashlang runtime"]
-  Repl --> ToolCalls["call tool_name { ... }"]
-  ToolCalls --> Graph["ToolEvent recorded before trajectory"]
-  Repl --> Trajectory["RlmTrajectoryEntry<br/>reasoning, code, output, tool_calls"]
-  Trajectory --> Next["Next iteration or final assistant"]
-              </div>
-            </div>
-            <div class="panel">
-              <h3>What Goes In Context</h3>
-              <ul>
-                <li>Rendered conversation history, including user and assistant messages.</li>
-                <li>The RLM execution prompt and shared lashlang language reference.</li>
-                <li>Available tool documentation as prompt text, not provider tool schemas.</li>
-                <li>RLM feedback messages when the model emits prose without required lashlang or when typed validation fails.</li>
-                <li>The active persistent REPL state is not serialized as native provider tools; the model accesses it through subsequent lashlang blocks.</li>
-              </ul>
-              <h3>Completion Contract</h3>
-              <p>RLM can be configured with <code>RlmTermination::Finish</code> for <code>submit</code>-based typed/final output. Legacy root chat can use <code>ProseWithoutFence</code> in specific cases, but lashlang remains the execution path.</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="section" id="rlmpure">
-          <div class="section-header">
-            <h2>RLMPure</h2>
-            <p>RLMPure is the compact trajectory variant. It does not send chat history wholesale; it formats task inputs and REPL trajectory explicitly.</p>
-          </div>
-          <div class="two-col">
-            <div class="diagram">
-              <div class="diagram-title">RLMPure context shape</div>
-              <div class="mermaid">
-flowchart TD
-  UserMessages["User text/prose messages"] --> Inputs["build_inputs()<br/>first + recent user chunks"]
-  Trajectory["RlmTrajectoryEntry[]"] --> History["format_repl_history()<br/>Step, Reasoning, Code, Observation"]
-  Iteration["ctx.iteration + 1"] --> Prompt["User prompt:<br/>Inputs + REPL history + Iteration + Next prediction"]
-  System["RLMPure system prompt<br/>iterative discipline + lashlang reference"] --> Request["LlmRequest"]
-  Prompt --> Request
-  EmptyTools["tools: []<br/>tool_choice: None"] --> Request
-  Request --> Model["Model emits reasoning + one lashlang fence"]
-  Model --> Exec["RlmDriver -> ExecCode"]
-  Exec --> History
-  History --> Prompt
-              </div>
-            </div>
-            <div class="panel">
-              <h3>What Goes In Context</h3>
-              <ul>
-                <li><strong>Inputs:</strong> up to four user text/prose chunks, preserving the first and the most recent messages when history is long.</li>
-                <li><strong>REPL history:</strong> up to twelve <code>RlmTrajectoryEntry</code> steps with reasoning, lashlang source, observation preview, error, and final output when present.</li>
-                <li><strong>Iteration:</strong> one-indexed iteration number for the next prediction.</li>
-                <li><strong>System prompt:</strong> RLMPure execution discipline plus the shared lashlang language reference.</li>
-                <li><strong>No native tools:</strong> tools are prompt-documented and callable only through <code>call tool_name { ... }</code>.</li>
-              </ul>
-              <h3>Iteration Discipline</h3>
-              <p>The prompt now explicitly says not to solve everything in one block and not to <code>submit</code> in the same block that calls a tool or prints. The intended loop is: write code, observe output, then decide the next code block or final <code>submit</code>.</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <footer class="footer">Mode sources: <code>lash-mode-standard</code>, <code>lash-mode-rlm</code>, <code>lash-mode-rlmpure</code>, <code>lash-sansio/src/mode.rs</code></footer>
+      </div>
     </main>
   </div>
 </body>

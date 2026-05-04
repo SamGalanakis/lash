@@ -213,12 +213,10 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                             break;
                         }
                     }
-                    PluginDirective::HandoffSession { session_id } => {
-                        crate::session_model::send_event(
-                            &context.event_tx,
-                            SessionEvent::SessionHandoff { session_id },
-                        )
-                        .await;
+                    PluginDirective::HandoffSession { .. } => {
+                        final_result =
+                            ToolResult::err_fmt("after_tool_call does not support session handoff");
+                        break;
                     }
                     PluginDirective::ShortCircuitTool { result, success } => {
                         final_result = ToolResult {

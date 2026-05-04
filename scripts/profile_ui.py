@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         "--scenario",
         action="append",
         default=[],
-        help="Limit to one or more UI perf scenarios.",
+        help="Limit to one or more UI perf scenarios, or use all.",
     )
     parser.add_argument(
         "--out",

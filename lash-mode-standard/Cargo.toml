@@ -9,9 +9,6 @@ lash = { path = "../lash" }
 async-trait = "0.1"
 serde_json = "1"
 
-[features]
-default = []
-sqlite-store = ["lash/sqlite-store"]
-
 [dev-dependencies]
+lash-sqlite-store = { path = "../lash-sqlite-store" }
 tokio = { version = "1", features = ["full"] }

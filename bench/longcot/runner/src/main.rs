@@ -18,7 +18,7 @@ use lash::{
     PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot, PromptTemplate,
     PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
     RuntimePersistence, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport,
-    StandardContextApproach, Store, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput,
+    StandardContextApproach, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput,
     TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_export::{ExportFormat, SessionSelector, export};
@@ -26,6 +26,7 @@ use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
+use lash_sqlite_store::Store;
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -701,9 +702,9 @@ async fn run_question(
     let partial_output = sink
         .last_llm_response()
         .or_else(|| non_empty(&turn.assistant_output.safe_text));
-    let status = turn_status_label(&turn.status).to_string();
-    let done_reason = done_reason_label(&turn.done_reason).to_string();
-    let successful = matches!(turn.status, lash::TurnStatus::Completed);
+    let status = turn_status_label(&turn.outcome).to_string();
+    let done_reason = done_reason_label(&turn.outcome).to_string();
+    let successful = turn_completed(&turn.outcome);
     let response_text = partial_output.clone().unwrap_or_default();
     let failure_reason = if successful {
         None
@@ -865,13 +866,9 @@ fn build_plugin_session(
     // frontier model, not a quality-tiered delegation. An empty model
     // override on `TierCapability` falls back to the parent policy's
     // model via `pick_tier_model`.
-    let registry =
-        std::sync::Arc::new(CapabilityRegistry::new().with(Arc::new(TierCapability::new(
-            "default",
-            None,
-            std::iter::empty::<String>(),
-            TierExecutionMode::Inherit,
-        ))));
+    let registry = std::sync::Arc::new(CapabilityRegistry::new().with(Arc::new(
+        TierCapability::new("default", None, TierExecutionMode::Inherit),
+    )));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
     factories.push(Arc::new(SubagentsPluginFactory::new(
         policy.clone(),
@@ -1069,21 +1066,36 @@ fn standard_context_approach_label(approach: &StandardContextApproach) -> &'stat
     }
 }
 
-fn turn_status_label(status: &lash::TurnStatus) -> &'static str {
-    match status {
-        lash::TurnStatus::Completed => "completed",
-        lash::TurnStatus::Interrupted => "interrupted",
-        lash::TurnStatus::Failed => "failed",
+fn turn_completed(outcome: &lash::TurnOutcome) -> bool {
+    matches!(
+        outcome,
+        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+    )
+}
+
+fn turn_status_label(outcome: &lash::TurnOutcome) -> &'static str {
+    match outcome {
+        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => "completed",
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "interrupted",
+        lash::TurnOutcome::Stopped(_) => "failed",
     }
 }
 
-fn done_reason_label(reason: &lash::DoneReason) -> &'static str {
-    match reason {
-        lash::DoneReason::ModelStop => "model_stop",
-        lash::DoneReason::MaxTurns => "max_turns",
-        lash::DoneReason::UserAbort => "user_abort",
-        lash::DoneReason::ToolFailure => "tool_failure",
-        lash::DoneReason::RuntimeError => "runtime_error",
+fn done_reason_label(outcome: &lash::TurnOutcome) -> &'static str {
+    match outcome {
+        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. }) => {
+            "assistant_message"
+        }
+        lash::TurnOutcome::Finished(lash::TurnFinish::Submission { .. }) => "submission",
+        lash::TurnOutcome::Handoff { .. } => "handoff",
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
+        lash::TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
+        lash::TurnOutcome::Stopped(lash::TurnStop::MaxTurns) => "max_turns",
+        lash::TurnOutcome::Stopped(lash::TurnStop::ToolFailure) => "tool_failure",
+        lash::TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
+        lash::TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
+        lash::TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
+        lash::TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
     }
 }
 

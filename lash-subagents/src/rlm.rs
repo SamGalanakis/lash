@@ -28,6 +28,7 @@ use crate::types::{CloseAgentRequest, SpawnAgentRequest, WaitAgentRequest, WaitU
 pub(crate) struct RlmSubagentToolsProvider {
     pub(crate) registry: Arc<CapabilityRegistry>,
     pub(crate) host: Arc<dyn SubagentHost>,
+    pub(crate) include_submit_error: bool,
 }
 
 impl RlmSubagentToolsProvider {
@@ -228,7 +229,9 @@ impl RlmSubagentToolsProvider {
 impl ToolProvider for RlmSubagentToolsProvider {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = rlm_subagent_tool_definitions(&self.registry.names());
-        definitions.push(shared::submit_error_tool_definition());
+        if self.include_submit_error {
+            definitions.push(shared::submit_error_tool_definition());
+        }
         definitions.push(list_async_handles_definition());
         definitions
     }

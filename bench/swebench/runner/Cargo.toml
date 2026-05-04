@@ -12,6 +12,7 @@ path = "src/main.rs"
 dirs = "6"
 lash = { path = "../../../lash", default-features = false, features = ["full"] }
 lash-default-tools = { path = "../../../lash-default-tools" }
+lash-sqlite-store = { path = "../../../lash-sqlite-store" }
 lash-mode-rlm = { path = "../../../lash-mode-rlm" }
 lash-mode-standard = { path = "../../../lash-mode-standard" }
 lash-plugin-observational-memory = { path = "../../../lash-plugin-observational-memory" }

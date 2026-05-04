@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize lash runtime/UI perf reports and dhat heap profiles.
+"""Summarize lash runtime/UI/Lashlang perf reports and dhat heap profiles.
 
 Usage:
   perfreport.py REPORT.json                  # human summary
@@ -41,8 +41,18 @@ def fmt_ms(n: float | None) -> str:
     return f"{n:.2f}ms"
 
 
+def fmt_ns(n: float | None) -> str:
+    if n is None:
+        return "n/a"
+    return f"{n:.1f}ns"
+
+
 def is_dhat(payload: dict[str, Any]) -> bool:
     return "dhatFileVersion" in payload and "ftbl" in payload
+
+
+def is_lashlang_report(payload: dict[str, Any]) -> bool:
+    return payload.get("kind") == "lashlang-perf"
 
 
 def is_runtime_report(payload: dict[str, Any]) -> bool:
@@ -261,6 +271,67 @@ def summarize_ui(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def summarize_lashlang(report: dict[str, Any]) -> str:
+    params = report.get("parameters", {})
+    lines: list[str] = []
+    lines.append(
+        f"# lashlang-perf report  ({report.get('created_at', '?')[:19]}, "
+        f"{params.get('iterations', '?')} iterations)"
+    )
+    git = report.get("git", {})
+    dirty = "dirty" if git.get("dirty") else "clean"
+    lines.append(
+        f"build={report.get('build_mode', '?')}  git={git.get('sha', '?')} ({dirty})  "
+        f"scenarios={', '.join(params.get('scenarios', []))}  "
+        f"modes={', '.join(params.get('modes', []))}"
+    )
+    lines.append("")
+
+    perf_results = report.get("perf_results", [])
+    if perf_results:
+        lines.append("## perf sweep")
+        for row in sorted(perf_results, key=lambda r: (r.get("mode_arg", ""), r.get("scenario_arg", ""))):
+            mode = row.get("mode_arg", "?")
+            scenario = row.get("scenario_arg", "?")
+            lines.append(
+                f"  {mode:22s} {scenario:20s} "
+                f"avg={fmt_ns(row.get('ns_per_iter')):>10s}  "
+                f"allocs={row.get('allocations_per_iter', 0):>8}  "
+                f"bytes={fmt_bytes(row.get('allocated_bytes_per_iter', 0)):>10s}"
+            )
+        lines.append("")
+
+    profile_results = report.get("profile_results", [])
+    if profile_results:
+        lines.append("## hotspot profiles")
+        for profile in profile_results:
+            scenario = profile.get("scenario_arg", profile.get("scenario", "?"))
+            lines.append(f"### {scenario}")
+            instructions = profile.get("instruction_hotspots", [])
+            if instructions:
+                lines.append("  instruction hotspots:")
+                for row in instructions[:12]:
+                    lines.append(
+                        f"    {row.get('name', '?'):24s} "
+                        f"total={fmt_ms(row.get('total_ms')):>9s}  "
+                        f"avg={fmt_ns(row.get('avg_ns')):>10s}  "
+                        f"count={row.get('count', 0)}"
+                    )
+            builtins = profile.get("builtin_hotspots", [])
+            if builtins:
+                lines.append("  builtin hotspots:")
+                for row in builtins[:12]:
+                    lines.append(
+                        f"    {row.get('name', '?'):24s} "
+                        f"total={fmt_ms(row.get('total_ms')):>9s}  "
+                        f"avg={fmt_ns(row.get('avg_ns')):>10s}  "
+                        f"count={row.get('count', 0)}"
+                    )
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 def metric_pairs(name: str, baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
     rows: list[str] = []
 
@@ -368,6 +439,72 @@ def diff_ui(baseline: dict[str, Any], current: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def diff_lashlang(baseline: dict[str, Any], current: dict[str, Any]) -> str:
+    lines = ["# lashlang-perf diff", ""]
+    lines.append(
+        f"baseline: {baseline.get('created_at', '?')[:19]}  "
+        f"build={baseline.get('build_mode', '?')}"
+    )
+    lines.append(
+        f"current:  {current.get('created_at', '?')[:19]}  "
+        f"build={current.get('build_mode', '?')}"
+    )
+    lines.append("")
+
+    bs = {
+        (r.get("mode_arg"), r.get("scenario_arg")): r
+        for r in baseline.get("perf_results", [])
+        if r.get("mode_arg") and r.get("scenario_arg")
+    }
+    cs = {
+        (r.get("mode_arg"), r.get("scenario_arg")): r
+        for r in current.get("perf_results", [])
+        if r.get("mode_arg") and r.get("scenario_arg")
+    }
+
+    def cmp(label: str, metric: str, b: float | int | None, c: float | int | None, fmt) -> str:
+        if b is None or c is None:
+            return f"  {label:45s} {metric:26s} baseline={'n/a':>12s}  current={'n/a':>12s}"
+        bf = float(b)
+        cf = float(c)
+        delta = cf - bf
+        pct = (delta / bf * 100.0) if bf else 0.0
+        delta_str = fmt(delta)
+        if delta >= 0 and not delta_str.startswith("+"):
+            delta_str = "+" + delta_str
+        return (
+            f"  {label:45s} {metric:26s} baseline={fmt(bf):>12s}  "
+            f"current={fmt(cf):>12s}  Δ={delta_str:>12s} ({pct:+.1f}%)"
+        )
+
+    for mode, scenario in sorted(set(bs) & set(cs)):
+        b = bs[(mode, scenario)]
+        c = cs[(mode, scenario)]
+        label = f"{mode}/{scenario}"
+        lines.append(cmp(label, "ns_per_iter", b.get("ns_per_iter"), c.get("ns_per_iter"), fmt_ns))
+        lines.append(
+            cmp(
+                label,
+                "allocations_per_iter",
+                b.get("allocations_per_iter"),
+                c.get("allocations_per_iter"),
+                lambda v: f"{v:.2f}",
+            )
+        )
+        lines.append(
+            cmp(
+                label,
+                "allocated_bytes_per_iter",
+                b.get("allocated_bytes_per_iter"),
+                c.get("allocated_bytes_per_iter"),
+                fmt_bytes,
+            )
+        )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def summarize_dhat(payload: dict[str, Any], top: int) -> str:
     ftbl: list[str] = payload["ftbl"]
     pps: list[dict[str, Any]] = payload["pps"]
@@ -441,8 +578,8 @@ def summarize_dhat(payload: dict[str, Any], top: int) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("report", type=Path, help="runtime-perf JSON, ui-perf JSON, or *.dhat.json")
-    parser.add_argument("--diff", type=Path, help="baseline runtime-perf JSON to diff against")
+    parser.add_argument("report", type=Path, help="runtime-perf JSON, ui-perf JSON, lashlang-perf JSON, or *.dhat.json")
+    parser.add_argument("--diff", type=Path, help="baseline JSON of the same report kind to diff against")
     parser.add_argument("--top", type=int, default=20, help="top-N call stacks for dhat output (default 20)")
     return parser.parse_args()
 
@@ -455,14 +592,20 @@ def main() -> int:
         return 0
     if args.diff:
         baseline = json.loads(args.diff.read_text())
+        if is_lashlang_report(payload) and is_lashlang_report(baseline):
+            print(diff_lashlang(baseline, payload))
+            return 0
         if is_runtime_report(payload) and is_runtime_report(baseline):
             print(diff_runtime(baseline, payload))
             return 0
         if is_ui_report(payload) and is_ui_report(baseline):
             print(diff_ui(baseline, payload))
             return 0
-        print("error: --diff expects matching runtime-perf or ui-perf JSON pairs", file=sys.stderr)
+        print("error: --diff expects matching runtime-perf, ui-perf, or lashlang-perf JSON pairs", file=sys.stderr)
         return 2
+    if is_lashlang_report(payload):
+        print(summarize_lashlang(payload))
+        return 0
     if is_runtime_report(payload):
         print(summarize_runtime(payload))
         return 0

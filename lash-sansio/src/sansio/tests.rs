@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::TurnFinish;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 use crate::session_model::message::PartAttachment;
 use crate::session_model::{
@@ -25,6 +26,10 @@ fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineCon
         termination: (),
         retry_policy: RetryPolicy::default(),
     }
+}
+
+fn assistant_done(text: impl Into<String>) -> TurnOutcome {
+    TurnOutcome::Finished(TurnFinish::AssistantMessage { text: text.into() })
 }
 
 fn test_attachment_ref(byte_len: u64) -> crate::AttachmentRef {
@@ -181,7 +186,7 @@ impl ProtocolDriverHandle for ProseDriver {
             ))]),
             DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
-                on_empty: CheckpointResumeAction::Finish,
+                on_empty: CheckpointResumeAction::Finish(assistant_done("done")),
             },
         ]
     }
@@ -229,7 +234,7 @@ impl ProtocolDriverHandle for RetryStateDriver {
             ))]),
             DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
-                on_empty: CheckpointResumeAction::Finish,
+                on_empty: CheckpointResumeAction::Finish(assistant_done("done")),
             },
         ]
     }
@@ -296,7 +301,7 @@ impl ProtocolDriverHandle for ExecDriver {
             ))]),
             DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
-                on_empty: CheckpointResumeAction::Finish,
+                on_empty: CheckpointResumeAction::Finish(assistant_done("done")),
             },
         ]
     }
@@ -328,7 +333,7 @@ impl ProtocolDriverHandle for SyncThenAdvanceDriver {
                 },
             ]
         } else {
-            vec![DriverAction::Finish]
+            vec![DriverAction::Finish(assistant_done("done"))]
         }
     }
 

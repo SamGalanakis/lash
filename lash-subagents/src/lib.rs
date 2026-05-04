@@ -10,7 +10,8 @@ mod types;
 use std::sync::Arc;
 
 pub use capability::{
-    Capability, CapabilityContext, CapabilityRegistry, CapabilitySpec, DenyList, TierCapability,
+    Capability, CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRecursion,
+    CapabilityRegistry, CapabilitySpec, CapabilityToolSurface, StaticCapability, TierCapability,
     TierExecutionMode, default_registry,
 };
 
@@ -64,6 +65,7 @@ impl PluginFactory for SubagentsPluginFactory {
             Some(Arc::new(rlm::RlmSubagentToolsProvider {
                 registry: Arc::clone(&registry),
                 host: Arc::clone(&host),
+                include_submit_error: ctx.subagent.is_some(),
             }))
         } else {
             None
@@ -187,6 +189,28 @@ mod tests {
         let wrapped = json!({ lashlang::LASH_TYPE_KEY: {"properties": {}} });
         let err = parse_output_schema(Some(&wrapped)).expect_err("missing type");
         assert!(err.contains("type"), "error: {err}");
+    }
+
+    #[test]
+    fn static_capability_policy_fields_distinguish_inherit_set_and_clear() {
+        let current = SessionPolicy {
+            model: "parent-model".to_string(),
+            model_variant: Some("parent-variant".to_string()),
+            execution_mode: lash::ExecutionMode::standard(),
+            ..SessionPolicy::default()
+        };
+        let mut spec = CapabilitySpec::inherit();
+        spec.model = CapabilityField::Set("child-model".to_string());
+        spec.model_variant = CapabilityOptionalField::Clear;
+        spec.execution_mode = CapabilityField::Set(lash::ExecutionMode::new("rlm"));
+        let registry =
+            CapabilityRegistry::new().with(Arc::new(StaticCapability::new("child", spec)));
+
+        let policy = build_session_policy(&registry, &current, "child").expect("policy");
+
+        assert_eq!(policy.model, "child-model");
+        assert_eq!(policy.model_variant, None);
+        assert_eq!(policy.execution_mode, lash::ExecutionMode::new("rlm"));
     }
 
     #[test]
@@ -564,6 +588,7 @@ mod tests {
                 lash::ExecutionMode::new("rlm"),
             )),
             host: Arc::new(LocalSubagentHost::default()),
+            include_submit_error: false,
         };
         let context = ToolExecutionContext {
             session_id: "parent".to_string(),
@@ -632,6 +657,7 @@ mod tests {
                 lash::ExecutionMode::new("rlm"),
             )),
             host: Arc::new(LocalSubagentHost::default()),
+            include_submit_error: false,
         };
         let context = ToolExecutionContext {
             session_id: "parent".to_string(),
@@ -763,6 +789,7 @@ mod tests {
         let provider = rlm::RlmSubagentToolsProvider {
             registry,
             host: Arc::new(LocalSubagentHost::default()),
+            include_submit_error: false,
         };
         let context = ToolExecutionContext {
             session_id: "parent".to_string(),

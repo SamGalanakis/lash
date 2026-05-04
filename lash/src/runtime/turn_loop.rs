@@ -1,5 +1,37 @@
 use super::*;
 
+fn trace_fields_from_outcome(
+    outcome: &TurnOutcome,
+) -> (&'static str, &'static str, Option<lash_trace::TraceHandoff>) {
+    match outcome {
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => {
+            ("completed", "assistant_message", None)
+        }
+        TurnOutcome::Finished(TurnFinish::Submission { .. }) => ("completed", "submission", None),
+        TurnOutcome::Handoff { session_id } => (
+            "completed",
+            "handoff",
+            Some(lash_trace::TraceHandoff {
+                successor_session_id: session_id.clone(),
+            }),
+        ),
+        TurnOutcome::Stopped(stop) => ("failed", trace_stop_reason(stop), None),
+    }
+}
+
+fn trace_stop_reason(stop: &TurnStop) -> &'static str {
+    match stop {
+        TurnStop::Cancelled => "cancelled",
+        TurnStop::InvalidInput => "invalid_input",
+        TurnStop::MaxTurns => "max_turns",
+        TurnStop::ToolFailure => "tool_failure",
+        TurnStop::ProviderError => "provider_error",
+        TurnStop::PluginAbort => "plugin_abort",
+        TurnStop::RuntimeError => "runtime_error",
+        TurnStop::SubmittedError { .. } => "submitted_error",
+    }
+}
+
 impl LashRuntime {
     fn has_overflow_error(assembled: &AssembledTurn) -> bool {
         assembled.errors.iter().any(|issue| {
@@ -152,6 +184,11 @@ impl LashRuntime {
                 };
                 assembler.push(&error_event);
                 emit_session_event_to_sink(events, error_event).await;
+                let outcome_event = SessionEvent::TurnOutcome {
+                    outcome: TurnOutcome::Stopped(TurnStop::InvalidInput),
+                };
+                assembler.push(&outcome_event);
+                emit_session_event_to_sink(events, outcome_event).await;
                 assembler.push(&SessionEvent::Done);
                 emit_session_event_to_sink(events, SessionEvent::Done).await;
                 return Ok(assembler.finish(
@@ -471,6 +508,11 @@ impl LashRuntime {
             };
             assembler.push(&error_event);
             emit_session_event_to_sink(events, error_event).await;
+            let outcome_event = SessionEvent::TurnOutcome {
+                outcome: TurnOutcome::Stopped(TurnStop::PluginAbort),
+            };
+            assembler.push(&outcome_event);
+            emit_session_event_to_sink(events, outcome_event).await;
             assembler.push(&SessionEvent::Done);
             emit_session_event_to_sink(events, SessionEvent::Done).await;
             return Ok(assembler.finish(
@@ -722,6 +764,8 @@ impl LashRuntime {
             }
             self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
             if self.host.core.trace_sink.is_some() {
+                let (status, done_reason, handoff) =
+                    trace_fields_from_outcome(&returned_turn.outcome);
                 crate::trace::emit_trace(
                     &self.host.core.trace_sink,
                     &self.host.core.trace_context,
@@ -729,14 +773,9 @@ impl LashRuntime {
                         .for_session(returned_turn.state.session_id.clone())
                         .for_iteration(returned_turn.state.iteration),
                     lash_trace::TraceEvent::TurnCompleted {
-                        status: format!("{:?}", returned_turn.status).to_ascii_lowercase(),
-                        done_reason: format!("{:?}", returned_turn.done_reason)
-                            .to_ascii_lowercase(),
-                        handoff: returned_turn.handoff_successor_session_id.as_ref().map(
-                            |session_id| lash_trace::TraceHandoff {
-                                successor_session_id: session_id.clone(),
-                            },
-                        ),
+                        status: status.to_string(),
+                        done_reason: done_reason.to_string(),
+                        handoff,
                     },
                 );
             }
@@ -744,6 +783,7 @@ impl LashRuntime {
         } else {
             self.state.apply_exported_state(&assembled.state);
             if self.host.core.trace_sink.is_some() {
+                let (status, done_reason, handoff) = trace_fields_from_outcome(&assembled.outcome);
                 crate::trace::emit_trace(
                     &self.host.core.trace_sink,
                     &self.host.core.trace_context,
@@ -751,13 +791,9 @@ impl LashRuntime {
                         .for_session(assembled.state.session_id.clone())
                         .for_iteration(assembled.state.iteration),
                     lash_trace::TraceEvent::TurnCompleted {
-                        status: format!("{:?}", assembled.status).to_ascii_lowercase(),
-                        done_reason: format!("{:?}", assembled.done_reason).to_ascii_lowercase(),
-                        handoff: assembled.handoff_successor_session_id.as_ref().map(
-                            |session_id| lash_trace::TraceHandoff {
-                                successor_session_id: session_id.clone(),
-                            },
-                        ),
+                        status: status.to_string(),
+                        done_reason: done_reason.to_string(),
+                        handoff,
                     },
                 );
             }

@@ -1,12 +1,10 @@
-#![cfg(feature = "sqlite-store")]
-
 use std::sync::Arc;
 
 use lash::{
     ExecutionMode, LashRuntime, Message, MessageRole, Part, PartKind, PersistedSessionConfig,
-    PersistedTurnState, PruneState, RuntimePersistence, SessionGraph, SessionHead, Store,
-    TokenUsage,
+    PersistedTurnState, PruneState, RuntimePersistence, SessionGraph, SessionHead, TokenUsage,
 };
+use lash_sqlite_store::Store;
 
 fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
     Message {
@@ -58,6 +56,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
         .checkpoint_ref;
     store.save_session_head(SessionHead {
         session_id: "stored-session".to_string(),
+        head_revision: 0,
         graph: SessionGraph::from_active_read_state(
             &[text_message("u0", MessageRole::User, "stored question")],
             &[],
@@ -98,6 +97,7 @@ async fn embedded_runtime_builder_rejects_store_bound_to_different_session_id() 
     let store = Arc::new(Store::memory().expect("store"));
     store.save_session_head(SessionHead {
         session_id: "alpha".to_string(),
+        head_revision: 0,
         graph: SessionGraph::default(),
         config: PersistedSessionConfig {
             provider_id: "openai-compatible".into(),

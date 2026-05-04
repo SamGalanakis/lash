@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
@@ -133,48 +133,6 @@ pub(crate) fn timeline_from_read_view(
     timeline
 }
 
-#[cfg(test)]
-fn timeline_from_test_read_view(
-    read_view: &lash::SessionReadView,
-    ui_state: &UiProjectionState,
-) -> UiTimeline {
-    let projection = read_view.chronological_projection();
-    let mut timeline = timeline_from_chronological(&projection);
-    append_live_projection_items(&mut timeline, ui_state);
-    timeline.extend(
-        ui_state
-            .plugin_panels
-            .iter()
-            .cloned()
-            .map(UiTimelineItem::PluginPanel),
-    );
-    timeline
-}
-
-#[cfg(test)]
-pub(crate) fn timeline_items_from_read_view_parts(
-    events: &[lash::SessionEventRecord],
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-    ui_state: &UiProjectionState,
-) -> Vec<UiTimelineItem> {
-    let read_view = read_view_from_parts(events, messages, tool_calls);
-    timeline_from_test_read_view(&read_view, ui_state)
-        .items()
-        .to_vec()
-}
-
-#[cfg(test)]
-pub(crate) fn timeline_from_read_view_parts(
-    events: &[lash::SessionEventRecord],
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-    ui_state: &UiProjectionState,
-) -> UiTimeline {
-    let read_view = read_view_from_parts(events, messages, tool_calls);
-    timeline_from_test_read_view(&read_view, ui_state)
-}
-
 pub(crate) fn interrupted_blocks_from_read_view(
     read_view: &lash::SessionReadView,
     ui_state: &UiProjectionState,
@@ -183,34 +141,6 @@ pub(crate) fn interrupted_blocks_from_read_view(
     let mut timeline = timeline_from_read_view(read_view, ui_state);
     timeline.push_system_message_if_new(status_message.into());
     timeline
-}
-
-#[cfg(test)]
-pub(crate) fn interrupted_blocks_from_read_view_parts(
-    events: &[lash::SessionEventRecord],
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-    ui_state: &UiProjectionState,
-    status_message: impl Into<String>,
-) -> Vec<UiTimelineItem> {
-    let read_view = read_view_from_parts(events, messages, tool_calls);
-    let mut timeline = timeline_from_test_read_view(&read_view, ui_state);
-    timeline.push_system_message_if_new(status_message.into());
-    timeline.items().to_vec()
-}
-
-#[cfg(test)]
-fn read_view_from_parts(
-    events: &[lash::SessionEventRecord],
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-) -> lash::SessionReadView {
-    lash::SessionReadView::from_derived_message_view(
-        lash::SessionStateEnvelope::default(),
-        std::sync::Arc::new(events.to_vec()),
-        std::sync::Arc::new(messages.to_vec()),
-        std::sync::Arc::new(tool_calls.to_vec()),
-    )
 }
 
 fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> UiTimeline {
@@ -227,7 +157,6 @@ fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> Ui
             lash::ChronologicalPayload::Message(_) | lash::ChronologicalPayload::RlmStep(_) => None,
         })
         .collect::<HashMap<_, _>>();
-    let mut seen_tool_calls = HashSet::new();
 
     for entry in projection.entries() {
         match &entry.payload {
@@ -241,16 +170,10 @@ fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> Ui
                 );
             }
             lash::ChronologicalPayload::ToolCall(record) => {
-                seen_tool_calls.insert(lash::chronological_tool_call_key(record));
                 append_tool_call_record_items(&mut timeline, record, &mut activity_state);
             }
             lash::ChronologicalPayload::RlmStep(entry) => {
-                append_rlm_trajectory_items(
-                    &mut timeline,
-                    entry,
-                    &mut activity_state,
-                    &mut seen_tool_calls,
-                );
+                append_rlm_trajectory_items(&mut timeline, entry, &mut activity_state);
             }
         }
     }
@@ -262,16 +185,13 @@ fn append_rlm_trajectory_items(
     timeline: &mut UiTimeline,
     entry: &lash_rlm_types::RlmTrajectoryEntry,
     activity_state: &mut ActivityState,
-    seen_tool_calls: &mut HashSet<String>,
 ) {
     if let Some(reasoning) = rlm_reasoning_display_text(&entry.reasoning) {
         let _ = push_assistant_reasoning_item(timeline, &reasoning);
     }
     timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
     for record in &entry.tool_calls {
-        if seen_tool_calls.insert(lash::chronological_tool_call_key(record)) {
-            append_tool_call_record_items(timeline, record, activity_state);
-        }
+        append_tool_call_record_items(timeline, record, activity_state);
     }
 }
 

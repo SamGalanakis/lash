@@ -1,4 +1,6 @@
 use lash::*;
+#[cfg(test)]
+use lash_sqlite_store::Store;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -43,14 +45,13 @@ where
             Ok(turn) => turn,
             Err(err) => AssembledTurn {
                 state: runtime.export_state(),
-                status: TurnStatus::Failed,
+                outcome: TurnOutcome::Stopped(TurnStop::RuntimeError),
                 assistant_output: AssistantOutput {
                     safe_text: String::new(),
                     raw_text: String::new(),
                     state: OutputState::EmptyOutput,
                 },
                 has_plugin_visible_output: false,
-                done_reason: DoneReason::RuntimeError,
                 execution: ExecutionSummary {
                     mode: runtime.export_state().policy.execution_mode,
                     had_tool_calls: false,
@@ -64,11 +65,9 @@ where
                     message: err.message,
                     raw: None,
                 }],
-                typed_finish: None,
-                handoff_successor_session_id: None,
             },
         };
-        tracing::debug!(stream_id, status = ?result.status, "runtime turn task returning runtime");
+        tracing::debug!(stream_id, outcome = ?result.outcome, "runtime turn task returning runtime");
         let _ = return_tx.send(RuntimeRunResult {
             stream_id,
             runtime,
@@ -164,7 +163,9 @@ mod tests {
             token_ledger: Vec::new(),
             ..lash::PersistedSessionState::default()
         };
-        lash::refresh_persisted_session_state(&store, &mut persistence_state).await;
+        lash::refresh_persisted_session_state(&store, &mut persistence_state)
+            .await
+            .expect("refresh persisted session state");
         let stale_state = persistence_state;
 
         assert_eq!(stale_state.iteration, 2);

@@ -2204,6 +2204,35 @@ struct Vm<'a, H> {
     profile: Option<ProfileAccumulator>,
 }
 
+enum VmStep {
+    Continue,
+    Finish(Value),
+    Effect(VmEffect),
+}
+
+#[derive(Clone, Copy)]
+enum VmEffect {
+    CallTool { name: usize, keys: usize },
+    CallToolUnwrap { name: usize, keys: usize },
+    StartCallTool { name: usize, keys: usize },
+    AwaitHandle,
+    AwaitHandleUnwrap,
+    CancelHandle,
+    Print,
+    ParallelCalls(usize),
+    ParallelCallsValue(usize),
+    ParallelNamedCallsValue(usize),
+    Parallel(usize),
+    ParallelValue(usize),
+    ParallelNamed(usize),
+    ParallelNamedValue(usize),
+}
+
+struct VmTrap {
+    error: RuntimeError,
+    instruction_ip: usize,
+}
+
 impl<'a, H: ToolHost> Vm<'a, H> {
     fn new(chunk: &'a Chunk, slots: SlotState, host: &'a H, in_parallel_branch: bool) -> Self {
         Self {
@@ -2246,74 +2275,45 @@ impl<'a, H: ToolHost> Vm<'a, H> {
     }
 
     async fn run(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
-        let result = self.run_inner().await;
+        let result = self.run_loop().await.map_err(|trap| trap.error);
         self.unwind_iterators();
         result
     }
 
     async fn run_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
-        let result = self.run_inner_traced().await;
+        let result = self.run_loop().await.map_err(|trap| RuntimeFailure {
+            error: trap.error,
+            span: self.chunk.spans.get(trap.instruction_ip).copied().flatten(),
+        });
         self.unwind_iterators();
         result
     }
 
-    async fn run_inner(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
-        if self.profile.is_some() {
-            return self.run_inner_profiled().await;
-        }
-
-        let mut budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
-        while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
-            self.ip += 1;
-            if let Some(outcome) = self.execute_instruction(instruction).await? {
-                return Ok(outcome);
-            }
-            budget -= 1;
-            if budget == 0 {
-                self.host.yield_now().await;
-                budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
-            }
-        }
-        Ok(ExecutionOutcome::Continued)
-    }
-
-    async fn run_inner_profiled(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
-        let mut budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
-        while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
-            self.ip += 1;
-            let tag = instruction.profile_tag();
-            let start = Instant::now();
-            let result = self.execute_instruction(instruction).await;
-            self.record_instruction_profile(tag, start.elapsed().as_nanos());
-            if let Some(outcome) = result? {
-                return Ok(outcome);
-            }
-            budget -= 1;
-            if budget == 0 {
-                self.host.yield_now().await;
-                budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
-            }
-        }
-        Ok(ExecutionOutcome::Continued)
-    }
-
-    async fn run_inner_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
-        if self.profile.is_some() {
-            return self.run_inner_traced_profiled().await;
-        }
-
+    async fn run_loop(&mut self) -> Result<ExecutionOutcome, VmTrap> {
         let mut budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
         while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
             let instruction_ip = self.ip;
             self.ip += 1;
-            let result = self.execute_instruction(instruction).await;
+            let profile = self
+                .profile
+                .as_ref()
+                .map(|_| (instruction.profile_tag(), Instant::now()));
+            let result = match self.step_instruction(instruction) {
+                Ok(VmStep::Continue) => Ok(None),
+                Ok(VmStep::Finish(value)) => Ok(Some(ExecutionOutcome::Finished(value))),
+                Ok(VmStep::Effect(effect)) => self.resolve_effect(effect).await.map(|()| None),
+                Err(error) => Err(error),
+            };
+            if let Some((tag, start)) = profile {
+                self.record_instruction_profile(tag, start.elapsed().as_nanos());
+            }
             match result {
                 Ok(Some(outcome)) => return Ok(outcome),
                 Ok(None) => {}
                 Err(error) => {
-                    return Err(RuntimeFailure {
+                    return Err(VmTrap {
                         error,
-                        span: self.chunk.spans.get(instruction_ip).copied().flatten(),
+                        instruction_ip,
                     });
                 }
             }
@@ -2326,38 +2326,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(ExecutionOutcome::Continued)
     }
 
-    async fn run_inner_traced_profiled(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
-        let mut budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
-        while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
-            let instruction_ip = self.ip;
-            self.ip += 1;
-            let tag = instruction.profile_tag();
-            let start = Instant::now();
-            let result = self.execute_instruction(instruction).await;
-            self.record_instruction_profile(tag, start.elapsed().as_nanos());
-            match result {
-                Ok(Some(outcome)) => return Ok(outcome),
-                Ok(None) => {}
-                Err(error) => {
-                    return Err(RuntimeFailure {
-                        error,
-                        span: self.chunk.spans.get(instruction_ip).copied().flatten(),
-                    });
-                }
-            }
-            budget -= 1;
-            if budget == 0 {
-                self.host.yield_now().await;
-                budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
-            }
-        }
-        Ok(ExecutionOutcome::Continued)
-    }
-
-    async fn execute_instruction(
-        &mut self,
-        instruction: Instruction,
-    ) -> Result<Option<ExecutionOutcome>, RuntimeError> {
+    #[inline(always)]
+    fn step_instruction(&mut self, instruction: Instruction) -> Result<VmStep, RuntimeError> {
         match instruction {
             Instruction::PushConst(index) => {
                 self.stack.push(self.chunk.constants[index].clone());
@@ -2459,57 +2429,22 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 }
             }
             Instruction::CallTool { name, keys } => {
-                let args = self.drain_record_from_stack(keys)?;
-                let result = match self
-                    .host
-                    .call(self.chunk.names[name].text.to_string(), args)
-                    .await
-                {
-                    Ok(value) => success(value),
-                    Err(error) => error_value(error.to_string()),
-                };
-                self.stack.push(result);
+                return Ok(VmStep::Effect(VmEffect::CallTool { name, keys }));
             }
             Instruction::CallToolUnwrap { name, keys } => {
-                let args = self.drain_record_from_stack(keys)?;
-                let value = self
-                    .host
-                    .call(self.chunk.names[name].text.to_string(), args)
-                    .await
-                    .map_err(|error| RuntimeError::ValueError {
-                        message: format!("`?` unwrapped failed tool result: {error}"),
-                    })?;
-                self.stack.push(value);
+                return Ok(VmStep::Effect(VmEffect::CallToolUnwrap { name, keys }));
             }
             Instruction::StartCallTool { name, keys } => {
-                let args = self.drain_record_from_stack(keys)?;
-                let result = self
-                    .host
-                    .start_call(self.chunk.names[name].text.to_string(), args)
-                    .await
-                    .map_err(|err| RuntimeError::ValueError {
-                        message: format!("async start failed: {err}"),
-                    })?;
-                self.stack.push(result);
+                return Ok(VmStep::Effect(VmEffect::StartCallTool { name, keys }));
             }
             Instruction::AwaitHandle => {
-                let handle = self.pop_stack()?;
-                let result = self.await_value(handle).await;
-                self.stack.push(result);
+                return Ok(VmStep::Effect(VmEffect::AwaitHandle));
             }
             Instruction::AwaitHandleUnwrap => {
-                let handle = self.pop_stack()?;
-                let result = self.await_value_unwrap(handle).await?;
-                self.stack.push(result);
+                return Ok(VmStep::Effect(VmEffect::AwaitHandleUnwrap));
             }
             Instruction::CancelHandle => {
-                let handle = self.pop_stack()?;
-                let value = self.host.cancel_handle(handle).await.map_err(|err| {
-                    RuntimeError::ValueError {
-                        message: format!("cancel failed: {err}"),
-                    }
-                })?;
-                self.last_value = Some(value);
+                return Ok(VmStep::Effect(VmEffect::CancelHandle));
             }
             Instruction::CallBuiltin { builtin, argc } => {
                 let values = self.stack_tail(argc)?;
@@ -2593,13 +2528,24 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::AddAssign(slot) => {
                 let right = self.pop_stack()?;
                 let slot_name = &self.chunk.slot_names[slot];
-                let left = self.slots.get(slot).cloned().ok_or_else(|| {
-                    RuntimeError::UndefinedVariable {
-                        name: slot_name.text.to_string(),
+                let value = {
+                    let left = self.slots.get_mut(slot).ok_or_else(|| {
+                        RuntimeError::UndefinedVariable {
+                            name: slot_name.text.to_string(),
+                        }
+                    })?;
+                    match (left, right) {
+                        (Value::Number(left), Value::Number(right)) => {
+                            *left += right;
+                            Value::Number(*left)
+                        }
+                        (left, right) => {
+                            let value = add_values(left.clone(), right)?;
+                            *left = value.clone();
+                            value
+                        }
                     }
-                })?;
-                let value = add_values(left, right)?;
-                self.slots.assign(slot, value.clone());
+                };
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
@@ -2625,20 +2571,13 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.last_value = Some(value);
             }
             Instruction::Print => {
-                let value = self.pop_stack()?;
-                self.host
-                    .print(value.clone())
-                    .await
-                    .map_err(|err| RuntimeError::ValueError {
-                        message: format!("print failed: {err}"),
-                    })?;
-                self.last_value = Some(value);
+                return Ok(VmStep::Effect(VmEffect::Print));
             }
             Instruction::Submit => {
                 if self.in_parallel_branch {
                     return Err(RuntimeError::FinishInsideParallel);
                 }
-                return Ok(Some(ExecutionOutcome::Finished(self.pop_stack()?)));
+                return Ok(VmStep::Finish(self.pop_stack()?));
             }
             Instruction::Pop => {
                 self.last_value = Some(self.pop_stack()?);
@@ -2676,18 +2615,13 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 }
             }
             Instruction::ParallelCalls(branches) => {
-                self.exec_parallel_calls(branches).await?;
-                self.last_value = Some(Value::Null);
+                return Ok(VmStep::Effect(VmEffect::ParallelCalls(branches)));
             }
             Instruction::ParallelCallsValue(branches) => {
-                let value = self.exec_parallel_calls_value(branches).await?;
-                self.last_value = Some(value.clone());
-                self.stack.push(value);
+                return Ok(VmStep::Effect(VmEffect::ParallelCallsValue(branches)));
             }
             Instruction::ParallelNamedCallsValue(branches) => {
-                let value = self.exec_parallel_named_calls_value(branches).await?;
-                self.last_value = Some(value.clone());
-                self.stack.push(value);
+                return Ok(VmStep::Effect(VmEffect::ParallelNamedCallsValue(branches)));
             }
             Instruction::PureParallelValue(branches) => {
                 let value = self.exec_pure_parallel_value(branches)?;
@@ -2700,22 +2634,16 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.stack.push(value);
             }
             Instruction::Parallel(branches) => {
-                self.exec_parallel(branches).await?;
-                self.last_value = Some(Value::Null);
+                return Ok(VmStep::Effect(VmEffect::Parallel(branches)));
             }
             Instruction::ParallelValue(branches) => {
-                let value = self.exec_parallel_value(branches).await?;
-                self.last_value = Some(value.clone());
-                self.stack.push(value);
+                return Ok(VmStep::Effect(VmEffect::ParallelValue(branches)));
             }
             Instruction::ParallelNamed(branches) => {
-                self.exec_parallel_named(branches).await?;
-                self.last_value = Some(Value::Null);
+                return Ok(VmStep::Effect(VmEffect::ParallelNamed(branches)));
             }
             Instruction::ParallelNamedValue(branches) => {
-                let value = self.exec_parallel_named_value(branches).await?;
-                self.last_value = Some(value.clone());
-                self.stack.push(value);
+                return Ok(VmStep::Effect(VmEffect::ParallelNamedValue(branches)));
             }
             Instruction::ResolveTypeRef(slot) => {
                 let slot_name = &self.chunk.slot_names[slot];
@@ -2742,7 +2670,108 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.stack.push(Value::Record(Arc::new(wrapper)));
             }
         }
-        Ok(None)
+        Ok(VmStep::Continue)
+    }
+
+    async fn resolve_effect(&mut self, effect: VmEffect) -> Result<(), RuntimeError> {
+        match effect {
+            VmEffect::CallTool { name, keys } => {
+                let args = self.drain_record_from_stack(keys)?;
+                let result = match self
+                    .host
+                    .call(self.chunk.names[name].text.to_string(), args)
+                    .await
+                {
+                    Ok(value) => success(value),
+                    Err(error) => error_value(error.to_string()),
+                };
+                self.stack.push(result);
+            }
+            VmEffect::CallToolUnwrap { name, keys } => {
+                let args = self.drain_record_from_stack(keys)?;
+                let value = self
+                    .host
+                    .call(self.chunk.names[name].text.to_string(), args)
+                    .await
+                    .map_err(|error| RuntimeError::ValueError {
+                        message: format!("`?` unwrapped failed tool result: {error}"),
+                    })?;
+                self.stack.push(value);
+            }
+            VmEffect::StartCallTool { name, keys } => {
+                let args = self.drain_record_from_stack(keys)?;
+                let value = self
+                    .host
+                    .start_call(self.chunk.names[name].text.to_string(), args)
+                    .await
+                    .map_err(|err| RuntimeError::ValueError {
+                        message: format!("async start failed: {err}"),
+                    })?;
+                self.stack.push(value);
+            }
+            VmEffect::AwaitHandle => {
+                let handle = self.pop_stack()?;
+                let result = self.await_value(handle).await;
+                self.stack.push(result);
+            }
+            VmEffect::AwaitHandleUnwrap => {
+                let handle = self.pop_stack()?;
+                let result = self.await_value_unwrap(handle).await?;
+                self.stack.push(result);
+            }
+            VmEffect::CancelHandle => {
+                let handle = self.pop_stack()?;
+                let value = self.host.cancel_handle(handle).await.map_err(|err| {
+                    RuntimeError::ValueError {
+                        message: format!("cancel failed: {err}"),
+                    }
+                })?;
+                self.last_value = Some(value);
+            }
+            VmEffect::Print => {
+                let value = self.pop_stack()?;
+                self.host
+                    .print(value.clone())
+                    .await
+                    .map_err(|err| RuntimeError::ValueError {
+                        message: format!("print failed: {err}"),
+                    })?;
+                self.last_value = Some(value);
+            }
+            VmEffect::ParallelCalls(branches) => {
+                self.exec_parallel_calls(branches).await?;
+                self.last_value = Some(Value::Null);
+            }
+            VmEffect::ParallelCallsValue(branches) => {
+                let value = self.exec_parallel_calls_value(branches).await?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
+            }
+            VmEffect::ParallelNamedCallsValue(branches) => {
+                let value = self.exec_parallel_named_calls_value(branches).await?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
+            }
+            VmEffect::Parallel(branches) => {
+                self.exec_parallel(branches).await?;
+                self.last_value = Some(Value::Null);
+            }
+            VmEffect::ParallelValue(branches) => {
+                let value = self.exec_parallel_value(branches).await?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
+            }
+            VmEffect::ParallelNamed(branches) => {
+                self.exec_parallel_named(branches).await?;
+                self.last_value = Some(Value::Null);
+            }
+            VmEffect::ParallelNamedValue(branches) => {
+                let value = self.exec_parallel_named_value(branches).await?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
+            }
+        }
+        Ok(())
     }
 
     async fn exec_parallel(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
@@ -4416,10 +4445,10 @@ fn descend_index<'a>(target: &'a mut Value, index: &Value) -> Result<&'a mut Val
 fn eval_binary_values(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Add => add_values(left, right),
-        BinaryOp::Subtract => Ok(Value::Number(as_number(&left)? - as_number(&right)?)),
-        BinaryOp::Multiply => Ok(Value::Number(as_number(&left)? * as_number(&right)?)),
-        BinaryOp::Divide => Ok(Value::Number(as_number(&left)? / as_number(&right)?)),
-        BinaryOp::Modulo => Ok(Value::Number(as_number(&left)? % as_number(&right)?)),
+        BinaryOp::Subtract => numeric_binary_values(left, right, |a, b| a - b),
+        BinaryOp::Multiply => numeric_binary_values(left, right, |a, b| a * b),
+        BinaryOp::Divide => numeric_binary_values(left, right, |a, b| a / b),
+        BinaryOp::Modulo => numeric_binary_values(left, right, |a, b| a % b),
         BinaryOp::Equal => Ok(Value::Bool(left == right)),
         BinaryOp::NotEqual => Ok(Value::Bool(left != right)),
         BinaryOp::Less => compare_ordered(left, right, |a, b| a < b, |a, b| a < b),
@@ -4427,6 +4456,17 @@ fn eval_binary_values(left: Value, op: BinaryOp, right: Value) -> Result<Value, 
         BinaryOp::Greater => compare_ordered(left, right, |a, b| a > b, |a, b| a > b),
         BinaryOp::GreaterEqual => compare_ordered(left, right, |a, b| a >= b, |a, b| a >= b),
         BinaryOp::And | BinaryOp::Or => unreachable!("logical ops are compiled with jumps"),
+    }
+}
+
+fn numeric_binary_values(
+    left: Value,
+    right: Value,
+    op: impl FnOnce(f64, f64) -> f64,
+) -> Result<Value, RuntimeError> {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => Ok(Value::Number(op(left, right))),
+        (left, right) => Ok(Value::Number(op(as_number(&left)?, as_number(&right)?))),
     }
 }
 
@@ -4484,7 +4524,10 @@ fn compare_numbers(
     right: Value,
     cmp: impl FnOnce(f64, f64) -> bool,
 ) -> Result<Value, RuntimeError> {
-    Ok(Value::Bool(cmp(as_number(&left)?, as_number(&right)?)))
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => Ok(Value::Bool(cmp(left, right))),
+        (left, right) => Ok(Value::Bool(cmp(as_number(&left)?, as_number(&right)?))),
+    }
 }
 
 fn compare_ordered(
