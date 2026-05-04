@@ -23,17 +23,17 @@ impl TestHost {
 }
 
 impl ToolHost for TestHost {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        match name {
+    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+        match name.as_str() {
             "read_file" => {
-                let path = expect_string(args, "path")?;
+                let path = expect_string(&args, "path")?;
                 match self.files.get(path) {
                     Some(content) => Ok(Value::String(content.clone().into())),
                     None => Err(ToolHostError::new(format!("missing file: {path}"))),
                 }
             }
             "glob" => {
-                let pattern = expect_string(args, "pattern")?;
+                let pattern = expect_string(&args, "pattern")?;
                 let values: Vec<_> = self
                     .globs
                     .get(pattern)
@@ -59,21 +59,21 @@ impl ToolHost for TestHost {
                         break;
                     }
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 self.active.fetch_sub(1, Ordering::SeqCst);
                 Ok(Value::String(
-                    expect_string(args, "value")?.to_string().into(),
+                    expect_string(&args, "value")?.to_string().into(),
                 ))
             }
             _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
         }
     }
 
-    fn print(&self, value: &Value) -> Result<(), ToolHostError> {
+    async fn print(&self, value: Value) -> Result<(), ToolHostError> {
         self.observations
             .lock()
             .expect("observation mutex")
-            .push(value.clone());
+            .push(value);
         Ok(())
     }
 }
@@ -85,17 +85,20 @@ fn finished(outcome: ExecutionOutcome) -> Value {
     }
 }
 
-fn runtime_error(source: &str) -> RuntimeError {
+async fn runtime_error(source: &str) -> RuntimeError {
     let host = TestHost::default();
     let mut state = State::new();
-    match execute(source, &mut state, &host).expect_err("execution should fail") {
+    match execute(source, &mut state, &host)
+        .await
+        .expect_err("execution should fail")
+    {
         ExecuteError::Runtime(error) => error,
         ExecuteError::Parse(error) => panic!("expected runtime error, got parse error: {error:?}"),
     }
 }
 
-#[test]
-fn parser_handles_precedence_and_parallel() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_handles_precedence_and_parallel() {
     let program = parse(
         r#"
         total = 1 + 2 * 3
@@ -111,8 +114,8 @@ fn parser_handles_precedence_and_parallel() {
     assert_eq!(program.statements.len(), 3);
 }
 
-#[test]
-fn parser_accepts_double_slash_comments() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_accepts_double_slash_comments() {
     let program = parse(
         r#"
         // setup
@@ -126,8 +129,42 @@ fn parser_accepts_double_slash_comments() {
     assert_eq!(program.statements.len(), 2);
 }
 
-#[test]
-fn multiline_strings_are_expression_values() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_accepts_semicolons_as_statement_separators() {
+    let program = parse(
+        r#"
+        x = 1; y = 2;
+        submit x;
+        "#,
+    )
+    .expect("program should parse");
+
+    assert_eq!(program.statements.len(), 3);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn parser_accepts_trailing_semicolon_after_raw_string() {
+    let program = parse(
+        r#"
+        msg = r'''hello''';
+        submit msg
+        "#,
+    )
+    .expect("program should parse");
+
+    assert_eq!(program.statements.len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn parser_treats_semicolon_like_whitespace_between_idents() {
+    let with_semi = parse("x = 1;y = 2").expect("semicolon-separated should parse");
+    let with_newline = parse("x = 1\ny = 2").expect("newline-separated should parse");
+    assert_eq!(with_semi.statements.len(), with_newline.statements.len());
+    assert_eq!(with_semi.statements.len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn multiline_strings_are_expression_values() {
     let host = TestHost::default();
     let mut state = State::new();
     let value = finished(
@@ -139,14 +176,15 @@ second"""
             &mut state,
             &host,
         )
+        .await
         .expect("program should run"),
     );
 
     assert_eq!(value, Value::String("first\n\"quoted\"\nsecond".into()));
 }
 
-#[test]
-fn raw_multiline_strings_preserve_patch_text() {
+#[tokio::test(flavor = "current_thread")]
+async fn raw_multiline_strings_preserve_patch_text() {
     let host = TestHost::default();
     let mut state = State::new();
     let value = finished(
@@ -164,6 +202,7 @@ fn raw_multiline_strings_preserve_patch_text() {
             &mut state,
             &host,
         )
+        .await
         .expect("program should run"),
     );
 
@@ -176,8 +215,8 @@ fn raw_multiline_strings_preserve_patch_text() {
     );
 }
 
-#[test]
-fn raw_triple_single_strings_preserve_script_text() {
+#[tokio::test(flavor = "current_thread")]
+async fn raw_triple_single_strings_preserve_script_text() {
     let host = TestHost::default();
     let mut state = State::new();
     let value = finished(
@@ -192,6 +231,7 @@ PY'''
             &mut state,
             &host,
         )
+        .await
         .expect("program should run"),
     );
 
@@ -203,8 +243,8 @@ PY'''
     );
 }
 
-#[test]
-fn parser_accepts_comment_only_program() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_accepts_comment_only_program() {
     let program = parse(
         r#"
         // comment one
@@ -216,8 +256,8 @@ fn parser_accepts_comment_only_program() {
     assert!(program.statements.is_empty());
 }
 
-#[test]
-fn parser_accepts_inline_trailing_comments_in_blocks() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_accepts_inline_trailing_comments_in_blocks() {
     let program = parse(
         r#"
         if true { // enter block
@@ -233,8 +273,8 @@ fn parser_accepts_inline_trailing_comments_in_blocks() {
     assert_eq!(program.statements.len(), 2);
 }
 
-#[test]
-fn parser_accepts_else_if_chains() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_accepts_else_if_chains() {
     let program = parse(
         r#"
         if false {
@@ -252,8 +292,8 @@ fn parser_accepts_else_if_chains() {
     assert_eq!(program.statements.len(), 2);
 }
 
-#[test]
-fn parser_allows_parallel_in_expression_position() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_allows_parallel_in_expression_position() {
     let program = parse(
         r#"
         results = parallel {
@@ -268,8 +308,8 @@ fn parser_allows_parallel_in_expression_position() {
     assert_eq!(program.statements.len(), 2);
 }
 
-#[test]
-fn parser_allows_bare_expression_statements() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_allows_bare_expression_statements() {
     let program = parse(
         r#"
         "branch_a"
@@ -282,8 +322,8 @@ fn parser_allows_bare_expression_statements() {
     assert!(matches!(program.statements[0], lashlang::Stmt::Expr(_)));
 }
 
-#[test]
-fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
     let program = parse(
         r#"
         if true {
@@ -303,8 +343,8 @@ fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
     ));
 }
 
-#[test]
-fn executes_programs_with_double_slash_comments() {
+#[tokio::test(flavor = "current_thread")]
+async fn executes_programs_with_double_slash_comments() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -319,24 +359,29 @@ fn executes_programs_with_double_slash_comments() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::Number(3.0));
 }
 
-#[test]
-fn bare_finish_returns_null() {
+#[tokio::test(flavor = "current_thread")]
+async fn bare_finish_returns_null() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = finished(execute("submit", &mut state, &host).expect("execution should succeed"));
+    let value = finished(
+        execute("submit", &mut state, &host)
+            .await
+            .expect("execution should succeed"),
+    );
 
     assert_eq!(value, Value::Null);
 }
 
-#[test]
-fn executes_inline_trailing_comments_inside_blocks() {
+#[tokio::test(flavor = "current_thread")]
+async fn executes_inline_trailing_comments_inside_blocks() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -353,14 +398,15 @@ fn executes_inline_trailing_comments_inside_blocks() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::Number(3.0));
 }
 
-#[test]
-fn double_slash_inside_strings_is_not_a_comment() {
+#[tokio::test(flavor = "current_thread")]
+async fn double_slash_inside_strings_is_not_a_comment() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -373,6 +419,7 @@ fn double_slash_inside_strings_is_not_a_comment() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -382,8 +429,8 @@ fn double_slash_inside_strings_is_not_a_comment() {
     );
 }
 
-#[test]
-fn parser_accepts_ternary_in_call_arguments() {
+#[tokio::test(flavor = "current_thread")]
+async fn parser_accepts_ternary_in_call_arguments() {
     let program = parse(
         r#"
         result = format("{}", true ? "yes" : "no")
@@ -395,8 +442,8 @@ fn parser_accepts_ternary_in_call_arguments() {
     assert_eq!(program.statements.len(), 2);
 }
 
-#[test]
-fn executes_arithmetic_strings_and_finish() {
+#[tokio::test(flavor = "current_thread")]
+async fn executes_arithmetic_strings_and_finish() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -410,6 +457,7 @@ fn executes_arithmetic_strings_and_finish() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -417,8 +465,8 @@ fn executes_arithmetic_strings_and_finish() {
     assert_eq!(state.globals()["total"], Value::Number(7.0));
 }
 
-#[test]
-fn executes_if_for_and_list_concat() {
+#[tokio::test(flavor = "current_thread")]
+async fn executes_if_for_and_list_concat() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -442,14 +490,15 @@ fn executes_if_for_and_list_concat() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("n=1,n=2,n=3,n=4".to_string().into()));
 }
 
-#[test]
-fn break_exits_loop_and_restores_loop_binding() {
+#[tokio::test(flavor = "current_thread")]
+async fn break_exits_loop_and_restores_loop_binding() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -469,6 +518,7 @@ fn break_exits_loop_and_restores_loop_binding() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -477,8 +527,8 @@ fn break_exits_loop_and_restores_loop_binding() {
     assert_eq!(record["item"], Value::String("outer".to_string().into()));
 }
 
-#[test]
-fn continue_skips_to_next_iteration() {
+#[tokio::test(flavor = "current_thread")]
+async fn continue_skips_to_next_iteration() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -497,6 +547,7 @@ fn continue_skips_to_next_iteration() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -506,8 +557,8 @@ fn continue_skips_to_next_iteration() {
     );
 }
 
-#[test]
-fn nested_loop_control_targets_nearest_loop() {
+#[tokio::test(flavor = "current_thread")]
+async fn nested_loop_control_targets_nearest_loop() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -532,6 +583,7 @@ fn nested_loop_control_targets_nearest_loop() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -549,8 +601,8 @@ fn nested_loop_control_targets_nearest_loop() {
     );
 }
 
-#[test]
-fn submit_inside_loop_still_terminates_program() {
+#[tokio::test(flavor = "current_thread")]
+async fn submit_inside_loop_still_terminates_program() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -565,14 +617,15 @@ fn submit_inside_loop_still_terminates_program() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::Number(1.0));
 }
 
-#[test]
-fn ternary_selects_the_correct_branch() {
+#[tokio::test(flavor = "current_thread")]
+async fn ternary_selects_the_correct_branch() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -586,14 +639,15 @@ fn ternary_selects_the_correct_branch() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("left:right".to_string().into()));
 }
 
-#[test]
-fn ternary_is_right_associative() {
+#[tokio::test(flavor = "current_thread")]
+async fn ternary_is_right_associative() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -606,14 +660,15 @@ fn ternary_is_right_associative() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::Number(2.0));
 }
 
-#[test]
-fn ternary_has_lower_precedence_than_boolean_ops() {
+#[tokio::test(flavor = "current_thread")]
+async fn ternary_has_lower_precedence_than_boolean_ops() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -626,14 +681,15 @@ fn ternary_has_lower_precedence_than_boolean_ops() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("yes".to_string().into()));
 }
 
-#[test]
-fn ternary_short_circuits_unselected_branch() {
+#[tokio::test(flavor = "current_thread")]
+async fn ternary_short_circuits_unselected_branch() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -647,14 +703,15 @@ fn ternary_short_circuits_unselected_branch() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("ok:ok".to_string().into()));
 }
 
-#[test]
-fn unary_bang_aliases_not() {
+#[tokio::test(flavor = "current_thread")]
+async fn unary_bang_aliases_not() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -668,6 +725,7 @@ fn unary_bang_aliases_not() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -677,8 +735,8 @@ fn unary_bang_aliases_not() {
     );
 }
 
-#[test]
-fn symbolic_boolean_aliases_match_word_operators() {
+#[tokio::test(flavor = "current_thread")]
+async fn symbolic_boolean_aliases_match_word_operators() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -693,6 +751,7 @@ fn symbolic_boolean_aliases_match_word_operators() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -702,8 +761,8 @@ fn symbolic_boolean_aliases_match_word_operators() {
     );
 }
 
-#[test]
-fn conditions_and_ternary_use_bounded_truthiness() {
+#[tokio::test(flavor = "current_thread")]
+async fn conditions_and_ternary_use_bounded_truthiness() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -719,6 +778,7 @@ fn conditions_and_ternary_use_bounded_truthiness() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -736,8 +796,8 @@ fn conditions_and_ternary_use_bounded_truthiness() {
     );
 }
 
-#[test]
-fn string_concatenation_stringifies_non_string_side() {
+#[tokio::test(flavor = "current_thread")]
+async fn string_concatenation_stringifies_non_string_side() {
     let host = TestHost::default().with_file("src/lib.rs", "pub fn main() {}");
     let mut state = State::new();
 
@@ -750,6 +810,7 @@ fn string_concatenation_stringifies_non_string_side() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -759,8 +820,8 @@ fn string_concatenation_stringifies_non_string_side() {
     );
 }
 
-#[test]
-fn arithmetic_and_string_builtins_coerce_scalars() {
+#[tokio::test(flavor = "current_thread")]
+async fn arithmetic_and_string_builtins_coerce_scalars() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -783,6 +844,7 @@ fn arithmetic_and_string_builtins_coerce_scalars() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -806,8 +868,8 @@ fn arithmetic_and_string_builtins_coerce_scalars() {
     assert_eq!(record["prefix"], Value::Bool(true));
 }
 
-#[test]
-fn to_string_stringifies_records() {
+#[tokio::test(flavor = "current_thread")]
+async fn to_string_stringifies_records() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -819,6 +881,7 @@ fn to_string_stringifies_records() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -828,8 +891,8 @@ fn to_string_stringifies_records() {
     );
 }
 
-#[test]
-fn observe_captures_intermediate_values_without_ending_execution() {
+#[tokio::test(flavor = "current_thread")]
+async fn observe_captures_intermediate_values_without_ending_execution() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -844,6 +907,7 @@ fn observe_captures_intermediate_values_without_ending_execution() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -862,8 +926,8 @@ fn observe_captures_intermediate_values_without_ending_execution() {
     assert_eq!(observed[1], Value::String("step done".to_string().into()));
 }
 
-#[test]
-fn execution_can_continue_without_finish() {
+#[tokio::test(flavor = "current_thread")]
+async fn execution_can_continue_without_finish() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -875,6 +939,7 @@ fn execution_can_continue_without_finish() {
         &mut state,
         &host,
     )
+    .await
     .expect("execution should succeed");
 
     assert_eq!(outcome, ExecutionOutcome::Continued);
@@ -883,8 +948,8 @@ fn execution_can_continue_without_finish() {
     assert_eq!(observed.as_slice(), &[Value::Number(1.0)]);
 }
 
-#[test]
-fn ternary_fixes_tool_result_formatting_pattern() {
+#[tokio::test(flavor = "current_thread")]
+async fn ternary_fixes_tool_result_formatting_pattern() {
     let host = TestHost::default().with_file("src/lib.rs", "pub fn main() {}");
     let mut state = State::new();
 
@@ -903,6 +968,7 @@ fn ternary_fixes_tool_result_formatting_pattern() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -913,8 +979,8 @@ fn ternary_fixes_tool_result_formatting_pattern() {
     assert!(text.contains("missing=failed:"));
 }
 
-#[test]
-fn format_supports_indexed_reordering() {
+#[tokio::test(flavor = "current_thread")]
+async fn format_supports_indexed_reordering() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -926,14 +992,15 @@ fn format_supports_indexed_reordering() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("b=y a=x".to_string().into()));
 }
 
-#[test]
-fn format_without_placeholders_returns_literal_string() {
+#[tokio::test(flavor = "current_thread")]
+async fn format_without_placeholders_returns_literal_string() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -945,14 +1012,15 @@ fn format_without_placeholders_returns_literal_string() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("plain".to_string().into()));
 }
 
-#[test]
-fn format_supports_escaped_braces() {
+#[tokio::test(flavor = "current_thread")]
+async fn format_supports_escaped_braces() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -964,19 +1032,21 @@ fn format_supports_escaped_braces() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("{1}".to_string().into()));
 }
 
-#[test]
-fn format_rejects_mixed_placeholder_styles_end_to_end() {
+#[tokio::test(flavor = "current_thread")]
+async fn format_rejects_mixed_placeholder_styles_end_to_end() {
     let error = runtime_error(
         r#"
         submit format("{} {1}", "x", "y")
         "#,
-    );
+    )
+    .await;
 
     assert_eq!(
         error,
@@ -986,13 +1056,14 @@ fn format_rejects_mixed_placeholder_styles_end_to_end() {
     );
 }
 
-#[test]
-fn format_rejects_unused_args_end_to_end() {
+#[tokio::test(flavor = "current_thread")]
+async fn format_rejects_unused_args_end_to_end() {
     let error = runtime_error(
         r#"
         submit format("plain", 1)
         "#,
-    );
+    )
+    .await;
 
     assert_eq!(
         error,
@@ -1002,13 +1073,14 @@ fn format_rejects_unused_args_end_to_end() {
     );
 }
 
-#[test]
-fn format_rejects_unmatched_braces_end_to_end() {
+#[tokio::test(flavor = "current_thread")]
+async fn format_rejects_unmatched_braces_end_to_end() {
     let open_error = runtime_error(
         r#"
         submit format("{")
         "#,
-    );
+    )
+    .await;
     assert_eq!(
         open_error,
         RuntimeError::ValueError {
@@ -1020,7 +1092,8 @@ fn format_rejects_unmatched_braces_end_to_end() {
         r#"
         submit format("}")
         "#,
-    );
+    )
+    .await;
     assert_eq!(
         close_error,
         RuntimeError::ValueError {
@@ -1029,8 +1102,8 @@ fn format_rejects_unmatched_braces_end_to_end() {
     );
 }
 
-#[test]
-fn tool_calls_return_result_records() {
+#[tokio::test(flavor = "current_thread")]
+async fn tool_calls_return_result_records() {
     let host = TestHost::default().with_file("src/lib.rs", "pub fn main() {}");
     let mut state = State::new();
 
@@ -1044,6 +1117,7 @@ fn tool_calls_return_result_records() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1060,8 +1134,8 @@ fn tool_calls_return_result_records() {
     );
 }
 
-#[test]
-fn parallel_executes_concurrently_and_merges_distinct_bindings() {
+#[tokio::test(flavor = "current_thread")]
+async fn parallel_executes_concurrently_and_merges_distinct_bindings() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1077,6 +1151,7 @@ fn parallel_executes_concurrently_and_merges_distinct_bindings() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1094,8 +1169,8 @@ fn parallel_executes_concurrently_and_merges_distinct_bindings() {
     assert!(host.max_active.load(Ordering::SeqCst) >= 2);
 }
 
-#[test]
-fn parallel_expression_returns_branch_results_in_order() {
+#[tokio::test(flavor = "current_thread")]
+async fn parallel_expression_returns_branch_results_in_order() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1111,6 +1186,7 @@ fn parallel_expression_returns_branch_results_in_order() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1140,8 +1216,8 @@ fn parallel_expression_returns_branch_results_in_order() {
     assert!(host.max_active.load(Ordering::SeqCst) >= 2);
 }
 
-#[test]
-fn named_parallel_expression_returns_record_results() {
+#[tokio::test(flavor = "current_thread")]
+async fn named_parallel_expression_returns_record_results() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1162,6 +1238,7 @@ fn named_parallel_expression_returns_record_results() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1174,8 +1251,8 @@ fn named_parallel_expression_returns_record_results() {
     assert!(host.max_active.load(Ordering::SeqCst) >= 2);
 }
 
-#[test]
-fn parallel_expression_accepts_bare_expression_branches() {
+#[tokio::test(flavor = "current_thread")]
+async fn parallel_expression_accepts_bare_expression_branches() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1192,6 +1269,7 @@ fn parallel_expression_accepts_bare_expression_branches() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1208,8 +1286,8 @@ fn parallel_expression_accepts_bare_expression_branches() {
     );
 }
 
-#[test]
-fn slice_null_bounds_default_to_start_or_end() {
+#[tokio::test(flavor = "current_thread")]
+async fn slice_null_bounds_default_to_start_or_end() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1227,6 +1305,7 @@ fn slice_null_bounds_default_to_start_or_end() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1251,8 +1330,8 @@ fn slice_null_bounds_default_to_start_or_end() {
     );
 }
 
-#[test]
-fn negative_indices_and_record_contains_are_supported() {
+#[tokio::test(flavor = "current_thread")]
+async fn negative_indices_and_record_contains_are_supported() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1273,6 +1352,7 @@ fn negative_indices_and_record_contains_are_supported() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1287,8 +1367,8 @@ fn negative_indices_and_record_contains_are_supported() {
     assert_eq!(record["record_missing_key"], Value::Bool(false));
 }
 
-#[test]
-fn dynamic_record_indexing_reads_fields() {
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_record_indexing_reads_fields() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1302,6 +1382,7 @@ fn dynamic_record_indexing_reads_fields() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1312,8 +1393,8 @@ fn dynamic_record_indexing_reads_fields() {
     assert_eq!(record["missing"], Value::Null);
 }
 
-#[test]
-fn indexed_and_field_assignment_update_collections() {
+#[tokio::test(flavor = "current_thread")]
+async fn indexed_and_field_assignment_update_collections() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1333,6 +1414,7 @@ fn indexed_and_field_assignment_update_collections() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1350,8 +1432,8 @@ fn indexed_and_field_assignment_update_collections() {
     );
 }
 
-#[test]
-fn nested_path_assignment_and_histogram_loops_work() {
+#[tokio::test(flavor = "current_thread")]
+async fn nested_path_assignment_and_histogram_loops_work() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1371,6 +1453,7 @@ fn nested_path_assignment_and_histogram_loops_work() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1392,8 +1475,8 @@ fn nested_path_assignment_and_histogram_loops_work() {
     assert_eq!(counts["c"], Value::Number(1.0));
 }
 
-#[test]
-fn path_assignment_preserves_alias_isolation() {
+#[tokio::test(flavor = "current_thread")]
+async fn path_assignment_preserves_alias_isolation() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1410,6 +1493,7 @@ fn path_assignment_preserves_alias_isolation() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1440,36 +1524,36 @@ fn path_assignment_preserves_alias_isolation() {
     );
 }
 
-#[test]
-fn path_assignment_reports_invalid_targets() {
+#[tokio::test(flavor = "current_thread")]
+async fn path_assignment_reports_invalid_targets() {
     assert!(matches!(
-        runtime_error("items = [1]\nitems[2] = 2"),
+        runtime_error("items = [1]\nitems[2] = 2").await,
         RuntimeError::ValueError { message } if message.contains("out of bounds")
     ));
     assert!(matches!(
-        runtime_error("items = [1]\nitems[0.5] = 2"),
+        runtime_error("items = [1]\nitems[0.5] = 2").await,
         RuntimeError::TypeError { message } if message.contains("integer")
     ));
     assert!(matches!(
-        runtime_error("items = [1]\nitems[\"0\"] = 2"),
+        runtime_error("items = [1]\nitems[\"0\"] = 2").await,
         RuntimeError::TypeError { message } if message.contains("integer")
     ));
     assert!(matches!(
-        runtime_error("text = \"abc\"\ntext[0] = \"x\""),
+        runtime_error("text = \"abc\"\ntext[0] = \"x\"").await,
         RuntimeError::TypeError { message } if message.contains("string")
     ));
     assert!(matches!(
-        runtime_error("record = {}\nrecord.missing.value = 1"),
+        runtime_error("record = {}\nrecord.missing.value = 1").await,
         RuntimeError::ValueError { message } if message.contains("missing field")
     ));
     assert!(matches!(
-        runtime_error("record = { item: 1 }\nrecord.item.value = 2"),
+        runtime_error("record = { item: 1 }\nrecord.item.value = 2").await,
         RuntimeError::TypeError { message } if message.contains("number")
     ));
 }
 
-#[test]
-fn parallel_path_assignment_conflicts_on_root_slot() {
+#[tokio::test(flavor = "current_thread")]
+async fn parallel_path_assignment_conflicts_on_root_slot() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1485,6 +1569,7 @@ fn parallel_path_assignment_conflicts_on_root_slot() {
         &mut state,
         &host,
     )
+    .await
     .expect_err("execution should fail");
 
     assert!(matches!(
@@ -1493,8 +1578,8 @@ fn parallel_path_assignment_conflicts_on_root_slot() {
     ));
 }
 
-#[test]
-fn else_if_chains_execute_without_extra_braces() {
+#[tokio::test(flavor = "current_thread")]
+async fn else_if_chains_execute_without_extra_braces() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1514,14 +1599,15 @@ fn else_if_chains_execute_without_extra_braces() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("medium".to_string().into()));
 }
 
-#[test]
-fn slice_supports_negative_bounds() {
+#[tokio::test(flavor = "current_thread")]
+async fn slice_supports_negative_bounds() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1541,6 +1627,7 @@ fn slice_supports_negative_bounds() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1588,8 +1675,8 @@ fn slice_supports_negative_bounds() {
     );
 }
 
-#[test]
-fn range_and_push_cover_common_collection_building() {
+#[tokio::test(flavor = "current_thread")]
+async fn range_and_push_cover_common_collection_building() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1609,6 +1696,7 @@ fn range_and_push_cover_common_collection_building() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1642,8 +1730,8 @@ fn range_and_push_cover_common_collection_building() {
     assert_eq!(record["empty"], Value::List(Vec::new().into()));
 }
 
-#[test]
-fn for_loop_assignments_carry_across_iterations() {
+#[tokio::test(flavor = "current_thread")]
+async fn for_loop_assignments_carry_across_iterations() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1664,6 +1752,7 @@ fn for_loop_assignments_carry_across_iterations() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1688,8 +1777,8 @@ fn for_loop_assignments_carry_across_iterations() {
     assert_eq!(snapshots.len(), 3);
 }
 
-#[test]
-fn named_parallel_accepts_commas_and_keyword_record_keys_execute() {
+#[tokio::test(flavor = "current_thread")]
+async fn named_parallel_accepts_commas_and_keyword_record_keys_execute() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1709,6 +1798,7 @@ fn named_parallel_accepts_commas_and_keyword_record_keys_execute() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1720,8 +1810,8 @@ fn named_parallel_accepts_commas_and_keyword_record_keys_execute() {
     assert_eq!(record["quoted_value"], Value::Number(2.0));
 }
 
-#[test]
-fn string_comparisons_are_lexicographic() {
+#[tokio::test(flavor = "current_thread")]
+async fn string_comparisons_are_lexicographic() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1738,6 +1828,7 @@ fn string_comparisons_are_lexicographic() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1750,8 +1841,8 @@ fn string_comparisons_are_lexicographic() {
     assert_eq!(record["ge"], Value::Bool(true));
 }
 
-#[test]
-fn stringification_preserves_integer_format_inside_containers() {
+#[tokio::test(flavor = "current_thread")]
+async fn stringification_preserves_integer_format_inside_containers() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1766,6 +1857,7 @@ fn stringification_preserves_integer_format_inside_containers() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
@@ -1782,8 +1874,8 @@ fn stringification_preserves_integer_format_inside_containers() {
     );
 }
 
-#[test]
-fn parallel_rejects_conflicting_assignments() {
+#[tokio::test(flavor = "current_thread")]
+async fn parallel_rejects_conflicting_assignments() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1798,6 +1890,7 @@ fn parallel_rejects_conflicting_assignments() {
         &mut state,
         &host,
     )
+    .await
     .expect_err("execution should fail");
 
     assert!(matches!(
@@ -1806,8 +1899,8 @@ fn parallel_rejects_conflicting_assignments() {
     ));
 }
 
-#[test]
-fn optimized_parallel_tool_calls_reject_conflicts_across_three_branches() {
+#[tokio::test(flavor = "current_thread")]
+async fn optimized_parallel_tool_calls_reject_conflicts_across_three_branches() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1823,6 +1916,7 @@ fn optimized_parallel_tool_calls_reject_conflicts_across_three_branches() {
         &mut state,
         &host,
     )
+    .await
     .expect_err("execution should fail");
 
     assert!(matches!(
@@ -1831,8 +1925,8 @@ fn optimized_parallel_tool_calls_reject_conflicts_across_three_branches() {
     ));
 }
 
-#[test]
-fn optimized_parallel_expression_tool_calls_reject_conflicts_across_three_branches() {
+#[tokio::test(flavor = "current_thread")]
+async fn optimized_parallel_expression_tool_calls_reject_conflicts_across_three_branches() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1848,6 +1942,7 @@ fn optimized_parallel_expression_tool_calls_reject_conflicts_across_three_branch
         &mut state,
         &host,
     )
+    .await
     .expect_err("execution should fail");
 
     assert!(matches!(
@@ -1856,8 +1951,8 @@ fn optimized_parallel_expression_tool_calls_reject_conflicts_across_three_branch
     ));
 }
 
-#[test]
-fn snapshot_round_trip_preserves_repl_like_state() {
+#[tokio::test(flavor = "current_thread")]
+async fn snapshot_round_trip_preserves_repl_like_state() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1870,6 +1965,7 @@ fn snapshot_round_trip_preserves_repl_like_state() {
             &mut state,
             &host,
         )
+        .await
         .expect("first execution should succeed"),
     );
 
@@ -1887,14 +1983,15 @@ fn snapshot_round_trip_preserves_repl_like_state() {
             &mut restored,
             &host,
         )
+        .await
         .expect("restored execution should succeed"),
     );
 
     assert_eq!(value, Value::Number(2.0));
 }
 
-#[test]
-fn json_and_record_helpers_work() {
+#[tokio::test(flavor = "current_thread")]
+async fn json_and_record_helpers_work() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1907,14 +2004,15 @@ fn json_and_record_helpers_work() {
             &mut state,
             &host,
         )
+        .await
         .expect("execution should succeed"),
     );
 
     assert_eq!(value, Value::String("src/lib.rs:7".to_string().into()));
 }
 
-#[test]
-fn finish_inside_parallel_is_rejected() {
+#[tokio::test(flavor = "current_thread")]
+async fn finish_inside_parallel_is_rejected() {
     let host = TestHost::default();
     let mut state = State::new();
 
@@ -1928,6 +2026,7 @@ fn finish_inside_parallel_is_rejected() {
         &mut state,
         &host,
     )
+    .await
     .expect_err("execution should fail");
 
     assert!(matches!(
@@ -1936,8 +2035,8 @@ fn finish_inside_parallel_is_rejected() {
     ));
 }
 
-#[test]
-fn parse_errors_are_surface_level_and_precise() {
+#[tokio::test(flavor = "current_thread")]
+async fn parse_errors_are_surface_level_and_precise() {
     let error = parse(
         r#"
         if true {
@@ -1963,8 +2062,8 @@ fn expect_string<'a>(args: &'a Record, key: &str) -> Result<&'a str, ToolHostErr
 //  End-to-end Type literal integration tests
 // ------------------------------------------------------------------
 
-#[test]
-fn end_to_end_type_value_is_json_schema_shaped() {
+#[tokio::test(flavor = "current_thread")]
+async fn end_to_end_type_value_is_json_schema_shaped() {
     let program = parse(
         r#"
         Books = Type {
@@ -1983,7 +2082,9 @@ fn end_to_end_type_value_is_json_schema_shaped() {
     .expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
-    let outcome = lashlang::execute_program(&program, &mut state, &host).expect("should run");
+    let outcome = lashlang::execute_program(&program, &mut state, &host)
+        .await
+        .expect("should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1999,14 +2100,14 @@ fn end_to_end_type_value_is_json_schema_shaped() {
     assert_eq!(required.len(), 4);
 }
 
-#[test]
-fn type_is_usable_as_a_tool_call_argument() {
+#[tokio::test(flavor = "current_thread")]
+async fn type_is_usable_as_a_tool_call_argument() {
     #[derive(Default)]
     struct CaptureHost {
         captured: std::sync::Mutex<Option<Value>>,
     }
     impl ToolHost for CaptureHost {
-        fn call(&self, _: &str, args: &Record) -> Result<Value, ToolHostError> {
+        async fn call(&self, _: String, args: Record) -> Result<Value, ToolHostError> {
             *self.captured.lock().unwrap() = args.get("output").cloned();
             Ok(Value::Null)
         }
@@ -2021,7 +2122,9 @@ fn type_is_usable_as_a_tool_call_argument() {
     )
     .expect("should parse");
     let mut state = State::new();
-    lashlang::execute_program(&program, &mut state, &host).expect("should run");
+    lashlang::execute_program(&program, &mut state, &host)
+        .await
+        .expect("should run");
     let captured = host.captured.lock().unwrap().clone().expect("captured arg");
     let inner = lashlang::unwrap_type_value(&captured).expect("wrapped type");
     let schema = inner.as_record().expect("schema record");
@@ -2037,8 +2140,8 @@ fn type_is_usable_as_a_tool_call_argument() {
     assert_eq!(enum_values.len(), 2);
 }
 
-#[test]
-fn validate_reuses_type_literals_for_intermediate_checks() {
+#[tokio::test(flavor = "current_thread")]
+async fn validate_reuses_type_literals_for_intermediate_checks() {
     let host = TestHost::default();
     let mut state = State::new();
     let value = finished(
@@ -2059,6 +2162,7 @@ fn validate_reuses_type_literals_for_intermediate_checks() {
             &mut state,
             &host,
         )
+        .await
         .expect("validate should succeed"),
     );
     let package = value.as_record().expect("package record");
@@ -2078,6 +2182,7 @@ fn validate_reuses_type_literals_for_intermediate_checks() {
         &mut state,
         &host,
     )
+    .await
     .expect_err("validate should fail");
     let ExecuteError::Runtime(RuntimeError::ValueError { message }) = err else {
         panic!("expected validation runtime error");
@@ -2088,18 +2193,19 @@ fn validate_reuses_type_literals_for_intermediate_checks() {
     );
 }
 
-#[test]
-fn undefined_ref_in_type_produces_runtime_error() {
+#[tokio::test(flavor = "current_thread")]
+async fn undefined_ref_in_type_produces_runtime_error() {
     let program = parse("submit Type { inner: Missing }").expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
-    let err =
-        lashlang::execute_program(&program, &mut state, &host).expect_err("Missing is undefined");
+    let err = lashlang::execute_program(&program, &mut state, &host)
+        .await
+        .expect_err("Missing is undefined");
     assert!(matches!(err, RuntimeError::UndefinedVariable { .. }));
 }
 
-#[test]
-fn snapshot_round_trip_preserves_type_values() {
+#[tokio::test(flavor = "current_thread")]
+async fn snapshot_round_trip_preserves_type_values() {
     let program = parse(
         r#"
         Books = Type { title: str, count: int }
@@ -2109,7 +2215,9 @@ fn snapshot_round_trip_preserves_type_values() {
     .expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
-    let outcome = lashlang::execute_program(&program, &mut state, &host).expect("should run");
+    let outcome = lashlang::execute_program(&program, &mut state, &host)
+        .await
+        .expect("should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -2120,7 +2228,9 @@ fn snapshot_round_trip_preserves_type_values() {
     // Re-execute a program that references Books — the ref should still resolve.
     let program2 = parse("submit Books").expect("parse");
     let mut state2 = restored_state;
-    let outcome2 = lashlang::execute_program(&program2, &mut state2, &host).expect("run");
+    let outcome2 = lashlang::execute_program(&program2, &mut state2, &host)
+        .await
+        .expect("run");
     let ExecutionOutcome::Finished(v2) = outcome2 else {
         panic!("expected finish");
     };

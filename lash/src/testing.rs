@@ -14,12 +14,15 @@ use crate::plugin::{
     DynamicToolHost, PluginError, SessionCreateRequest, SessionHandle, SessionLifecycleHost,
     SessionSnapshot, SessionSnapshotHost, ToolCatalogHost, TurnHost,
 };
-use crate::provider::{AgentModelSelection, ProviderHandle, VariantRequestConfig};
+use crate::provider::{
+    AgentModelSelection, ProviderAuth, ProviderComponents, ProviderHandle, ProviderModelPolicy,
+    ProviderReadiness, ProviderState, ProviderTransport, VariantRequestConfig,
+};
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, ExecutionSummary, OutputState,
-    PersistedSessionState, Provider, ProviderOptions, SessionPolicy, SessionStateEnvelope,
-    TokenUsage, TurnInput, TurnStatus,
+    PersistedSessionState, ProviderOptions, SessionPolicy, SessionStateEnvelope, TokenUsage,
+    TurnInput, TurnStatus,
 };
 
 type CompletionFuture =
@@ -90,7 +93,8 @@ impl TestProvider {
     }
 
     pub fn into_handle(self) -> ProviderHandle {
-        ProviderHandle::new(Box::new(self))
+        let model_policy: Arc<dyn ProviderModelPolicy> = Arc::new(self.clone());
+        ProviderHandle::new(ProviderComponents::shared(self, model_policy))
     }
 }
 
@@ -211,10 +215,68 @@ impl Default for TestProviderBuilder {
     }
 }
 
-#[async_trait::async_trait]
-impl Provider for TestProvider {
+impl ProviderState for TestProvider {
     fn kind(&self) -> &'static str {
         self.kind
+    }
+
+    fn options(&self) -> ProviderOptions {
+        self.options.clone()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.options = options;
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        (self.serialize_config)()
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderAuth for TestProvider {
+    async fn ensure_fresh(&mut self) -> Result<bool, crate::oauth::OAuthError> {
+        Ok(false)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderReadiness for TestProvider {
+    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+        Ok(false)
+    }
+
+    fn requires_streaming(&self) -> bool {
+        self.requires_streaming
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderTransport for TestProvider {
+    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        (self.complete)(request).await
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+        Box::new(self.clone())
+    }
+}
+
+impl ProviderModelPolicy for TestProvider {
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
+        (self.default_agent_model)(tier)
     }
 
     fn default_model(&self) -> &str {
@@ -231,34 +293,6 @@ impl Provider for TestProvider {
 
     fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
         (self.request_variant_config)(model, variant)
-    }
-
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        (self.default_agent_model)(tier)
-    }
-
-    fn requires_streaming(&self) -> bool {
-        self.requires_streaming
-    }
-
-    fn options(&self) -> &ProviderOptions {
-        &self.options
-    }
-
-    fn options_mut(&mut self) -> &mut ProviderOptions {
-        &mut self.options
-    }
-
-    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        (self.complete)(request).await
-    }
-
-    fn serialize_config(&self) -> serde_json::Value {
-        (self.serialize_config)()
-    }
-
-    fn clone_boxed(&self) -> Box<dyn Provider> {
-        Box::new(self.clone())
     }
 }
 
@@ -637,11 +671,8 @@ mod test_mode_fakes {
     impl ModeSessionPlugin for TestModeSession {
         async fn initialize_session(
             &self,
-            mut ctx: ModeSessionContext<'_>,
+            _ctx: ModeSessionContext<'_>,
         ) -> Result<(), crate::SessionError> {
-            if self.mode == ExecutionMode::new("rlm") {
-                ctx.start_lashlang_runtime().await?;
-            }
             Ok(())
         }
 
@@ -655,7 +686,11 @@ mod test_mode_fakes {
                     .mode_extras
                     .decode::<lash_rlm_types::RlmCreateExtras>(&ExecutionMode::new("rlm"))
             {
-                ctx.set_rlm_termination_mode(extras.termination);
+                if let Ok(options) =
+                    crate::ModeTurnOptions::typed(ExecutionMode::new("rlm"), extras.termination)
+                {
+                    ctx.set_mode_turn_options(options);
+                }
             }
         }
     }

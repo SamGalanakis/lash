@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [features]
-# Keep core portable by default. The lashlang-backed `rlm` runtime is always on.
+# Keep core portable by default.
 default = []
 sqlite-store = ["dep:rusqlite", "dep:flate2"]
 otel-trace = ["lash-trace/otel"]
@@ -47,7 +47,6 @@ bytes = "1"
 sha2 = "0.10"
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 flate2 = { version = "1", optional = true }
-lashlang = { path = "../lashlang" }
 chrono = "0.4"
 similar = "2"
 pdf-extract = { version = "0.7", optional = true }

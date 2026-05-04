@@ -233,7 +233,6 @@ async fn apply_graph_resume_state(
         if let Some(context_window) = app.context_window {
             restored_policy.max_context_tokens = Some(context_window as usize);
         }
-        let persisted_graph_node_count = graph.nodes.len();
         let mut restored_state = PersistedSessionState {
             session_id: app.session_id.clone(),
             policy: restored_policy,
@@ -268,7 +267,7 @@ async fn apply_graph_resume_state(
             execution_state_snapshot: None,
             token_ledger,
             checkpoint_ref,
-            persisted_graph_node_count,
+            head_revision: None,
             graph_replace_required: false,
         };
         restored_state.replace_active_read_state(&messages, &tool_calls);
@@ -406,6 +405,7 @@ mod tests {
         let checkpoint_ref = store.put_checkpoint(&checkpoint).checkpoint_ref;
         store.save_session_head(lash::SessionHead {
             session_id: "root".to_string(),
+            head_revision: 0,
             graph,
             config: lash::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
@@ -537,11 +537,13 @@ mod tests {
         );
         persist_session_head(&store, graph, checkpoint);
 
-        let provider =
-            lash::ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
+        let provider = lash::ProviderHandle::new(
+            lash_provider_openai::OpenAiGenericProvider::new(
                 "test-key",
                 "https://example.invalid/v1",
-            )));
+            )
+            .into_components(),
+        );
         let (dynamic_tools, mut desired_dynamic, model_catalog, runtime) =
             build_runtime(&provider).await;
 

@@ -2,17 +2,15 @@ use std::sync::Arc;
 
 use lash::session_model::Message;
 use lash::*;
-use tokio::sync::mpsc;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{App, UiTimelineItem};
-use crate::event::AppEvent;
 use crate::fork;
 use crate::resume;
 use crate::session_log::{self, SessionLogger};
 use crate::turn_runner::RuntimeRunResult;
-use crate::{hash12, push_system_message, sync_ui_extensions};
+use crate::{hash12, push_system_message};
 
 use super::super::helpers::TurnReplayPayload;
 use super::super::runtime::{apply_pending_reconfigure, send_user_message};
@@ -20,7 +18,7 @@ use super::super::runtime::{apply_pending_reconfigure, send_user_message};
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_clear(
     app: &mut App,
-    plugin_host: &PluginHost,
+    _plugin_host: &PluginHost,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -60,14 +58,7 @@ pub(super) async fn handle_clear(
                 push_system_message(app, format!("Failed to refresh session manager: {}", err))
             }
         }
-        let ui_extensions = app.ui_extensions_handle();
-        sync_ui_extensions(
-            app,
-            ui_extensions.as_ref(),
-            plugin_host,
-            Arc::clone(session_manager),
-        )
-        .await;
+        app.dirty = true;
         *pending_clear_after_return = false;
     } else {
         *pending_clear_after_return = true;
@@ -90,7 +81,7 @@ pub(super) async fn handle_retry(
     desired_dynamic: &mut DynamicStateSnapshot,
     pending_reconfigure: &mut bool,
     toolset_hash: &mut String,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    app_tx: &crate::event::AppEventTx,
 ) -> anyhow::Result<bool> {
     if let Some(previous) = last_turn.clone() {
         if let Err(e) =
@@ -230,7 +221,7 @@ pub(super) async fn handle_resume(
     name: Option<String>,
     app: &mut App,
     logger: &SessionLogger,
-    plugin_host: &PluginHost,
+    _plugin_host: &PluginHost,
     dynamic_tools: &Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
@@ -271,14 +262,7 @@ pub(super) async fn handle_resume(
                         ),
                     }
                 }
-                let ui_extensions = app.ui_extensions_handle();
-                sync_ui_extensions(
-                    app,
-                    ui_extensions.as_ref(),
-                    plugin_host,
-                    Arc::clone(session_manager),
-                )
-                .await;
+                app.dirty = true;
                 *toolset_hash = hash12(
                     &serde_json::to_vec(&dynamic_tools.definitions())
                         .unwrap_or_else(|_| b"[]".to_vec()),

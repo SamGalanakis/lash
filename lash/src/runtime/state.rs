@@ -119,17 +119,11 @@ pub struct PersistedSessionState {
     pub token_ledger: Vec<TokenLedgerEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<crate::store::BlobRef>,
-    /// Count of nodes the store currently holds. Resident nodes at
-    /// indices `[0..persisted_graph_node_count)` are what the store has;
-    /// indices `[persisted_graph_node_count..)` are new and need
-    /// appending on the next commit.
-    ///
-    /// Invariant: residency trim (drops resident orphans) must reset this
-    /// to `state.session_graph.nodes.len()` so subsequent appends stay in
-    /// bounds — the dropped nodes stay in the store, but nothing resident
-    /// is "new" right after a trim.
+    /// Store head revision observed by the runtime. Commits use it for
+    /// optimistic concurrency; `None` means the runtime is creating the
+    /// first persisted head.
     #[serde(skip)]
-    pub persisted_graph_node_count: usize,
+    pub head_revision: Option<u64>,
     /// Signals that the next commit must write the full graph (a
     /// destructive rewrite happened, e.g. `heal_orphaned_leaf`). Cleared
     /// after the next commit.
@@ -157,7 +151,7 @@ impl PersistedSessionState {
             execution_state_snapshot: None,
             token_ledger: Vec::new(),
             checkpoint_ref: None,
-            persisted_graph_node_count: 0,
+            head_revision: None,
             graph_replace_required: false,
         }
     }
@@ -256,10 +250,8 @@ impl PersistedSessionState {
         &self.token_ledger
     }
 
-    pub fn apply_persisted_commit_result(
-        &mut self,
-        result: crate::store::PersistedStateCommitResult,
-    ) {
+    pub fn apply_persisted_commit_result(&mut self, result: crate::store::RuntimeCommitResult) {
+        self.head_revision = Some(result.head_revision);
         self.checkpoint_ref = Some(result.checkpoint_ref);
         self.dynamic_state_ref = result.manifest.dynamic_state_ref;
         if let Some(snapshot) = self.dynamic_state_snapshot.as_ref() {
@@ -270,7 +262,6 @@ impl PersistedSessionState {
         self.plugin_snapshot_ref = result.manifest.plugin_snapshot_ref;
         self.plugin_snapshot_revision = result.manifest.plugin_snapshot_revision;
         self.execution_state_ref = result.manifest.execution_state_ref;
-        self.persisted_graph_node_count = result.persisted_graph_node_count;
         self.graph_replace_required = false;
         self.dynamic_state_snapshot = None;
         self.plugin_snapshot = None;
@@ -333,7 +324,7 @@ impl Default for PersistedSessionState {
             execution_state_snapshot: None,
             token_ledger: Vec::new(),
             checkpoint_ref: None,
-            persisted_graph_node_count: 0,
+            head_revision: None,
             graph_replace_required: false,
         }
     }
@@ -401,17 +392,9 @@ pub(super) fn apply_session_head(
     state.plugin_snapshot = None;
     state.execution_state_ref = None;
     state.execution_state_snapshot = None;
-    state.persisted_graph_node_count = state.session_graph.nodes.len();
+    state.head_revision = Some(head.head_revision);
     state.graph_replace_required = false;
     apply_persisted_session_config(&mut state.policy, &head.config);
-}
-
-pub(super) async fn load_session_checkpoint(
-    store: &(dyn crate::store::RuntimePersistence + '_),
-    checkpoint_ref: Option<&crate::store::BlobRef>,
-) -> Option<crate::store::HydratedSessionCheckpoint> {
-    let checkpoint_ref = checkpoint_ref?;
-    crate::store::get_checkpoint(store, checkpoint_ref).await
 }
 
 pub(super) fn append_session_nodes_to_state(
@@ -468,11 +451,6 @@ pub(super) fn normalize_session_graph(state: &mut PersistedSessionState) {
 /// the host decides whether/when to tombstone + vacuum them via
 /// `LashRuntime::orphaned_node_ids` + the store primitives.
 ///
-/// Preserves the "resident[0..persisted_graph_node_count) were committed"
-/// invariant. Active path is root-to-leaf; any unpersisted resident
-/// nodes (appended after the last commit) live at the tail, so the
-/// new persisted count = number of kept active-path nodes whose
-/// original index was < the old count.
 pub(super) fn apply_residency_on_load(
     state: &mut PersistedSessionState,
     residency: crate::Residency,
@@ -480,27 +458,7 @@ pub(super) fn apply_residency_on_load(
     match residency {
         crate::Residency::KeepAll => {}
         crate::Residency::ActivePathOnly => {
-            let old_persisted = state.persisted_graph_node_count;
-            let new_persisted = state
-                .session_graph
-                .active_path_nodes()
-                .iter()
-                .filter(|node| {
-                    state
-                        .session_graph
-                        .node_index(&node.node_id)
-                        .map(|orig_idx| orig_idx < old_persisted)
-                        .unwrap_or(false)
-                })
-                .count();
             state.session_graph = state.session_graph.fork_current_path();
-            state.persisted_graph_node_count = new_persisted;
-            debug_assert!(
-                state.persisted_graph_node_count <= state.session_graph.nodes.len(),
-                "residency trim left persisted count ({}) > resident ({})",
-                state.persisted_graph_node_count,
-                state.session_graph.nodes.len()
-            );
         }
     }
 }

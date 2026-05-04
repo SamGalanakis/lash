@@ -170,9 +170,20 @@ impl RuntimeTurnDriver {
             }
         });
         let manager = self.session_manager.clone();
-        let result = self
-            .session
-            .run_code(&self.session_id, manager, &session_event_tx, code, true)
+        let mode_session = Arc::clone(self.session.plugins().mode_session());
+        let context = self.session.mode_execution_context(
+            &self.session_id,
+            manager,
+            session_event_tx.clone(),
+        );
+        let result = mode_session
+            .execute_code(
+                context,
+                crate::ExecRequest {
+                    code: code.to_string(),
+                    accept_finish: true,
+                },
+            )
             .await
             .map_err(|e| e.to_string());
         drop(session_event_tx);

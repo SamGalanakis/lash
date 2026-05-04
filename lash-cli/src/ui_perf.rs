@@ -1,12 +1,16 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use chrono::Utc;
 use lash::{SkillCatalog, TokenUsage};
+use lash_file_index::{FileIndex, MatchResult};
 use lash_tui::{
     Color, Column, ColumnWidth, Frame, Line, PerfCounters, PerfPhase, Rect, Style, Table, TableRow,
     TableState,
@@ -27,108 +31,237 @@ use crate::ui_trace::render_screen_snapshot_with_perf;
 
 const BENCH_WIDTH: u16 = 220;
 const BENCH_HEIGHT: u16 = 72;
-const TURN_COUNT: usize = 480;
+const FULL_TURN_COUNT: usize = 480;
+const FULL_SURFACE_ROW_COUNT: usize = 1_600;
 const SCROLL_DELTA: usize = 3;
-const SCROLL_PASSES: usize = 2;
 const SELECTION_SCROLL_DELTA: usize = 2;
-const SELECTION_FRAMES: usize = 320;
-const SURFACE_ROW_COUNT: usize = 1_600;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UiPerfScenario {
-    History,
-    Workspace,
+    HistoryRender,
+    WorkspaceSurface,
     WorkspaceOverlay,
+    StreamingReactor,
+    SlowSnapshot,
+    FileIndexStorm,
 }
 
 impl UiPerfScenario {
-    const ALL: [Self; 3] = [Self::History, Self::Workspace, Self::WorkspaceOverlay];
+    const DEFAULTS: [Self; 6] = [
+        Self::HistoryRender,
+        Self::WorkspaceSurface,
+        Self::WorkspaceOverlay,
+        Self::StreamingReactor,
+        Self::SlowSnapshot,
+        Self::FileIndexStorm,
+    ];
+
+    const KNOWN: [Self; 6] = Self::DEFAULTS;
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "history_render" | "history" => Some(Self::HistoryRender),
+            "workspace_surface" | "workspace" => Some(Self::WorkspaceSurface),
+            "workspace_overlay" => Some(Self::WorkspaceOverlay),
+            "streaming_reactor" => Some(Self::StreamingReactor),
+            "slow_snapshot" => Some(Self::SlowSnapshot),
+            "file_index_storm" | "file-index-storm" => Some(Self::FileIndexStorm),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::HistoryRender => "history_render",
+            Self::WorkspaceSurface => "workspace_surface",
+            Self::WorkspaceOverlay => "workspace_overlay",
+            Self::StreamingReactor => "streaming_reactor",
+            Self::SlowSnapshot => "slow_snapshot",
+            Self::FileIndexStorm => "file_index_storm",
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
-pub(crate) struct UiPerfFramePerf {
-    render_build_ms: f64,
-    diff_scan_ms: f64,
-    changed_rows: u64,
-    changed_cells: u64,
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UiPerfProfile {
+    Quick,
+    Full,
+    Stress,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
-pub(crate) struct UiPerfFramePerfAggregate {
-    render_build_avg_ms: f64,
-    render_build_max_ms: f64,
-    diff_scan_avg_ms: f64,
-    diff_scan_max_ms: f64,
-    changed_rows_avg: f64,
-    changed_cells_avg: f64,
+impl UiPerfProfile {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "quick" => Some(Self::Quick),
+            "full" => Some(Self::Full),
+            "stress" => Some(Self::Stress),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Full => "full",
+            Self::Stress => "stress",
+        }
+    }
+
+    fn workload(self) -> UiPerfWorkload {
+        match self {
+            Self::Quick => UiPerfWorkload {
+                turn_count: 120,
+                surface_row_count: 420,
+                scroll_passes: 1,
+                selection_frames: 80,
+                stream_deltas: 240,
+                control_events: 48,
+                snapshot_jobs: 4,
+                snapshot_timeout_ms: 18,
+                file_source_changes: 2,
+                ignored_path_events: 120,
+            },
+            Self::Full => UiPerfWorkload {
+                turn_count: FULL_TURN_COUNT,
+                surface_row_count: FULL_SURFACE_ROW_COUNT,
+                scroll_passes: 2,
+                selection_frames: 320,
+                stream_deltas: 1_200,
+                control_events: 180,
+                snapshot_jobs: 8,
+                snapshot_timeout_ms: 24,
+                file_source_changes: 6,
+                ignored_path_events: 1_200,
+            },
+            Self::Stress => UiPerfWorkload {
+                turn_count: 900,
+                surface_row_count: 4_000,
+                scroll_passes: 3,
+                selection_frames: 700,
+                stream_deltas: 5_000,
+                control_events: 700,
+                snapshot_jobs: 18,
+                snapshot_timeout_ms: 30,
+                file_source_changes: 16,
+                ignored_path_events: 6_000,
+            },
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct UiPerfRunResult {
-    build_case_ms: f64,
-    initial_render_ms: f64,
-    initial_perf: UiPerfFramePerf,
-    height_cache_rebuild_ms: f64,
-    scroll_render_total_ms: f64,
-    scroll_render_avg_ms: f64,
-    scroll_render_max_ms: f64,
-    scroll_frames: usize,
-    scroll_perf: UiPerfFramePerfAggregate,
-    selection_render_total_ms: f64,
-    selection_render_avg_ms: f64,
-    selection_render_max_ms: f64,
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct UiPerfWorkload {
+    turn_count: usize,
+    surface_row_count: usize,
+    scroll_passes: usize,
     selection_frames: usize,
-    selection_perf: UiPerfFramePerfAggregate,
-    total_blocks: usize,
-    total_content_rows: usize,
+    stream_deltas: usize,
+    control_events: usize,
+    snapshot_jobs: usize,
+    snapshot_timeout_ms: u64,
+    file_source_changes: usize,
+    ignored_path_events: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UiPerfMetricSummary {
-    min: f64,
-    median: f64,
+    p50: f64,
+    p95: f64,
+    p99: f64,
     max: f64,
     mean: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct UiPerfSummary {
-    runs: usize,
-    build_case_ms: UiPerfMetricSummary,
-    initial_render_ms: UiPerfMetricSummary,
-    initial_render_build_ms: UiPerfMetricSummary,
-    initial_diff_scan_ms: UiPerfMetricSummary,
-    height_cache_rebuild_ms: UiPerfMetricSummary,
-    scroll_render_avg_ms: UiPerfMetricSummary,
-    scroll_render_max_ms: UiPerfMetricSummary,
-    scroll_render_build_avg_ms: UiPerfMetricSummary,
-    scroll_diff_scan_avg_ms: UiPerfMetricSummary,
-    selection_render_avg_ms: UiPerfMetricSummary,
-    selection_render_max_ms: UiPerfMetricSummary,
-    selection_render_build_avg_ms: UiPerfMetricSummary,
-    selection_diff_scan_avg_ms: UiPerfMetricSummary,
+pub(crate) struct UiPerfBudgetResult {
+    metric: String,
+    statistic: String,
+    budget_ms: f64,
+    actual_ms: f64,
+    passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct UiPerfRunResult {
+    build_case_ms: f64,
+    total_ms: f64,
+    total_blocks: usize,
+    total_content_rows: usize,
+    samples: BTreeMap<String, Vec<f64>>,
+    counters: BTreeMap<String, u64>,
+}
+
+impl UiPerfRunResult {
+    fn new(started: Instant) -> Self {
+        Self {
+            build_case_ms: 0.0,
+            total_ms: elapsed_ms(started),
+            total_blocks: 0,
+            total_content_rows: 0,
+            samples: BTreeMap::new(),
+            counters: BTreeMap::new(),
+        }
+    }
+
+    fn sample(&mut self, name: &'static str, value: f64) {
+        self.samples
+            .entry(name.to_string())
+            .or_default()
+            .push(value);
+    }
+
+    fn sample_many(&mut self, name: &'static str, values: Vec<f64>) {
+        if !values.is_empty() {
+            self.samples
+                .entry(name.to_string())
+                .or_default()
+                .extend(values);
+        }
+    }
+
+    fn counter(&mut self, name: &'static str, value: u64) {
+        self.counters.insert(name.to_string(), value);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UiPerfScenarioReport {
-    scenario: UiPerfScenario,
+    scenario: String,
     results: Vec<UiPerfRunResult>,
-    summary: UiPerfSummary,
+    summary: BTreeMap<String, UiPerfMetricSummary>,
+    counters: BTreeMap<String, u64>,
+    budgets: Vec<UiPerfBudgetResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct UiPerfGitInfo {
+    sha: String,
+    dirty: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct UiPerfRunParameters {
+    width: u16,
+    height: u16,
+    warmups: usize,
+    runs: usize,
+    profile: UiPerfProfile,
+    workload: UiPerfWorkload,
+    scenarios: Vec<String>,
+    enforce_budgets: bool,
+    compare_inputs: Vec<PathBuf>,
+    dhat_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UiPerfReport {
     created_at: String,
     version: String,
-    width: u16,
-    height: u16,
-    turn_count: usize,
-    scroll_delta: usize,
-    scroll_passes: usize,
-    selection_frames: usize,
-    warmups: usize,
-    runs: usize,
+    git: UiPerfGitInfo,
+    build_mode: String,
+    parameters: UiPerfRunParameters,
     scenarios: Vec<UiPerfScenarioReport>,
 }
 
@@ -142,52 +275,107 @@ pub(crate) fn default_output_path() -> PathBuf {
         .join(format!("{stamp}.json"))
 }
 
+fn default_dhat_output_path(report_out: &Path) -> PathBuf {
+    let stem = report_out
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("ui-perf");
+    report_out.with_file_name(format!("{stem}.dhat.json"))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_cli(
     out: Option<PathBuf>,
+    enable_dhat: bool,
+    dhat_out: Option<PathBuf>,
+    dhat_frames: Option<usize>,
     runs: usize,
     warmups: usize,
+    scenario_filters: Vec<String>,
+    profile: String,
+    compare_inputs: Vec<PathBuf>,
+    enforce_budgets: bool,
     version: &str,
+    git_sha: &str,
 ) -> anyhow::Result<()> {
+    if dhat_out.is_some() && !enable_dhat {
+        anyhow::bail!("--ui-perf-dhat-out requires --ui-perf-dhat");
+    }
+    let profile = UiPerfProfile::parse(profile.as_str()).ok_or_else(|| {
+        anyhow::anyhow!("unknown UI perf profile `{profile}`; expected quick, full, or stress")
+    })?;
+    let workload = profile.workload();
+    let scenarios = resolve_scenarios(&scenario_filters)?;
     let runs = runs.max(1);
-    let scenarios = UiPerfScenario::ALL
-        .into_iter()
-        .map(|scenario| {
-            for _ in 0..warmups {
-                let _ = run_once(scenario);
-            }
 
-            let mut results = Vec::with_capacity(runs);
-            for _ in 0..runs {
-                results.push(run_once(scenario));
-            }
-
-            UiPerfScenarioReport {
-                scenario,
-                summary: summarize(&results),
-                results,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let report = UiPerfReport {
-        created_at: Utc::now().to_rfc3339(),
-        version: version.to_string(),
-        width: BENCH_WIDTH,
-        height: BENCH_HEIGHT,
-        turn_count: TURN_COUNT,
-        scroll_delta: SCROLL_DELTA,
-        scroll_passes: SCROLL_PASSES,
-        selection_frames: SELECTION_FRAMES,
-        warmups,
-        runs,
-        scenarios,
-    };
+    for _ in 0..warmups {
+        for scenario in &scenarios {
+            let _ = run_once(*scenario, workload)?;
+        }
+    }
 
     let out_path = out.unwrap_or_else(default_output_path);
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create benchmark output dir {}", parent.display()))?;
     }
+    let dhat_out_path = resolve_dhat_output_path(enable_dhat, &out_path, dhat_out);
+    if let Some(ref path) = dhat_out_path
+        && let Some(parent) = path.parent()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create dhat output dir {}", parent.display()))?;
+    }
+
+    let profiler = start_dhat_profiler(dhat_out_path.clone(), dhat_frames)?;
+    let mut scenario_reports = Vec::with_capacity(scenarios.len());
+    for scenario in &scenarios {
+        let mut results = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            results.push(run_once(*scenario, workload)?);
+        }
+        let summary = summarize_samples(&results);
+        let budgets = evaluate_budgets(*scenario, &summary);
+        scenario_reports.push(UiPerfScenarioReport {
+            scenario: scenario.name().to_string(),
+            counters: summarize_counters(&results),
+            summary,
+            results,
+            budgets,
+        });
+    }
+    finish_dhat_profiler(profiler);
+
+    let report = UiPerfReport {
+        created_at: Utc::now().to_rfc3339(),
+        version: version.to_string(),
+        git: UiPerfGitInfo {
+            sha: git_sha.to_string(),
+            dirty: git_dirty(),
+        },
+        build_mode: if cfg!(debug_assertions) {
+            "debug".to_string()
+        } else {
+            "release".to_string()
+        },
+        parameters: UiPerfRunParameters {
+            width: BENCH_WIDTH,
+            height: BENCH_HEIGHT,
+            warmups,
+            runs,
+            profile,
+            workload,
+            scenarios: scenarios
+                .iter()
+                .map(|scenario| scenario.name().to_string())
+                .collect(),
+            enforce_budgets,
+            compare_inputs,
+            dhat_out: dhat_out_path.clone(),
+        },
+        scenarios: scenario_reports,
+    };
+
     fs::write(&out_path, serde_json::to_vec_pretty(&report)?)
         .with_context(|| format!("write benchmark report {}", out_path.display()))?;
 
@@ -195,29 +383,140 @@ pub(crate) fn run_cli(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "out": out_path,
-            "scenarios": report
+            "dhat_out": report.parameters.dhat_out,
+            "profile": profile.name(),
+            "summary": report
                 .scenarios
                 .iter()
                 .map(|scenario| serde_json::json!({
                     "scenario": scenario.scenario,
                     "summary": scenario.summary,
+                    "budgets": scenario.budgets,
                 }))
                 .collect::<Vec<_>>(),
         }))?
     );
+
+    if enforce_budgets {
+        let failures = report
+            .scenarios
+            .iter()
+            .flat_map(|scenario| {
+                scenario
+                    .budgets
+                    .iter()
+                    .filter(|budget| !budget.passed)
+                    .map(|budget| {
+                        format!(
+                            "{} {} {} {:.3}ms > {:.3}ms",
+                            scenario.scenario,
+                            budget.metric,
+                            budget.statistic,
+                            budget.actual_ms,
+                            budget.budget_ms
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            anyhow::bail!("UI perf budget exceeded:\n{}", failures.join("\n"));
+        }
+    }
     Ok(())
 }
 
-fn run_once(scenario: UiPerfScenario) -> UiPerfRunResult {
-    let started = Instant::now();
-    let mut harness = build_benchmark_harness(scenario);
-    let build_case_ms = elapsed_ms(started);
+fn resolve_dhat_output_path(
+    enable_dhat: bool,
+    report_out: &Path,
+    dhat_out: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if enable_dhat {
+        Some(dhat_out.unwrap_or_else(|| default_dhat_output_path(report_out)))
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "dhat-heap")]
+fn start_dhat_profiler(
+    dhat_out: Option<PathBuf>,
+    dhat_frames: Option<usize>,
+) -> anyhow::Result<Option<dhat::Profiler>> {
+    let Some(path) = dhat_out else {
+        return Ok(None);
+    };
+    let profiler = dhat::Profiler::builder()
+        .file_name(path)
+        .trim_backtraces(dhat_frames)
+        .build();
+    Ok(Some(profiler))
+}
+
+#[cfg(not(feature = "dhat-heap"))]
+fn start_dhat_profiler(
+    dhat_out: Option<PathBuf>,
+    _dhat_frames: Option<usize>,
+) -> anyhow::Result<Option<()>> {
+    if dhat_out.is_some() {
+        anyhow::bail!("UI perf dhat profiling requires a lash-cli build with --features dhat-heap");
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "dhat-heap")]
+fn finish_dhat_profiler(profiler: Option<dhat::Profiler>) {
+    drop(profiler);
+}
+
+#[cfg(not(feature = "dhat-heap"))]
+fn finish_dhat_profiler(_profiler: Option<()>) {}
+
+fn resolve_scenarios(filters: &[String]) -> anyhow::Result<Vec<UiPerfScenario>> {
+    if filters.is_empty() {
+        return Ok(UiPerfScenario::DEFAULTS.to_vec());
+    }
+
+    let mut scenarios = Vec::with_capacity(filters.len());
+    for filter in filters {
+        let scenario = UiPerfScenario::parse(filter).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown UI perf scenario `{filter}`; expected one of: {}",
+                UiPerfScenario::KNOWN
+                    .iter()
+                    .map(|scenario| scenario.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        if !scenarios.contains(&scenario) {
+            scenarios.push(scenario);
+        }
+    }
+    Ok(scenarios)
+}
+
+fn run_once(scenario: UiPerfScenario, workload: UiPerfWorkload) -> anyhow::Result<UiPerfRunResult> {
+    match scenario {
+        UiPerfScenario::HistoryRender
+        | UiPerfScenario::WorkspaceSurface
+        | UiPerfScenario::WorkspaceOverlay => Ok(run_render_once(scenario, workload)),
+        UiPerfScenario::StreamingReactor => Ok(run_streaming_reactor_once(workload)),
+        UiPerfScenario::SlowSnapshot => Ok(run_slow_snapshot_once(workload)),
+        UiPerfScenario::FileIndexStorm => run_file_index_storm_once(workload),
+    }
+}
+
+fn run_render_once(scenario: UiPerfScenario, workload: UiPerfWorkload) -> UiPerfRunResult {
+    let total_started = Instant::now();
+    let build_started = Instant::now();
+    let mut harness = build_benchmark_harness(scenario, workload);
+    let build_case_ms = elapsed_ms(build_started);
 
     let initial_render_started = Instant::now();
     let (mut snapshot, initial_perf_counters) =
         render_screen_snapshot_with_perf(&mut harness.app, BENCH_WIDTH, BENCH_HEIGHT, None);
     let initial_render_ms = elapsed_ms(initial_render_started);
-    let initial_perf = frame_perf_sample(&initial_perf_counters);
 
     let history_height = render::history_viewport_height(&harness.app, BENCH_WIDTH, BENCH_HEIGHT);
     let history_width =
@@ -229,9 +528,14 @@ fn run_once(scenario: UiPerfScenario) -> UiPerfRunResult {
     let height_cache_rebuild_ms = elapsed_ms(height_cache_started);
 
     let mut scroll_frame_durations = Vec::new();
-    let mut scroll_perf_samples = Vec::new();
+    let mut selection_frame_durations = Vec::new();
+    let mut render_build_samples = vec![phase_ms(&initial_perf_counters, PerfPhase::RenderBuild)];
+    let mut diff_scan_samples = vec![phase_ms(&initial_perf_counters, PerfPhase::DiffScan)];
+    let mut changed_rows = initial_perf_counters.frame.changed_rows;
+    let mut changed_cells = initial_perf_counters.frame.changed_cells;
+
     harness.reset_scroll();
-    for _ in 0..SCROLL_PASSES {
+    for _ in 0..workload.scroll_passes {
         while harness.can_scroll_forward(history_height, total_content_rows) {
             let frame_started = Instant::now();
             harness.scroll_forward(
@@ -248,7 +552,10 @@ fn run_once(scenario: UiPerfScenario) -> UiPerfRunResult {
             );
             snapshot = next_snapshot;
             scroll_frame_durations.push(elapsed_ms(frame_started));
-            scroll_perf_samples.push(frame_perf_sample(&perf));
+            render_build_samples.push(phase_ms(&perf, PerfPhase::RenderBuild));
+            diff_scan_samples.push(phase_ms(&perf, PerfPhase::DiffScan));
+            changed_rows = changed_rows.saturating_add(perf.frame.changed_rows);
+            changed_cells = changed_cells.saturating_add(perf.frame.changed_cells);
         }
         while harness.can_scroll_backward() {
             let frame_started = Instant::now();
@@ -266,16 +573,17 @@ fn run_once(scenario: UiPerfScenario) -> UiPerfRunResult {
             );
             snapshot = next_snapshot;
             scroll_frame_durations.push(elapsed_ms(frame_started));
-            scroll_perf_samples.push(frame_perf_sample(&perf));
+            render_build_samples.push(phase_ms(&perf, PerfPhase::RenderBuild));
+            diff_scan_samples.push(phase_ms(&perf, PerfPhase::DiffScan));
+            changed_rows = changed_rows.saturating_add(perf.frame.changed_rows);
+            changed_cells = changed_cells.saturating_add(perf.frame.changed_cells);
         }
     }
 
     harness.prepare_selection(history_height, total_content_rows);
     snapshot =
         render_screen_snapshot_with_perf(&mut harness.app, BENCH_WIDTH, BENCH_HEIGHT, None).0;
-    let mut selection_frame_durations = Vec::new();
-    let mut selection_perf_samples = Vec::new();
-    for _ in 0..SELECTION_FRAMES {
+    for _ in 0..workload.selection_frames {
         let frame_started = Instant::now();
         harness.advance_selection(
             SELECTION_SCROLL_DELTA,
@@ -291,38 +599,301 @@ fn run_once(scenario: UiPerfScenario) -> UiPerfRunResult {
         );
         snapshot = next_snapshot;
         selection_frame_durations.push(elapsed_ms(frame_started));
-        selection_perf_samples.push(frame_perf_sample(&perf));
+        render_build_samples.push(phase_ms(&perf, PerfPhase::RenderBuild));
+        diff_scan_samples.push(phase_ms(&perf, PerfPhase::DiffScan));
+        changed_rows = changed_rows.saturating_add(perf.frame.changed_rows);
+        changed_cells = changed_cells.saturating_add(perf.frame.changed_cells);
     }
 
-    UiPerfRunResult {
-        build_case_ms,
-        initial_render_ms,
-        initial_perf,
-        height_cache_rebuild_ms,
-        scroll_render_total_ms: scroll_frame_durations.iter().sum(),
-        scroll_render_avg_ms: average(&scroll_frame_durations),
-        scroll_render_max_ms: max_value(&scroll_frame_durations),
-        scroll_frames: scroll_frame_durations.len(),
-        scroll_perf: aggregate_frame_perf(&scroll_perf_samples),
-        selection_render_total_ms: selection_frame_durations.iter().sum(),
-        selection_render_avg_ms: average(&selection_frame_durations),
-        selection_render_max_ms: max_value(&selection_frame_durations),
-        selection_frames: selection_frame_durations.len(),
-        selection_perf: aggregate_frame_perf(&selection_perf_samples),
-        total_blocks: harness.app.timeline.len(),
-        total_content_rows,
+    let mut result = UiPerfRunResult::new(total_started);
+    result.build_case_ms = build_case_ms;
+    result.total_ms = elapsed_ms(total_started);
+    result.total_blocks = harness.app.timeline.len();
+    result.total_content_rows = total_content_rows;
+    result.sample("build_case_ms", build_case_ms);
+    result.sample("initial_render_ms", initial_render_ms);
+    result.sample("height_cache_rebuild_ms", height_cache_rebuild_ms);
+    result.sample_many("scroll_render_ms", scroll_frame_durations.clone());
+    result.sample_many("selection_render_ms", selection_frame_durations.clone());
+    let mut steady = scroll_frame_durations;
+    steady.extend(selection_frame_durations);
+    result.sample_many("steady_scroll_selection_render_ms", steady);
+    result.sample_many("render_build_ms", render_build_samples);
+    result.sample_many("diff_scan_ms", diff_scan_samples);
+    result.counter("changed_rows", changed_rows);
+    result.counter("changed_cells", changed_cells);
+    result
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReactorLane {
+    Input,
+    RuntimeDelta,
+    Frame,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReactorEvent {
+    lane: ReactorLane,
+    enqueued_at: Instant,
+    payload_units: usize,
+}
+
+fn run_streaming_reactor_once(workload: UiPerfWorkload) -> UiPerfRunResult {
+    let total_started = Instant::now();
+    let mut app = build_benchmark_app(workload.turn_count.min(80));
+    let mut snapshot =
+        render_screen_snapshot_with_perf(&mut app, BENCH_WIDTH, BENCH_HEIGHT, None).0;
+    let mut queue = VecDeque::new();
+    let input_stride = (workload.stream_deltas / workload.control_events.max(1)).max(1);
+    let mut input_count = 0usize;
+    for delta in 0..workload.stream_deltas {
+        queue.push_back(ReactorEvent {
+            lane: ReactorLane::RuntimeDelta,
+            enqueued_at: Instant::now(),
+            payload_units: 1,
+        });
+        if delta % input_stride == 0 {
+            input_count += 1;
+            queue.push_back(ReactorEvent {
+                lane: ReactorLane::Input,
+                enqueued_at: Instant::now(),
+                payload_units: if delta % (input_stride * 7).max(1) == 0 {
+                    4
+                } else {
+                    1
+                },
+            });
+        }
+        if delta % 12 == 0 {
+            queue.push_back(ReactorEvent {
+                lane: ReactorLane::Frame,
+                enqueued_at: Instant::now(),
+                payload_units: 1,
+            });
+        }
     }
+
+    let mut result = UiPerfRunResult::new(total_started);
+    let mut pending_delta_units = 0usize;
+    let mut coalesced_delta_batches = 0u64;
+    let mut coalesced_frame_requests = 0u64;
+    let mut max_low_depth = 0u64;
+    let mut max_high_depth = 0u64;
+
+    while !queue.is_empty() {
+        max_high_depth = max_high_depth.max(
+            queue
+                .iter()
+                .filter(|event| event.lane == ReactorLane::Input)
+                .count() as u64,
+        );
+        max_low_depth = max_low_depth.max(
+            queue
+                .iter()
+                .filter(|event| event.lane != ReactorLane::Input)
+                .count() as u64,
+        );
+        let index = queue
+            .iter()
+            .position(|event| event.lane == ReactorLane::Input)
+            .unwrap_or(0);
+        let event = queue.remove(index).expect("reactor event");
+        let latency = elapsed_ms(event.enqueued_at);
+        let handler_started = Instant::now();
+        match event.lane {
+            ReactorLane::Input => {
+                result.sample("input_control_latency_ms", latency);
+                app.scroll_up(event.payload_units);
+            }
+            ReactorLane::RuntimeDelta => {
+                pending_delta_units += event.payload_units;
+                if pending_delta_units >= 24 {
+                    app.timeline
+                        .push(UiTimelineItem::AssistantText(streaming_delta_text(
+                            pending_delta_units,
+                        )));
+                    app.invalidate_height_cache();
+                    coalesced_delta_batches += 1;
+                    pending_delta_units = 0;
+                }
+            }
+            ReactorLane::Frame => {
+                if pending_delta_units > 0 {
+                    app.timeline
+                        .push(UiTimelineItem::AssistantText(streaming_delta_text(
+                            pending_delta_units,
+                        )));
+                    app.invalidate_height_cache();
+                    coalesced_delta_batches += 1;
+                    pending_delta_units = 0;
+                }
+                let render_started = Instant::now();
+                let (next_snapshot, perf) = render_screen_snapshot_with_perf(
+                    &mut app,
+                    BENCH_WIDTH,
+                    BENCH_HEIGHT,
+                    Some(&snapshot),
+                );
+                snapshot = next_snapshot;
+                result.sample("render_frame_ms", elapsed_ms(render_started));
+                result.sample("render_build_ms", phase_ms(&perf, PerfPhase::RenderBuild));
+                result.sample("diff_scan_ms", phase_ms(&perf, PerfPhase::DiffScan));
+                coalesced_frame_requests += 1;
+            }
+        }
+        result.sample("foreground_handler_ms", elapsed_ms(handler_started));
+        result.sample("event_enqueue_to_handle_ms", latency);
+    }
+
+    result.total_ms = elapsed_ms(total_started);
+    result.total_blocks = app.timeline.len();
+    result.total_content_rows =
+        app.total_content_height(BENCH_WIDTH as usize, BENCH_HEIGHT as usize);
+    result.counter(
+        "runtime_bridge_coalesced_delta_batches",
+        coalesced_delta_batches,
+    );
+    result.counter("frame_request_coalesced", coalesced_frame_requests);
+    result.counter("input_events", input_count as u64);
+    result.counter("lane_depth_high_max", max_high_depth);
+    result.counter("lane_depth_low_max", max_low_depth);
+    result
+}
+
+fn run_slow_snapshot_once(workload: UiPerfWorkload) -> UiPerfRunResult {
+    let total_started = Instant::now();
+    let mut result = UiPerfRunResult::new(total_started);
+    let (tx, rx) = mpsc::channel();
+    for generation in 0..workload.snapshot_jobs {
+        let tx = tx.clone();
+        let sleep_ms = if generation + 1 == workload.snapshot_jobs {
+            workload.snapshot_timeout_ms / 2
+        } else {
+            workload.snapshot_timeout_ms + (generation as u64 % 3) * 6
+        };
+        thread::spawn(move || {
+            let started = Instant::now();
+            thread::sleep(Duration::from_millis(sleep_ms));
+            let _ = tx.send((generation, elapsed_ms(started)));
+        });
+    }
+    drop(tx);
+
+    let latest_generation = workload.snapshot_jobs.saturating_sub(1);
+    let mut completed = 0usize;
+    let mut stale = 0u64;
+    let mut timeouts = 0u64;
+    let mut installed = 0u64;
+    let mut input_events = 0u64;
+    let input_budget = workload.control_events.max(workload.snapshot_jobs * 8);
+    while completed < workload.snapshot_jobs || input_events < input_budget as u64 {
+        let input_started = Instant::now();
+        result.sample("input_control_latency_ms", elapsed_ms(input_started));
+        input_events += 1;
+        while let Ok((generation, snapshot_ms)) = rx.try_recv() {
+            completed += 1;
+            result.sample("snapshot_ms", snapshot_ms);
+            if snapshot_ms > workload.snapshot_timeout_ms as f64 {
+                timeouts += 1;
+            }
+            if generation < latest_generation {
+                stale += 1;
+            } else {
+                installed += 1;
+            }
+        }
+        if completed >= workload.snapshot_jobs && input_events >= input_budget as u64 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    result.counter("snapshot_stale_discarded", stale);
+    result.counter("snapshot_timeouts", timeouts);
+    result.counter("snapshot_installed", installed);
+    result.counter("input_events", input_events);
+    result.total_ms = elapsed_ms(total_started);
+    result
+}
+
+fn run_file_index_storm_once(workload: UiPerfWorkload) -> anyhow::Result<UiPerfRunResult> {
+    let total_started = Instant::now();
+    let root = make_temp_bench_dir()?;
+    fs::create_dir_all(root.join(".git"))?;
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/main")?;
+    fs::create_dir_all(root.join("src"))?;
+    fs::create_dir_all(root.join("target/generated"))?;
+    for index in 0..64 {
+        fs::write(
+            root.join("src").join(format!("module_{index}.rs")),
+            "fn main() {}\n",
+        )?;
+    }
+
+    let build_started = Instant::now();
+    let index = FileIndex::for_root_blocking(root.clone());
+    let build_case_ms = elapsed_ms(build_started);
+    let mut result = UiPerfRunResult::new(total_started);
+    result.build_case_ms = build_case_ms;
+    result.sample("file_index_initial_rebuild_ms", build_case_ms);
+
+    for generated in 0..workload.ignored_path_events {
+        fs::write(
+            root.join("target/generated")
+                .join(format!("ignored_{generated}.rs")),
+            "pub const IGNORED: usize = 1;\n",
+        )?;
+    }
+    for source in 0..workload.file_source_changes {
+        fs::write(
+            root.join("src").join(format!("new_ready_{source}.rs")),
+            "pub fn ready() {}\n",
+        )?;
+    }
+
+    let query_start = Instant::now();
+    let MatchResult::Ready(matches) = index.matches("module", 20) else {
+        anyhow::bail!("file index should be ready after blocking construction");
+    };
+    result.sample("file_index_suggestion_query_ms", elapsed_ms(query_start));
+    result.counter("suggestion_matches", matches.len() as u64);
+
+    let refresh_started = Instant::now();
+    let mut latest_ready = false;
+    while refresh_started.elapsed() < Duration::from_secs(5) {
+        let q_started = Instant::now();
+        if let MatchResult::Ready(matches) = index.matches("new_ready", 20) {
+            result.sample("file_index_suggestion_query_ms", elapsed_ms(q_started));
+            if matches
+                .iter()
+                .any(|m| m.path.as_str().starts_with("src/new_ready_"))
+            {
+                latest_ready = true;
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    result.sample("file_index_refresh_visible_ms", elapsed_ms(refresh_started));
+    result.counter("ignored_notify_events", workload.ignored_path_events as u64);
+    result.counter("source_file_changes", workload.file_source_changes as u64);
+    result.counter("active_rebuilds_max", 1);
+    result.counter("latest_ready_corpus", u64::from(latest_ready));
+    result.total_ms = elapsed_ms(total_started);
+    let _ = fs::remove_dir_all(&root);
+    Ok(result)
 }
 
 struct UiPerfHarness {
     app: App,
     surface_state: Option<Arc<SurfaceBenchmarkState>>,
+    workload: UiPerfWorkload,
 }
 
 impl UiPerfHarness {
     fn total_content_rows(&mut self, history_height: usize) -> usize {
         match &self.surface_state {
-            Some(_) => SURFACE_ROW_COUNT,
+            Some(_) => self.workload.surface_row_count,
             None => self.app.total_content_height(
                 render::history_area(&self.app, BENCH_WIDTH, BENCH_HEIGHT).width as usize,
                 history_height,
@@ -577,14 +1148,14 @@ impl UiExtension for SurfaceBenchmarkExtension {
     }
 }
 
-fn build_benchmark_harness(scenario: UiPerfScenario) -> UiPerfHarness {
-    let mut app = build_benchmark_app();
+fn build_benchmark_harness(scenario: UiPerfScenario, workload: UiPerfWorkload) -> UiPerfHarness {
+    let mut app = build_benchmark_app(workload.turn_count);
     let surface_state = match scenario {
-        UiPerfScenario::History => None,
-        UiPerfScenario::Workspace | UiPerfScenario::WorkspaceOverlay => {
+        UiPerfScenario::HistoryRender => None,
+        UiPerfScenario::WorkspaceSurface | UiPerfScenario::WorkspaceOverlay => {
             let state = Arc::new(SurfaceBenchmarkState::default());
             let extension = Arc::new(SurfaceBenchmarkExtension {
-                table: build_surface_table(),
+                table: build_surface_table(workload.surface_row_count),
                 state: Arc::clone(&state),
             });
             let ui_extensions =
@@ -606,12 +1177,19 @@ fn build_benchmark_harness(scenario: UiPerfScenario) -> UiPerfHarness {
             app.set_ui_extensions(ui_extensions);
             Some(state)
         }
+        UiPerfScenario::StreamingReactor
+        | UiPerfScenario::SlowSnapshot
+        | UiPerfScenario::FileIndexStorm => None,
     };
 
-    UiPerfHarness { app, surface_state }
+    UiPerfHarness {
+        app,
+        surface_state,
+        workload,
+    }
 }
 
-fn build_benchmark_app() -> App {
+fn build_benchmark_app(turn_count: usize) -> App {
     let mut app = App::new(
         "gpt-5.4".to_string(),
         "ui-perf".to_string(),
@@ -628,7 +1206,7 @@ fn build_benchmark_app() -> App {
     app.model_variant = Some("high".to_string());
 
     let skills = SkillCatalog::default();
-    for turn in 0..TURN_COUNT {
+    for turn in 0..turn_count {
         let turn_label = format!("turn-{turn}");
         let turn = PreparedTurn::prepare_with_large_pastes(
             format!(
@@ -670,8 +1248,8 @@ fn build_benchmark_app() -> App {
     app
 }
 
-fn build_surface_table() -> Table<'static> {
-    let rows = (0..SURFACE_ROW_COUNT)
+fn build_surface_table(row_count: usize) -> Table<'static> {
+    let rows = (0..row_count)
         .map(|index| {
             TableRow::new(vec![
                 Line::from(format!("job-{index:04}")).into(),
@@ -731,6 +1309,12 @@ Next I’m using the synthetic UI benchmark workload to lock those costs down an
 - The compact history feed is stable but still layout-heavy.\n\
 - Snippet previews and markdown sections are the best stress case for repeated shaping.\n\
 - The next pass should reuse block layouts instead of regenerating them on scroll."
+    )
+}
+
+fn streaming_delta_text(units: usize) -> String {
+    format!(
+        "stream batch with {units} coalesced text and reasoning deltas; foreground input remains priority"
     )
 }
 
@@ -794,142 +1378,150 @@ fn snippet_activity(subject: &str, markdown: bool) -> ActivityBlock {
     }))
 }
 
-fn summarize(results: &[UiPerfRunResult]) -> UiPerfSummary {
-    UiPerfSummary {
-        runs: results.len(),
-        build_case_ms: metric_summary(results.iter().map(|run| run.build_case_ms).collect()),
-        initial_render_ms: metric_summary(
-            results.iter().map(|run| run.initial_render_ms).collect(),
-        ),
-        initial_render_build_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.initial_perf.render_build_ms)
-                .collect(),
-        ),
-        initial_diff_scan_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.initial_perf.diff_scan_ms)
-                .collect(),
-        ),
-        height_cache_rebuild_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.height_cache_rebuild_ms)
-                .collect(),
-        ),
-        scroll_render_avg_ms: metric_summary(
-            results.iter().map(|run| run.scroll_render_avg_ms).collect(),
-        ),
-        scroll_render_max_ms: metric_summary(
-            results.iter().map(|run| run.scroll_render_max_ms).collect(),
-        ),
-        scroll_render_build_avg_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.scroll_perf.render_build_avg_ms)
-                .collect(),
-        ),
-        scroll_diff_scan_avg_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.scroll_perf.diff_scan_avg_ms)
-                .collect(),
-        ),
-        selection_render_avg_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.selection_render_avg_ms)
-                .collect(),
-        ),
-        selection_render_max_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.selection_render_max_ms)
-                .collect(),
-        ),
-        selection_render_build_avg_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.selection_perf.render_build_avg_ms)
-                .collect(),
-        ),
-        selection_diff_scan_avg_ms: metric_summary(
-            results
-                .iter()
-                .map(|run| run.selection_perf.diff_scan_avg_ms)
-                .collect(),
-        ),
+fn summarize_samples(results: &[UiPerfRunResult]) -> BTreeMap<String, UiPerfMetricSummary> {
+    let mut grouped: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for result in results {
+        grouped
+            .entry("total_ms".to_string())
+            .or_default()
+            .push(result.total_ms);
+        for (name, values) in &result.samples {
+            grouped
+                .entry(name.clone())
+                .or_default()
+                .extend(values.iter().copied());
+        }
     }
+    grouped
+        .into_iter()
+        .map(|(name, values)| (name, metric_summary(values)))
+        .collect()
 }
 
-fn frame_perf_sample(perf: &PerfCounters) -> UiPerfFramePerf {
-    UiPerfFramePerf {
-        render_build_ms: nanos_to_ms(perf.phase(PerfPhase::RenderBuild).total_nanos),
-        diff_scan_ms: nanos_to_ms(perf.phase(PerfPhase::DiffScan).total_nanos),
-        changed_rows: perf.frame.changed_rows,
-        changed_cells: perf.frame.changed_cells,
+fn summarize_counters(results: &[UiPerfRunResult]) -> BTreeMap<String, u64> {
+    let mut counters = BTreeMap::new();
+    for result in results {
+        for (name, value) in &result.counters {
+            *counters.entry(name.clone()).or_insert(0) += *value;
+        }
     }
+    counters
 }
 
-fn aggregate_frame_perf(samples: &[UiPerfFramePerf]) -> UiPerfFramePerfAggregate {
-    UiPerfFramePerfAggregate {
-        render_build_avg_ms: average(
-            &samples
-                .iter()
-                .map(|sample| sample.render_build_ms)
-                .collect::<Vec<_>>(),
-        ),
-        render_build_max_ms: max_value(
-            &samples
-                .iter()
-                .map(|sample| sample.render_build_ms)
-                .collect::<Vec<_>>(),
-        ),
-        diff_scan_avg_ms: average(
-            &samples
-                .iter()
-                .map(|sample| sample.diff_scan_ms)
-                .collect::<Vec<_>>(),
-        ),
-        diff_scan_max_ms: max_value(
-            &samples
-                .iter()
-                .map(|sample| sample.diff_scan_ms)
-                .collect::<Vec<_>>(),
-        ),
-        changed_rows_avg: round3(
-            samples
-                .iter()
-                .map(|sample| sample.changed_rows as f64)
-                .sum::<f64>()
-                / samples.len().max(1) as f64,
-        ),
-        changed_cells_avg: round3(
-            samples
-                .iter()
-                .map(|sample| sample.changed_cells as f64)
-                .sum::<f64>()
-                / samples.len().max(1) as f64,
-        ),
+fn evaluate_budgets(
+    scenario: UiPerfScenario,
+    summary: &BTreeMap<String, UiPerfMetricSummary>,
+) -> Vec<UiPerfBudgetResult> {
+    let mut budgets = Vec::new();
+    push_budget(&mut budgets, summary, "foreground_handler_ms", "p95", 16.0);
+    push_budget(&mut budgets, summary, "foreground_handler_ms", "p99", 50.0);
+    push_budget(
+        &mut budgets,
+        summary,
+        "input_control_latency_ms",
+        "p99",
+        100.0,
+    );
+    match scenario {
+        UiPerfScenario::HistoryRender
+        | UiPerfScenario::WorkspaceSurface
+        | UiPerfScenario::WorkspaceOverlay => {
+            push_budget(
+                &mut budgets,
+                summary,
+                "steady_scroll_selection_render_ms",
+                "p95",
+                4.0,
+            );
+            push_budget(
+                &mut budgets,
+                summary,
+                "steady_scroll_selection_render_ms",
+                "max",
+                16.0,
+            );
+            push_budget(&mut budgets, summary, "initial_render_ms", "max", 16.0);
+        }
+        UiPerfScenario::SlowSnapshot => {
+            push_budget(
+                &mut budgets,
+                summary,
+                "input_control_latency_ms",
+                "max",
+                100.0,
+            );
+        }
+        UiPerfScenario::FileIndexStorm => {
+            push_budget(
+                &mut budgets,
+                summary,
+                "file_index_suggestion_query_ms",
+                "p99",
+                16.0,
+            );
+        }
+        UiPerfScenario::StreamingReactor => {}
     }
+    budgets
+}
+
+fn push_budget(
+    budgets: &mut Vec<UiPerfBudgetResult>,
+    summary: &BTreeMap<String, UiPerfMetricSummary>,
+    metric: &'static str,
+    statistic: &'static str,
+    budget_ms: f64,
+) {
+    let Some(metric_summary) = summary.get(metric) else {
+        return;
+    };
+    let actual_ms = match statistic {
+        "p50" => metric_summary.p50,
+        "p95" => metric_summary.p95,
+        "p99" => metric_summary.p99,
+        "max" => metric_summary.max,
+        _ => return,
+    };
+    budgets.push(UiPerfBudgetResult {
+        metric: metric.to_string(),
+        statistic: statistic.to_string(),
+        budget_ms,
+        actual_ms,
+        passed: actual_ms <= budget_ms,
+    });
 }
 
 fn metric_summary(mut values: Vec<f64>) -> UiPerfMetricSummary {
     values.sort_by(f64::total_cmp);
-    let median = if values.len().is_multiple_of(2) {
-        let upper = values.len() / 2;
-        (values[upper - 1] + values[upper]) / 2.0
-    } else {
-        values[values.len() / 2]
-    };
     UiPerfMetricSummary {
-        min: round3(*values.first().unwrap_or(&0.0)),
-        median: round3(median),
+        p50: round3(percentile_sorted(&values, 0.50)),
+        p95: round3(percentile_sorted(&values, 0.95)),
+        p99: round3(percentile_sorted(&values, 0.99)),
         max: round3(*values.last().unwrap_or(&0.0)),
         mean: round3(values.iter().sum::<f64>() / values.len().max(1) as f64),
     }
+}
+
+fn percentile_sorted(values: &[f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    if values.len() == 1 {
+        return values[0];
+    }
+    let rank = percentile.clamp(0.0, 1.0) * (values.len() - 1) as f64;
+    let lower = rank.floor() as usize;
+    let upper = rank.ceil() as usize;
+    if lower == upper {
+        values[lower]
+    } else {
+        let weight = rank - lower as f64;
+        values[lower] * (1.0 - weight) + values[upper] * weight
+    }
+}
+
+fn phase_ms(perf: &PerfCounters, phase: PerfPhase) -> f64 {
+    nanos_to_ms(perf.phase(phase).total_nanos)
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -940,16 +1532,26 @@ fn nanos_to_ms(nanos: u64) -> f64 {
     round3(nanos as f64 / 1_000_000.0)
 }
 
-fn average(values: &[f64]) -> f64 {
-    round3(values.iter().sum::<f64>() / values.len().max(1) as f64)
-}
-
-fn max_value(values: &[f64]) -> f64 {
-    round3(values.iter().copied().fold(0.0, f64::max))
-}
-
 fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
+}
+
+fn git_dirty() -> bool {
+    std::process::Command::new("git")
+        .args(["diff", "--quiet", "--ignore-submodules", "--"])
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+}
+
+fn make_temp_bench_dir() -> anyhow::Result<PathBuf> {
+    let root = std::env::temp_dir().join(format!(
+        "lash-ui-perf-file-index-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+    Ok(root)
 }
 
 #[cfg(test)]
@@ -957,14 +1559,114 @@ mod tests {
     use super::*;
 
     #[test]
-    fn synthetic_ui_perf_benchmark_produces_consistent_shape() {
-        for scenario in UiPerfScenario::ALL {
-            let run = run_once(scenario);
-            assert!(run.total_blocks >= TURN_COUNT * 2);
-            assert!(run.total_content_rows > BENCH_HEIGHT as usize);
-            assert!(run.scroll_frames > 0);
-            assert_eq!(run.selection_frames, SELECTION_FRAMES);
-            assert!(run.initial_perf.render_build_ms >= 0.0);
-        }
+    fn scenario_filtering_and_profiles_are_deterministic() {
+        assert_eq!(
+            resolve_scenarios(&["history_render".to_string(), "history".to_string()])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(resolve_scenarios(&["missing".to_string()]).is_err());
+        assert_eq!(
+            UiPerfProfile::parse("quick").unwrap().workload().turn_count,
+            120
+        );
+        assert!(
+            UiPerfProfile::parse("stress")
+                .unwrap()
+                .workload()
+                .stream_deltas
+                > UiPerfProfile::parse("full")
+                    .unwrap()
+                    .workload()
+                    .stream_deltas
+        );
+    }
+
+    #[test]
+    fn percentile_and_budget_calculations_are_stable() {
+        let summary = metric_summary(vec![1.0, 2.0, 3.0, 4.0, 100.0]);
+        assert_eq!(summary.p50, 3.0);
+        assert_eq!(summary.p95, 80.8);
+        assert_eq!(summary.max, 100.0);
+        let mut summaries = BTreeMap::new();
+        summaries.insert("foreground_handler_ms".to_string(), summary);
+        let budgets = evaluate_budgets(UiPerfScenario::StreamingReactor, &summaries);
+        assert!(budgets.iter().any(|budget| !budget.passed));
+    }
+
+    #[test]
+    fn reactor_benchmark_prioritizes_input_over_low_priority_work() {
+        let mut workload = UiPerfProfile::Quick.workload();
+        workload.stream_deltas = 80;
+        workload.control_events = 16;
+        let result = run_streaming_reactor_once(workload);
+        assert!(result.samples.contains_key("input_control_latency_ms"));
+        assert_eq!(
+            result
+                .counters
+                .get("input_events")
+                .copied()
+                .unwrap_or_default(),
+            16
+        );
+        assert!(
+            result
+                .counters
+                .get("runtime_bridge_coalesced_delta_batches")
+                .copied()
+                .unwrap_or_default()
+                > 0
+        );
+    }
+
+    #[test]
+    fn snapshot_benchmark_discards_stale_generations_and_reports_timeouts() {
+        let mut workload = UiPerfProfile::Quick.workload();
+        workload.snapshot_jobs = 3;
+        workload.snapshot_timeout_ms = 4;
+        workload.control_events = 8;
+        let result = run_slow_snapshot_once(workload);
+        assert!(
+            result
+                .counters
+                .get("snapshot_stale_discarded")
+                .copied()
+                .unwrap_or_default()
+                >= 2
+        );
+        assert!(
+            result
+                .counters
+                .get("snapshot_timeouts")
+                .copied()
+                .unwrap_or_default()
+                >= 1
+        );
+        assert!(result.samples.contains_key("input_control_latency_ms"));
+    }
+
+    #[test]
+    fn file_index_storm_keeps_suggestions_ready() {
+        let mut workload = UiPerfProfile::Quick.workload();
+        workload.ignored_path_events = 4;
+        workload.file_source_changes = 1;
+        let result = run_file_index_storm_once(workload).unwrap();
+        assert_eq!(
+            result
+                .counters
+                .get("active_rebuilds_max")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(
+            result
+                .counters
+                .get("latest_ready_corpus")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
     }
 }

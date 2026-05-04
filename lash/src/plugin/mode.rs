@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{SessionAppendNode, SessionCreateRequest};
 use crate::runtime::PersistedSessionState;
-use crate::{ExecutionMode, ToolDefinition, ToolResult};
+use crate::{
+    ExecRequest, ExecResponse, ExecutionMode, ModeExecutionContext, ToolDefinition, ToolResult,
+};
 
 /// Session-scoped plugin that initializes, restores, and extends mode
 /// state across a session's lifecycle. External mode crates implement
@@ -47,6 +49,33 @@ pub trait ModeSessionPlugin: Send + Sync {
         Ok(())
     }
 
+    async fn execute_code(
+        &self,
+        _ctx: ModeExecutionContext,
+        _request: ExecRequest,
+    ) -> Result<ExecResponse, crate::SessionError> {
+        Err(crate::SessionError::RlmUnavailable)
+    }
+
+    fn execution_state_dirty(&self) -> bool {
+        false
+    }
+
+    async fn snapshot_execution_state(
+        &self,
+        _ctx: ModeSessionContext<'_>,
+    ) -> Result<Option<Vec<u8>>, crate::SessionError> {
+        Ok(None)
+    }
+
+    async fn restore_execution_state(
+        &self,
+        _ctx: ModeSessionContext<'_>,
+        _data: &[u8],
+    ) -> Result<(), crate::SessionError> {
+        Ok(())
+    }
+
     fn configure_runtime_from_request(
         &self,
         _ctx: ModeRuntimeContext<'_>,
@@ -58,64 +87,24 @@ pub trait ModeSessionPlugin: Send + Sync {
 /// Narrow wrapper around `Session` that mode plugins use to
 /// initialize, restore, and extend their per-session state.
 ///
-/// Exposes only the capabilities every mode reasonably needs
-/// (starting the lashlang execution backend, configuring output
-/// projection, restoring execution state, applying globals patches).
+/// Exposes only generic per-session lifecycle capabilities. Mode-local
+/// execution state is owned by the mode plugin itself and is accessed
+/// through [`ModeSessionPlugin`] callbacks.
 /// Prevents mode plugins from reaching into unrelated `Session`
 /// internals.
 pub struct ModeSessionContext<'a> {
-    session: &'a mut crate::Session,
     session_id: &'a str,
 }
 
 impl<'a> ModeSessionContext<'a> {
-    pub(crate) fn new(session: &'a mut crate::Session, session_id: &'a str) -> Self {
-        Self {
-            session,
-            session_id,
-        }
+    pub(crate) fn new(_session: &'a mut crate::Session, session_id: &'a str) -> Self {
+        Self { session_id }
     }
 
     /// ID of the session being initialized/restored. Equivalent to the
     /// `session_id` previously passed as a separate argument.
     pub fn session_id(&self) -> &str {
         self.session_id
-    }
-
-    /// Start the embedded lashlang execution backend for this session
-    /// (no-op if already running). Typically called in
-    /// `initialize_session` by modes that dispatch work via lashlang.
-    pub async fn start_lashlang_runtime(&mut self) -> Result<(), crate::SessionError> {
-        self.session.start_lashlang_runtime(self.session_id).await
-    }
-
-    /// Configure how tool-call / print output is truncated before it
-    /// flows back into the model. Mode plugins supply this from their
-    /// own config.
-    pub fn set_execution_output_projection(
-        &mut self,
-        config: crate::ToolResultProjectionPluginConfig,
-    ) {
-        self.session.set_execution_output_projection(config);
-    }
-
-    /// Restore the lashlang execution backend's globals from a
-    /// persisted snapshot.
-    pub async fn restore_execution_state(
-        &mut self,
-        data: &[u8],
-    ) -> Result<(), crate::SessionError> {
-        self.session.restore_execution_state(data).await
-    }
-
-    /// Apply a mode-owned globals/state patch from either the session
-    /// graph or an incoming append-nodes request. Today the only
-    /// patch payload is the RLM lashlang globals patch.
-    pub async fn apply_mode_globals_patch(
-        &mut self,
-        patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
-    ) -> Result<(), crate::SessionError> {
-        self.session.apply_mode_globals_patch(patch).await
     }
 }
 
@@ -134,16 +123,8 @@ impl<'a> ModeRuntimeContext<'a> {
         Self { runtime }
     }
 
-    /// Set how the session's embedded lashlang runtime terminates.
-    /// RLM sessions finish through `submit`; legacy prose-only config
-    /// values are treated as submit-required.
     pub fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
         self.runtime.set_mode_turn_options(options);
-    }
-
-    pub fn set_rlm_termination_mode(&mut self, termination: lash_rlm_types::RlmTermination) {
-        self.runtime
-            .set_mode_turn_options(crate::ModeTurnOptions::rlm(termination));
     }
 }
 
@@ -257,8 +238,6 @@ impl<'de> Deserialize<'de> for ModeExtras {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StandardCreateExtras {}
 
-pub use lash_rlm_types::RlmCreateExtras;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +254,7 @@ mod tests {
         .expect("legacy extras");
         assert_eq!(extras.mode_id, ExecutionMode::new("rlm"));
         let decoded = extras
-            .decode::<RlmCreateExtras>(&ExecutionMode::new("rlm"))
+            .decode::<lash_rlm_types::RlmCreateExtras>(&ExecutionMode::new("rlm"))
             .expect("decode")
             .expect("matching mode");
         assert!(matches!(
@@ -292,7 +271,7 @@ mod tests {
 
         let extras = ModeExtras::typed(
             ExecutionMode::new("rlm"),
-            RlmCreateExtras {
+            lash_rlm_types::RlmCreateExtras {
                 termination: lash_rlm_types::RlmTermination::default(),
             },
         )

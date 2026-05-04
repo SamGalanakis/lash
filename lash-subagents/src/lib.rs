@@ -740,14 +740,18 @@ mod tests {
                     standard_context_approach: Some(lash::StandardContextApproach::default()),
                     ..SessionPolicy::default()
                 },
-                mode_turn_options: lash::ModeTurnOptions::rlm(RlmTermination::Finish {
-                    schema: Some(json!({
-                        "type": "object",
-                        "properties": { "answer": { "type": "string" } },
-                        "required": ["answer"]
-                    })),
-                    include_submit_prompt: true,
-                }),
+                mode_turn_options: lash::ModeTurnOptions::typed(
+                    lash::ExecutionMode::new("rlm"),
+                    RlmTermination::Finish {
+                        schema: Some(json!({
+                            "type": "object",
+                            "properties": { "answer": { "type": "string" } },
+                            "required": ["answer"]
+                        })),
+                        include_submit_prompt: true,
+                    },
+                )
+                .expect("valid rlm turn options"),
                 ..PersistedSessionState::default()
             },
             created: Mutex::new(Vec::new()),

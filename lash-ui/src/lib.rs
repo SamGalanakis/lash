@@ -207,7 +207,7 @@ pub trait UiExtension: Send + Sync {
         UiInputOutcome::Ignored
     }
 
-    async fn sync(&self, _ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
+    async fn snapshot(&self, _ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
         Ok(Vec::new())
     }
 
@@ -403,11 +403,11 @@ impl UiExtensions {
         })
     }
 
-    pub async fn sync_all(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
+    pub async fn snapshot_all(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
         let mut effects = Vec::new();
         for extension in &self.extensions {
             let extension_effects = extension
-                .sync(UiContext {
+                .snapshot(UiContext {
                     plugin_host: ctx.plugin_host,
                     session_id: ctx.session_id,
                     session_manager: Arc::clone(&ctx.session_manager),
@@ -740,7 +740,7 @@ impl UiExtension for MonitorUiExtension {
         MONITOR_COMMANDS
     }
 
-    async fn sync(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
+    async fn snapshot(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
         let updates = monitor_updates(
             ctx.plugin_host,
             ctx.session_id,
@@ -1307,7 +1307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_mode_sync_is_event_driven() {
+    async fn plan_mode_snapshot_is_event_driven() {
         struct UnusedSessionManager;
 
         #[async_trait]
@@ -1383,7 +1383,7 @@ mod tests {
             UiExtensions::new(vec![Arc::new(PlanModeUiExtension)]).expect("extensions");
         let host = PluginHost::new(Vec::new());
         let effects = extensions
-            .sync_all(UiContext {
+            .snapshot_all(UiContext {
                 plugin_host: &host,
                 session_id: "fresh-context-child",
                 session_manager: Arc::new(UnusedSessionManager),

@@ -191,6 +191,14 @@ pub fn rlm_execution_section() -> String {
 
 pub struct RlmDriver;
 
+fn rlm_termination(options: &lash::ModeTurnOptions) -> RlmTermination {
+    options
+        .decode(&lash::ExecutionMode::new("rlm"))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
 #[derive(Default)]
 struct RlmDriverState {
     reasoning: String,
@@ -267,7 +275,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             let RlmTermination::Finish {
                 schema,
                 include_submit_prompt,
-            } = ctx.termination().rlm_termination();
+            } = rlm_termination(ctx.termination());
             actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
                 "llm_extraction",
                 serde_json::json!({
@@ -406,7 +414,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             if let RlmTermination::Finish {
                 schema: Some(schema),
                 ..
-            } = ctx.termination().rlm_termination()
+            } = rlm_termination(ctx.termination())
                 && let Err(error_text) = validate_finish_value(finish_value, &schema)
             {
                 actions.push(DriverAction::AppendEvents(vec![
@@ -523,32 +531,58 @@ fn diagnostic_event(phase: &str, payload: Value) -> SessionEventRecord {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Return `true` when `text` contains a complete ` ```lashlang ` (or
-/// `rlm`/`lash`) fenced block — opener followed by a closing ` ``` `
-/// anywhere (no newline requirement on either side). Exposed for the
-/// stream mask, which raises `abort_stream` as soon as this is true.
+/// `rlm`/`lash`) fenced block — opener of N backticks followed by a
+/// closing run of M ≥ N backticks anywhere (no newline requirement on
+/// either side). Exposed for the stream mask, which raises
+/// `abort_stream` as soon as this is true.
 pub fn contains_closed_lashlang_fence(text: &str) -> bool {
-    let Some((_, _body_start, body_end)) = first_lashlang_fence_span(text) else {
-        return false;
-    };
-    body_end + 3 <= text.len() && &text[body_end..body_end + 3] == "```"
+    first_lashlang_fence_span(text).is_some_and(|span| span.close_len > 0)
 }
 
-fn first_lashlang_fence_span(text: &str) -> Option<(usize, usize, usize)> {
+#[derive(Debug, Clone, Copy)]
+struct FenceSpan {
+    /// Byte offset of the first backtick of the opener.
+    #[allow(dead_code)]
+    open_pos: usize,
+    /// Number of backticks in the opener (≥3).
+    #[allow(dead_code)]
+    opener_len: usize,
+    /// Byte offset of the first byte of the body (after the opener
+    /// line's terminating `\n`).
+    body_start: usize,
+    /// Byte offset of the first backtick of the closer (or `text.len()`
+    /// when the body extends to EOF without a closer).
+    body_end: usize,
+    /// Number of backticks consumed by the closer. `0` when unclosed.
+    /// Always ≤ `opener_len` — extra backticks in the closer run stay
+    /// in the residual text so adjacent fences glued together (the
+    /// "``````lashlang" pattern) still parse the way they always did.
+    close_len: usize,
+}
+
+fn first_lashlang_fence_span(text: &str) -> Option<FenceSpan> {
+    let bytes = text.as_bytes();
     let mut search_from = 0usize;
-    while let Some(rel) = text[search_from..].find("```") {
+    while search_from < bytes.len() {
+        let rel = text[search_from..].find("```")?;
         let open = search_from + rel;
+        // CommonMark-style variable-length fences: count consecutive
+        // backticks at the opener. N must be ≥3 (find("```") guarantees
+        // that). Anything past N backticks is part of the opener run
+        // and the matching closer must be at least N backticks long.
+        let opener_len = bytes[open..].iter().take_while(|&&b| b == b'`').count();
+        let after_open = open + opener_len;
         // The opening `\`\`\`` doesn't have to be on its own line —
         // reasoning models commonly emit `…required shape.\`\`\`lashlang\n`
         // inline after prose. The language tag is distinctive enough
         // (`lashlang`/`rlm`/`lash`) that collisions with inline prose
-        // are essentially impossible. The *closer* still has to live
-        // on its own line (newline-preceded) — that's the real
-        // structural signal, enforced in the inner loop below.
-        let after_open = open + 3;
+        // are essentially impossible.
         let rest = &text[after_open..];
         let lang_end = rest.find('\n').unwrap_or(rest.len());
         let lang = rest[..lang_end].trim();
         if !matches!(lang, "lashlang" | "rlm" | "lash") {
+            // Skip past this opener run and keep looking — a non-lash
+            // language tag belongs to a different code block.
             search_from = after_open;
             continue;
         }
@@ -557,26 +591,53 @@ fn first_lashlang_fence_span(text: &str) -> Option<(usize, usize, usize)> {
             return None;
         }
 
-        // The first `\`\`\`` after the opener closes the block, no
-        // matter where it sits on the line. Lashlang strings use `"`,
-        // so the risk of a backtick-triple inside otherwise-valid
-        // code is essentially zero, and this matches the mental model
-        // the prompt describes: `\`\`\`` starts, `\`\`\`` stops.
-        let close = text[body_start..]
-            .find("```")
-            .map(|rel| body_start + rel)
-            .unwrap_or(text.len());
-        return Some((open, body_start, close));
+        // Closer: the first run of ≥`opener_len` consecutive backticks
+        // after `body_start`. We consume exactly `opener_len` of them
+        // — leftover backticks in the run stay in the text so the
+        // "``````lashlang" double-fence pattern still resolves into
+        // two adjacent blocks.
+        let (close, close_len) = match find_closing_fence(&bytes[body_start..], opener_len) {
+            Some((rel, _run_len)) => (body_start + rel, opener_len),
+            None => (text.len(), 0),
+        };
+        return Some(FenceSpan {
+            open_pos: open,
+            opener_len,
+            body_start,
+            body_end: close,
+            close_len,
+        });
+    }
+    None
+}
+
+/// Find the first run of consecutive backticks of length ≥ `min_len` in
+/// `bytes`. Returns `(start_byte_offset, run_length)`.
+fn find_closing_fence(bytes: &[u8], min_len: usize) -> Option<(usize, usize)> {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            let len = i - start;
+            if len >= min_len {
+                return Some((start, len));
+            }
+        } else {
+            i += 1;
+        }
     }
     None
 }
 
 fn extract_first_lashlang_fence(text: &str) -> Option<FenceExtraction> {
-    let (_open, body_start, body_end) = first_lashlang_fence_span(text)?;
-    let code = text[body_start..body_end]
+    let span = first_lashlang_fence_span(text)?;
+    let code = text[span.body_start..span.body_end]
         .trim_end_matches('\n')
         .to_string();
-    let after_close = (body_end + 3).min(text.len());
+    let after_close = (span.body_end + span.close_len).min(text.len());
     let had_extra_fences = first_lashlang_fence_span(&text[after_close..]).is_some();
     Some(FenceExtraction {
         code,
@@ -808,5 +869,37 @@ mod tests {
         let text = "```python\nprint('x')\n```\n\n```lashlang\nsubmit 1\n```";
         let extraction = extract_first_lashlang_fence(text).expect("should skip python block");
         assert_eq!(extraction.code, "submit 1");
+    }
+
+    #[test]
+    fn fence_detector_four_backticks_allows_embedded_triple() {
+        // Variable-length fences: opener of 4 backticks lets the body
+        // contain literal ``` (which would otherwise terminate a 3-bt
+        // block). Closer must be ≥4 backticks.
+        let text = "````lashlang\nprint \"```\"\nsubmit 1\n````";
+        let extraction = extract_first_lashlang_fence(text)
+            .expect("4-backtick fence should allow embedded triple-backticks");
+        assert_eq!(extraction.code, "print \"```\"\nsubmit 1");
+        assert!(contains_closed_lashlang_fence(text));
+    }
+
+    #[test]
+    fn fence_detector_four_backtick_opener_accepts_longer_closer() {
+        // CommonMark allows the closer to be longer than the opener.
+        // 4-backtick opener closed by 5-backtick closer.
+        let text = "````lashlang\nsubmit 1\n`````";
+        let extraction =
+            extract_first_lashlang_fence(text).expect("4-bt opener should accept 5-bt closer");
+        assert_eq!(extraction.code, "submit 1");
+    }
+
+    #[test]
+    fn fence_detector_four_backtick_opener_ignores_inner_triple() {
+        // Inner ``` runs (length 3 < opener 4) are NOT closers — body
+        // continues until a run of ≥4 backticks (or EOF).
+        let text = "````lashlang\nbody with ``` inside\nmore body\n````\ntail";
+        let extraction = extract_first_lashlang_fence(text)
+            .expect("4-bt opener should not be closed by inner triple");
+        assert_eq!(extraction.code, "body with ``` inside\nmore body");
     }
 }

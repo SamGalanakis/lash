@@ -4,7 +4,9 @@ use std::sync::Arc;
 use lash::session_model::{Part, PartKind, PruneState};
 use lash::{PluginMessage, *};
 
+use super::helpers::RuntimeEventBridge;
 use super::*;
+use crate::event::AppEventTx;
 use crate::input_items::build_items_from_editor_input;
 use crate::turn_runner::{RuntimeRunResult, spawn_runtime_turn};
 
@@ -266,7 +268,7 @@ pub(super) async fn send_user_message(
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    app_tx: &AppEventTx,
     _dynamic_state: &DynamicStateSnapshot,
 ) {
     let mut ui_trace = ui_trace;
@@ -313,11 +315,7 @@ pub(super) async fn send_user_message(
         "send_user_message armed runtime return channel"
     );
 
-    let sink_tx = app_tx.clone();
-    let sink = AppEventSink {
-        tx: sink_tx,
-        stream_id,
-    };
+    let sink = RuntimeEventBridge::spawn(stream_id, app_tx.clone());
     let (cancel, return_rx) = spawn_runtime_turn(rt, turn_input, sink, stream_id);
     *cancel_token = Some(cancel);
     *runtime_return_rx = Some(return_rx);

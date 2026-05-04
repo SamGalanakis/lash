@@ -720,6 +720,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -732,6 +733,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -1310,6 +1312,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
+name = "futures"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1324,6 +1341,17 @@ name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
 
 [[package]]
 name = "futures-io"
@@ -1360,6 +1388,7 @@ version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
+ "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
@@ -2106,7 +2135,6 @@ dependencies = [
  "lash-rlm-types",
  "lash-sansio",
  "lash-trace",
- "lashlang",
  "libc",
  "pdf-extract",
  "portable-pty",
@@ -2209,6 +2237,7 @@ dependencies = [
  "clap",
  "dirs 6.0.0",
  "lash",
+ "lash-rlm-types",
  "pulldown-cmark",
  "serde",
  "serde_json",
@@ -2246,9 +2275,12 @@ dependencies = [
  "lash-mode-standard",
  "lash-rlm-types",
  "lash-sansio",
+ "lashlang",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2483,13 +2515,15 @@ version = "0.2.83"
 dependencies = [
  "compact_str",
  "criterion",
+ "futures",
+ "futures-util",
  "proptest",
- "rayon",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "smallvec",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

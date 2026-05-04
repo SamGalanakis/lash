@@ -10,13 +10,25 @@ use proptest::prelude::*;
 struct DeterministicHost;
 
 impl ToolHost for DeterministicHost {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        match name {
+    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+        match name.as_str() {
             "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
             "fail" => Err(ToolHostError::new("fail")),
             _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
         }
     }
+}
+
+fn run_execute(
+    source: &str,
+    state: &mut State,
+    host: &DeterministicHost,
+) -> Result<ExecutionOutcome, lashlang::ExecuteError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(execute(source, state, host))
 }
 
 fn finished(outcome: ExecutionOutcome) -> Value {
@@ -170,7 +182,7 @@ proptest! {
     fn execute_never_panics_on_arbitrary_input(source in ".*") {
         let host = DeterministicHost;
         let mut state = State::new();
-        let result = catch_unwind(AssertUnwindSafe(|| execute(&source, &mut state, &host)));
+        let result = catch_unwind(AssertUnwindSafe(|| run_execute(&source, &mut state, &host)));
         prop_assert!(result.is_ok(), "execute panicked for input: {source:?}");
     }
 
@@ -185,7 +197,7 @@ proptest! {
         let mut state = State::new();
 
         let actual = finished(
-            execute(&source, &mut state, &host)
+            run_execute(&source, &mut state, &host)
                 .expect("generated value program should execute")
         );
 
@@ -234,9 +246,9 @@ proptest! {
         let snapshot: Snapshot = serde_json::from_slice(&blob).expect("snapshot decode");
         restored = State::from_snapshot(snapshot);
 
-        let fresh_value = finished(execute(&source, &mut fresh, &host).expect("fresh execution"));
+        let fresh_value = finished(run_execute(&source, &mut fresh, &host).expect("fresh execution"));
         let restored_value = finished(
-            execute(&source, &mut restored, &host).expect("restored execution")
+            run_execute(&source, &mut restored, &host).expect("restored execution")
         );
 
         prop_assert_eq!(fresh_value, restored_value);
@@ -251,7 +263,7 @@ proptest! {
         let host = DeterministicHost;
         let mut state = State::new();
 
-        let result = finished(execute(&source, &mut state, &host).expect("tool call should succeed"));
+        let result = finished(run_execute(&source, &mut state, &host).expect("tool call should succeed"));
         let record = result.as_record().expect("tool result should be a record");
 
         prop_assert_eq!(record.get("ok"), Some(&Value::Bool(true)));
@@ -274,7 +286,7 @@ proptest! {
         let host = DeterministicHost;
         let mut state = State::new();
 
-        let actual = finished(execute(&source, &mut state, &host).expect("ternary execution"));
+        let actual = finished(run_execute(&source, &mut state, &host).expect("ternary execution"));
 
         prop_assert_eq!(actual, expected);
     }
@@ -286,7 +298,7 @@ proptest! {
         let source = format!("x = {}\nsubmit x\n", ty.to_source());
         let host = DeterministicHost;
         let mut state = State::new();
-        let outcome = execute(&source, &mut state, &host);
+        let outcome = run_execute(&source, &mut state, &host);
         let value = finished(outcome.expect("Type literal should execute"));
         let inner = lashlang::unwrap_type_value(&value).expect("wrapped type");
         let schema = inner.as_record().expect("schema record");

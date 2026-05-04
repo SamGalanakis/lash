@@ -17,7 +17,9 @@ use lash::llm::types::{
     ResponseTextPhase,
 };
 use lash::provider::{
-    AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
+    AgentModelSelection, NoopProviderAuth, NoopProviderReadiness, ProviderComponents,
+    ProviderFactory, ProviderModelPolicy, ProviderOptions, ProviderState, ProviderTransport,
+    VariantRequestConfig,
 };
 
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -89,6 +91,19 @@ pub struct OpenAiGenericProvider {
     pub base_url: String,
     pub options: ProviderOptions,
     client: reqwest::Client,
+}
+
+#[derive(Clone, Debug)]
+struct OpenAiModelPolicy {
+    base_url: String,
+}
+
+impl OpenAiModelPolicy {
+    fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -704,7 +719,8 @@ impl OpenAiGenericProvider {
         }
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
-                self.request_variant_config(&req.model, variant)
+                OpenAiModelPolicy::new(self.base_url.clone())
+                    .request_variant_config(&req.model, variant)
             && effort != "none"
         {
             body["reasoning"] = json!({
@@ -1062,12 +1078,57 @@ impl OpenAiGenericProvider {
     }
 }
 
-#[async_trait]
-impl Provider for OpenAiGenericProvider {
+impl OpenAiGenericProvider {
+    pub fn into_components(self) -> ProviderComponents {
+        let model_policy = std::sync::Arc::new(OpenAiModelPolicy::new(self.base_url.clone()));
+        ProviderComponents::new(
+            Box::new(self.clone()),
+            Box::new(NoopProviderAuth),
+            Box::new(NoopProviderReadiness::new()),
+            Box::new(self),
+            model_policy,
+        )
+    }
+}
+
+impl ProviderState for OpenAiGenericProvider {
     fn kind(&self) -> &'static str {
         "openai-compatible"
     }
 
+    fn options(&self) -> ProviderOptions {
+        self.options.clone()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.options = options;
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "api_key".to_string(),
+            serde_json::Value::String(self.api_key.clone()),
+        );
+        map.insert(
+            "base_url".to_string(),
+            serde_json::Value::String(self.base_url.clone()),
+        );
+        if !self.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+impl ProviderModelPolicy for OpenAiModelPolicy {
     fn default_model(&self) -> &str {
         "anthropic/claude-sonnet-4.6"
     }
@@ -1097,7 +1158,7 @@ impl Provider for OpenAiGenericProvider {
     }
 
     fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        if self.validate_variant(model, variant).is_err() {
+        if !self.supported_variants(model).contains(&variant) {
             return None;
         }
         Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
@@ -1128,15 +1189,10 @@ impl Provider for OpenAiGenericProvider {
             format!("openrouter/{model}")
         }
     }
+}
 
-    fn options(&self) -> &ProviderOptions {
-        &self.options
-    }
-
-    fn options_mut(&mut self) -> &mut ProviderOptions {
-        &mut self.options
-    }
-
+#[async_trait]
+impl ProviderTransport for OpenAiGenericProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
@@ -1314,26 +1370,7 @@ impl Provider for OpenAiGenericProvider {
         })
     }
 
-    fn serialize_config(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "api_key".to_string(),
-            serde_json::Value::String(self.api_key.clone()),
-        );
-        map.insert(
-            "base_url".to_string(),
-            serde_json::Value::String(self.base_url.clone()),
-        );
-        if !self.options.is_default() {
-            map.insert(
-                "options".to_string(),
-                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
-            );
-        }
-        serde_json::Value::Object(map)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn Provider> {
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
         Box::new(self.clone())
     }
 }
@@ -1368,15 +1405,16 @@ impl ProviderFactory for OpenAiGenericProviderFactory {
     fn setup_description(&self) -> &'static str {
         "Any OpenAI-compatible Responses API endpoint"
     }
-    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String> {
+    fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: OpenAiProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
-        Ok(Box::new(OpenAiGenericProvider {
+        Ok(OpenAiGenericProvider {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             options: cfg.options,
             client: build_http_client(),
-        }))
+        }
+        .into_components())
     }
 }
 

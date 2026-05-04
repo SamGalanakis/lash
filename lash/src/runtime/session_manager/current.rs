@@ -5,8 +5,11 @@ impl RuntimeSessionManager {
         &self,
     ) -> SessionSnapshot {
         let mut state = self.current.snapshot.to_snapshot();
-        if let Some(store) = &self.current.store {
-            crate::store::refresh_persisted_session_state(store.as_ref(), &mut state).await;
+        if let Some(store) = &self.current.store
+            && let Err(err) =
+                crate::store::refresh_persisted_session_state(store.as_ref(), &mut state).await
+        {
+            tracing::warn!("failed to refresh persisted session state: {err}");
         }
         super::normalize_session_graph(&mut state);
         state

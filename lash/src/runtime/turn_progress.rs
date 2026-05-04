@@ -124,11 +124,13 @@ impl TurnProgress {
 
     pub(super) fn graph_commit(
         &self,
-        persisted_graph_node_count: usize,
         graph_replace_required: bool,
-    ) -> crate::store::SessionGraphCommit {
-        self.graph
-            .graph_commit(persisted_graph_node_count, graph_replace_required)
+    ) -> crate::store::GraphCommitDelta {
+        self.graph.graph_commit(graph_replace_required)
+    }
+
+    pub(super) fn mark_graph_commit_persisted(&mut self, graph: &crate::store::GraphCommitDelta) {
+        self.graph.mark_graph_commit_persisted(graph);
     }
 
     #[cfg(test)]
@@ -169,7 +171,7 @@ fn append_unique_tool_calls(out: &mut Vec<ToolCallRecord>, records: &[ToolCallRe
 mod tests {
     use super::*;
     use crate::session_model::ConversationRecord;
-    use crate::store::SessionGraphCommit;
+    use crate::store::GraphCommitDelta;
     use crate::{
         Message, MessageRole, ModeEvent, Part, PartKind, PruneState, SessionGraph,
         SessionNodePayload,
@@ -293,18 +295,21 @@ mod tests {
         ));
 
         progress.apply_prepared_messages(&MessageSequence::from_base(
+            vec![first.clone(), second.clone()].into(),
+        ));
+        let first_commit = progress.graph_commit(false);
+        progress.mark_graph_commit_persisted(&first_commit);
+        progress.apply_prepared_messages(&MessageSequence::from_base(
             vec![first.clone(), second, third].into(),
         ));
-        let commit = progress.graph_commit(2, false);
-        let SessionGraphCommit::Append {
+        let commit = progress.graph_commit(false);
+        let GraphCommitDelta::Append {
             nodes,
             leaf_node_id,
-            graph_node_count,
         } = commit
         else {
             panic!("progress should append graph tail");
         };
-        assert_eq!(graph_node_count, 3);
         assert_eq!(leaf_node_id.as_deref(), Some("u2"));
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_id, "u2");

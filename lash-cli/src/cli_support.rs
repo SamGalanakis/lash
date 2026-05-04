@@ -715,26 +715,41 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
     }
 }
 
-pub(crate) async fn sync_ui_extensions(
-    app: &mut App,
+pub(crate) async fn collect_ui_snapshot(
+    session_id: String,
     ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
     session_manager: Arc<dyn RuntimeSessionHost>,
-) {
-    let session_id = app.session_id.clone();
-    if let Ok(tasks) = session_manager.list_background_tasks(&session_id).await {
-        app.update_background_tasks(tasks);
-    }
-    match ui_extensions
-        .sync_all(UiContext {
+) -> crate::event::UiSnapshotResult {
+    let started = std::time::Instant::now();
+    let mut diagnostics = Vec::new();
+    let background_tasks = match session_manager.list_background_tasks(&session_id).await {
+        Ok(tasks) => Some(tasks),
+        Err(err) => {
+            diagnostics.push(format!("background task snapshot failed: {err}"));
+            None
+        }
+    };
+    let effects = match ui_extensions
+        .snapshot_all(UiContext {
             plugin_host,
             session_id: &session_id,
-            session_manager,
+            session_manager: Arc::clone(&session_manager),
         })
         .await
     {
-        Ok(effects) => apply_ui_host_effects(app, effects),
-        Err(err) => push_system_message(app, format!("Failed to sync UI extensions: {err}")),
+        Ok(effects) => effects,
+        Err(err) => {
+            diagnostics.push(format!("Failed to snapshot UI extensions: {err}"));
+            Vec::new()
+        }
+    };
+    crate::event::UiSnapshotResult {
+        effects,
+        background_tasks,
+        duration: started.elapsed(),
+        timed_out: false,
+        diagnostics,
     }
 }
 
@@ -881,11 +896,13 @@ mod tests {
 
     #[test]
     fn info_text_includes_session_id_and_db_path() {
-        let provider =
-            ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
+        let provider = ProviderHandle::new(
+            lash_provider_openai::OpenAiGenericProvider::new(
                 "test",
                 "https://openrouter.ai/api/v1",
-            )));
+            )
+            .into_components(),
+        );
         let text = info_text(
             &provider,
             "google/gemini-3-flash-preview",

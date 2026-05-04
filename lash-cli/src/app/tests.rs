@@ -716,13 +716,11 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
         iteration: 0,
         reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"hi\"\n```".to_string(),
         code: "submit \"hi\"".to_string(),
-        output: String::new(),
-        observations: Vec::new(),
+        output: Vec::new(),
         tool_calls: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: None,
-        output_raw_len: 0,
     };
     let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
         lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
@@ -747,13 +745,11 @@ fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversat
         iteration: 0,
         reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
-        output: String::new(),
-        observations: Vec::new(),
+        output: Vec::new(),
         tool_calls: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: Some(serde_json::json!("Hi!")),
-        output_raw_len: 0,
     };
     let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
         lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
@@ -774,13 +770,11 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
         iteration: 0,
         reasoning: "I'll answer directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
-        output: String::new(),
-        observations: Vec::new(),
+        output: Vec::new(),
         tool_calls: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: Some(serde_json::json!("Hi!")),
-        output_raw_len: 0,
     };
     let events = vec![
         conversation_event(user.clone()),
@@ -816,8 +810,7 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
         iteration: 0,
         reasoning: "I'll inspect the environment.".to_string(),
         code: "now = (call exec_command { cmd: \"date -u\" })?\nprint now".to_string(),
-        output: "2026-04-25 20:05:57 UTC\n".to_string(),
-        observations: vec!["2026-04-25 20:05:57 UTC".to_string()],
+        output: vec!["2026-04-25 20:05:57 UTC".to_string()],
         tool_calls: vec![ToolCallRecord {
             call_id: None,
             tool: "exec_command".to_string(),
@@ -832,7 +825,6 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
         images: Vec::new(),
         error: None,
         final_output: None,
-        output_raw_len: 24,
     };
     let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
         lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
@@ -858,8 +850,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
         iteration: 0,
         reasoning: "First check the time.".to_string(),
         code: "now = (call exec_command { cmd: \"date -u\" })?\nprint now".to_string(),
-        output: "time\n".to_string(),
-        observations: vec!["time".to_string()],
+        output: vec!["time".to_string()],
         tool_calls: vec![ToolCallRecord {
             call_id: None,
             tool: "exec_command".to_string(),
@@ -871,15 +862,13 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
         images: Vec::new(),
         error: None,
         final_output: None,
-        output_raw_len: 5,
     };
     let second = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_1".to_string(),
         iteration: 1,
         reasoning: "Then check files.".to_string(),
         code: "files = (call ls { path: \".\" })?\nprint files".to_string(),
-        output: "files\n".to_string(),
-        observations: vec!["files".to_string()],
+        output: vec!["files".to_string()],
         tool_calls: vec![ToolCallRecord {
             call_id: None,
             tool: "ls".to_string(),
@@ -891,7 +880,6 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
         images: Vec::new(),
         error: None,
         final_output: None,
-        output_raw_len: 6,
     };
     let assistant = text_message("a1", MessageRole::Assistant, "Done.");
     let events = vec![

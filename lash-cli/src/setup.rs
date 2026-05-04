@@ -184,14 +184,15 @@ async fn run_setup_inner(
                 Ok(Some((auth_code, code_verifier))) => {
                     match codex_oauth::exchange_code(&auth_code, &code_verifier).await {
                         Ok(tokens) => {
-                            provider = Some(ProviderHandle::new(Box::new(
+                            provider = Some(ProviderHandle::new(
                                 CodexProvider::new(
                                     tokens.access_token,
                                     tokens.refresh_token,
                                     tokens.expires_at,
                                 )
-                                .with_account_id(tokens.account_id),
-                            )));
+                                .with_account_id(tokens.account_id)
+                                .into_components(),
+                            ));
                             app.step = if tavily_key.is_some() {
                                 SetupStep::Done
                             } else {
@@ -319,8 +320,9 @@ async fn run_setup_inner(
                                 *error = Some("API key cannot be empty.".into());
                                 continue;
                             }
-                            provider =
-                                Some(ProviderHandle::new(Box::new(AnthropicProvider::new(value))));
+                            provider = Some(ProviderHandle::new(
+                                AnthropicProvider::new(value).into_components(),
+                            ));
                             app.step = if tavily_key.is_some() {
                                 SetupStep::Done
                             } else {
@@ -351,14 +353,15 @@ async fn run_setup_inner(
                                     let project_id = std::env::var("GOOGLE_CLOUD_PROJECT")
                                         .ok()
                                         .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok());
-                                    provider = Some(ProviderHandle::new(Box::new(
+                                    provider = Some(ProviderHandle::new(
                                         GoogleOAuthProvider::new(
                                             tokens.access_token,
                                             tokens.refresh_token,
                                             tokens.expires_at,
                                         )
-                                        .with_project_id(project_id),
-                                    )));
+                                        .with_project_id(project_id)
+                                        .into_components(),
+                                    ));
                                     app.step = if tavily_key.is_some() {
                                         SetupStep::Done
                                     } else {
@@ -414,10 +417,9 @@ async fn run_setup_inner(
                     if base_url.is_empty() {
                         continue;
                     }
-                    provider = Some(ProviderHandle::new(Box::new(OpenAiGenericProvider::new(
-                        api_key.clone(),
-                        base_url,
-                    ))));
+                    provider = Some(ProviderHandle::new(
+                        OpenAiGenericProvider::new(api_key.clone(), base_url).into_components(),
+                    ));
                     app.step = if tavily_key.is_some() {
                         SetupStep::Done
                     } else {

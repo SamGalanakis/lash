@@ -563,6 +563,7 @@ fn materialize_child_from_graph(
     });
     child_store.save_session_head(lash::SessionHead {
         session_id: child_session_id.to_string(),
+        head_revision: 0,
         graph: child_graph.clone(),
         config: config.clone(),
         checkpoint_ref: child_checkpoint_ref.clone(),
@@ -599,6 +600,7 @@ pub async fn fork_current_session(
         .load_session_head()
         .unwrap_or(lash::SessionHead {
             session_id: child_meta.session_id.clone(),
+            head_revision: 0,
             graph: lash::SessionGraph::default(),
             config: lash::PersistedSessionConfig {
                 provider_id: _provider.kind().to_string(),
@@ -637,10 +639,10 @@ mod fork_tests {
     use std::sync::Arc;
 
     fn dummy_provider() -> ProviderHandle {
-        ProviderHandle::new(Box::new(lash_provider_openai::OpenAiGenericProvider::new(
-            "test",
-            "https://example.invalid/v1",
-        )))
+        ProviderHandle::new(
+            lash_provider_openai::OpenAiGenericProvider::new("test", "https://example.invalid/v1")
+                .into_components(),
+        )
     }
 
     fn empty_dynamic_state() -> DynamicStateSnapshot {
@@ -683,6 +685,7 @@ mod fork_tests {
             .checkpoint_ref;
         store.save_session_head(lash::SessionHead {
             session_id: "root".to_string(),
+            head_revision: 0,
             graph,
             config: lash::PersistedSessionConfig {
                 provider_id: dummy_provider().kind().to_string(),

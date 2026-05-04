@@ -3,53 +3,26 @@ use std::sync::{Arc, Mutex};
 
 use lash::PromptContribution;
 use lash::plugin::{ModeSessionContext, PromptHookContext};
-use lash::{SessionAppendNode, SessionError, SessionEventRecord};
-use lash_rlm_types::RlmModeEvent;
+use lash::{SessionAppendNode, SessionError};
 
 pub async fn restore_execution_state_and_globals(
-    ctx: &mut ModeSessionContext<'_>,
-    state: &lash::runtime::PersistedSessionState,
+    _ctx: &mut ModeSessionContext<'_>,
+    _state: &lash::runtime::PersistedSessionState,
 ) -> Result<(), SessionError> {
-    if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
-        ctx.restore_execution_state(&snapshot).await?;
-    }
-    let read_view = state.read_view();
-    apply_globals_patch_events(ctx, read_view.active_events()).await
+    Ok(())
 }
 
 pub async fn apply_globals_patch_nodes(
-    ctx: &mut ModeSessionContext<'_>,
-    nodes: &[SessionAppendNode],
+    _ctx: &mut ModeSessionContext<'_>,
+    _nodes: &[SessionAppendNode],
 ) -> Result<(), SessionError> {
-    for node in nodes {
-        if let SessionAppendNode::Event {
-            event: SessionEventRecord::Mode(event),
-        } = node
-            && let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = event.rlm_event()
-        {
-            ctx.apply_mode_globals_patch(&patch).await?;
-        }
-    }
     Ok(())
 }
 
-async fn apply_globals_patch_events<'a>(
-    ctx: &mut ModeSessionContext<'_>,
-    events: impl IntoIterator<Item = &'a SessionEventRecord>,
-) -> Result<(), SessionError> {
-    for event in events {
-        if let SessionEventRecord::Mode(event) = event
-            && let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = event.rlm_event()
-        {
-            ctx.apply_mode_globals_patch(&patch).await?;
-        }
-    }
-    Ok(())
-}
-
-/// Render the "Context Budget" prompt section. Returns an empty vec when
-/// no budget is configured or the most recent prompt has no usable token
-/// accounting yet.
+/// Render the "Context Budget" prompt section. Always emits a one-line
+/// status (iteration · tokens used · % of handoff threshold) once the
+/// session has at least one prior LLM call's usage to report. Adds an
+/// escalation tail at 60% / 90% / 100% nudging toward `continue_as`.
 pub fn budget_prompt_contributions(
     ctx: &PromptHookContext,
     max_budget_tokens: Option<usize>,
@@ -64,19 +37,22 @@ pub fn budget_prompt_contributions(
     if used == 0 {
         return Vec::new();
     }
+    let iteration = ctx.state.iteration();
     let pct = used.saturating_mul(100) / max.max(1);
-    if pct < 60 {
-        return Vec::new();
+    let mut content =
+        format!("Iteration: {iteration} · Tokens: {used} · handoff threshold: {max} ({pct}%).");
+    if pct >= 60 {
+        let tail = if used >= max {
+            "Past the handoff threshold. Do not continue ordinary work — `continue_as` now and pack only what the successor needs into `task` + `seed`."
+        } else if pct >= 90 {
+            "Budget tight — finish the current step, then `continue_as`."
+        } else {
+            "Look for a clean handoff point and `continue_as` rather than starting new work."
+        };
+        content.push('\n');
+        content.push_str(tail);
     }
-    let tail = if used >= max {
-        "Past the handoff threshold. Do not continue ordinary work — `continue_as` now and pack only what the successor needs into `task` + `seed`."
-    } else if pct >= 90 {
-        "Budget tight — finish the current step, then `continue_as`."
-    } else {
-        "Look for a clean handoff point and `continue_as` rather than starting new work."
-    };
-    let content = format!("Tokens: {used} · handoff threshold: {max} ({pct}%).\n{tail}");
-    vec![PromptContribution::execution("Context Budget", content)]
+    vec![PromptContribution::environment("Context Budget", content)]
 }
 
 pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {

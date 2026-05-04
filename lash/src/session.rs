@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -7,20 +6,14 @@ use serde_json::json;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime, LashlangToolReply};
 use crate::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, ToolDispatchOutcome, dispatch_parallel_tool_call,
     dispatch_tool_call_with_execution_context,
 };
 use crate::{
-    ExecResponse, PluginMessage, PromptContribution, RuntimeServices, RuntimeSessionHost,
-    SandboxMessage, SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider,
+    PluginMessage, PromptContribution, RuntimeServices, RuntimeSessionHost, SandboxMessage,
+    SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider,
 };
-
-const REPL_SNAPSHOT_VERSION: u32 = 3;
-
-type RlmToolTaskOutput = Vec<(ToolCallRecord, Vec<ToolImage>)>;
-type RlmToolTaskHandle = tokio::task::JoinHandle<RlmToolTaskOutput>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ToolSurfaceCacheKey {
@@ -34,7 +27,6 @@ struct ToolSurfaceCacheKey {
 #[derive(Debug, Default)]
 struct ToolSurfaceDerived {
     catalog: OnceLock<Arc<Vec<serde_json::Value>>>,
-    rlm_tools_json: OnceLock<Arc<String>>,
 }
 
 struct ToolSurfaceArtifact {
@@ -60,14 +52,6 @@ impl ToolSurfaceHandle {
             Arc::new(crate::tools::project_tool_catalog(
                 self.0.surface.discoverable_tools_iter().cloned(),
             ))
-        }))
-    }
-
-    fn rlm_tools_json(&self) -> Arc<String> {
-        Arc::clone(self.0.derived.rlm_tools_json.get_or_init(|| {
-            Arc::new(
-                serde_json::to_string(self.catalog().as_ref()).unwrap_or_else(|_| "[]".to_string()),
-            )
         }))
     }
 }
@@ -185,42 +169,710 @@ enum AsyncToolTerminal {
     Failed(String),
 }
 
-struct AsyncToolReply {
-    success: bool,
-    value: serde_json::Value,
-    images: Vec<ToolImage>,
+#[derive(Clone, Debug)]
+pub struct ExecRequest {
+    pub code: String,
+    pub accept_finish: bool,
 }
 
-impl AsyncToolReply {
-    fn success(value: serde_json::Value) -> Self {
+#[derive(Clone, Debug)]
+pub struct ModeToolBatchItem {
+    pub id: String,
+    pub name: String,
+    pub args: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModeToolReply {
+    pub success: bool,
+    pub value: serde_json::Value,
+    pub images: Vec<ToolImage>,
+    pub record: Option<ToolCallRecord>,
+}
+
+impl ModeToolReply {
+    pub fn success(value: serde_json::Value) -> Self {
         Self {
             success: true,
             value,
             images: Vec::new(),
+            record: None,
         }
     }
 
-    fn success_with_images(value: serde_json::Value, images: Vec<ToolImage>) -> Self {
+    pub fn success_with_images(value: serde_json::Value, images: Vec<ToolImage>) -> Self {
         Self {
             success: true,
             value,
             images,
+            record: None,
         }
     }
 
-    fn error(value: serde_json::Value) -> Self {
+    pub fn error(value: serde_json::Value) -> Self {
         Self {
             success: false,
             value,
             images: Vec::new(),
+            record: None,
         }
     }
 
-    fn into_lashlang_reply(self) -> LashlangToolReply {
-        if self.success {
-            LashlangToolReply::success_with_images(self.value, self.images)
+    fn with_record(mut self, record: ToolCallRecord) -> Self {
+        self.record = Some(record);
+        self
+    }
+}
+
+#[derive(Clone)]
+pub struct ModeExecutionContext {
+    session_id: String,
+    execution_mode: crate::ExecutionMode,
+    dispatch: Arc<ToolDispatchContext>,
+    async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
+    message_tx: Option<UnboundedSender<SandboxMessage>>,
+    attachment_store: Arc<dyn crate::AttachmentStore>,
+}
+
+impl ModeExecutionContext {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn execution_mode(&self) -> &crate::ExecutionMode {
+        &self.execution_mode
+    }
+
+    pub fn attachment_store(&self) -> Arc<dyn crate::AttachmentStore> {
+        Arc::clone(&self.attachment_store)
+    }
+
+    pub async fn call_tool(
+        &self,
+        call_id: String,
+        name: String,
+        args: serde_json::Value,
+        index: usize,
+    ) -> ModeToolReply {
+        if name == "list_async_handles" {
+            let live_monitor_tasks = self.live_monitor_tasks().await;
+            return self.list_async_handles(live_monitor_tasks);
+        }
+        if name == "monitor" {
+            return self
+                .start_monitor_handle_call(call_id, args, index, self.message_tx.clone())
+                .await;
+        }
+        let mut outcome = dispatch_parallel_tool_call(
+            Arc::clone(&self.dispatch),
+            ParallelToolCallSpec {
+                index,
+                tool_name: name,
+                args,
+            },
+            self.message_tx.clone(),
+        )
+        .await;
+        outcome.record.call_id = Some(call_id);
+        let reply = if outcome.record.success {
+            ModeToolReply::success_with_images(
+                outcome.record.result.clone(),
+                outcome.images.clone(),
+            )
         } else {
-            LashlangToolReply::error(self.value)
+            ModeToolReply::error(outcome.record.result.clone())
+        };
+        reply.with_record(outcome.record)
+    }
+
+    pub async fn call_tool_batch(&self, calls: Vec<ModeToolBatchItem>) -> Vec<ModeToolReply> {
+        let mut pending = FuturesUnordered::new();
+        for (offset, call) in calls.into_iter().enumerate() {
+            let ctx = self.clone();
+            pending.push(async move {
+                let reply = ctx.call_tool(call.id, call.name, call.args, offset).await;
+                (offset, reply)
+            });
+        }
+        let mut replies = Vec::new();
+        while let Some(reply) = pending.next().await {
+            replies.push(reply);
+        }
+        replies.sort_by_key(|(offset, _)| *offset);
+        replies.into_iter().map(|(_, reply)| reply).collect()
+    }
+
+    pub async fn start_tool_call(
+        &self,
+        call_id: String,
+        name: String,
+        args: serde_json::Value,
+    ) -> ModeToolReply {
+        if name == "monitor" {
+            return self
+                .start_monitor_handle_call(call_id, args, 0, self.message_tx.clone())
+                .await;
+        }
+        self.start_async_tool_call(call_id, name, args).await
+    }
+
+    pub async fn await_tool_handle(
+        &self,
+        _call_id: String,
+        handle: serde_json::Value,
+    ) -> ModeToolReply {
+        self.await_async_tool_handle(handle).await
+    }
+
+    pub async fn cancel_tool_handle(
+        &self,
+        _call_id: String,
+        handle: serde_json::Value,
+    ) -> ModeToolReply {
+        self.cancel_async_tool_handle(handle).await
+    }
+
+    async fn live_monitor_tasks(&self) -> Vec<crate::ManagedTaskStatus> {
+        self.dispatch
+            .host
+            .list_background_tasks(&self.session_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|task| {
+                task.kind == crate::ManagedTaskKind::Monitor && !task.run_state.is_terminal()
+            })
+            .collect()
+    }
+
+    fn async_tool_handle_value(id: &str, tool_name: &str) -> serde_json::Value {
+        json!({
+            "__handle__": ASYNC_TOOL_HANDLE_KIND,
+            "id": id,
+            "tool": tool_name,
+        })
+    }
+
+    fn background_task_status_value(status: &crate::ManagedTaskStatus) -> serde_json::Value {
+        json!({
+            "task_id": status.id,
+            "label": status.label,
+            "kind": status.kind.as_str(),
+            "producer": status.producer,
+            "run_state": match status.run_state {
+                crate::ManagedRunState::Running => "running",
+                crate::ManagedRunState::Idle => "idle",
+                crate::ManagedRunState::Completed => "completed",
+                crate::ManagedRunState::Failed => "failed",
+                crate::ManagedRunState::Cancelled => "cancelled",
+            },
+        })
+    }
+
+    fn monitor_handle_identifier(task_id: &str) -> String {
+        task_id
+            .strip_prefix("monitor:")
+            .unwrap_or(task_id)
+            .to_string()
+    }
+
+    fn normalize_async_subagent_name(agent_name: &str) -> Option<String> {
+        let mut out = String::new();
+        let mut last_was_sep = false;
+        for ch in agent_name.chars().flat_map(char::to_lowercase) {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch);
+                last_was_sep = false;
+            } else if !last_was_sep && !out.is_empty() {
+                out.push('_');
+                last_was_sep = true;
+            }
+        }
+        while out.ends_with('_') {
+            out.pop();
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    fn async_tool_handle_metadata(
+        id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> AsyncToolHandleMetadata {
+        if tool_name == "spawn_agent"
+            && let Some(agent_name) = args.get("agent_name").and_then(|value| value.as_str())
+            && let Some(normalized) = Self::normalize_async_subagent_name(agent_name)
+        {
+            return AsyncToolHandleMetadata {
+                tool_name: tool_name.to_string(),
+                namespace: AsyncToolHandleNamespace::Subagent,
+                identifier: normalized,
+            };
+        }
+        AsyncToolHandleMetadata {
+            tool_name: tool_name.to_string(),
+            namespace: AsyncToolHandleNamespace::Tool,
+            identifier: id.to_string(),
+        }
+    }
+
+    fn parse_async_tool_handle(
+        handle: &serde_json::Value,
+    ) -> Result<(String, Option<String>), String> {
+        let kind = handle
+            .get("__handle__")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "Invalid async handle: missing `__handle__`".to_string())?;
+        if kind != ASYNC_TOOL_HANDLE_KIND {
+            return Err(format!("Invalid async handle kind: {kind}"));
+        }
+        let id = handle
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Invalid async handle: missing `id`".to_string())?;
+        let tool_name = handle
+            .get("tool")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        Ok((id.to_string(), tool_name))
+    }
+
+    fn async_tool_handle_entry(&self, id: &str) -> Option<AsyncToolHandleEntry> {
+        self.async_tool_handles.lock().ok()?.get(id).cloned()
+    }
+
+    fn ensure_monitor_async_handle(&self, status: &crate::ManagedTaskStatus) -> serde_json::Value {
+        let mut handles = self
+            .async_tool_handles
+            .lock()
+            .expect("async tool handle map lock");
+        handles
+            .entry(status.id.clone())
+            .or_insert_with(|| AsyncToolHandleEntry {
+                state: Arc::new(StdMutex::new(AsyncToolHandleState {
+                    join_handle: None,
+                    buffered_messages: Vec::new(),
+                    terminal: None,
+                })),
+                done_notify: Arc::new(Notify::new()),
+                progress_notify: Arc::new(Notify::new()),
+                cancellation: CancellationToken::new(),
+                metadata: AsyncToolHandleMetadata {
+                    tool_name: "monitor".to_string(),
+                    namespace: AsyncToolHandleNamespace::Monitor,
+                    identifier: Self::monitor_handle_identifier(&status.id),
+                },
+            });
+        Self::async_tool_handle_value(&status.id, "monitor")
+    }
+
+    fn flush_async_tool_messages(&self, entry: &AsyncToolHandleEntry) {
+        let Some(message_tx) = self.message_tx.as_ref() else {
+            return;
+        };
+        let pending = {
+            let mut state = entry.state.lock().expect("async tool state lock");
+            std::mem::take(&mut state.buffered_messages)
+        };
+        for message in pending {
+            let _ = message_tx.send(message);
+        }
+    }
+
+    async fn start_async_tool_call(
+        &self,
+        call_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+    ) -> ModeToolReply {
+        let handle_id = uuid::Uuid::new_v4().to_string();
+        let state = Arc::new(StdMutex::new(AsyncToolHandleState {
+            join_handle: None,
+            buffered_messages: Vec::new(),
+            terminal: None,
+        }));
+        let done_notify = Arc::new(Notify::new());
+        let progress_notify = Arc::new(Notify::new());
+        let cancellation = CancellationToken::new();
+        let entry = AsyncToolHandleEntry {
+            state: Arc::clone(&state),
+            done_notify: Arc::clone(&done_notify),
+            progress_notify: Arc::clone(&progress_notify),
+            cancellation: cancellation.clone(),
+            metadata: Self::async_tool_handle_metadata(&handle_id, &tool_name, &args),
+        };
+        self.async_tool_handles
+            .lock()
+            .expect("async tool handle map lock")
+            .insert(handle_id.clone(), entry);
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress_state = Arc::clone(&state);
+        let progress_notify_task = Arc::clone(&progress_notify);
+        tokio::spawn(async move {
+            while let Some(message) = progress_rx.recv().await {
+                {
+                    let mut guard = progress_state.lock().expect("async tool state lock");
+                    guard.buffered_messages.push(message);
+                }
+                progress_notify_task.notify_waiters();
+            }
+            progress_notify_task.notify_waiters();
+        });
+
+        let task_state = Arc::clone(&state);
+        let task_done_notify = Arc::clone(&done_notify);
+        let task_progress_notify = Arc::clone(&progress_notify);
+        let task_handle_id = handle_id.clone();
+        let task_tool_name = tool_name.clone();
+        let task_args = args.clone();
+        let dispatch = Arc::clone(&self.dispatch);
+        let join_handle = tokio::spawn(async move {
+            let tool_context = ToolExecutionContext {
+                session_id: dispatch.session_id.clone(),
+                host: Arc::clone(&dispatch.host),
+                cancellation_token: None,
+                async_task_id: None,
+            }
+            .with_async_task(task_handle_id.clone(), cancellation.clone());
+            let outcome = dispatch_tool_call_with_execution_context(
+                &dispatch,
+                task_tool_name,
+                task_args,
+                Some(&progress_tx),
+                tool_context,
+            )
+            .await;
+            drop(progress_tx);
+            let mut guard = task_state.lock().expect("async tool state lock");
+            if guard.terminal.is_none() {
+                guard.terminal = Some(AsyncToolTerminal::Completed(outcome));
+            }
+            drop(guard);
+            task_progress_notify.notify_waiters();
+            task_done_notify.notify_waiters();
+        });
+
+        state.lock().expect("async tool state lock").join_handle = Some(join_handle);
+
+        let handle_value = Self::async_tool_handle_value(&handle_id, &tool_name);
+        let record = ToolCallRecord {
+            call_id: Some(call_id),
+            tool: tool_name,
+            args,
+            result: handle_value.clone(),
+            success: true,
+            duration_ms: 0,
+        };
+        ModeToolReply::success(handle_value).with_record(record)
+    }
+
+    async fn start_monitor_handle_call(
+        &self,
+        call_id: String,
+        args: serde_json::Value,
+        tc_num: usize,
+        msg_tx: Option<UnboundedSender<SandboxMessage>>,
+    ) -> ModeToolReply {
+        let mut outcome = dispatch_parallel_tool_call(
+            Arc::clone(&self.dispatch),
+            ParallelToolCallSpec {
+                index: tc_num,
+                tool_name: "monitor".to_string(),
+                args,
+            },
+            msg_tx,
+        )
+        .await;
+        outcome.record.call_id = Some(call_id);
+
+        let reply = if outcome.record.success {
+            let task_id = outcome
+                .record
+                .result
+                .get("task_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            match task_id {
+                Some(task_id) => {
+                    let status = crate::ManagedTaskStatus {
+                        id: task_id.clone(),
+                        label: outcome
+                            .record
+                            .result
+                            .get("description")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("monitor")
+                            .to_string(),
+                        kind: crate::ManagedTaskKind::Monitor,
+                        producer: "monitor".to_string(),
+                        run_state: crate::ManagedRunState::Running,
+                        started_at: std::time::SystemTime::now(),
+                    };
+                    ModeToolReply::success(self.ensure_monitor_async_handle(&status))
+                }
+                None => ModeToolReply::error(json!("monitor started but did not return a task_id")),
+            }
+        } else {
+            ModeToolReply::error(outcome.record.result.clone())
+        };
+
+        ModeToolReply {
+            record: Some(outcome.record),
+            images: outcome.images,
+            ..reply
+        }
+    }
+
+    fn list_async_handles(
+        &self,
+        live_monitor_tasks: Vec<crate::ManagedTaskStatus>,
+    ) -> ModeToolReply {
+        for task in &live_monitor_tasks {
+            self.ensure_monitor_async_handle(task);
+        }
+
+        let entries = self
+            .async_tool_handles
+            .lock()
+            .expect("async tool handle map lock")
+            .iter()
+            .filter_map(|(id, entry)| {
+                if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
+                    return None;
+                }
+                let is_terminal = entry
+                    .state
+                    .lock()
+                    .expect("async tool state lock")
+                    .terminal
+                    .is_some();
+                (!is_terminal).then(|| (id.clone(), entry.metadata.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        let mut monitor = serde_json::Map::new();
+        let mut subagent = serde_json::Map::new();
+        let mut tool = serde_json::Map::new();
+        for (id, metadata) in entries {
+            let value = Self::async_tool_handle_value(&id, &metadata.tool_name);
+            match metadata.namespace {
+                AsyncToolHandleNamespace::Monitor => {
+                    monitor.insert(metadata.identifier, value);
+                }
+                AsyncToolHandleNamespace::Subagent => {
+                    subagent.insert(metadata.identifier, value);
+                }
+                AsyncToolHandleNamespace::Tool => {
+                    tool.insert(metadata.identifier, value);
+                }
+            }
+        }
+        for task in live_monitor_tasks {
+            monitor.insert(
+                Self::monitor_handle_identifier(&task.id),
+                Self::async_tool_handle_value(&task.id, "monitor"),
+            );
+        }
+        ModeToolReply::success(json!({
+            "monitor": monitor,
+            "subagent": subagent,
+            "tool": tool,
+        }))
+    }
+
+    async fn await_async_tool_handle(&self, handle: serde_json::Value) -> ModeToolReply {
+        let (handle_id, hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
+            Ok(parsed) => parsed,
+            Err(err) => return ModeToolReply::error(json!(err)),
+        };
+        let Some(entry) = self.async_tool_handle_entry(&handle_id) else {
+            if hinted_tool_name.as_deref() == Some("monitor") || handle_id.starts_with("monitor:") {
+                return self.await_monitor_handle(&handle_id).await;
+            }
+            return ModeToolReply::error(json!(format!("Unknown async handle: {handle_id}")));
+        };
+        if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
+            return self.await_monitor_handle(&handle_id).await;
+        }
+
+        loop {
+            self.flush_async_tool_messages(&entry);
+            let is_done = {
+                let guard = entry.state.lock().expect("async tool state lock");
+                guard.terminal.is_some()
+            };
+            if is_done {
+                break;
+            }
+            tokio::select! {
+                _ = entry.done_notify.notified() => {}
+                _ = entry.progress_notify.notified() => {}
+            }
+        }
+        self.flush_async_tool_messages(&entry);
+
+        let join_handle = {
+            let mut guard = entry.state.lock().expect("async tool state lock");
+            guard.join_handle.take()
+        };
+        if let Some(handle) = join_handle
+            && let Err(err) = handle.await
+            && !err.is_cancelled()
+        {
+            let mut guard = entry.state.lock().expect("async tool state lock");
+            if guard.terminal.is_none() {
+                guard.terminal = Some(AsyncToolTerminal::Failed(format!(
+                    "async tool task failed: {err}"
+                )));
+            }
+        }
+
+        let terminal = {
+            let guard = entry.state.lock().expect("async tool state lock");
+            guard.terminal.clone()
+        };
+
+        match terminal {
+            Some(AsyncToolTerminal::Completed(outcome)) => {
+                if outcome.record.success {
+                    ModeToolReply::success_with_images(outcome.record.result, outcome.images)
+                } else {
+                    ModeToolReply::error(outcome.record.result)
+                }
+            }
+            Some(AsyncToolTerminal::Cancelled) => {
+                ModeToolReply::error(json!("async task was cancelled"))
+            }
+            Some(AsyncToolTerminal::Failed(err)) => ModeToolReply::error(json!(err)),
+            None => ModeToolReply::error(json!("async task did not produce a result")),
+        }
+    }
+
+    async fn await_monitor_handle(&self, task_id: &str) -> ModeToolReply {
+        loop {
+            let tasks = match self
+                .dispatch
+                .host
+                .list_background_tasks(&self.session_id)
+                .await
+            {
+                Ok(tasks) => tasks,
+                Err(err) => return ModeToolReply::error(json!(err.to_string())),
+            };
+            let Some(status) = tasks.into_iter().find(|task| task.id == task_id) else {
+                return ModeToolReply::error(json!(format!("Unknown monitor handle: {task_id}")));
+            };
+            if status.run_state.is_terminal() {
+                if let Some(entry) = self
+                    .async_tool_handles
+                    .lock()
+                    .ok()
+                    .and_then(|handles| handles.get(task_id).cloned())
+                {
+                    let mut guard = entry.state.lock().expect("async tool state lock");
+                    if guard.terminal.is_none() {
+                        guard.terminal = Some(match status.run_state {
+                            crate::ManagedRunState::Cancelled => AsyncToolTerminal::Cancelled,
+                            crate::ManagedRunState::Failed => {
+                                AsyncToolTerminal::Failed("monitor failed".to_string())
+                            }
+                            _ => AsyncToolTerminal::Completed(ToolDispatchOutcome {
+                                record: ToolCallRecord {
+                                    call_id: None,
+                                    tool: "monitor".into(),
+                                    args: json!({}),
+                                    result: Self::background_task_status_value(&status),
+                                    success: true,
+                                    duration_ms: 0,
+                                },
+                                images: Vec::new(),
+                            }),
+                        });
+                    }
+                }
+                let value = Self::background_task_status_value(&status);
+                return match status.run_state {
+                    crate::ManagedRunState::Failed | crate::ManagedRunState::Cancelled => {
+                        ModeToolReply::error(value)
+                    }
+                    _ => ModeToolReply::success(value),
+                };
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn cancel_async_tool_handle(&self, handle: serde_json::Value) -> ModeToolReply {
+        let (handle_id, hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
+            Ok(parsed) => parsed,
+            Err(err) => return ModeToolReply::error(json!(err)),
+        };
+        let Some(entry) = self.async_tool_handle_entry(&handle_id) else {
+            if hinted_tool_name.as_deref() == Some("monitor") || handle_id.starts_with("monitor:") {
+                return self.cancel_monitor_handle(&handle_id).await;
+            }
+            return ModeToolReply::error(json!(format!("Unknown async handle: {handle_id}")));
+        };
+        if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
+            return self.cancel_monitor_handle(&handle_id).await;
+        }
+
+        entry.cancellation.cancel();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            entry.done_notify.notified(),
+        )
+        .await;
+        let join_handle = {
+            let mut guard = entry.state.lock().expect("async tool state lock");
+            if guard.terminal.is_none() {
+                guard.join_handle.take()
+            } else {
+                None
+            }
+        };
+        if let Some(handle) = join_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        {
+            let mut guard = entry.state.lock().expect("async tool state lock");
+            if guard.terminal.is_none() {
+                guard.terminal = Some(AsyncToolTerminal::Cancelled);
+            }
+        }
+        entry.progress_notify.notify_waiters();
+        entry.done_notify.notify_waiters();
+        self.flush_async_tool_messages(&entry);
+
+        ModeToolReply::success(serde_json::Value::Null)
+    }
+
+    async fn cancel_monitor_handle(&self, task_id: &str) -> ModeToolReply {
+        match self
+            .dispatch
+            .host
+            .cancel_background_task(&self.session_id, task_id)
+            .await
+        {
+            Ok(status) => {
+                if let Some(entry) = self
+                    .async_tool_handles
+                    .lock()
+                    .ok()
+                    .and_then(|handles| handles.get(task_id).cloned())
+                {
+                    let mut guard = entry.state.lock().expect("async tool state lock");
+                    guard.terminal = Some(AsyncToolTerminal::Cancelled);
+                    entry.progress_notify.notify_waiters();
+                    entry.done_notify.notify_waiters();
+                }
+                ModeToolReply::success(Self::background_task_status_value(&status))
+            }
+            Err(err) => ModeToolReply::error(json!(err.to_string())),
         }
     }
 }
@@ -228,18 +880,12 @@ impl AsyncToolReply {
 pub struct Session {
     session_id: String,
     execution_mode: crate::ExecutionMode,
-    rlm_runtime: Option<LashlangRuntime>,
-    last_repl_tools_json: Option<Arc<String>>,
     services: RuntimeServices,
     include_base_tools: bool,
     context_surface_revision: u64,
     context_tools: Vec<Arc<dyn ToolProvider>>,
     context_prompt_contributions: Vec<PromptContribution>,
-    tool_calls: Vec<ToolCallRecord>,
-    tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
-    scratch_dir: tempfile::TempDir,
-    rlm_observe_projection_config: crate::ToolResultProjectionPluginConfig,
     tool_surface_cache: std::sync::Mutex<Vec<(ToolSurfaceCacheKey, ToolSurfaceHandle)>>,
     /// Memoizes the rendered system prompt across turns. Most consecutive
     /// turns reuse the same template + context surface, so the cache hits
@@ -247,14 +893,6 @@ pub struct Session {
     /// `lash_sansio::PromptTemplate::render`.
     prompt_cache: Arc<lash_sansio::PromptCache>,
     async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
-    /// Tracks whether the lashlang VM (and the scratch dir it owns) has
-    /// changed since the last successful `snapshot_execution_state` call.
-    /// Bumped to `true` whenever a `LashlangRequest` that can mutate state
-    /// is sent (Exec, Reset, PatchGlobals, Reconfigure, Init, Restore).
-    /// Callers gate the per-iteration snapshot on
-    /// [`Session::execution_state_dirty`] so iterations that don't run any
-    /// lashlang code skip the round-trip + JSON serialization.
-    lashlang_state_dirty: bool,
 }
 
 impl Session {
@@ -263,27 +901,18 @@ impl Session {
         session_id: &str,
         execution_mode: crate::ExecutionMode,
     ) -> Result<Self, SessionError> {
-        let scratch_dir = tempfile::TempDir::new()?;
-
         let mut session = Self {
             session_id: session_id.to_string(),
             execution_mode,
-            rlm_runtime: None,
-            last_repl_tools_json: None,
             services,
             include_base_tools: true,
             context_surface_revision: 0,
             context_tools: Vec::new(),
             context_prompt_contributions: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_images: Vec::new(),
             message_tx: None,
-            scratch_dir,
-            rlm_observe_projection_config: crate::ToolResultProjectionPluginConfig::default(),
             tool_surface_cache: std::sync::Mutex::new(Vec::new()),
             prompt_cache: Arc::new(lash_sansio::PromptCache::new()),
             async_tool_handles: Arc::new(StdMutex::new(HashMap::new())),
-            lashlang_state_dirty: true,
         };
 
         let mode_session = Arc::clone(session.plugins().mode_session());
@@ -297,21 +926,8 @@ impl Session {
         Ok(session)
     }
 
-    fn runtime(&self) -> Result<&LashlangRuntime, SessionError> {
-        self.rlm_runtime
-            .as_ref()
-            .ok_or(SessionError::RlmUnavailable)
-    }
-
-    pub fn supports_repl(&self) -> bool {
-        self.rlm_runtime.is_some()
-    }
-
-    pub(crate) fn set_execution_output_projection(
-        &mut self,
-        config: crate::ToolResultProjectionPluginConfig,
-    ) {
-        self.rlm_observe_projection_config = config;
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     pub(crate) fn mode_extra_prompt_contributions(
@@ -322,20 +938,6 @@ impl Session {
         // plugins (`lash-mode-standard`, `lash-mode-rlm`) via their
         // `reg.prompt().contribute(...)` hooks. Nothing to add here.
         Vec::new()
-    }
-
-    pub(crate) async fn start_lashlang_runtime(
-        &mut self,
-        session_id: &str,
-    ) -> Result<(), SessionError> {
-        if self.rlm_runtime.is_some() {
-            return Ok(());
-        }
-        let runtime = LashlangRuntime::start_with_attachment_store(Arc::clone(
-            &self.services.attachment_store,
-        ))?;
-        self.rlm_runtime = Some(runtime);
-        self.initialize_tool_surface(session_id).await
     }
 
     pub fn tools(&self) -> Arc<dyn ToolProvider> {
@@ -510,623 +1112,30 @@ impl Session {
         self.shared_tool_catalog(session_id, mode).as_ref().clone()
     }
 
-    fn rlm_tools_json(&self, session_id: &str) -> Arc<String> {
-        let entry = self.tool_surface_cache_entry(session_id, self.execution_mode.clone());
-        let catalog = entry.catalog();
-        tracing::debug!(
-            session_id,
-            tool_count = catalog.len(),
-            tool_names = ?catalog
-                .iter()
-                .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
-                .collect::<Vec<_>>(),
-            "serializing RLM tool catalog"
-        );
-        entry.rlm_tools_json()
-    }
-
-    fn async_tool_handle_value(id: &str, tool_name: &str) -> serde_json::Value {
-        json!({
-            "__handle__": ASYNC_TOOL_HANDLE_KIND,
-            "id": id,
-            "tool": tool_name,
-        })
-    }
-
-    fn background_task_status_value(status: &crate::ManagedTaskStatus) -> serde_json::Value {
-        json!({
-            "task_id": status.id,
-            "label": status.label,
-            "kind": status.kind.as_str(),
-            "producer": status.producer,
-            "run_state": match status.run_state {
-                crate::ManagedRunState::Running => "running",
-                crate::ManagedRunState::Idle => "idle",
-                crate::ManagedRunState::Completed => "completed",
-                crate::ManagedRunState::Failed => "failed",
-                crate::ManagedRunState::Cancelled => "cancelled",
-            },
-        })
-    }
-
-    fn monitor_handle_identifier(task_id: &str) -> String {
-        task_id
-            .strip_prefix("monitor:")
-            .unwrap_or(task_id)
-            .to_string()
-    }
-
-    fn async_tool_handle_metadata(
-        id: &str,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> AsyncToolHandleMetadata {
-        if tool_name == "spawn_agent"
-            && let Some(agent_name) = args.get("agent_name").and_then(|value| value.as_str())
-            && let Some(normalized) = Self::normalize_async_subagent_name(agent_name)
-        {
-            return AsyncToolHandleMetadata {
-                tool_name: tool_name.to_string(),
-                namespace: AsyncToolHandleNamespace::Subagent,
-                identifier: normalized,
-            };
-        }
-        AsyncToolHandleMetadata {
-            tool_name: tool_name.to_string(),
-            namespace: AsyncToolHandleNamespace::Tool,
-            identifier: id.to_string(),
-        }
-    }
-
-    fn normalize_async_subagent_name(agent_name: &str) -> Option<String> {
-        let mut out = String::new();
-        let mut last_was_sep = false;
-        for ch in agent_name.chars().flat_map(char::to_lowercase) {
-            if ch.is_ascii_alphanumeric() {
-                out.push(ch);
-                last_was_sep = false;
-            } else if !last_was_sep && !out.is_empty() {
-                out.push('_');
-                last_was_sep = true;
-            }
-        }
-        while out.ends_with('_') {
-            out.pop();
-        }
-        (!out.is_empty()).then_some(out)
-    }
-
-    fn parse_async_tool_handle(
-        handle: &serde_json::Value,
-    ) -> Result<(String, Option<String>), String> {
-        let kind = handle
-            .get("__handle__")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "Invalid async handle: missing `__handle__`".to_string())?;
-        if kind != ASYNC_TOOL_HANDLE_KIND {
-            return Err(format!("Invalid async handle kind: {kind}"));
-        }
-        let id = handle
-            .get("id")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "Invalid async handle: missing `id`".to_string())?;
-        let tool_name = handle
-            .get("tool")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        Ok((id.to_string(), tool_name))
-    }
-
-    fn async_tool_handle_entry(&self, id: &str) -> Option<AsyncToolHandleEntry> {
-        self.async_tool_handles.lock().ok()?.get(id).cloned()
-    }
-
-    fn ensure_monitor_async_handle(&self, status: &crate::ManagedTaskStatus) -> serde_json::Value {
-        let mut handles = self
-            .async_tool_handles
-            .lock()
-            .expect("async tool handle map lock");
-        handles
-            .entry(status.id.clone())
-            .or_insert_with(|| AsyncToolHandleEntry {
-                state: Arc::new(StdMutex::new(AsyncToolHandleState {
-                    join_handle: None,
-                    buffered_messages: Vec::new(),
-                    terminal: None,
-                })),
-                done_notify: Arc::new(Notify::new()),
-                progress_notify: Arc::new(Notify::new()),
-                cancellation: CancellationToken::new(),
-                metadata: AsyncToolHandleMetadata {
-                    tool_name: "monitor".to_string(),
-                    namespace: AsyncToolHandleNamespace::Monitor,
-                    identifier: Self::monitor_handle_identifier(&status.id),
-                },
-            });
-        Self::async_tool_handle_value(&status.id, "monitor")
-    }
-
-    fn flush_async_tool_messages(&self, entry: &AsyncToolHandleEntry) {
-        let Some(message_tx) = self.message_tx.as_ref() else {
-            return;
-        };
-        let pending = {
-            let mut state = entry.state.lock().expect("async tool state lock");
-            std::mem::take(&mut state.buffered_messages)
-        };
-        for message in pending {
-            let _ = message_tx.send(message);
-        }
-    }
-
-    async fn start_async_tool_call(
-        &mut self,
-        call_id: String,
-        dispatch: Arc<ToolDispatchContext>,
-        tool_name: String,
-        args: serde_json::Value,
-    ) -> LashlangToolReply {
-        let handle_id = uuid::Uuid::new_v4().to_string();
-        let state = Arc::new(StdMutex::new(AsyncToolHandleState {
-            join_handle: None,
-            buffered_messages: Vec::new(),
-            terminal: None,
-        }));
-        let done_notify = Arc::new(Notify::new());
-        let progress_notify = Arc::new(Notify::new());
-        let cancellation = CancellationToken::new();
-        let entry = AsyncToolHandleEntry {
-            state: Arc::clone(&state),
-            done_notify: Arc::clone(&done_notify),
-            progress_notify: Arc::clone(&progress_notify),
-            cancellation: cancellation.clone(),
-            metadata: Self::async_tool_handle_metadata(&handle_id, &tool_name, &args),
-        };
-        self.async_tool_handles
-            .lock()
-            .expect("async tool handle map lock")
-            .insert(handle_id.clone(), entry);
-
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-        let progress_state = Arc::clone(&state);
-        let progress_notify_task = Arc::clone(&progress_notify);
-        tokio::spawn(async move {
-            while let Some(message) = progress_rx.recv().await {
-                {
-                    let mut guard = progress_state.lock().expect("async tool state lock");
-                    guard.buffered_messages.push(message);
-                }
-                progress_notify_task.notify_waiters();
-            }
-            progress_notify_task.notify_waiters();
-        });
-
-        let task_state = Arc::clone(&state);
-        let task_done_notify = Arc::clone(&done_notify);
-        let task_progress_notify = Arc::clone(&progress_notify);
-        let task_handle_id = handle_id.clone();
-        let task_tool_name = tool_name.clone();
-        let task_args = args.clone();
-        let join_handle = tokio::spawn(async move {
-            let tool_context = ToolExecutionContext {
-                session_id: dispatch.session_id.clone(),
-                host: Arc::clone(&dispatch.host),
-                cancellation_token: None,
-                async_task_id: None,
-            }
-            .with_async_task(task_handle_id.clone(), cancellation.clone());
-            let outcome = dispatch_tool_call_with_execution_context(
-                &dispatch,
-                task_tool_name,
-                task_args,
-                Some(&progress_tx),
-                tool_context,
-            )
-            .await;
-            drop(progress_tx);
-            let mut guard = task_state.lock().expect("async tool state lock");
-            if guard.terminal.is_none() {
-                guard.terminal = Some(AsyncToolTerminal::Completed(outcome));
-            }
-            drop(guard);
-            task_progress_notify.notify_waiters();
-            task_done_notify.notify_waiters();
-        });
-
-        state.lock().expect("async tool state lock").join_handle = Some(join_handle);
-
-        let handle_value = Self::async_tool_handle_value(&handle_id, &tool_name);
-        self.tool_calls.push(ToolCallRecord {
-            call_id: Some(call_id),
-            tool: tool_name,
-            args,
-            result: handle_value.clone(),
-            success: true,
-            duration_ms: 0,
-        });
-        AsyncToolReply::success(handle_value).into_lashlang_reply()
-    }
-
-    async fn start_monitor_handle_call(
-        &mut self,
-        call_id: String,
-        dispatch: Arc<ToolDispatchContext>,
-        args: serde_json::Value,
-        tc_num: usize,
-        msg_tx: Option<UnboundedSender<SandboxMessage>>,
-    ) -> LashlangToolReply {
-        let mut outcome = dispatch_parallel_tool_call(
-            Arc::clone(&dispatch),
-            ParallelToolCallSpec {
-                index: tc_num,
-                tool_name: "monitor".to_string(),
-                args,
-            },
-            msg_tx,
-        )
-        .await;
-        outcome.record.call_id = Some(call_id);
-
-        let reply = if outcome.record.success {
-            let task_id = outcome
-                .record
-                .result
-                .get("task_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
-            match task_id {
-                Some(task_id) => {
-                    let status = crate::ManagedTaskStatus {
-                        id: task_id.clone(),
-                        label: outcome
-                            .record
-                            .result
-                            .get("description")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("monitor")
-                            .to_string(),
-                        kind: crate::ManagedTaskKind::Monitor,
-                        producer: "monitor".to_string(),
-                        run_state: crate::ManagedRunState::Running,
-                        started_at: std::time::SystemTime::now(),
-                    };
-                    let handle_value = self.ensure_monitor_async_handle(&status);
-                    AsyncToolReply::success(handle_value).into_lashlang_reply()
-                }
-                None => {
-                    LashlangToolReply::error(json!("monitor started but did not return a task_id"))
-                }
-            }
-        } else {
-            LashlangToolReply::error(outcome.record.result.clone())
-        };
-
-        self.tool_images.extend(outcome.images.clone());
-        self.tool_calls.push(outcome.record);
-        reply
-    }
-
-    fn list_async_handles(
+    pub(crate) fn mode_execution_context(
         &self,
-        live_monitor_tasks: Vec<crate::ManagedTaskStatus>,
-    ) -> LashlangToolReply {
-        for task in &live_monitor_tasks {
-            self.ensure_monitor_async_handle(task);
+        session_id: &str,
+        host: Arc<dyn RuntimeSessionHost>,
+        event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> ModeExecutionContext {
+        let dispatch = Arc::new(ToolDispatchContext {
+            plugins: Arc::clone(self.plugins()),
+            tools: self.tools(),
+            surface: self.tool_surface(session_id, self.execution_mode.clone()),
+            host,
+            session_id: session_id.to_string(),
+            event_tx,
+            turn_injection_bridge: self.turn_injection_bridge().clone(),
+            attachment_store: Arc::clone(&self.services.attachment_store),
+        });
+        ModeExecutionContext {
+            session_id: session_id.to_string(),
+            execution_mode: self.execution_mode.clone(),
+            dispatch,
+            async_tool_handles: Arc::clone(&self.async_tool_handles),
+            message_tx: self.message_tx.clone(),
+            attachment_store: Arc::clone(&self.services.attachment_store),
         }
-
-        let entries = self
-            .async_tool_handles
-            .lock()
-            .expect("async tool handle map lock")
-            .iter()
-            .filter_map(|(id, entry)| {
-                if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
-                    return None;
-                }
-                let is_terminal = entry
-                    .state
-                    .lock()
-                    .expect("async tool state lock")
-                    .terminal
-                    .is_some();
-                (!is_terminal).then(|| (id.clone(), entry.metadata.clone()))
-            })
-            .collect::<Vec<_>>();
-
-        let mut monitor = serde_json::Map::new();
-        let mut subagent = serde_json::Map::new();
-        let mut tool = serde_json::Map::new();
-        for (id, metadata) in entries {
-            let value = Self::async_tool_handle_value(&id, &metadata.tool_name);
-            match metadata.namespace {
-                AsyncToolHandleNamespace::Monitor => {
-                    monitor.insert(metadata.identifier, value);
-                }
-                AsyncToolHandleNamespace::Subagent => {
-                    subagent.insert(metadata.identifier, value);
-                }
-                AsyncToolHandleNamespace::Tool => {
-                    tool.insert(metadata.identifier, value);
-                }
-            }
-        }
-        for task in live_monitor_tasks {
-            monitor.insert(
-                Self::monitor_handle_identifier(&task.id),
-                Self::async_tool_handle_value(&task.id, "monitor"),
-            );
-        }
-        AsyncToolReply::success(json!({
-            "monitor": monitor,
-            "subagent": subagent,
-            "tool": tool,
-        }))
-        .into_lashlang_reply()
-    }
-
-    async fn await_async_tool_handle(
-        &mut self,
-        _call_id: String,
-        context: &ToolDispatchContext,
-        handle: serde_json::Value,
-    ) -> LashlangToolReply {
-        let (handle_id, hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
-            Ok(parsed) => parsed,
-            Err(err) => return AsyncToolReply::error(json!(err)).into_lashlang_reply(),
-        };
-        let Some(entry) = self.async_tool_handle_entry(&handle_id) else {
-            if hinted_tool_name.as_deref() == Some("monitor") || handle_id.starts_with("monitor:") {
-                return Self::await_monitor_handle(
-                    Arc::clone(&self.async_tool_handles),
-                    context,
-                    &handle_id,
-                )
-                .await;
-            }
-            return AsyncToolReply::error(json!(format!("Unknown async handle: {handle_id}")))
-                .into_lashlang_reply();
-        };
-        if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
-            return Self::await_monitor_handle(
-                Arc::clone(&self.async_tool_handles),
-                context,
-                &handle_id,
-            )
-            .await;
-        }
-
-        loop {
-            self.flush_async_tool_messages(&entry);
-            let is_done = {
-                let guard = entry.state.lock().expect("async tool state lock");
-                guard.terminal.is_some()
-            };
-            if is_done {
-                break;
-            }
-            tokio::select! {
-                _ = entry.done_notify.notified() => {}
-                _ = entry.progress_notify.notified() => {}
-            }
-        }
-        self.flush_async_tool_messages(&entry);
-
-        let join_handle = {
-            let mut guard = entry.state.lock().expect("async tool state lock");
-            guard.join_handle.take()
-        };
-        if let Some(handle) = join_handle
-            && let Err(err) = handle.await
-            && !err.is_cancelled()
-        {
-            let mut guard = entry.state.lock().expect("async tool state lock");
-            if guard.terminal.is_none() {
-                guard.terminal = Some(AsyncToolTerminal::Failed(format!(
-                    "async tool task failed: {err}"
-                )));
-            }
-        }
-
-        let terminal = {
-            let guard = entry.state.lock().expect("async tool state lock");
-            guard.terminal.clone()
-        };
-
-        match terminal {
-            Some(AsyncToolTerminal::Completed(outcome)) => {
-                self.tool_images.extend(outcome.images.clone());
-                if outcome.record.success {
-                    AsyncToolReply::success_with_images(outcome.record.result, outcome.images)
-                        .into_lashlang_reply()
-                } else {
-                    AsyncToolReply::error(outcome.record.result).into_lashlang_reply()
-                }
-            }
-            Some(AsyncToolTerminal::Cancelled) => {
-                AsyncToolReply::error(json!("async task was cancelled")).into_lashlang_reply()
-            }
-            Some(AsyncToolTerminal::Failed(err)) => {
-                AsyncToolReply::error(json!(err)).into_lashlang_reply()
-            }
-            None => AsyncToolReply::error(json!("async task did not produce a result"))
-                .into_lashlang_reply(),
-        }
-    }
-
-    async fn await_monitor_handle(
-        async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
-        context: &ToolDispatchContext,
-        task_id: &str,
-    ) -> LashlangToolReply {
-        loop {
-            let tasks = match context
-                .host
-                .list_background_tasks(&context.session_id)
-                .await
-            {
-                Ok(tasks) => tasks,
-                Err(err) => {
-                    return AsyncToolReply::error(json!(err.to_string())).into_lashlang_reply();
-                }
-            };
-            let Some(status) = tasks.into_iter().find(|task| task.id == task_id) else {
-                return AsyncToolReply::error(json!(format!("Unknown monitor handle: {task_id}")))
-                    .into_lashlang_reply();
-            };
-            if status.run_state.is_terminal() {
-                if let Some(entry) = async_tool_handles
-                    .lock()
-                    .ok()
-                    .and_then(|handles| handles.get(task_id).cloned())
-                {
-                    let mut guard = entry.state.lock().expect("async tool state lock");
-                    if guard.terminal.is_none() {
-                        guard.terminal = Some(match status.run_state {
-                            crate::ManagedRunState::Cancelled => AsyncToolTerminal::Cancelled,
-                            crate::ManagedRunState::Failed => {
-                                AsyncToolTerminal::Failed("monitor failed".to_string())
-                            }
-                            _ => AsyncToolTerminal::Completed(ToolDispatchOutcome {
-                                record: ToolCallRecord {
-                                    call_id: None,
-                                    tool: "monitor".into(),
-                                    args: json!({}),
-                                    result: Self::background_task_status_value(&status),
-                                    success: true,
-                                    duration_ms: 0,
-                                },
-                                images: Vec::new(),
-                            }),
-                        });
-                    }
-                }
-                let value = Self::background_task_status_value(&status);
-                return match status.run_state {
-                    crate::ManagedRunState::Failed | crate::ManagedRunState::Cancelled => {
-                        AsyncToolReply::error(value).into_lashlang_reply()
-                    }
-                    _ => AsyncToolReply::success(value).into_lashlang_reply(),
-                };
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-    }
-
-    async fn cancel_async_tool_handle(
-        &mut self,
-        _call_id: String,
-        context: &ToolDispatchContext,
-        handle: serde_json::Value,
-    ) -> LashlangToolReply {
-        let (handle_id, hinted_tool_name) = match Self::parse_async_tool_handle(&handle) {
-            Ok(parsed) => parsed,
-            Err(err) => return AsyncToolReply::error(json!(err)).into_lashlang_reply(),
-        };
-        let Some(entry) = self.async_tool_handle_entry(&handle_id) else {
-            if hinted_tool_name.as_deref() == Some("monitor") || handle_id.starts_with("monitor:") {
-                return Self::cancel_monitor_handle(
-                    Arc::clone(&self.async_tool_handles),
-                    context,
-                    &handle_id,
-                )
-                .await;
-            }
-            return AsyncToolReply::error(json!(format!("Unknown async handle: {handle_id}")))
-                .into_lashlang_reply();
-        };
-        if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
-            return Self::cancel_monitor_handle(
-                Arc::clone(&self.async_tool_handles),
-                context,
-                &handle_id,
-            )
-            .await;
-        }
-
-        entry.cancellation.cancel();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            entry.done_notify.notified(),
-        )
-        .await;
-        let join_handle = {
-            let mut guard = entry.state.lock().expect("async tool state lock");
-            if guard.terminal.is_none() {
-                guard.join_handle.take()
-            } else {
-                None
-            }
-        };
-        if let Some(handle) = join_handle {
-            handle.abort();
-            let _ = handle.await;
-        }
-
-        {
-            let mut guard = entry.state.lock().expect("async tool state lock");
-            if guard.terminal.is_none() {
-                guard.terminal = Some(AsyncToolTerminal::Cancelled);
-            }
-        }
-        entry.progress_notify.notify_waiters();
-        entry.done_notify.notify_waiters();
-        self.flush_async_tool_messages(&entry);
-
-        AsyncToolReply::success(serde_json::Value::Null).into_lashlang_reply()
-    }
-
-    async fn cancel_monitor_handle(
-        async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
-        context: &ToolDispatchContext,
-        task_id: &str,
-    ) -> LashlangToolReply {
-        match context
-            .host
-            .cancel_background_task(&context.session_id, task_id)
-            .await
-        {
-            Ok(status) => {
-                if let Some(entry) = async_tool_handles
-                    .lock()
-                    .ok()
-                    .and_then(|handles| handles.get(task_id).cloned())
-                {
-                    let mut guard = entry.state.lock().expect("async tool state lock");
-                    guard.terminal = Some(AsyncToolTerminal::Cancelled);
-                    entry.progress_notify.notify_waiters();
-                    entry.done_notify.notify_waiters();
-                }
-                AsyncToolReply::success(Self::background_task_status_value(&status))
-                    .into_lashlang_reply()
-            }
-            Err(err) => AsyncToolReply::error(json!(err.to_string())).into_lashlang_reply(),
-        }
-    }
-
-    async fn cancel_all_async_tool_handles(&self) {
-        let entries = self
-            .async_tool_handles
-            .lock()
-            .expect("async tool handle map lock")
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for entry in entries {
-            entry.cancellation.cancel();
-            let join_handle = {
-                let mut guard = entry.state.lock().expect("async tool state lock");
-                guard.join_handle.take()
-            };
-            if let Some(handle) = join_handle {
-                handle.abort();
-                let _ = handle.await;
-            }
-        }
-        self.async_tool_handles
-            .lock()
-            .expect("async tool handle map lock")
-            .clear();
     }
 
     pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
@@ -1147,375 +1156,11 @@ impl Session {
         self.message_tx = None;
     }
 
-    /// Execute code in the persistent lashlang RLM.
-    ///
-    /// `accept_finish` controls how `lashlang::ExecutionOutcome::Finished`
-    /// is treated: when true, the captured value flows back through
-    /// `ExecResponse::terminal_finish`; when false (today's chat-style
-    /// RLM contract), it surfaces as an error telling the model to
-    /// terminate via prose instead.
-    pub async fn run_code(
-        &mut self,
-        session_id: &str,
-        host: Arc<dyn RuntimeSessionHost>,
-        event_tx: &tokio::sync::mpsc::Sender<SessionEvent>,
-        code: &str,
-        accept_finish: bool,
-    ) -> Result<ExecResponse, SessionError> {
-        self.tool_calls.clear();
-        self.tool_images.clear();
-        let start = std::time::Instant::now();
-        let id = uuid::Uuid::new_v4().to_string();
-
-        // Strip markdown separator lines (all dashes + whitespace) the LLM
-        // sometimes emits between code blocks.
-        let clean_code: String = code
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                trimmed.is_empty()
-                    || trimmed
-                        .trim_matches('-')
-                        .chars()
-                        .any(|c| !c.is_whitespace())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        self.runtime()?.send(LashlangRequest::Exec {
-            id: id.clone(),
-            code: clean_code,
-            accept_finish,
-        })?;
-        self.lashlang_state_dirty = true;
-
-        // Read messages until we get exec_result.
-        // Tool calls are spawned as concurrent tokio tasks so RLM parallel branches
-        // can dispatch multiple tools at the same time.
-        let dispatch = Arc::new(ToolDispatchContext {
-            plugins: Arc::clone(self.plugins()),
-            tools: self.tools(),
-            surface: self.tool_surface(session_id, self.execution_mode.clone()),
-            host,
-            session_id: session_id.to_string(),
-            event_tx: event_tx.clone(),
-            turn_injection_bridge: self.turn_injection_bridge().clone(),
-            attachment_store: Arc::clone(&self.services.attachment_store),
-        });
-        let mut tool_handles: Vec<RlmToolTaskHandle> = Vec::new();
-        let mut tool_call_count = 0usize;
-
-        // Use block_in_place so tokio knows this thread is blocked and can
-        // schedule drain tasks (prompt forwarding, message forwarding) on other threads.
-        loop {
-            let runtime = self.runtime()?;
-            let response = tokio::task::block_in_place(|| runtime.recv())
-                .map_err(|_| SessionError::RuntimeExited)?;
-            match response {
-                LashlangResponse::ToolCall {
-                    id: call_id,
-                    name,
-                    args,
-                    result_tx,
-                } => {
-                    if name == "list_async_handles" {
-                        let live_monitor_tasks = dispatch
-                            .host
-                            .list_background_tasks(&dispatch.session_id)
-                            .await
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|task| {
-                                task.kind == crate::ManagedTaskKind::Monitor
-                                    && !task.run_state.is_terminal()
-                            })
-                            .collect::<Vec<_>>();
-                        let reply = self.list_async_handles(live_monitor_tasks);
-                        let _ = result_tx.send(reply);
-                        continue;
-                    }
-                    if name == "monitor" {
-                        let tc_num = tool_call_count;
-                        tool_call_count += 1;
-                        let reply = self
-                            .start_monitor_handle_call(
-                                call_id,
-                                Arc::clone(&dispatch),
-                                args,
-                                tc_num,
-                                self.message_tx.clone(),
-                            )
-                            .await;
-                        let _ = result_tx.send(reply);
-                        continue;
-                    }
-                    let tc_num = tool_call_count;
-                    tool_call_count += 1;
-                    tracing::info!(
-                        "PARALLEL: ToolCall #{tc_num} '{name}' received at t+{:.3}s",
-                        start.elapsed().as_secs_f64()
-                    );
-                    let msg_tx = self.message_tx.clone();
-                    let run_start = start;
-                    let dispatch = Arc::clone(&dispatch);
-
-                    let handle = tokio::spawn(async move {
-                        let tool_name_for_log = name.clone();
-                        tracing::info!(
-                            "PARALLEL: task #{tc_num} '{name}' executing at t+{:.3}s",
-                            run_start.elapsed().as_secs_f64()
-                        );
-                        let mut outcome = dispatch_parallel_tool_call(
-                            Arc::clone(&dispatch),
-                            ParallelToolCallSpec {
-                                index: tc_num,
-                                tool_name: name,
-                                args,
-                            },
-                            msg_tx,
-                        )
-                        .await;
-                        outcome.record.call_id = Some(call_id);
-
-                        // Send the tool result back to the embedded lashlang runtime.
-                        let reply = if outcome.record.success {
-                            LashlangToolReply::success_with_images(
-                                outcome.record.result.clone(),
-                                outcome.images.clone(),
-                            )
-                        } else {
-                            LashlangToolReply::error(outcome.record.result.clone())
-                        };
-                        let _ = result_tx.send(reply);
-                        tracing::info!(
-                            "PARALLEL: task #{tc_num} '{tool_name_for_log}' done at t+{:.3}s",
-                            run_start.elapsed().as_secs_f64()
-                        );
-
-                        vec![(outcome.record, outcome.images)]
-                    });
-                    tool_handles.push(handle);
-                }
-                LashlangResponse::ToolBatchCall { calls, result_tx } => {
-                    let call_count = calls.len();
-                    let base_index = tool_call_count;
-                    tool_call_count += call_count;
-                    tracing::info!(
-                        "PARALLEL: ToolBatchCall {} calls received at t+{:.3}s",
-                        call_count,
-                        start.elapsed().as_secs_f64()
-                    );
-                    let msg_tx = self.message_tx.clone();
-                    let run_start = start;
-                    let dispatch = Arc::clone(&dispatch);
-
-                    let handle = tokio::spawn(async move {
-                        let mut pending = FuturesUnordered::new();
-                        for (offset, call) in calls.into_iter().enumerate() {
-                            let dispatch = Arc::clone(&dispatch);
-                            let msg_tx = msg_tx.clone();
-                            pending.push(async move {
-                                let tc_num = base_index + offset;
-                                let call_id = call.id;
-                                let tool_name_for_log = call.name.clone();
-                                tracing::info!(
-                                    "PARALLEL: batch task #{tc_num} '{}' executing at t+{:.3}s",
-                                    call.name,
-                                    run_start.elapsed().as_secs_f64()
-                                );
-                                let mut outcome = dispatch_parallel_tool_call(
-                                    Arc::clone(&dispatch),
-                                    ParallelToolCallSpec {
-                                        index: tc_num,
-                                        tool_name: call.name,
-                                        args: call.args,
-                                    },
-                                    msg_tx,
-                                )
-                                .await;
-                                outcome.record.call_id = Some(call_id);
-                                tracing::info!(
-                                    "PARALLEL: batch task #{tc_num} '{tool_name_for_log}' done at t+{:.3}s",
-                                    run_start.elapsed().as_secs_f64()
-                                );
-                                (offset, outcome)
-                            });
-                        }
-
-                        let mut outcomes = Vec::with_capacity(call_count);
-                        while let Some(outcome) = pending.next().await {
-                            outcomes.push(outcome);
-                        }
-                        outcomes.sort_by_key(|(offset, _)| *offset);
-
-                        let replies = outcomes
-                            .iter()
-                            .map(|(_, outcome)| {
-                                if outcome.record.success {
-                                    LashlangToolReply::success_with_images(
-                                        outcome.record.result.clone(),
-                                        outcome.images.clone(),
-                                    )
-                                } else {
-                                    LashlangToolReply::error(outcome.record.result.clone())
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        let _ = result_tx.send(replies);
-
-                        outcomes
-                            .into_iter()
-                            .map(|(_, outcome)| (outcome.record, outcome.images))
-                            .collect::<Vec<_>>()
-                    });
-                    tool_handles.push(handle);
-                }
-                LashlangResponse::StartToolCall {
-                    id: call_id,
-                    name,
-                    args,
-                    result_tx,
-                } => {
-                    let reply = if name == "monitor" {
-                        let tc_num = tool_call_count;
-                        tool_call_count += 1;
-                        self.start_monitor_handle_call(
-                            call_id,
-                            Arc::clone(&dispatch),
-                            args,
-                            tc_num,
-                            self.message_tx.clone(),
-                        )
-                        .await
-                    } else {
-                        self.start_async_tool_call(call_id, Arc::clone(&dispatch), name, args)
-                            .await
-                    };
-                    let _ = result_tx.send(reply);
-                }
-                LashlangResponse::AwaitToolHandle {
-                    id: call_id,
-                    handle,
-                    result_tx,
-                } => {
-                    let reply = self
-                        .await_async_tool_handle(call_id, &dispatch, handle)
-                        .await;
-                    let _ = result_tx.send(reply);
-                }
-                LashlangResponse::CancelToolHandle {
-                    id: call_id,
-                    handle,
-                    result_tx,
-                } => {
-                    let reply = self
-                        .cancel_async_tool_handle(call_id, &dispatch, handle)
-                        .await;
-                    let _ = result_tx.send(reply);
-                }
-                LashlangResponse::ExecResult {
-                    id: _,
-                    output,
-                    observations,
-                    observation_truncation,
-                    images,
-                    error,
-                    terminal_finish,
-                } => {
-                    tracing::info!(
-                        "PARALLEL: ExecResult received at t+{:.3}s ({} handles)",
-                        start.elapsed().as_secs_f64(),
-                        tool_handles.len()
-                    );
-                    // Collect results from all concurrent tool calls.
-                    // By the time the runtime sends ExecResult, all tool futures have
-                    // resolved, so these awaits are instant.
-                    for handle in tool_handles {
-                        match handle.await {
-                            Ok(results) => {
-                                for (record, images) in results {
-                                    self.tool_calls.push(record);
-                                    self.tool_images.extend(images);
-                                }
-                            }
-                            Err(e) => {
-                                self.tool_calls.push(ToolCallRecord {
-                                    call_id: Some(uuid::Uuid::new_v4().to_string()),
-                                    tool: "unknown".into(),
-                                    args: json!({}),
-                                    result: json!({"error": format!("task panicked: {e}")}),
-                                    success: false,
-                                    duration_ms: 0,
-                                });
-                            }
-                        }
-                    }
-                    let error = error.filter(|value| !value.trim().is_empty());
-                    return Ok(ExecResponse {
-                        output,
-                        observations,
-                        observation_truncation,
-                        tool_calls: self.tool_calls.clone(),
-                        images: std::mem::take(&mut self.tool_images),
-                        printed_images: images,
-                        error,
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        terminal_finish,
-                    });
-                }
-                LashlangResponse::Ready => {
-                    // Unexpected but harmless
-                }
-                LashlangResponse::SnapshotResult { .. }
-                | LashlangResponse::PatchGlobalsResult { .. }
-                | LashlangResponse::ResetResult { .. }
-                | LashlangResponse::ReconfigureResult { .. }
-                | LashlangResponse::CheckCompleteResult { .. } => {
-                    return Err(SessionError::Protocol(
-                        "unexpected response during exec".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Check if a code string is syntactically complete for the lashlang RLM.
-    pub fn check_complete(&self, code: &str) -> Result<bool, SessionError> {
-        tracing::debug!(
-            code_preview = %code.chars().take(300).collect::<String>(),
-            "checking RLM completeness"
-        );
-        self.runtime()?.send(LashlangRequest::CheckComplete {
-            code: code.to_string(),
-        })?;
-        let runtime = self.runtime()?;
-        let response = tokio::task::block_in_place(|| runtime.recv())
-            .map_err(|_| SessionError::RuntimeExited)?;
-        match response {
-            LashlangResponse::CheckCompleteResult { is_complete } => {
-                tracing::debug!(is_complete, "received RLM completeness result");
-                Ok(is_complete)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    /// Reset the lashlang RLM state and re-register tools.
     pub async fn reset(&mut self) -> Result<(), SessionError> {
-        self.cancel_all_async_tool_handles().await;
-        let id = uuid::Uuid::new_v4().to_string();
-        self.runtime()?
-            .send(LashlangRequest::Reset { id: id.clone() })?;
-        self.lashlang_state_dirty = true;
-
-        loop {
-            match self.runtime()?.recv()? {
-                LashlangResponse::ResetResult { .. } => break,
-                _ => continue,
-            }
-        }
-
-        self.last_repl_tools_json = None;
+        self.async_tool_handles
+            .lock()
+            .expect("async tool handle map lock")
+            .clear();
         self.tool_surface_cache
             .lock()
             .expect("tool surface cache lock")
@@ -1523,1009 +1168,11 @@ impl Session {
         Ok(())
     }
 
-    /// Apply an in-place patch to the lashlang `FlowState.globals`
-    /// without replacing the rest of the execution snapshot.
-    pub async fn apply_mode_globals_patch(
-        &mut self,
-        patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
-    ) -> Result<(), SessionError> {
-        if !self.supports_repl() || patch.is_empty() {
-            return Ok(());
-        }
-        let id = uuid::Uuid::new_v4().to_string();
-        self.runtime()?.send(LashlangRequest::PatchGlobals {
-            id: id.clone(),
-            set: patch.set.clone(),
-            unset: patch.unset.clone(),
-        })?;
-        self.lashlang_state_dirty = true;
-
-        loop {
-            match self.runtime()?.recv()? {
-                LashlangResponse::PatchGlobalsResult { id: got_id, error } if got_id == id => {
-                    if let Some(err) = error {
-                        return Err(SessionError::Protocol(format!(
-                            "failed to patch RLM globals: {err}"
-                        )));
-                    }
-                    break;
-                }
-                _ => continue,
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Re-register the current tool definitions in the live RLM.
-    /// This is intended for turn-boundary runtime reconfiguration.
     pub async fn refresh_tool_surface(&mut self) -> Result<(), SessionError> {
-        if !self.supports_repl() {
-            return Ok(());
-        }
-
-        let tools_json = self.rlm_tools_json(&self.session_id);
-        tracing::debug!(
-            session_id = self.session_id,
-            generation = self.tools().dynamic_generation().unwrap_or(0),
-            tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
-            "refreshing RLM tool surface"
-        );
-        // Fast-path: same Arc as last time → definitely identical.
-        // Fallback: same contents → also skip. The tool-surface cache
-        // reuses the inner Arc across turns when inputs are stable, so
-        // the fast path fires most often.
-        if let Some(last) = self.last_repl_tools_json.as_ref()
-            && (Arc::ptr_eq(last, &tools_json) || last.as_str() == tools_json.as_str())
-        {
-            return Ok(());
-        }
-        let generation = self.tools().dynamic_generation().unwrap_or(0);
-        self.runtime()?.send(LashlangRequest::Reconfigure {
-            tools_json: (*tools_json).clone(),
-            generation,
-            observe_projection: self.rlm_observe_projection_config.clone(),
-        })?;
-        self.lashlang_state_dirty = true;
-
-        loop {
-            match self.runtime()?.recv()? {
-                LashlangResponse::ReconfigureResult {
-                    generation: got_generation,
-                    error,
-                } => {
-                    if got_generation != generation {
-                        return Err(SessionError::Protocol(format!(
-                            "reconfigure generation mismatch: expected {generation}, got {got_generation}"
-                        )));
-                    }
-                    if let Some(err) = error {
-                        return Err(SessionError::Protocol(format!("reconfigure failed: {err}")));
-                    }
-                    self.last_repl_tools_json = Some(tools_json);
-                    break;
-                }
-                _ => continue,
-            }
-        }
-
+        self.tool_surface_cache
+            .lock()
+            .expect("tool surface cache lock")
+            .clear();
         Ok(())
     }
-
-    async fn initialize_tool_surface(&mut self, session_id: &str) -> Result<(), SessionError> {
-        let tools_json = self.rlm_tools_json(session_id);
-        tracing::debug!(
-            session_id,
-            tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
-            "initializing RLM tool surface"
-        );
-        self.runtime()?.send(LashlangRequest::Init {
-            tools_json: (*tools_json).clone(),
-            session_id: session_id.to_string(),
-            observe_projection: self.rlm_observe_projection_config.clone(),
-        })?;
-        self.lashlang_state_dirty = true;
-
-        match self.runtime()?.recv()? {
-            LashlangResponse::Ready => {
-                self.last_repl_tools_json = Some(tools_json);
-                Ok(())
-            }
-            other => Err(SessionError::Protocol(format!(
-                "expected ready, got: {:?}",
-                std::mem::discriminant(&other)
-            ))),
-        }
-    }
-
-    /// Returns `true` if the lashlang VM (or its scratch dir) has been
-    /// mutated since the last successful `snapshot_execution_state` call.
-    /// Callers in the per-iteration progress-boundary path should gate
-    /// the snapshot on this so chat-only iterations skip the round-trip.
-    pub fn execution_state_dirty(&self) -> bool {
-        self.lashlang_state_dirty
-    }
-
-    /// Snapshot execution-mode-local state, if any.
-    pub async fn snapshot_execution_state(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
-        if !self.supports_repl() {
-            self.lashlang_state_dirty = false;
-            return Ok(None);
-        }
-        let id = uuid::Uuid::new_v4().to_string();
-        self.runtime()?
-            .send(LashlangRequest::Snapshot { id: id.clone() })?;
-
-        let data = loop {
-            match self.runtime()?.recv()? {
-                LashlangResponse::SnapshotResult { id: _, data } => break data,
-                _ => continue,
-            }
-        };
-
-        // Collect scratch files
-        let files = collect_files(self.scratch_dir.path()).unwrap_or_default();
-
-        let combined = json!({
-            "version": REPL_SNAPSHOT_VERSION,
-            "engine": "lashlang",
-            "vars": data,
-            "files": files,
-        });
-        self.lashlang_state_dirty = false;
-        Ok(Some(serde_json::to_vec(&combined).unwrap()))
-    }
-
-    /// Restore execution-mode-local state from a snapshot blob.
-    pub async fn restore_execution_state(&mut self, data: &[u8]) -> Result<(), SessionError> {
-        if !self.supports_repl() {
-            return Ok(());
-        }
-        let parsed: serde_json::Value = serde_json::from_slice(data).unwrap_or(json!({}));
-
-        if parsed.get("version").is_none() || parsed.get("engine").is_none() {
-            return Err(SessionError::Protocol(
-                "unsupported RLM snapshot format".to_string(),
-            ));
-        }
-        if parsed.get("version").and_then(|v| v.as_u64()) != Some(REPL_SNAPSHOT_VERSION as u64) {
-            return Err(SessionError::Protocol(
-                "unsupported RLM snapshot version".to_string(),
-            ));
-        }
-        if parsed.get("engine").and_then(|v| v.as_str()) != Some("lashlang") {
-            return Err(SessionError::Protocol(
-                "unsupported RLM snapshot engine".to_string(),
-            ));
-        }
-
-        // `vars` is an opaque lashlang snapshot string from the executor thread.
-        let vars_str = parsed
-            .get("vars")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let id = uuid::Uuid::new_v4().to_string();
-        self.runtime()?
-            .send(LashlangRequest::Restore { id, data: vars_str })?;
-        self.lashlang_state_dirty = true;
-
-        // Wait for acknowledgment (exec_result with optional restore error)
-        loop {
-            match self.runtime()?.recv()? {
-                LashlangResponse::ExecResult { error, .. } => {
-                    if let Some(err) = error {
-                        return Err(SessionError::Protocol(format!(
-                            "executor restore failed: {err}"
-                        )));
-                    }
-                    break;
-                }
-                _ => continue,
-            }
-        }
-
-        // Restore scratch files
-        if let Some(files_val) = parsed.get("files")
-            && let Ok(files) = serde_json::from_value::<HashMap<String, String>>(files_val.clone())
-        {
-            // Clear existing scratch contents
-            if let Ok(entries) = std::fs::read_dir(self.scratch_dir.path()) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        let _ = std::fs::remove_dir_all(&path);
-                    } else {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-            }
-            let _ = restore_files(self.scratch_dir.path(), &files);
-        }
-
-        Ok(())
-    }
-}
-
-/// Walk a directory recursively and collect all files as relative_path -> contents.
-fn collect_files(root: &Path) -> std::io::Result<HashMap<String, String>> {
-    let mut files = HashMap::new();
-    walk_dir(root, root, &mut files)?;
-    Ok(files)
-}
-
-fn walk_dir(root: &Path, dir: &Path, files: &mut HashMap<String, String>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            walk_dir(root, &path, files)?;
-        } else {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            // Best-effort: skip binary files that aren't valid UTF-8
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                files.insert(rel, content);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Recreate files in a directory from a path -> content map.
-fn restore_files(root: &Path, files: &HashMap<String, String>) -> std::io::Result<()> {
-    for (rel_path, content) in files {
-        let full = root.join(rel_path);
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&full, content)?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plugin::{
-        DirectCompletionHost, DynamicToolHost, MonitorHost, PromptHost, SessionGraphHost,
-        SessionLifecycleHost, SessionSnapshotHost, StaticPluginFactory, TaskHost, ToolCatalogHost,
-        TraceHost, TurnHost,
-    };
-    use crate::{
-        BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, ManagedRunState,
-        ManagedTaskKind, ManagedTaskStatus, PluginError, PluginHost, PluginSpec, SessionHandle,
-        SessionSnapshot, ToolDefinition, ToolResult, TurnInput,
-    };
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, SystemTime};
-
-    struct NoopManager;
-
-    #[async_trait::async_trait]
-    impl SessionSnapshotHost for NoopManager {
-        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-            Err(PluginError::Session("snapshot unavailable".to_string()))
-        }
-
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<SessionSnapshot, PluginError> {
-            Err(PluginError::Session("snapshot unavailable".to_string()))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ToolCatalogHost for NoopManager {
-        async fn tool_catalog(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, PluginError> {
-            Err(PluginError::Session("tool catalog unavailable".to_string()))
-        }
-    }
-
-    impl DynamicToolHost for NoopManager {}
-
-    #[async_trait::async_trait]
-    impl SessionLifecycleHost for NoopManager {
-        async fn create_session(
-            &self,
-            _request: crate::SessionCreateRequest,
-        ) -> Result<SessionHandle, PluginError> {
-            Err(PluginError::Session(
-                "session creation unavailable".to_string(),
-            ))
-        }
-
-        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-            Err(PluginError::Session(
-                "session close unavailable".to_string(),
-            ))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TurnHost for NoopManager {
-        async fn start_turn_stream(
-            &self,
-            _session_id: &str,
-            _input: TurnInput,
-        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-            Err(PluginError::Session(
-                "turn streaming unavailable".to_string(),
-            ))
-        }
-
-        async fn await_turn(&self, _turn_id: &str) -> Result<crate::AssembledTurn, PluginError> {
-            Err(PluginError::Session("await turn unavailable".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
-            Err(PluginError::Session("cancel turn unavailable".to_string()))
-        }
-    }
-
-    impl TaskHost for NoopManager {}
-    impl MonitorHost for NoopManager {}
-    impl SessionGraphHost for NoopManager {}
-    impl PromptHost for NoopManager {}
-    impl DirectCompletionHost for NoopManager {}
-    impl TraceHost for NoopManager {}
-
-    #[derive(Clone, Default)]
-    struct MonitorTestManager {
-        tasks: Arc<StdMutex<HashMap<String, ManagedTaskStatus>>>,
-        cancelled: Arc<AtomicBool>,
-    }
-
-    #[async_trait::async_trait]
-    impl SessionSnapshotHost for MonitorTestManager {
-        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-            Err(PluginError::Session("snapshot unavailable".to_string()))
-        }
-
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<SessionSnapshot, PluginError> {
-            Err(PluginError::Session("snapshot unavailable".to_string()))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ToolCatalogHost for MonitorTestManager {
-        async fn tool_catalog(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, PluginError> {
-            Err(PluginError::Session("tool catalog unavailable".to_string()))
-        }
-    }
-
-    impl DynamicToolHost for MonitorTestManager {}
-
-    #[async_trait::async_trait]
-    impl SessionLifecycleHost for MonitorTestManager {
-        async fn create_session(
-            &self,
-            _request: crate::SessionCreateRequest,
-        ) -> Result<SessionHandle, PluginError> {
-            Err(PluginError::Session(
-                "session creation unavailable".to_string(),
-            ))
-        }
-
-        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-            Err(PluginError::Session(
-                "session close unavailable".to_string(),
-            ))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TurnHost for MonitorTestManager {
-        async fn start_turn_stream(
-            &self,
-            _session_id: &str,
-            _input: TurnInput,
-        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-            Err(PluginError::Session(
-                "turn streaming unavailable".to_string(),
-            ))
-        }
-
-        async fn await_turn(&self, _turn_id: &str) -> Result<crate::AssembledTurn, PluginError> {
-            Err(PluginError::Session("await turn unavailable".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
-            Err(PluginError::Session("cancel turn unavailable".to_string()))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TaskHost for MonitorTestManager {
-        async fn list_background_tasks(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<ManagedTaskStatus>, PluginError> {
-            Ok(self
-                .tasks
-                .lock()
-                .expect("monitor test tasks")
-                .values()
-                .cloned()
-                .collect())
-        }
-
-        async fn cancel_background_task(
-            &self,
-            _session_id: &str,
-            task_id: &str,
-        ) -> Result<ManagedTaskStatus, PluginError> {
-            self.cancelled.store(true, Ordering::SeqCst);
-            let mut tasks = self.tasks.lock().expect("monitor test tasks");
-            let status = tasks.get_mut(task_id).ok_or_else(|| {
-                PluginError::Session(format!("unknown background task `{task_id}`"))
-            })?;
-            status.run_state = ManagedRunState::Cancelled;
-            Ok(status.clone())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl MonitorHost for MonitorTestManager {
-        async fn start_monitor(
-            &self,
-            _session_id: &str,
-            spec: crate::MonitorSpec,
-        ) -> Result<crate::MonitorSnapshot, PluginError> {
-            let task_id = format!("monitor:{}", spec.id);
-            let status = ManagedTaskStatus {
-                id: task_id.clone(),
-                label: spec.label.clone(),
-                kind: ManagedTaskKind::Monitor,
-                producer: "monitor".to_string(),
-                run_state: ManagedRunState::Running,
-                started_at: SystemTime::now(),
-            };
-            self.tasks
-                .lock()
-                .expect("monitor test tasks")
-                .insert(task_id, status);
-            Ok(crate::MonitorSnapshot {
-                revision: 1,
-                active_count: 1,
-                monitors: vec![crate::MonitorStatus {
-                    spec,
-                    armed: false,
-                    run_state: crate::MonitorRunState::Running,
-                    last_event: None,
-                    last_error: None,
-                    last_exit_status: None,
-                    event_count: 0,
-                }],
-            })
-        }
-    }
-
-    impl SessionGraphHost for MonitorTestManager {}
-    impl PromptHost for MonitorTestManager {}
-    impl DirectCompletionHost for MonitorTestManager {}
-    impl TraceHost for MonitorTestManager {}
-
-    #[derive(Clone, Default)]
-    struct AsyncToolState {
-        cancelled: Arc<AtomicBool>,
-    }
-
-    struct AsyncTestToolProvider {
-        state: AsyncToolState,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::ToolProvider for AsyncTestToolProvider {
-        fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![
-                ToolDefinition::new(
-                    "echo_async",
-                    "Return an echo result after a short delay.",
-                    serde_json::json!({
-                        "type": "object",
-                        "properties": { "text": { "type": "string" } },
-                        "required": ["text"],
-                        "additionalProperties": false
-                    }),
-                    serde_json::json!({ "type": "object", "additionalProperties": true }),
-                ),
-                ToolDefinition::new(
-                    "wait_for_cancel",
-                    "Wait until the async task is cancelled.",
-                    ToolDefinition::default_input_schema(),
-                    serde_json::json!({ "type": "object", "additionalProperties": true }),
-                ),
-                ToolDefinition::new(
-                    "spawn_agent",
-                    "Test-only spawn stand-in.",
-                    serde_json::json!({
-                        "type": "object",
-                        "properties": { "agent_name": { "type": "string" } },
-                        "required": ["agent_name"],
-                        "additionalProperties": true
-                    }),
-                    serde_json::json!({ "type": "object", "additionalProperties": true }),
-                ),
-            ]
-        }
-
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
-            ToolResult::err_fmt("async test tool requires session context")
-        }
-
-        async fn execute_streaming_with_context(
-            &self,
-            name: &str,
-            args: &serde_json::Value,
-            context: &ToolExecutionContext,
-            _progress: Option<&crate::ProgressSender>,
-        ) -> ToolResult {
-            match name {
-                "echo_async" => {
-                    let text = args
-                        .get("text")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default();
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    ToolResult::ok(json!({ "echo": text }))
-                }
-                "wait_for_cancel" => {
-                    let Some(token) = context.cancellation_token.clone() else {
-                        return ToolResult::err_fmt("missing cancellation token");
-                    };
-                    token.cancelled().await;
-                    self.state.cancelled.store(true, Ordering::SeqCst);
-                    ToolResult::ok(json!({ "cancelled": true }))
-                }
-                "spawn_agent" => {
-                    let Some(token) = context.cancellation_token.clone() else {
-                        return ToolResult::err_fmt("missing cancellation token");
-                    };
-                    token.cancelled().await;
-                    self.state.cancelled.store(true, Ordering::SeqCst);
-                    ToolResult::ok(json!({ "cancelled": true }))
-                }
-                _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn set_context_surface_is_noop_for_unchanged_surface() {
-        let plugin_host = PluginHost::new(Vec::new());
-        let plugin_session = plugin_host
-            .build_session(
-                "root",
-                crate::ExecutionMode::standard(),
-                Some(crate::StandardContextApproach::default()),
-                None,
-            )
-            .expect("plugin session");
-        let mut session = Session::new(
-            crate::RuntimeServices::new(plugin_session),
-            "root",
-            crate::ExecutionMode::standard(),
-        )
-        .await
-        .expect("session");
-
-        session.set_context_surface(Vec::new(), Vec::new(), true);
-        assert_eq!(session.context_surface_revision, 0);
-
-        let prompt_contributions = vec![crate::PromptContribution::guidance(
-            "Memory Context",
-            "remember",
-        )];
-        session.set_context_surface(Vec::new(), prompt_contributions.clone(), true);
-        assert_eq!(session.context_surface_revision, 1);
-
-        session.set_context_surface(Vec::new(), prompt_contributions, true);
-        assert_eq!(session.context_surface_revision, 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn run_code_returns_terminal_finish_after_tool_call() {
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(AsyncTestToolProvider {
-            state: AsyncToolState::default(),
-        });
-        let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
-            "test_tools",
-            PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
-        ))]);
-        let plugin_session = plugin_host
-            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
-            .expect("plugin session");
-        let mut session = Session::new(
-            crate::RuntimeServices::new(plugin_session),
-            "root",
-            crate::ExecutionMode::new("rlm"),
-        )
-        .await
-        .expect("session");
-
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
-
-        let response = session
-            .run_code(
-                "root",
-                manager,
-                &event_tx,
-                r#"
-call echo_async { text: "before finish" }
-submit "ok"
-"#,
-                false,
-            )
-            .await
-            .expect("exec response");
-
-        // `submit "ok"` terminates the lashlang program and delivers the
-        // value through `terminal_finish` regardless of mode. The prior
-        // tool call stays successful; no error is surfaced.
-        assert_eq!(response.error, None);
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].tool, "echo_async");
-        assert!(response.tool_calls[0].success);
-        assert_eq!(response.terminal_finish, Some(serde_json::json!("ok")));
-    }
-
-    #[cfg(feature = "tool-impls")]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rlm_run_code_can_call_common_repo_tools_without_model() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("alpha.txt"), "hello\n").expect("write alpha");
-        std::fs::write(temp.path().join("beta.rs"), "fn main() {}\n").expect("write beta");
-        let temp_path = temp.path().display().to_string();
-
-        let plugin_host = PluginHost::new(vec![
-            Arc::new(StaticPluginFactory::new(
-                "ls",
-                PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Ls)),
-            )),
-            Arc::new(StaticPluginFactory::new(
-                "grep",
-                PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Grep::new())),
-            )),
-        ]);
-        let plugin_session = plugin_host
-            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
-            .expect("plugin session");
-        let mut session = Session::new(
-            crate::RuntimeServices::new(plugin_session),
-            "root",
-            crate::ExecutionMode::new("rlm"),
-        )
-        .await
-        .expect("session");
-
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
-
-        let response = session
-            .run_code(
-                "root",
-                manager,
-                &event_tx,
-                &format!(
-                    r#"
-files = call ls {{ path: "{}" }}
-match = call grep {{ query: "fn main", path: "{}" }}
-print files
-print match
-"#,
-                    temp_path, temp_path
-                ),
-                false,
-            )
-            .await
-            .expect("exec response");
-
-        assert!(
-            response.error.is_none(),
-            "unexpected rlm error: {:?}",
-            response.error
-        );
-        assert_eq!(response.tool_calls.len(), 2);
-        assert_eq!(response.tool_calls[0].tool, "ls");
-        assert!(response.tool_calls[0].success);
-        assert_eq!(response.tool_calls[1].tool, "grep");
-        assert!(response.tool_calls[1].success);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rlm_run_code_can_start_and_await_async_tool_handles() {
-        let async_tools: Arc<dyn crate::ToolProvider> = Arc::new(AsyncTestToolProvider {
-            state: AsyncToolState::default(),
-        });
-        let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
-            "async_tools",
-            PluginSpec::new().with_tool_provider(Arc::clone(&async_tools)),
-        ))]);
-        let plugin_session = plugin_host
-            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
-            .expect("plugin session");
-        let mut session = Session::new(
-            crate::RuntimeServices::new(plugin_session),
-            "root",
-            crate::ExecutionMode::new("rlm"),
-        )
-        .await
-        .expect("session");
-
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
-
-        let response = session
-            .run_code(
-                "root",
-                manager,
-                &event_tx,
-                r#"
-handle = start call echo_async { text: "hello" }
-result = await handle
-print result
-"#,
-                false,
-            )
-            .await
-            .expect("exec response");
-
-        assert!(
-            response.error.is_none(),
-            "unexpected rlm error: {:?}",
-            response.error
-        );
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].tool, "echo_async");
-        assert_eq!(
-            response.tool_calls[0]
-                .result
-                .get("__handle__")
-                .and_then(|value| value.as_str()),
-            Some(ASYNC_TOOL_HANDLE_KIND)
-        );
-        assert!(
-            response
-                .observations
-                .iter()
-                .any(|text| text.contains("\"value\":{\"echo\":\"hello\"}")),
-            "observations were: {:?}",
-            response.observations
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rlm_run_code_can_cancel_async_tool_handles() {
-        let async_state = AsyncToolState::default();
-        let async_tools: Arc<dyn crate::ToolProvider> = Arc::new(AsyncTestToolProvider {
-            state: async_state.clone(),
-        });
-        let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
-            "async_tools",
-            PluginSpec::new().with_tool_provider(Arc::clone(&async_tools)),
-        ))]);
-        let plugin_session = plugin_host
-            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
-            .expect("plugin session");
-        let mut session = Session::new(
-            crate::RuntimeServices::new(plugin_session),
-            "root",
-            crate::ExecutionMode::new("rlm"),
-        )
-        .await
-        .expect("session");
-
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
-
-        let response = session
-            .run_code(
-                "root",
-                manager,
-                &event_tx,
-                r#"
-handle = start call wait_for_cancel {}
-cancel handle
-print "cancelled"
-"#,
-                false,
-            )
-            .await
-            .expect("exec response");
-
-        assert!(
-            response.error.is_none(),
-            "unexpected rlm error: {:?}",
-            response.error
-        );
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].tool, "wait_for_cancel");
-        assert!(async_state.cancelled.load(Ordering::SeqCst));
-        assert!(
-            response
-                .observations
-                .iter()
-                .any(|text| text.contains("cancelled")),
-            "observations were: {:?}",
-            response.observations
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rlm_run_code_lists_live_async_handles_by_namespace() {
-        let async_state = AsyncToolState::default();
-        let async_tools: Arc<dyn crate::ToolProvider> = Arc::new(AsyncTestToolProvider {
-            state: async_state.clone(),
-        });
-        let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
-            "async_tools",
-            PluginSpec::new().with_tool_provider(Arc::clone(&async_tools)),
-        ))]);
-        let plugin_session = plugin_host
-            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
-            .expect("plugin session");
-        let mut session = Session::new(
-            crate::RuntimeServices::new(plugin_session),
-            "root",
-            crate::ExecutionMode::new("rlm"),
-        )
-        .await
-        .expect("session");
-
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager: Arc<dyn RuntimeSessionHost> = Arc::new(NoopManager);
-
-        let response = session
-            .run_code(
-                "root",
-                manager,
-                &event_tx,
-                r#"
-agent = start call spawn_agent { agent_name: "Auth Worker" }
-tool = start call wait_for_cancel {}
-handles = (call list_async_handles {})?
-print handles
-cancel handles.subagent.auth_worker
-cancel handles.tool[tool.id]
-after = (call list_async_handles {})?
-print after
-"#,
-                false,
-            )
-            .await
-            .expect("exec response");
-
-        assert!(
-            response.error.is_none(),
-            "unexpected rlm error: {:?}",
-            response.error
-        );
-        assert!(async_state.cancelled.load(Ordering::SeqCst));
-        assert!(
-            response
-                .observations
-                .iter()
-                .any(|text| text.contains("\"auth_worker\"") && text.contains("\"tool\"")),
-            "observations were: {:?}",
-            response.observations
-        );
-        assert!(
-            response
-                .observations
-                .iter()
-                .any(|text| text.contains("\"subagent\":{}") && text.contains("\"tool\":{}")),
-            "observations were: {:?}",
-            response.observations
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn rlm_monitor_returns_listable_cancelable_async_handle() {
-        let plugin_host = PluginHost::new(vec![Arc::new(BuiltinMonitorToolPluginFactory::new())]);
-        let plugin_session = plugin_host
-            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
-            .expect("plugin session");
-        let mut session = Session::new(
-            crate::RuntimeServices::new(plugin_session),
-            "root",
-            crate::ExecutionMode::new("rlm"),
-        )
-        .await
-        .expect("session");
-
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let manager = Arc::new(MonitorTestManager::default());
-
-        let response = session
-            .run_code(
-                "root",
-                manager.clone(),
-                &event_tx,
-                r#"
-monitor_handle = (call monitor { command: "tail -f app.log", description: "app log" })?
-handles = (call list_async_handles {})?
-print handles
-cancel monitor_handle
-after = (call list_async_handles {})?
-print after
-"#,
-                false,
-            )
-            .await
-            .expect("exec response");
-
-        assert!(
-            response.error.is_none(),
-            "unexpected rlm error: {:?}",
-            response.error
-        );
-        assert!(manager.cancelled.load(Ordering::SeqCst));
-        assert!(
-            response
-                .observations
-                .iter()
-                .any(|text| text.contains("\"monitor\"") && text.contains("\"tool\":\"monitor\"")),
-            "observations were: {:?}",
-            response.observations
-        );
-        assert!(
-            response
-                .observations
-                .iter()
-                .any(|text| text.contains("\"monitor\":{}")),
-            "observations were: {:?}",
-            response.observations
-        );
-    }
-
-    #[test]
-    fn task_controls_are_not_registered_for_rlm_sessions() {
-        let plugin_host = PluginHost::new(vec![Arc::new(BuiltinTaskControlsPluginFactory::new())]);
-        let rlm_session = plugin_host
-            .build_session("root", crate::ExecutionMode::new("rlm"), None, None)
-            .expect("rlm plugin session");
-        let rlm_tools = rlm_session
-            .mode_native_tool_definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect::<Vec<_>>();
-        assert!(!rlm_tools.iter().any(|name| name == "tasks_list"));
-        assert!(!rlm_tools.iter().any(|name| name == "tasks_stop"));
-
-        let standard_session = plugin_host
-            .build_session(
-                "standard-root",
-                crate::ExecutionMode::standard(),
-                Some(crate::StandardContextApproach::default()),
-                None,
-            )
-            .expect("standard plugin session");
-        let standard_tools = standard_session
-            .mode_native_tool_definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect::<Vec<_>>();
-        assert!(standard_tools.iter().any(|name| name == "tasks_list"));
-        assert!(standard_tools.iter().any(|name| name == "tasks_stop"));
-    }
-
-    // `rlm_run_code_caps_observe_output_via_mode_plugin_config` moved
-    // to `lash-mode-rlm` integration tests (lash itself no longer
-    // knows about the RLM plugin factory after the crate split).
 }

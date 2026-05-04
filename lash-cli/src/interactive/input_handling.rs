@@ -8,7 +8,6 @@ use lash::session_model::Message;
 use lash::*;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_ui::{UiContext, UiExtensions, UiInputOutcome, UiSurfaceSlot};
-use tokio::sync::mpsc;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
@@ -24,7 +23,7 @@ use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_acti
 use crate::ui_trace::UiTraceRecorder;
 use crate::{
     Args, apply_ui_host_effects, hash12, normalize_prepared_turn_for_dispatch, push_system_message,
-    shell_escape_command, sync_ui_extensions,
+    shell_escape_command,
 };
 
 use super::commands::{
@@ -224,8 +223,8 @@ pub(super) async fn activate_foreground_session_handoff(
     current_execution_mode: &mut ExecutionMode,
     current_model_variant: &mut Option<String>,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    ui_extensions: &UiExtensions,
-    plugin_host: &PluginHost,
+    _ui_extensions: &UiExtensions,
+    _plugin_host: &PluginHost,
 ) -> bool {
     let Some(rt) = runtime.as_mut() else {
         push_system_message(
@@ -273,7 +272,7 @@ pub(super) async fn activate_foreground_session_handoff(
         Err(err) => push_system_message(app, format!("Failed to refresh session manager: {}", err)),
     }
 
-    sync_ui_extensions(app, ui_extensions, plugin_host, Arc::clone(session_manager)).await;
+    app.dirty = true;
 
     if let Some(turn) = queued_turn {
         app.queue_turn(turn);
@@ -311,7 +310,7 @@ pub(super) async fn process_pending_monitor_wakes(
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    app_tx: &crate::event::AppEventTx,
     turn_input_injection_bridge: &TurnInputInjectionBridge,
     desired_dynamic: &DynamicStateSnapshot,
 ) -> Result<bool, String> {
@@ -591,7 +590,7 @@ pub(super) async fn handle_key_event(
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    app_tx: &crate::event::AppEventTx,
     pending_clear_after_return: &mut bool,
     turn_input_injection_bridge: &TurnInputInjectionBridge,
 ) -> anyhow::Result<bool> {
@@ -850,13 +849,7 @@ pub(super) async fn handle_key_event(
                                     ),
                                 }
                             }
-                            sync_ui_extensions(
-                                app,
-                                ui_extensions,
-                                plugin_host,
-                                Arc::clone(session_manager),
-                            )
-                            .await;
+                            app.dirty = true;
                             *toolset_hash = hash12(
                                 &serde_json::to_vec(&dynamic_tools.definitions())
                                     .unwrap_or_else(|_| b"[]".to_vec()),
@@ -926,13 +919,7 @@ pub(super) async fn handle_key_event(
                                     format!("Failed to refresh session manager: {}", err),
                                 ),
                             }
-                            sync_ui_extensions(
-                                app,
-                                ui_extensions,
-                                plugin_host,
-                                Arc::clone(session_manager),
-                            )
-                            .await;
+                            app.dirty = true;
                         }
                         Err(err) => {
                             push_system_message(app, format!("Branch switch failed: {err}"));

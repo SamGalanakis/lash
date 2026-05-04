@@ -212,11 +212,11 @@ impl LashRuntime {
         let session_id = self.state.session_id.clone();
         let policy = self.policy.clone();
         // Flush any dirty resident state to the store before dropping.
-        let commit = crate::store::PersistedStateCommit::persisted_state(&self.state, &[]);
-        match crate::store::apply_runtime_commit(store.as_ref(), commit).await {
-            Ok(result) => self.state.apply_persisted_commit_result(result),
-            Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
-        }
+        let commit = crate::store::RuntimeCommit::persisted_state(&self.state, &[]);
+        let result = store.commit_runtime_state(commit).await.map_err(|err| {
+            SessionError::Protocol(format!("failed to persist runtime state: {err}"))
+        })?;
+        self.state.apply_persisted_commit_result(result);
         // Drain pending tombstones if any. Under KeepHistory this is a
         // no-op (tombstones never get added). Under DropOrphans,
         // Phase-9's not-yet-wired rewrite path would have populated the
@@ -238,18 +238,19 @@ impl LashRuntime {
     ) -> Result<Self, SessionError> {
         // Under ActivePathOnly, skip the full-graph load: fetch head
         // metadata + the active-path chain only. SQLite impls can
-        // override `load_active_path_graph` with a recursive CTE for a
-        // real O(active-path) query; the default still loads the full
-        // graph then forks, which is correct but slower on large
-        // histories.
+        // ActivePathOnly is an exact store capability. Stores that do
+        // not support it must return UnsupportedReadScope; resume does
+        // not fall back to a full graph load.
         let loaded = match env.residency {
             Residency::KeepAll => {
                 crate::store::load_persisted_session_state(parked.store.as_ref()).await
             }
             Residency::ActivePathOnly => {
-                crate::store::load_persisted_session_state_active_path(parked.store.as_ref()).await
+                crate::store::load_persisted_session_state_active_path(parked.store.as_ref(), None)
+                    .await
             }
-        };
+        }
+        .map_err(|err| SessionError::Protocol(format!("failed to load runtime state: {err}")))?;
         let state = loaded.unwrap_or_else(|| PersistedSessionState {
             session_id: parked.session_id.clone(),
             policy: parked.policy.clone(),
@@ -272,7 +273,10 @@ impl LashRuntime {
         let store = self.services.store.clone().ok_or_else(|| {
             SessionError::Protocol("get_historic_node() requires a persistent runtime".to_string())
         })?;
-        Ok(store.get_node(node_id).await)
+        store
+            .load_node(node_id)
+            .await
+            .map_err(|err| SessionError::Protocol(format!("failed to load historic node: {err}")))
     }
 
     /// Store-resident node IDs that are NOT reachable from the current
@@ -294,15 +298,21 @@ impl LashRuntime {
         let store = self.services.store.clone().ok_or_else(|| {
             SessionError::Protocol("orphaned_node_ids() requires a persistent runtime".to_string())
         })?;
-        let active: std::collections::HashSet<&str> = self
-            .state
-            .session_graph
+        let Some(read) = store
+            .load_session(crate::store::SessionReadScope::FullGraph)
+            .await
+            .map_err(|err| SessionError::Protocol(format!("failed to load full graph: {err}")))?
+        else {
+            return Ok(Vec::new());
+        };
+        let active: std::collections::HashSet<&str> = read
+            .graph
             .active_path_nodes()
             .iter()
             .map(|node| node.node_id.as_str())
             .collect();
-        let full = store.load_session_graph().await;
-        Ok(full
+        Ok(read
+            .graph
             .nodes
             .iter()
             .filter(|node| !active.contains(node.node_id.as_str()))

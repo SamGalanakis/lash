@@ -2,7 +2,6 @@ pub mod attachments;
 pub mod chronological;
 pub mod direct;
 pub mod dynamic;
-pub mod embedded;
 pub mod instructions;
 pub mod llm;
 pub mod mcp;
@@ -53,7 +52,6 @@ pub use dynamic::{
 };
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
-pub use lash_rlm_types::RlmTrajectoryEntry;
 pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 pub use lash_sansio::{
     AttachmentId, AttachmentMeta, AttachmentRef, BaseRenderCache, CheckpointKind,
@@ -75,24 +73,45 @@ pub use standard_context_approach::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
     StandardContextApproachKind,
 };
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "mode", content = "options", rename_all = "snake_case")]
-pub enum ModeTurnOptions {
-    #[default]
-    Unit,
-    Rlm(lash_rlm_types::RlmTermination),
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ModeTurnOptions {
+    pub mode_id: ExecutionMode,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+impl Default for ModeTurnOptions {
+    fn default() -> Self {
+        Self::empty(ExecutionMode::standard())
+    }
 }
 
 impl ModeTurnOptions {
-    pub fn rlm(termination: lash_rlm_types::RlmTermination) -> Self {
-        Self::Rlm(termination)
+    pub fn empty(mode_id: ExecutionMode) -> Self {
+        Self {
+            mode_id,
+            payload: serde_json::Value::Object(serde_json::Map::new()),
+        }
     }
 
-    pub fn rlm_termination(&self) -> lash_rlm_types::RlmTermination {
-        match self {
-            Self::Unit => lash_rlm_types::RlmTermination::default(),
-            Self::Rlm(termination) => termination.clone(),
+    pub fn typed<T>(mode_id: ExecutionMode, value: T) -> Result<Self, serde_json::Error>
+    where
+        T: serde::Serialize,
+    {
+        Ok(Self {
+            mode_id,
+            payload: serde_json::to_value(value)?,
+        })
+    }
+
+    pub fn decode<T>(&self, expected_mode: &ExecutionMode) -> Result<Option<T>, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        if &self.mode_id != expected_mode {
+            return Ok(None);
         }
+        serde_json::from_value(self.payload.clone()).map(Some)
     }
 }
 
@@ -159,9 +178,11 @@ pub use plugin::{
     plugin_surface_event_renders_visible_output,
 };
 pub use provider::{
-    AgentModelSelection, LashConfig, Provider, ProviderFactory, ProviderHandle, ProviderOptions,
-    ProviderRegistry, ProviderSpec, RequestTimeout, VariantRequestConfig, build_provider,
-    provider_cli_label, provider_factory, register_provider_factory,
+    AgentModelSelection, LashConfig, NoopProviderAuth, NoopProviderReadiness, ProviderAuth,
+    ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy, ProviderOptions,
+    ProviderReadiness, ProviderRegistry, ProviderSpec, ProviderState, ProviderTransport,
+    RequestTimeout, StaticModelPolicy, VariantRequestConfig, build_provider, provider_cli_label,
+    provider_factory, register_provider_factory,
 };
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
@@ -176,7 +197,8 @@ pub use runtime::{
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use session::{
-    InjectedTurnInput, Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,
+    ExecRequest, InjectedTurnInput, ModeExecutionContext, ModeToolBatchItem, ModeToolReply,
+    Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 pub use session_graph::{
     PersistedSessionConfig, PersistedTurnState, SessionGraph, SessionMessageTreeNode,
@@ -192,14 +214,12 @@ pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
 pub use store::{
-    BlobArtifactDescriptor, BlobCompression, BlobRef, BlobStorageHint, BlobStore, GcReport,
-    HydratedSessionCheckpoint, PersistedArtifactKind, PersistedStateCommit,
-    PersistedStateCommitResult, RetainedArtifactRef, RetentionStore, RuntimePersistence,
-    SessionCheckpoint, SessionGraphCommit, SessionGraphStore, SessionHead, SessionHeadMeta,
-    SessionHeadStore, SessionMeta, SessionPickerInfo, UsageLedgerStore, VacuumReport,
-    apply_runtime_commit, head_copy_from_store, load_persisted_session_state,
-    load_persisted_session_state_active_path, load_session_head, refresh_persisted_session_state,
-    save_session_head,
+    BlobArtifactDescriptor, BlobCompression, BlobRef, BlobStorageHint, GcReport, GraphCommitDelta,
+    HydratedSessionCheckpoint, PersistedArtifactKind, PersistedSessionRead, RetainedArtifactRef,
+    RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionHead,
+    SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, VacuumReport,
+    load_persisted_session_state, load_persisted_session_state_active_path,
+    refresh_persisted_session_state,
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{BuiltinBlobProfile, SqliteStore, Store, StoreGcPolicy, StoreOptions};

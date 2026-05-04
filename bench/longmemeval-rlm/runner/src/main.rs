@@ -950,7 +950,7 @@ fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
             })?;
             let provider =
                 lash_provider_openai::OpenAiGenericProvider::new(api_key, resolve_base_url(args));
-            Ok(ProviderHandle::new(Box::new(provider)))
+            Ok(ProviderHandle::new(provider.into_components()))
         }
         other => bail!(
             "provider `{other}` is not supported by this harness; use the OpenAI-compatible path with an API key from .env"

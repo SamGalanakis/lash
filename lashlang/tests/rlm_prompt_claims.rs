@@ -47,8 +47,8 @@ impl MockHost {
 }
 
 impl ToolHost for MockHost {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        match name {
+    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+        match name.as_str() {
             "read_file" => {
                 let path = args
                     .get("path")
@@ -115,13 +115,14 @@ impl ToolHost for MockHost {
         }
     }
 
-    fn start_call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
+    async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
         // Allocate a handle id, run the sync call now, stash the result.
-        let mut counter = self.next_handle.lock().unwrap();
-        *counter += 1;
-        let handle_id = format!("h{}", *counter);
-        drop(counter);
-        let result = self.call(name, args)?;
+        let handle_id = {
+            let mut counter = self.next_handle.lock().unwrap();
+            *counter += 1;
+            format!("h{}", *counter)
+        };
+        let result = self.call(name.clone(), args.clone()).await?;
         self.pending
             .lock()
             .unwrap()
@@ -137,11 +138,11 @@ impl ToolHost for MockHost {
         let mut record = Record::default();
         record.insert("__handle__".into(), Value::String("task".into()));
         record.insert("id".into(), Value::String(handle_id.into()));
-        record.insert("tool".into(), Value::String(name.to_string().into()));
+        record.insert("tool".into(), Value::String(name.into()));
         Ok(Value::Record(record.into()))
     }
 
-    fn await_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
+    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
         let record = handle
             .as_record()
             .ok_or_else(|| ToolHostError::new("expected handle record"))?;
@@ -160,7 +161,7 @@ impl ToolHost for MockHost {
             .ok_or_else(|| ToolHostError::new(format!("unknown handle: {id}")))
     }
 
-    fn cancel_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
+    async fn cancel_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
         if let Some(record) = handle.as_record()
             && let Some(Value::String(id)) = record.get("id")
         {
@@ -170,15 +171,17 @@ impl ToolHost for MockHost {
         Ok(Value::Null)
     }
 
-    fn print(&self, value: &Value) -> Result<(), ToolHostError> {
-        self.record_observation(value.clone());
+    async fn print(&self, value: Value) -> Result<(), ToolHostError> {
+        self.record_observation(value);
         Ok(())
     }
 }
 
 fn run(host: &MockHost, source: &str) -> Value {
     let mut state = State::new();
-    match execute(source, &mut state, host).expect("execution should succeed") {
+    match futures::executor::block_on(execute(source, &mut state, host))
+        .expect("execution should succeed")
+    {
         ExecutionOutcome::Finished(value) => value,
         ExecutionOutcome::Continued => Value::Null,
     }
@@ -186,7 +189,8 @@ fn run(host: &MockHost, source: &str) -> Value {
 
 fn run_continued(host: &MockHost, source: &str) -> (ExecutionOutcome, State) {
     let mut state = State::new();
-    let outcome = execute(source, &mut state, host).expect("execution should succeed");
+    let outcome = futures::executor::block_on(execute(source, &mut state, host))
+        .expect("execution should succeed");
     (outcome, state)
 }
 
@@ -195,8 +199,8 @@ fn run_continued(host: &MockHost, source: &str) -> (ExecutionOutcome, State) {
 //               Literals: `[a, b]`, `{ a: 1, b: 2 }`."
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_value_literals_parse_and_evaluate() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_value_literals_parse_and_evaluate() {
     let host = MockHost::default();
     assert_eq!(run(&host, "submit null"), Value::Null);
     assert_eq!(run(&host, "submit true"), Value::Bool(true));
@@ -218,8 +222,8 @@ fn prompt_claim_value_literals_parse_and_evaluate() {
     assert_eq!(rec["b"], Value::Number(2.0));
 }
 
-#[test]
-fn prompt_claim_raw_triple_single_strings_parse_and_evaluate() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_raw_triple_single_strings_parse_and_evaluate() {
     let host = MockHost::default();
     assert_eq!(
         run(
@@ -242,8 +246,8 @@ PY'''"####
 // is tested at the RLM-runtime level, not at the lashlang level.)
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_assignment_persists_within_program() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_assignment_persists_within_program() {
     let host = MockHost::default();
     assert_eq!(
         run(&host, "x = 7\ny = x + 3\nsubmit y"),
@@ -251,8 +255,8 @@ fn prompt_claim_assignment_persists_within_program() {
     );
 }
 
-#[test]
-fn prompt_claim_indexed_and_field_assignment_examples_work() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_indexed_and_field_assignment_examples_work() {
     let host = MockHost::default();
     let Value::Record(result) = run(
         &host,
@@ -283,8 +287,8 @@ submit { counts: counts, items: items }
 // `{ ok: false, error: "..." }` on failure."
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
     let host = MockHost::default().with_file("a.txt", "hello world");
     let Value::Record(r) = run(&host, r#"submit call read_file { path: "a.txt" }"#) else {
         panic!("expected wrapped record");
@@ -293,8 +297,8 @@ fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
     assert_eq!(r["value"], Value::String("hello world".to_string().into()));
 }
 
-#[test]
-fn prompt_claim_tool_call_failure_is_wrapped_with_ok_false_and_error() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_tool_call_failure_is_wrapped_with_ok_false_and_error() {
     let host = MockHost::default();
     let Value::Record(r) = run(&host, "submit call boom {}") else {
         panic!("expected wrapped record");
@@ -303,8 +307,8 @@ fn prompt_claim_tool_call_failure_is_wrapped_with_ok_false_and_error() {
     assert!(matches!(&r["error"], Value::String(_)));
 }
 
-#[test]
-fn prompt_claim_value_field_reaches_the_underlying_tool_output() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_value_field_reaches_the_underlying_tool_output() {
     // The bug that motivated this section: models used `.output` / `.path`
     // directly on the wrapper and got null. Manual `.value` access still
     // works when code intentionally keeps the raw wrapper.
@@ -319,8 +323,8 @@ submit r.value"#,
     );
 }
 
-#[test]
-fn prompt_claim_question_unwraps_successful_tool_results() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_question_unwraps_successful_tool_results() {
     let host = MockHost::default().with_file("a.txt", "file text");
     assert_eq!(
         run(
@@ -332,11 +336,12 @@ submit text"#,
     );
 }
 
-#[test]
-fn prompt_claim_question_aborts_failed_tool_results_with_error() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_question_aborts_failed_tool_results_with_error() {
     let host = MockHost::default();
     let mut state = State::new();
     let err = execute("submit (call boom {})?", &mut state, &host)
+        .await
         .expect_err("failed result unwrap should abort");
     let ExecuteError::Runtime(err) = err else {
         panic!("expected runtime error");
@@ -353,8 +358,8 @@ fn prompt_claim_question_aborts_failed_tool_results_with_error() {
 // `{ ok, value }` wrapper as a synchronous call."
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_start_returns_unwrapped_handle() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_start_returns_unwrapped_handle() {
     let host = MockHost::default().with_file("a.txt", "x");
     let Value::Record(handle) = run(
         &host,
@@ -371,8 +376,8 @@ submit h"#,
     assert!(matches!(handle.get("id"), Some(Value::String(_))));
 }
 
-#[test]
-fn prompt_claim_await_handle_wraps_result_with_ok_value() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_await_handle_wraps_result_with_ok_value() {
     let host = MockHost::default().with_file("a.txt", "body");
     let Value::Record(r) = run(
         &host,
@@ -385,8 +390,8 @@ submit await h"#,
     assert_eq!(r["value"], Value::String("body".to_string().into()));
 }
 
-#[test]
-fn prompt_claim_question_unwraps_awaited_handle_results() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_question_unwraps_awaited_handle_results() {
     let host = MockHost::default().with_file("a.txt", "body");
     assert_eq!(
         run(
@@ -398,8 +403,8 @@ submit (await h)?"#,
     );
 }
 
-#[test]
-fn prompt_claim_await_list_returns_wrappers_in_order() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_await_list_returns_wrappers_in_order() {
     let host = MockHost::default()
         .with_file("a.txt", "A")
         .with_file("b.txt", "B");
@@ -422,8 +427,8 @@ submit results"#,
     assert_eq!(b["value"], Value::String("B".to_string().into()));
 }
 
-#[test]
-fn prompt_claim_await_record_returns_wrappers_by_name() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_await_record_returns_wrappers_by_name() {
     let host = MockHost::default()
         .with_file("a.txt", "A")
         .with_file("b.txt", "B");
@@ -451,8 +456,8 @@ submit results"#,
 // Prompt claim: "`cancel handle` (best-effort)"
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_cancel_handle_runs_without_error() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_cancel_handle_runs_without_error() {
     let host = MockHost::default().with_file("a.txt", "x");
     run(
         &host,
@@ -469,8 +474,8 @@ submit "done""#,
 // a bare expression contributes its value to the result list."
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_parallel_expression_returns_branch_list_in_order() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_parallel_expression_returns_branch_list_in_order() {
     let host = MockHost::default()
         .with_file("a.txt", "A")
         .with_file("b.txt", "B");
@@ -490,8 +495,8 @@ submit results"#,
     assert_eq!(a["value"], Value::String("A".to_string().into()));
 }
 
-#[test]
-fn prompt_claim_named_parallel_expression_returns_record() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_named_parallel_expression_returns_record() {
     let host = MockHost::default()
         .with_file("a.txt", "A")
         .with_file("b.txt", "B");
@@ -515,8 +520,8 @@ submit results"#,
     );
 }
 
-#[test]
-fn prompt_claim_bare_expressions_are_valid_parallel_branches() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_bare_expressions_are_valid_parallel_branches() {
     let host = MockHost::default();
     let Value::List(items) = run(&host, "submit parallel {\n  1 + 1\n  \"lit\"\n}") else {
         panic!("expected list");
@@ -530,8 +535,8 @@ fn prompt_claim_bare_expressions_are_valid_parallel_branches() {
 // Prompt claim: "`print expr` inspects a value mid-turn."
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_print_feeds_value_to_host() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_print_feeds_value_to_host() {
     let host = MockHost::default();
     let (outcome, _state) = run_continued(
         &host,
@@ -549,19 +554,21 @@ print v"#,
 // Prompt claim: "`submit <expr>` ends the turn with the given value..."
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_submit_terminates_program_with_value() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_submit_terminates_program_with_value() {
     let host = MockHost::default();
     let mut state = State::new();
-    let outcome = execute("x = 3\nsubmit x * 2", &mut state, &host).expect("runs");
+    let outcome = execute("x = 3\nsubmit x * 2", &mut state, &host)
+        .await
+        .expect("runs");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(6.0)));
 }
 
-#[test]
-fn prompt_claim_bare_submit_terminates_with_null() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_bare_submit_terminates_with_null() {
     let host = MockHost::default();
     let mut state = State::new();
-    let outcome = execute("submit", &mut state, &host).expect("runs");
+    let outcome = execute("submit", &mut state, &host).await.expect("runs");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Null));
 }
 
@@ -573,8 +580,8 @@ fn prompt_claim_bare_submit_terminates_with_null() {
 // `break`: it ends the whole program/turn."
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_if_for_and_ternary_work() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_if_for_and_ternary_work() {
     let host = MockHost::default();
     assert_eq!(
         run(
@@ -597,8 +604,8 @@ submit total"#,
     );
 }
 
-#[test]
-fn prompt_claim_break_and_continue_control_nearest_loop() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_break_and_continue_control_nearest_loop() {
     let host = MockHost::default();
     assert_eq!(
         run(
@@ -627,8 +634,8 @@ submit seen"#,
     );
 }
 
-#[test]
-fn prompt_claim_submit_exits_whole_program_not_loop() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_submit_exits_whole_program_not_loop() {
     let host = MockHost::default();
     assert_eq!(
         run(
@@ -642,8 +649,8 @@ submit 99"#,
     );
 }
 
-#[test]
-fn prompt_claim_loop_control_requires_loop() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_loop_control_requires_loop() {
     for (source, keyword) in [("break", "break"), ("continue", "continue")] {
         let err = parse(source).expect_err("loop control outside loop should fail");
         assert!(matches!(
@@ -656,8 +663,8 @@ fn prompt_claim_loop_control_requires_loop() {
     }
 }
 
-#[test]
-fn prompt_claim_both_negation_forms_work() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_both_negation_forms_work() {
     let host = MockHost::default();
     assert_eq!(run(&host, "submit !true"), Value::Bool(false));
     assert_eq!(run(&host, "submit not true"), Value::Bool(false));
@@ -669,8 +676,8 @@ fn prompt_claim_both_negation_forms_work() {
 // Prompt claim: every listed builtin is callable and behaves as described.
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_claim_builtin_len_returns_length() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_len_returns_length() {
     let host = MockHost::default();
     assert_eq!(run(&host, r#"submit len("hi")"#), Value::Number(2.0));
     assert_eq!(run(&host, "submit len([1,2,3])"), Value::Number(3.0));
@@ -678,8 +685,8 @@ fn prompt_claim_builtin_len_returns_length() {
     assert_eq!(run(&host, "submit len(null)"), Value::Number(0.0));
 }
 
-#[test]
-fn prompt_claim_builtin_empty_checks_zero_length() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_empty_checks_zero_length() {
     let host = MockHost::default();
     assert_eq!(run(&host, r#"submit empty("")"#), Value::Bool(true));
     assert_eq!(run(&host, r#"submit empty("x")"#), Value::Bool(false));
@@ -687,8 +694,8 @@ fn prompt_claim_builtin_empty_checks_zero_length() {
     assert_eq!(run(&host, "submit empty([1])"), Value::Bool(false));
 }
 
-#[test]
-fn prompt_claim_builtin_slice_supports_null_bounds_and_negative_bounds() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_slice_supports_null_bounds_and_negative_bounds() {
     let host = MockHost::default();
     // null = from start / to end
     assert_eq!(
@@ -712,8 +719,8 @@ fn prompt_claim_builtin_slice_supports_null_bounds_and_negative_bounds() {
     assert_eq!(items[0], Value::Number(2.0));
 }
 
-#[test]
-fn prompt_claim_builtin_range_and_push_build_lists() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_range_and_push_build_lists() {
     let host = MockHost::default();
     assert_eq!(
         run(&host, "submit range(3)"),
@@ -753,8 +760,8 @@ fn prompt_claim_builtin_range_and_push_build_lists() {
     );
 }
 
-#[test]
-fn prompt_claim_builtin_split_and_join() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_split_and_join() {
     let host = MockHost::default();
     let Value::List(parts) = run(&host, r#"submit split("a,b,c", ",")"#) else {
         panic!("list");
@@ -768,8 +775,8 @@ fn prompt_claim_builtin_split_and_join() {
     );
 }
 
-#[test]
-fn prompt_claim_builtin_trim_strips_whitespace() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_trim_strips_whitespace() {
     let host = MockHost::default();
     assert_eq!(
         run(&host, r#"submit trim("  hi  ")"#),
@@ -777,8 +784,8 @@ fn prompt_claim_builtin_trim_strips_whitespace() {
     );
 }
 
-#[test]
-fn prompt_claim_builtin_starts_ends_contains() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_starts_ends_contains() {
     let host = MockHost::default();
     assert_eq!(
         run(&host, r#"submit starts_with("foobar", "foo")"#),
@@ -798,8 +805,8 @@ fn prompt_claim_builtin_starts_ends_contains() {
     );
 }
 
-#[test]
-fn prompt_claim_builtin_keys_and_values() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_keys_and_values() {
     let host = MockHost::default();
     let Value::List(keys) = run(&host, "submit keys({a: 1, b: 2})") else {
         panic!("list");
@@ -817,8 +824,8 @@ fn prompt_claim_builtin_keys_and_values() {
     assert_eq!(vals[1], Value::Number(2.0));
 }
 
-#[test]
-fn prompt_claim_builtin_to_string_to_int_to_float() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_to_string_to_int_to_float() {
     let host = MockHost::default();
     assert_eq!(
         run(&host, "submit to_string(42)"),
@@ -828,8 +835,8 @@ fn prompt_claim_builtin_to_string_to_int_to_float() {
     assert_eq!(run(&host, r#"submit to_float("3.5")"#), Value::Number(3.5));
 }
 
-#[test]
-fn prompt_claim_builtin_json_parse_parses_strings_to_values() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_json_parse_parses_strings_to_values() {
     let host = MockHost::default();
     let Value::Record(r) = run(&host, r#"submit json_parse("{\"a\": 1}")"#) else {
         panic!("record");
@@ -837,8 +844,8 @@ fn prompt_claim_builtin_json_parse_parses_strings_to_values() {
     assert_eq!(r["a"], Value::Number(1.0));
 }
 
-#[test]
-fn prompt_claim_builtin_format_positional_placeholders() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_format_positional_placeholders() {
     let host = MockHost::default();
     // Auto-numbered `{}` placeholders.
     assert_eq!(
@@ -857,8 +864,8 @@ fn prompt_claim_builtin_format_positional_placeholders() {
     );
 }
 
-#[test]
-fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
     let host = MockHost::default();
     let value = run(
         &host,
@@ -876,6 +883,7 @@ fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
         &mut state,
         &host,
     )
+    .await
     .expect_err("validate should abort on bad shape");
     let ExecuteError::Runtime(err) = err else {
         panic!("expected runtime error");
@@ -893,8 +901,8 @@ fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
 //   submit split(r.value, "\n")[2]
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_example_format_block_executes_as_shown() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_example_format_block_executes_as_shown() {
     let host = MockHost::default().with_file("Cargo.toml", "line0\nline1\nline2\nline3\n");
     assert_eq!(
         run(
@@ -910,8 +918,8 @@ submit split(r.value, "\n")[2]"#,
 // Prompt fanout example: `?` unwraps normal happy-path tool results.
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
     let host = MockHost::default();
     let Value::List(results) = run(
         &host,
@@ -931,8 +939,8 @@ submit [results.a.claim, results.b.claim]"#,
     assert_eq!(results[1], Value::String("done:chunk_2".to_string().into()));
 }
 
-#[test]
-fn prompt_example_allow_nonzero_exit_inspects_shell_exit_code() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_example_allow_nonzero_exit_inspects_shell_exit_code() {
     let host = MockHost::default();
     assert_eq!(
         run(
@@ -944,8 +952,8 @@ submit probe.exit_code == 0 ? "Cargo.lock exists" : "Cargo.lock is missing""#,
     );
 }
 
-#[test]
-fn prompt_example_loop_builds_collection_without_comprehension() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_example_loop_builds_collection_without_comprehension() {
     let host = MockHost::default()
         .with_file("Cargo.toml", "abc")
         .with_file("README.md", "abcdef");
@@ -970,8 +978,8 @@ submit items"#,
     assert_eq!(second["chars"], Value::Number(6.0));
 }
 
-#[test]
-fn prompt_example_prints_targeted_slice_for_large_values() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_example_prints_targeted_slice_for_large_values() {
     let host = MockHost::default().with_file("Cargo.toml", "abcdef");
     let (outcome, _) = run_continued(
         &host,
@@ -985,8 +993,8 @@ print { chars: len(text), head: slice(text, 0, 3) }"#,
     assert_eq!(record["head"], Value::String("abc".into()));
 }
 
-#[test]
-fn prompt_example_validates_nontrivial_edit_before_submit() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_example_validates_nontrivial_edit_before_submit() {
     let host = MockHost::default();
     assert_eq!(
         run(
@@ -1015,8 +1023,8 @@ if check.exit_code != 0 {
 // this fails and points them at the prompt.
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn prompt_mentions_every_builtin_we_document() {
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_mentions_every_builtin_we_document() {
     // Source: `lash-sansio/src/mode.rs::RLM_EXECUTION_SECTION`. We don't
     // pull the const directly (cross-crate visibility) — instead keep the
     // expected list here. If you add a builtin, update both places.
@@ -1073,6 +1081,7 @@ fn prompt_mentions_every_builtin_we_document() {
     for (code, name) in smoke {
         let mut state = State::new();
         let outcome = execute(code, &mut state, &host)
+            .await
             .unwrap_or_else(|err| panic!("builtin `{name}` failed to execute: {err:?}"));
         assert!(
             matches!(outcome, ExecutionOutcome::Finished(_)),

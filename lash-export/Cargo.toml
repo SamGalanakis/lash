@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 lash = { path = "../lash", features = ["sqlite-store"] }
+lash-rlm-types = { path = "../lash-rlm-types" }
 anyhow = "1"
 pulldown-cmark = "0.13"
 serde = { version = "1", features = ["derive"] }

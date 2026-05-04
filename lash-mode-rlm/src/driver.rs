@@ -322,10 +322,18 @@ struct RlmContextProjector {
     max_output_chars: usize,
 }
 
+fn rlm_termination(options: &lash::ModeTurnOptions) -> RlmTermination {
+    options
+        .decode(&lash::ExecutionMode::new("rlm"))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
 impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
     fn project(&self, ctx: ProjectorContext<'_>) -> LlmRequest {
         let history = self.format_history(ctx.events);
-        let termination = ctx.config.termination.rlm_termination();
+        let termination = rlm_termination(&ctx.config.termination);
         let finalization = rlm_finalization_prompt(&termination);
         let user_prompt = format!(
             "=== HISTORY ===\n\n{history}\n\n\n=== CURRENT ITERATION: {} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
@@ -667,7 +675,14 @@ fn reasoning_without_first_fence(text: &str) -> String {
     let Some(open_rel) = text.find("```") else {
         return text.to_string();
     };
-    let after_open = open_rel + 3;
+    // CommonMark variable-length fences: count opener backticks; the
+    // closer must be a run of ≥N backticks. Mirrors the runtime
+    // extractor in `protocol.rs::first_lashlang_fence_span`.
+    let opener_len = text.as_bytes()[open_rel..]
+        .iter()
+        .take_while(|&&b| b == b'`')
+        .count();
+    let after_open = open_rel + opener_len;
     let rest = &text[after_open..];
     let Some(lang_end_rel) = rest.find('\n') else {
         return text[..open_rel].to_string();
@@ -677,11 +692,26 @@ fn reasoning_without_first_fence(text: &str) -> String {
         return text.to_string();
     }
     let body_start = after_open + lang_end_rel + 1;
-    let close = text[body_start..]
-        .find("```")
-        .map(|rel| body_start + rel)
-        .unwrap_or(text.len());
-    let after_close = (close + 3).min(text.len());
+    let body_bytes = &text.as_bytes()[body_start..];
+    let mut close = text.len();
+    let mut consumed = 0usize;
+    let mut i = 0;
+    while i < body_bytes.len() {
+        if body_bytes[i] == b'`' {
+            let start = i;
+            while i < body_bytes.len() && body_bytes[i] == b'`' {
+                i += 1;
+            }
+            if i - start >= opener_len {
+                close = body_start + start;
+                consumed = opener_len;
+                break;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let after_close = (close + consumed).min(text.len());
     let mut out = String::new();
     out.push_str(text[..open_rel].trim_end());
     let tail = text[after_close..].trim_start();

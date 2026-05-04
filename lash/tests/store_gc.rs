@@ -2,8 +2,9 @@
 
 use lash::{
     BlobArtifactDescriptor, DynamicStateSnapshot, ExecutionMode, HydratedSessionCheckpoint,
-    PersistedSessionConfig, PersistedSessionState, PersistedStateCommit, PersistedTurnState,
-    PluginSessionSnapshot, SessionGraph, SessionHead, StandardContextApproach, Store, TokenUsage,
+    PersistedSessionConfig, PersistedSessionState, PersistedTurnState, PluginSessionSnapshot,
+    RuntimeCommit, RuntimePersistence, SessionGraph, SessionHead, StandardContextApproach, Store,
+    TokenUsage,
 };
 
 #[test]
@@ -31,6 +32,7 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
     });
     store.save_session_head(SessionHead {
         session_id: "root".to_string(),
+        head_revision: 0,
         graph: SessionGraph::default(),
         config: PersistedSessionConfig {
             provider_id: "openai-compatible".into(),
@@ -67,16 +69,17 @@ async fn runtime_commit_rejects_different_session_id_on_single_session_store() {
         session_id: "alpha".to_string(),
         ..PersistedSessionState::default()
     };
-    let first =
-        lash::apply_runtime_commit(&store, PersistedStateCommit::persisted_state(&alpha, &[]))
-            .await;
+    let first = store
+        .commit_runtime_state(RuntimeCommit::persisted_state(&alpha, &[]))
+        .await;
     assert!(first.is_ok());
 
     let beta = PersistedSessionState {
         session_id: "beta".to_string(),
         ..PersistedSessionState::default()
     };
-    let err = lash::apply_runtime_commit(&store, PersistedStateCommit::persisted_state(&beta, &[]))
+    let err = store
+        .commit_runtime_state(RuntimeCommit::persisted_state(&beta, &[]))
         .await
         .expect_err("mismatched session commit should fail");
     assert!(err.to_string().contains("bound to session `alpha`"));

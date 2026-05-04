@@ -179,7 +179,12 @@ impl RlmSubagentToolsProvider {
             .snapshot_session(&context.session_id)
             .await
             .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-        let termination = current_snapshot.mode_turn_options.rlm_termination();
+        let termination = current_snapshot
+            .mode_turn_options
+            .decode(&lash::ExecutionMode::new("rlm"))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let mut policy = current_snapshot.policy.clone();
         policy.execution_mode = lash::ExecutionMode::new("rlm");
         normalize_context_policy(&mut policy);
