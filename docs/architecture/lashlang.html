@@ -67,6 +67,7 @@ flowchart LR
                 <li>Values: <code>null</code>, booleans, numbers, strings, lists, records, and immutable <code>Image</code> handles.</li>
                 <li>Images expose read-only metadata fields: <code>.id</code>, <code>.name</code>, <code>.mime</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>. <code>print(image)</code> attaches the actual image to the next model call; <code>submit(image)</code> serializes only the descriptor.</li>
                 <li>Literals: <code>[a, b]</code> and <code>{ a: 1, b: 2 }</code>.</li>
+                <li>Strings: <code>"..."</code> supports common escapes; <code>"""..."""</code> is escaped multiline; <code>r"""..."""</code> and <code>r'''...'''</code> are raw multiline strings for patches, scripts, JSON, Markdown, and heredocs.</li>
                 <li>Assignment: <code>name = expr</code>, plus variable-rooted path updates like <code>record.field = value</code>, <code>record[key] = value</code>, <code>list[i] = value</code>, and <code>state.groups[g].count = count + 1</code>.</li>
                 <li>Record assignment inserts or replaces fields. Dynamic record indexing reads string-coerced keys and returns <code>null</code> when absent, so <code>counts[g] = counts[g] + 1</code> is a compact histogram pattern.</li>
                 <li>List assignment replaces an existing integer index, including negative indexes; it does not grow the list.</li>

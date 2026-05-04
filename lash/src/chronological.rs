@@ -249,7 +249,6 @@ fn history_item_from_rlm_step(entry: &RlmTrajectoryEntry) -> RlmHistoryItem {
         iteration: entry.iteration,
         reasoning: entry.reasoning.clone(),
         code: entry.code.clone(),
-        observations: entry.observations.clone(),
         output: entry.output.clone(),
         tool_calls: entry.tool_calls.clone(),
         images: entry.images.iter().map(image_ref).collect(),

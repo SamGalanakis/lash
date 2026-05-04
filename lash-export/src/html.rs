@@ -17,12 +17,13 @@
 //! we suppress the in-message part because the standalone entry is the
 //! canonical view (args + result + duration + status).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
 use lash::{ChronologicalPayload, RlmTrajectoryEntry, ToolCallRecord};
 
+use crate::trace::LlmPromptSnapshot;
 use crate::LoadedSession;
 
 pub fn render(session: &LoadedSession) -> String {
@@ -132,7 +133,7 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
                 if step.error.is_some() {
                     s.rlm_errors += 1;
                 }
-                s.total_chars = s.total_chars.saturating_add(step.output.chars().count());
+                s.total_chars = s.total_chars.saturating_add(step.output_chars());
                 s.total_chars = s.total_chars.saturating_add(step.code.chars().count());
                 for record in &step.tool_calls {
                     let key = lash::chronological_tool_call_key(record);
@@ -156,7 +157,7 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
 struct RenderCtx<'a> {
     seen_tool_keys: std::collections::HashSet<String>,
     next_index: usize,
-    _stats: &'a SessionStats,
+    stats: &'a SessionStats,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -164,7 +165,7 @@ impl<'a> RenderCtx<'a> {
         Self {
             seen_tool_keys: std::collections::HashSet::new(),
             next_index: 0,
-            _stats: stats,
+            stats,
         }
     }
     fn next_id(&mut self) -> String {
@@ -395,16 +396,100 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
     let mut entries = String::with_capacity(32 * 1024);
     let mut spine = String::with_capacity(2 * 1024);
 
-    for entry in &session.chronological {
+    let insertions = compute_prompt_insertions(&session.chronological, &session.llm_prompts);
+    let mut last_hash: Option<String> = None;
+    let mut first_seen: HashMap<String, PromptAnchor> = HashMap::new();
+
+    // Collect every tool_call key that belongs to an RlmStep so we can skip
+    // its standalone chronological entry — it'll render nested under the
+    // step instead, putting the lashlang body that fired it directly above.
+    let nested_tool_keys: HashSet<String> = session
+        .chronological
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            ChronologicalPayload::RlmStep(step) => Some(step),
+            _ => None,
+        })
+        .flat_map(|step| {
+            step.tool_calls
+                .iter()
+                .map(lash::chronological_tool_call_key)
+        })
+        .collect();
+
+    // Identify assistant messages that just echo the prior RlmStep's submit
+    // value — they're a runtime side-effect of `submit`, not a separate
+    // model utterance. Suppressing avoids showing the same text twice.
+    let mut suppressed_message_ids: HashSet<String> = HashSet::new();
+    let mut last_final_output: Option<String> = None;
+    for entry in session.chronological.iter() {
+        match &entry.payload {
+            ChronologicalPayload::RlmStep(step) => {
+                last_final_output = step.final_output.as_ref().map(submit_value_text);
+            }
+            ChronologicalPayload::Message(message) => {
+                if matches!(message.role, MessageRole::Assistant)
+                    && let Some(prev) = last_final_output.as_deref()
+                    && message_matches_text(message, prev)
+                {
+                    suppressed_message_ids.insert(message.id.clone());
+                }
+                last_final_output = None;
+            }
+            ChronologicalPayload::ToolCall(_) => {}
+        }
+    }
+
+    let emit_prompt =
+        |entries: &mut String,
+         spine: &mut String,
+         ctx: &mut RenderCtx<'_>,
+         last_hash: &mut Option<String>,
+         first_seen: &mut HashMap<String, PromptAnchor>,
+         prompt_idx: usize| {
+            let prompt = &session.llm_prompts[prompt_idx];
+            let anchor = first_seen.get(&prompt.system_hash).cloned();
+            let id = render_system_prompt(
+                entries,
+                spine,
+                ctx,
+                prompt,
+                last_hash.as_deref(),
+                anchor.as_ref(),
+            );
+            first_seen.entry(prompt.system_hash.clone()).or_insert(PromptAnchor {
+                entry_id: id,
+                iter_label: prompt
+                    .iteration
+                    .map(|i| format!("iter {i}"))
+                    .unwrap_or_else(|| "first call".to_string()),
+            });
+            *last_hash = Some(prompt.system_hash.clone());
+        };
+
+    for (i, entry) in session.chronological.iter().enumerate() {
+        for &prompt_idx in &insertions.before_index[i] {
+            emit_prompt(
+                &mut entries,
+                &mut spine,
+                ctx,
+                &mut last_hash,
+                &mut first_seen,
+                prompt_idx,
+            );
+        }
         match &entry.payload {
             ChronologicalPayload::Message(message) => {
-                if message.is_transient() {
+                if message.is_transient() || suppressed_message_ids.contains(&message.id) {
                     continue;
                 }
                 render_message(&mut entries, &mut spine, ctx, message);
             }
             ChronologicalPayload::ToolCall(record) => {
                 let key = lash::chronological_tool_call_key(record);
+                if nested_tool_keys.contains(&key) {
+                    continue;
+                }
                 if !ctx.seen_tool_keys.insert(key) {
                     continue;
                 }
@@ -416,8 +501,134 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
         }
     }
 
+    for &prompt_idx in &insertions.trailing {
+        emit_prompt(
+            &mut entries,
+            &mut spine,
+            ctx,
+            &mut last_hash,
+            &mut first_seen,
+            prompt_idx,
+        );
+    }
+
     EntriesHtml { entries, spine }
 }
+
+#[derive(Clone)]
+struct PromptAnchor {
+    entry_id: String,
+    iter_label: String,
+}
+
+struct PromptInsertions {
+    /// `before_index[i]` lists prompt indices that should render *before*
+    /// the chronological entry at index `i`.
+    before_index: Vec<Vec<usize>>,
+    /// Prompts with no chronological anchor — rendered at the end so a
+    /// snapshot is never silently dropped.
+    trailing: Vec<usize>,
+}
+
+/// Decide where each per-LLM-call system prompt belongs in the rendered
+/// timeline.
+///
+/// Each LLM call kicks off one iteration. In RLM mode the chronological
+/// projection emits everything that iteration produced — its tool calls
+/// (children of the lashlang block) followed by the `RlmStep` trajectory
+/// record — as a contiguous run. We want the system prompt to appear at
+/// the *start* of that run, before the tool calls, since that's when the
+/// model received it.
+///
+/// Standard mode has no `RlmStep` entries, so we positionally bind each
+/// prompt to the matching assistant message instead.
+fn compute_prompt_insertions(
+    chronological: &[lash::ChronologicalEntry],
+    prompts: &[LlmPromptSnapshot],
+) -> PromptInsertions {
+    let mut before_index = vec![Vec::new(); chronological.len()];
+    let mut consumed = vec![false; prompts.len()];
+
+    let has_rlm_steps = chronological
+        .iter()
+        .any(|e| matches!(e.payload, ChronologicalPayload::RlmStep(_)));
+
+    if has_rlm_steps {
+        let by_iteration: HashMap<u64, usize> = prompts
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, p)| p.iteration.map(|it| (it, idx)))
+            .collect();
+
+        // Iteration 0's prompt was sent to the model alongside the
+        // initial user message, so anchor it to that user message
+        // rather than to the iteration's first tool/rlm output —
+        // otherwise the user message would appear *above* the prompt
+        // that contextualised it.
+        let first_user_idx = chronological.iter().position(|e| {
+            matches!(&e.payload, ChronologicalPayload::Message(m)
+                if matches!(m.role, MessageRole::User) && !m.is_transient())
+        });
+        if let (Some(idx), Some(&pi)) = (first_user_idx, by_iteration.get(&0))
+            && !consumed[pi]
+        {
+            before_index[idx].push(pi);
+            consumed[pi] = true;
+        }
+
+        let mut run_start: Option<usize> = None;
+        for (i, entry) in chronological.iter().enumerate() {
+            match &entry.payload {
+                ChronologicalPayload::ToolCall(_) => {
+                    if run_start.is_none() {
+                        run_start = Some(i);
+                    }
+                }
+                ChronologicalPayload::RlmStep(step) => {
+                    let begin = run_start.unwrap_or(i);
+                    if let Some(&pi) = by_iteration.get(&(step.iteration as u64))
+                        && !consumed[pi]
+                    {
+                        before_index[begin].push(pi);
+                        consumed[pi] = true;
+                    }
+                    run_start = None;
+                }
+                ChronologicalPayload::Message(_) => {
+                    // Non-RLM messages (the initial user prompt or a
+                    // trailing assistant message) don't open a new
+                    // iteration — they sit between or after RLM runs.
+                    run_start = None;
+                }
+            }
+        }
+    } else {
+        // Standard mode: positionally bind to assistant messages.
+        let mut cursor = 0usize;
+        for (i, entry) in chronological.iter().enumerate() {
+            if let ChronologicalPayload::Message(message) = &entry.payload
+                && matches!(message.role, MessageRole::Assistant)
+                && !message.is_transient()
+            {
+                while cursor < prompts.len() && consumed[cursor] {
+                    cursor += 1;
+                }
+                if cursor < prompts.len() {
+                    before_index[i].push(cursor);
+                    consumed[cursor] = true;
+                    cursor += 1;
+                }
+            }
+        }
+    }
+
+    let trailing: Vec<usize> = (0..prompts.len()).filter(|i| !consumed[*i]).collect();
+    PromptInsertions {
+        before_index,
+        trailing,
+    }
+}
+
 
 // ─── messages ───────────────────────────────────────────────────────────────
 
@@ -620,22 +831,16 @@ fn render_part(out: &mut String, part: &Part) {
     }
 }
 
-/// Render a prose body. Splits the text at fenced code blocks
-/// (` ```lang … ``` `) so embedded code renders as monospace `<pre>` while
-/// the surrounding narrative stays in the editorial body face. Very long
-/// total bodies are wrapped in a `<details>` so a single 13kb system prompt
-/// doesn't eat six screens — the expanded form is still one click away.
+/// Render a prose body as markdown. Long bodies are folded inside a
+/// `<details>` so a multi-kilobyte chunk doesn't dominate the timeline —
+/// the expanded form is one click away.
 fn render_prose(out: &mut String, content: &str) {
     if content.trim().is_empty() {
         return;
     }
-    let chunks = split_prose_with_fences(content);
     let total_chars = content.chars().count();
-    // Fold any prose longer than ~12 lines worth of body text. The fold
-    // shows a one-line preview + a click-to-expand affordance, so a
-    // multi-kilobyte system prompt no longer eats six screens before you
-    // reach the next entry.
     let collapse = total_chars > 1_000;
+    let body_html = crate::markdown::render(content);
 
     if collapse {
         let preview = first_n_chars(content, 480);
@@ -646,118 +851,18 @@ fn render_prose(out: &mut String, content: &str) {
             escape(&preview)
         );
         out.push_str("            <div class=\"prose-body\">\n");
-        write_prose_chunks(out, &chunks);
-        out.push_str("            </div>\n");
+        out.push_str(&body_html);
+        out.push_str("\n            </div>\n");
         out.push_str("          </details>\n");
     } else {
         out.push_str("          <div class=\"part part--prose-wrap\">\n");
-        write_prose_chunks(out, &chunks);
-        out.push_str("          </div>\n");
-    }
-}
-
-fn write_prose_chunks(out: &mut String, chunks: &[ProseChunk]) {
-    for chunk in chunks {
-        match chunk {
-            ProseChunk::Text(text) => {
-                if text.trim().is_empty() {
-                    continue;
-                }
-                let _ = writeln!(
-                    out,
-                    "            <div class=\"part-prose-text\">{}</div>",
-                    escape_breaks(text)
-                );
-            }
-            ProseChunk::Code { lang, body } => {
-                let len = body.chars().count();
-                let label = if lang.is_empty() { "code" } else { lang };
-                let _ = writeln!(
-                    out,
-                    "            <div class=\"part-prose-code\"><div class=\"code-bar\"><span class=\"code-tag\">{}</span><span class=\"code-size\">{}</span><button class=\"code-copy\" data-copy>copy</button></div><pre class=\"code-pre\">{}</pre></div>",
-                    escape(label),
-                    format_count(len as u64),
-                    escape(body),
-                );
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-enum ProseChunk<'a> {
-    Text(&'a str),
-    Code { lang: &'a str, body: &'a str },
-}
-
-fn split_prose_with_fences(input: &str) -> Vec<ProseChunk<'_>> {
-    let mut out = Vec::new();
-    let mut cursor = 0;
-    while cursor < input.len() {
-        // look for "\n```" or input starting with "```"
-        let rest = &input[cursor..];
-        let fence_at = if rest.starts_with("```") {
-            Some(0)
-        } else {
-            rest.find("\n```").map(|p| p + 1)
-        };
-        let Some(rel) = fence_at else {
-            out.push(ProseChunk::Text(rest));
-            break;
-        };
-        let abs = cursor + rel;
-        if abs > cursor {
-            out.push(ProseChunk::Text(&input[cursor..abs]));
-        }
-        // parse fence: lang line then body until next ``` on its own line
-        let after_open = abs + 3;
-        let nl = input[after_open..].find('\n');
-        let Some(nl_rel) = nl else {
-            // unterminated fence — render rest as text
-            out.push(ProseChunk::Text(&input[abs..]));
-            break;
-        };
-        let lang = input[after_open..after_open + nl_rel].trim();
-        let body_start = after_open + nl_rel + 1;
-        // find closing ``` on its own line
-        let close = find_closing_fence(&input[body_start..]);
-        match close {
-            Some((body_end_rel, after_close_rel)) => {
-                let body = &input[body_start..body_start + body_end_rel];
-                out.push(ProseChunk::Code { lang, body });
-                cursor = body_start + after_close_rel;
-            }
-            None => {
-                // unterminated — treat rest as code
-                let body = &input[body_start..];
-                out.push(ProseChunk::Code { lang, body });
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// Returns (offset of last char before closing fence, offset just past closing fence's newline).
-fn find_closing_fence(s: &str) -> Option<(usize, usize)> {
-    // closing fence is ``` at start of a line
-    let mut search_from = 0;
-    loop {
-        let rel = s[search_from..].find("```")?;
-        let abs = search_from + rel;
-        let at_line_start = abs == 0 || s.as_bytes()[abs - 1] == b'\n';
-        if at_line_start {
-            // body ends at abs (exclusive of preceding newline if present)
-            let body_end = if abs > 0 { abs - 1 } else { abs };
-            // skip past the ``` and any trailing-line content + newline
-            let after = abs + 3;
-            let after_nl = s[after..]
-                .find('\n')
-                .map(|p| after + p + 1)
-                .unwrap_or(s.len());
-            return Some((body_end, after_nl));
-        }
-        search_from = abs + 3;
+        let _ = writeln!(
+            out,
+            "            <div class=\"prose-bar\"><span class=\"prose-tag\">prose</span><span class=\"prose-size\">{}</span></div>",
+            format_count(total_chars as u64)
+        );
+        out.push_str(&body_html);
+        out.push_str("\n          </div>\n");
     }
 }
 
@@ -847,12 +952,18 @@ fn render_reasoning(out: &mut String, content: &str) {
     if content.trim().is_empty() {
         return;
     }
+    let len = content.chars().count();
     out.push_str("          <div class=\"part part--reasoning\">\n");
     out.push_str("            <span class=\"reasoning-gutter\">┊</span>\n");
     let _ = writeln!(
         out,
         "            <div class=\"reasoning-text\">{}</div>",
         escape_breaks(content)
+    );
+    let _ = writeln!(
+        out,
+        "            <span class=\"reasoning-size\">{}</span>",
+        format_count(len as u64)
     );
     out.push_str("          </div>\n");
 }
@@ -970,47 +1081,50 @@ fn render_tool_call_entry(
     );
     let _ = writeln!(out, "        <span class=\"entry-glyph\">{glyph}</span>");
     out.push_str("      </div>\n");
-    out.push_str("      <div class=\"entry-body\">\n");
-    out.push_str("        <header class=\"entry-head\">\n");
-    let _ = writeln!(
-        out,
-        "          <span class=\"entry-tag entry-tag--tool\">{}</span>",
-        escape(&record.tool)
-    );
-    let _ = writeln!(
-        out,
-        "          <span class=\"entry-headline\">{}</span>",
-        escape(&summary)
-    );
-    let _ = writeln!(
-        out,
-        "          <span class=\"entry-meta entry-meta--{status_key}\">{status_label} · {dur}</span>"
-    );
-    let _ = writeln!(
-        out,
-        "          <span class=\"entry-meta\">{}</span>",
-        format_count(result_size as u64)
-    );
-    if let Some(call_id) = record.call_id.as_deref() {
-        // Show only the leading 8 chars; full id available on hover and
-        // remains in the data-search payload so / search still finds it.
-        let short = call_id_short(call_id);
-        let _ = writeln!(
-            out,
-            "          <span class=\"entry-callid\" title=\"call_id: {full}\">{short}</span>",
-            full = escape_attr(call_id),
-            short = escape(&short),
-        );
-    }
-    out.push_str("        </header>\n");
-
-    let auto_open = !record.success || (args_size + result_size) <= 4096;
+    // Auto-open errors always; auto-open small calls only when the session
+    // is short. A 500-call trace at ~5kb each becomes a 200k-pixel document
+    // if everything's open by default — collapse-first, expand-on-demand
+    // is the right default for sessions of that scale.
+    let busy_session = ctx.stats.tool_calls_ok + ctx.stats.tool_calls_err > 30;
+    let auto_open = !record.success || (!busy_session && (args_size + result_size) <= 4096);
     let open_attr = if auto_open { " open" } else { "" };
+
+    // The whole header row IS the summary — click anywhere on it to expand.
+    out.push_str("      <div class=\"entry-body\">\n");
     let _ = writeln!(
         out,
         "        <details class=\"entry-content tool-details\"{open_attr}>"
     );
-    out.push_str("          <summary class=\"tool-summary\">arguments + result</summary>\n");
+    out.push_str("          <summary class=\"entry-head\">\n");
+    let _ = writeln!(
+        out,
+        "            <span class=\"entry-tag entry-tag--tool\">{}</span>",
+        escape(&record.tool)
+    );
+    let _ = writeln!(
+        out,
+        "            <span class=\"entry-headline\">{}</span>",
+        escape(&summary)
+    );
+    let _ = writeln!(
+        out,
+        "            <span class=\"entry-meta entry-meta--{status_key}\">{status_label} · {dur}</span>"
+    );
+    let _ = writeln!(
+        out,
+        "            <span class=\"entry-meta\">{}</span>",
+        format_count(result_size as u64)
+    );
+    if let Some(call_id) = record.call_id.as_deref() {
+        let short = call_id_short(call_id);
+        let _ = writeln!(
+            out,
+            "            <span class=\"entry-callid\" title=\"call_id: {full}\">{short}</span>",
+            full = escape_attr(call_id),
+            short = escape(&short),
+        );
+    }
+    out.push_str("          </summary>\n");
 
     let args_str = pretty_json(&record.args);
     let result_str = pretty_json(&record.result);
@@ -1071,18 +1185,31 @@ fn render_rlm_step(
     let has_err = step.error.is_some();
     let status_key = if has_err { "err" } else { "ok" };
     let nested_calls = step.tool_calls.len();
-    let output_preview = one_line_summary(&step.output, 200);
+    let reasoning = strip_first_lashlang_fence(&step.reasoning);
+    let has_reasoning_body = !reasoning.trim().is_empty();
+    let output_preview = if has_reasoning_body {
+        one_line_summary(&reasoning, 200)
+    } else if let Some(out_item) = step.output.iter().find(|o| !o.trim().is_empty()) {
+        one_line_summary(out_item, 200)
+    } else {
+        String::new()
+    };
     let mut search = String::new();
-    search.push_str(&step.reasoning.to_lowercase());
+    // Use the stripped reasoning so the lashlang body isn't duplicated —
+    // `step.reasoning` still contains the fenced block, and `step.code` is
+    // the same text extracted from it.
+    search.push_str(&reasoning.to_lowercase());
     search.push('\n');
     search.push_str(&step.code.to_lowercase());
-    search.push('\n');
-    search.push_str(&step.output.to_lowercase());
+    for item in &step.output {
+        search.push('\n');
+        search.push_str(&item.to_lowercase());
+    }
     if let Some(e) = &step.error {
         search.push('\n');
         search.push_str(&e.to_lowercase());
     }
-    let total_chars = step.output.chars().count() + step.code.chars().count();
+    let total_chars = step.output_chars() + step.code.chars().count();
 
     let _ = writeln!(
         out,
@@ -1103,11 +1230,17 @@ fn render_rlm_step(
         "          <span class=\"entry-tag entry-tag--rlm\">RLM step {}</span>",
         step.iteration
     );
-    let _ = writeln!(
-        out,
-        "          <span class=\"entry-headline\">{}</span>",
-        escape(&output_preview)
-    );
+    if has_reasoning_body {
+        // Reasoning renders below as its own block — keep the layout
+        // balanced without restating the same text in the head row.
+        out.push_str("          <span class=\"entry-headline entry-headline--ghost\"></span>\n");
+    } else {
+        let _ = writeln!(
+            out,
+            "          <span class=\"entry-headline\">{}</span>",
+            escape(&output_preview)
+        );
+    }
     if has_err {
         out.push_str("          <span class=\"entry-meta entry-meta--err\">error</span>\n");
     }
@@ -1126,18 +1259,14 @@ fn render_rlm_step(
     out.push_str("        </header>\n");
     out.push_str("        <div class=\"entry-content\">\n");
 
-    let reasoning = strip_first_lashlang_fence(&step.reasoning);
-    if !reasoning.trim().is_empty() {
+    if has_reasoning_body {
         render_reasoning(out, &reasoning);
     }
     if !step.code.is_empty() {
         render_code(out, "code", &step.code, Some("lashlang"));
     }
-    for observation in &step.observations {
-        render_code(out, "output", observation, Some("observation"));
-    }
-    if !step.output.is_empty() {
-        render_code(out, "output", &step.output, Some("output"));
+    for item in &step.output {
+        render_code(out, "output", item, Some("output"));
     }
     if let Some(error) = &step.error {
         render_code(out, "error", error, Some("error"));
@@ -1177,7 +1306,253 @@ fn render_rlm_step(
     }
 }
 
+// ─── system prompt (per-LLM-call snapshot from trace) ───────────────────────
+
+fn render_system_prompt(
+    out: &mut String,
+    spine: &mut String,
+    ctx: &mut RenderCtx<'_>,
+    prompt: &LlmPromptSnapshot,
+    prev_hash: Option<&str>,
+    first_seen: Option<&PromptAnchor>,
+) -> String {
+    let id = ctx.next_id();
+    let repeat_of = prev_hash.filter(|h| *h == prompt.system_hash.as_str());
+    let iter_label = prompt
+        .iteration
+        .map(|i| format!("iter {i}"))
+        .unwrap_or_else(|| "llm call".to_string());
+    let model_label = match (prompt.model.as_deref(), prompt.model_variant.as_deref()) {
+        (Some(m), Some(v)) if !v.is_empty() => format!("{m}/{v}"),
+        (Some(m), _) => m.to_string(),
+        _ => String::new(),
+    };
+    let hash_short = prompt
+        .system_hash
+        .chars()
+        .take(12)
+        .collect::<String>();
+    let chars_label = format_count(prompt.system_chars as u64);
+    let total_label = format_count(prompt.total_chars as u64);
+    // Show the system block size in the headline; the right-aligned
+    // entry-meta carries the *full* prompt size (system + history + new
+    // user message) — that's what was actually shipped to the wire.
+    let request_size_label = if prompt.total_chars > prompt.system_chars {
+        format!("→ {total_label}")
+    } else {
+        total_label.clone()
+    };
+
+    let mut headline = String::new();
+    headline.push_str(&iter_label);
+    if !model_label.is_empty() {
+        headline.push_str(" · ");
+        headline.push_str(&model_label);
+    }
+    headline.push_str(" · system ");
+    headline.push_str(&chars_label);
+    if repeat_of.is_some() {
+        headline.push_str(" · unchanged since previous call");
+    }
+
+    // Keep search text short — the prompt body is typically 30+kb and
+    // duplicating it into `data-search` would balloon page weight without
+    // helping anyone (the body is one click away in the <details>).
+    let mut search = String::new();
+    search.push_str("system prompt ");
+    search.push_str(&iter_label);
+    if let Some(call_id) = prompt.llm_call_id.as_deref() {
+        search.push(' ');
+        search.push_str(call_id);
+    }
+    search.push(' ');
+    search.push_str(&hash_short);
+
+    let repeat_class = if repeat_of.is_some() {
+        " entry--system-repeat"
+    } else {
+        ""
+    };
+
+    let _ = writeln!(
+        out,
+        "    <article class=\"entry entry--system{repeat_class}\" id=\"{id}\" data-role=\"system\" data-kind=\"system_prompt\" data-search=\"{search}\">",
+        search = escape_attr(&search)
+    );
+    out.push_str("      <div class=\"entry-rail\">\n");
+    let _ = writeln!(
+        out,
+        "        <a class=\"entry-num\" href=\"#{id}\" title=\"permalink\">{id}</a>"
+    );
+    out.push_str("        <span class=\"entry-glyph\">◇</span>\n");
+    out.push_str("      </div>\n");
+    out.push_str("      <div class=\"entry-body\">\n");
+
+    if repeat_of.is_some() {
+        out.push_str("        <header class=\"entry-head\">\n");
+        out.push_str(
+            "          <span class=\"entry-tag entry-tag--system\">system prompt</span>\n",
+        );
+        let _ = writeln!(
+            out,
+            "          <span class=\"entry-headline\">{}</span>",
+            escape(&headline)
+        );
+        if let Some(anchor) = first_seen {
+            let _ = writeln!(
+                out,
+                "          <a class=\"entry-meta entry-meta--repeat-link\" href=\"#{anchor_id}\" title=\"jump to full prompt body at {anchor_label}\">view full at {anchor_label} →</a>",
+                anchor_id = escape_attr(&anchor.entry_id),
+                anchor_label = escape(&anchor.iter_label),
+            );
+        }
+        let _ = writeln!(
+            out,
+            "          <span class=\"entry-meta entry-meta--repeat\" title=\"hash {full}\">↺ {short}</span>",
+            full = escape_attr(&prompt.system_hash),
+            short = escape(&hash_short),
+        );
+        let _ = writeln!(
+            out,
+            "          <span class=\"entry-meta\" title=\"total request size: system + history + user\">{}</span>",
+            escape(&request_size_label)
+        );
+        out.push_str("        </header>\n");
+    } else {
+        out.push_str("        <details class=\"entry-content prompt-details\">\n");
+        out.push_str("          <summary class=\"entry-head\">\n");
+        out.push_str(
+            "            <span class=\"entry-tag entry-tag--system\">system prompt</span>\n",
+        );
+        let _ = writeln!(
+            out,
+            "            <span class=\"entry-headline\">{}</span>",
+            escape(&headline)
+        );
+        let _ = writeln!(
+            out,
+            "            <span class=\"entry-meta\" title=\"sha hash of system text\">{}</span>",
+            escape(&hash_short)
+        );
+        let _ = writeln!(
+            out,
+            "            <span class=\"entry-meta\" title=\"total request size: system + history + user\">{}</span>",
+            escape(&request_size_label)
+        );
+        out.push_str("          </summary>\n");
+        out.push_str(
+            "          <div class=\"prompt-body\"><div class=\"code-bar\"><span class=\"code-tag\">system</span>",
+        );
+        let _ = writeln!(
+            out,
+            "<span class=\"code-size\">{}</span><button class=\"code-copy\" data-copy>copy</button></div>",
+            chars_label
+        );
+        out.push_str("          <div class=\"prompt-pre\">");
+        out.push_str(&crate::markdown::render(&prompt.system_text));
+        out.push_str("</div></div>\n");
+        out.push_str("        </details>\n");
+    }
+
+    // Always render the request body — that's what changed between
+    // calls. In RLM mode the runtime synthesises one growing user
+    // message containing the original task plus serialised history;
+    // surfacing it here is the only way to see what the model actually
+    // received per call (the .db doesn't store it — the user message
+    // shown in the timeline is just the original task).
+    if !prompt.request_messages.is_empty() {
+        let request_chars_label = format_count(prompt.request_chars as u64);
+        out.push_str("        <details class=\"entry-content prompt-details prompt-request\">\n");
+        out.push_str("          <summary class=\"entry-head\">\n");
+        out.push_str(
+            "            <span class=\"entry-tag entry-tag--request\">request body</span>\n",
+        );
+        let _ = writeln!(
+            out,
+            "            <span class=\"entry-headline\">{} non-system message{} sent at this call</span>",
+            prompt.request_messages.len(),
+            if prompt.request_messages.len() == 1 { "" } else { "s" }
+        );
+        let _ = writeln!(
+            out,
+            "            <span class=\"entry-meta\" title=\"sha hash of request body\">{}</span>",
+            escape(&prompt.request_hash.chars().take(12).collect::<String>())
+        );
+        let _ = writeln!(
+            out,
+            "            <span class=\"entry-meta\">{}</span>",
+            escape(&request_chars_label)
+        );
+        out.push_str("          </summary>\n");
+        out.push_str("          <div class=\"prompt-body request-messages\">\n");
+        for (idx, msg) in prompt.request_messages.iter().enumerate() {
+            let chars_label = format_count(msg.chars as u64);
+            let role_lc = msg.role.to_lowercase();
+            let render_as_markdown = matches!(role_lc.as_str(), "user" | "assistant" | "system");
+            let _ = writeln!(
+                out,
+                "            <div class=\"request-message\"><div class=\"code-bar\"><span class=\"code-tag code-tag--{role}\">{role}</span><span class=\"code-meta\">message {idx} of {total}</span><span class=\"code-size\">{size}</span><button class=\"code-copy\" data-copy>copy</button></div>",
+                role = escape(&msg.role),
+                idx = idx,
+                total = prompt.request_messages.len(),
+                size = chars_label,
+            );
+            if render_as_markdown {
+                out.push_str("<div class=\"prompt-pre\">");
+                out.push_str(&crate::markdown::render(&msg.text));
+                out.push_str("</div></div>\n");
+            } else {
+                let _ = writeln!(
+                    out,
+                    "<pre class=\"code-pre\">{body}</pre></div>",
+                    body = escape(&msg.text),
+                );
+            }
+        }
+        out.push_str("          </div>\n");
+        out.push_str("        </details>\n");
+    }
+
+    out.push_str("      </div>\n");
+    out.push_str("    </article>\n");
+
+    let title = if repeat_of.is_some() {
+        format!("system prompt · {iter_label} · unchanged")
+    } else {
+        format!("system prompt · {iter_label} · {chars_label}")
+    };
+    let _ = writeln!(
+        spine,
+        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"system\" title=\"{}\"></a>",
+        escape_attr(&title)
+    );
+
+    id
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+fn submit_value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn message_matches_text(message: &Message, expected: &str) -> bool {
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return false;
+    }
+    let collected: String = message
+        .parts
+        .iter()
+        .filter(|p| matches!(p.kind, PartKind::Text | PartKind::Prose))
+        .map(|p| p.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    collected.trim() == expected
+}
 
 fn one_line_summary(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
@@ -1219,10 +1594,13 @@ fn summarize_args(value: &serde_json::Value) -> String {
             format!("[{}{}]", preview.join(", "), more)
         }
         Value::Object(map) => {
-            // priority keys to surface first
+            // Priority keys to surface first — action-shaped keys (the
+            // WHAT) outrank location keys (the WHERE) so a grep call shows
+            // its query instead of its path. Tools without an action key
+            // fall through to path naturally.
             const PRIORITY: &[&str] = &[
-                "path", "file", "filename", "filepath", "command", "cmd", "shell", "url", "uri",
-                "query", "q", "prompt", "name", "id", "key", "title",
+                "query", "q", "command", "cmd", "shell", "url", "uri", "prompt",
+                "path", "file", "filename", "filepath", "name", "title", "id", "key",
             ];
             for k in PRIORITY {
                 if let Some(v) = map.get(*k) {
@@ -1469,13 +1847,11 @@ mod tests {
                         iteration: 0,
                         reasoning: "thinking".to_string(),
                         code: "x = 1".to_string(),
-                        output: "1".to_string(),
-                        observations: Vec::new(),
+                        output: vec!["1".to_string()],
                         tool_calls: Vec::new(),
                         images: Vec::new(),
                         error: None,
                         final_output: None,
-                        output_raw_len: 1,
                     }),
                 },
                 ChronologicalEntry {
@@ -1490,6 +1866,7 @@ mod tests {
                     }),
                 },
             ],
+            llm_prompts: Vec::new(),
         };
 
         let rendered = render(&session);
@@ -1545,6 +1922,7 @@ mod tests {
                     }),
                 },
             ],
+            llm_prompts: Vec::new(),
         };
 
         let rendered = render(&session);

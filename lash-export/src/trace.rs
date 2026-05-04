@@ -1,0 +1,280 @@
+//! Read per-LLM-call system prompts from a session's sibling trace file.
+//!
+//! The session `.db` stores the durable conversation thread but not the
+//! fully-assembled system prompt sent to the provider on each call —
+//! that prompt is rendered just-in-time from the preamble + plugin
+//! contributions + chronological history. The trace JSONL written next
+//! to the `.db` (see `lash-cli/src/bootstrap.rs` `with_trace_jsonl_path`)
+//! captures every `llm_call_started` event with the full request,
+//! including the system block. We pull just the system text out so the
+//! HTML exporter can show what the model was actually told on each call.
+
+use std::collections::hash_map::DefaultHasher;
+use std::fs::File;
+use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LlmPromptSnapshot {
+    pub iteration: Option<u64>,
+    pub llm_call_id: Option<String>,
+    pub timestamp: Option<String>,
+    pub model: Option<String>,
+    pub model_variant: Option<String>,
+    pub system_text: String,
+    pub system_chars: usize,
+    pub system_hash: String,
+    pub message_count: usize,
+    /// Total characters across every message (system + user + history)
+    /// in the request — the actual payload size sent to the model.
+    pub total_chars: usize,
+    /// Each non-system message in the request, in order. In RLM mode
+    /// the runtime synthesises a single growing user message containing
+    /// the original task plus serialised history of prior iterations;
+    /// the export uses this list to render one block per message rather
+    /// than concatenating into a wall of text.
+    pub request_messages: Vec<RequestMessage>,
+    pub request_chars: usize,
+    pub request_hash: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RequestMessage {
+    pub role: String,
+    pub text: String,
+    pub chars: usize,
+}
+
+/// Derive the trace path from a session `.db` path. Returns the sibling
+/// `<basename>.trace.jsonl` whether or not it exists.
+pub fn trace_path_for_session_db(db_path: &Path) -> PathBuf {
+    let stem = db_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session");
+    let mut path = db_path.to_path_buf();
+    path.set_file_name(format!("{stem}.trace.jsonl"));
+    path
+}
+
+/// Parse the trace and extract one snapshot per `llm_call_started` event,
+/// preserving file order. Returns an empty vec if the file is absent or
+/// unreadable — exporting must never fail because the trace is missing.
+pub fn load_prompts_from_trace(trace_path: &Path) -> Vec<LlmPromptSnapshot> {
+    let Ok(file) = File::open(trace_path) else {
+        return Vec::new();
+    };
+    let reader = BufReader::new(file);
+    let mut snapshots = Vec::new();
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if record.get("type").and_then(Value::as_str) != Some("llm_call_started") {
+            continue;
+        }
+        if let Some(snapshot) = snapshot_from_record(&record) {
+            snapshots.push(snapshot);
+        }
+    }
+    snapshots
+}
+
+fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
+    let request = record.get("request")?;
+    let messages = request.get("messages").and_then(Value::as_array)?;
+    let system_text = collect_system_text(messages);
+    if system_text.is_empty() {
+        return None;
+    }
+    let system_chars = system_text.chars().count();
+    let system_hash = short_hash(&system_text);
+    let total_chars = total_message_chars(messages);
+    let request_messages = collect_non_system_messages(messages);
+    let request_chars: usize = request_messages.iter().map(|m| m.chars).sum();
+    let request_concat = request_messages
+        .iter()
+        .map(|m| m.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let request_hash = short_hash(&request_concat);
+    let context = record.get("context");
+    Some(LlmPromptSnapshot {
+        iteration: context
+            .and_then(|c| c.get("iteration"))
+            .and_then(Value::as_u64),
+        llm_call_id: context
+            .and_then(|c| c.get("llm_call_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        timestamp: record
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        model: request
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        model_variant: request
+            .get("model_variant")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        system_text,
+        system_chars,
+        system_hash,
+        message_count: messages.len(),
+        total_chars,
+        request_messages,
+        request_chars,
+        request_hash,
+    })
+}
+
+fn total_message_chars(messages: &[Value]) -> usize {
+    let mut total = 0usize;
+    for message in messages {
+        if let Some(blocks) = message.get("blocks").and_then(Value::as_array) {
+            for block in blocks {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    total = total.saturating_add(text.chars().count());
+                }
+            }
+        } else if let Some(text) = message.get("text").and_then(Value::as_str) {
+            total = total.saturating_add(text.chars().count());
+        }
+    }
+    total
+}
+
+fn collect_system_text(messages: &[Value]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("system") {
+            continue;
+        }
+        append_message_text(message, &mut out);
+    }
+    out
+}
+
+fn collect_non_system_messages(messages: &[Value]) -> Vec<RequestMessage> {
+    let mut out = Vec::new();
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if role == "system" {
+            continue;
+        }
+        let mut text = String::new();
+        append_message_text(message, &mut text);
+        if text.is_empty() {
+            continue;
+        }
+        let chars = text.chars().count();
+        out.push(RequestMessage { role, text, chars });
+    }
+    out
+}
+
+fn append_message_text(message: &Value, out: &mut String) {
+    if let Some(blocks) = message.get("blocks").and_then(Value::as_array) {
+        for block in blocks {
+            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push_str("\n\n");
+                }
+                out.push_str(text);
+            }
+        }
+    } else if let Some(text) = message.get("text").and_then(Value::as_str) {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push_str("\n\n");
+        }
+        out.push_str(text);
+    }
+}
+
+fn short_hash(text: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn parses_system_text_and_metadata() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+        writeln!(
+            tmp,
+            r#"{{"type":"turn_started","context":{{"iteration":1}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            tmp,
+            r#"{{"type":"llm_call_started","timestamp":"2026-05-04T00:00:00Z","context":{{"iteration":0,"llm_call_id":"abc:0"}},"request":{{"model":"gpt-5.5","model_variant":"high","messages":[{{"role":"system","blocks":[{{"kind":"text","text":"You are lash."}}]}},{{"role":"user","blocks":[{{"kind":"text","text":"hi"}}]}}]}}}}"#
+        )
+        .unwrap();
+        tmp.flush().unwrap();
+
+        let prompts = load_prompts_from_trace(tmp.path());
+        assert_eq!(prompts.len(), 1);
+        let p = &prompts[0];
+        assert_eq!(p.iteration, Some(0));
+        assert_eq!(p.llm_call_id.as_deref(), Some("abc:0"));
+        assert_eq!(p.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(p.model_variant.as_deref(), Some("high"));
+        assert_eq!(p.system_text, "You are lash.");
+        assert_eq!(p.system_chars, 13);
+        assert_eq!(p.message_count, 2);
+        assert_eq!(p.total_chars, 15); // "You are lash." (13) + "hi" (2)
+        assert_eq!(p.system_hash.len(), 16);
+        assert_eq!(p.request_messages.len(), 1);
+        assert_eq!(p.request_messages[0].role, "user");
+        assert_eq!(p.request_messages[0].text, "hi");
+        assert_eq!(p.request_messages[0].chars, 2);
+        assert_eq!(p.request_chars, 2);
+    }
+
+    #[test]
+    fn missing_trace_returns_empty() {
+        let prompts = load_prompts_from_trace(Path::new("/nonexistent/path.trace.jsonl"));
+        assert!(prompts.is_empty());
+    }
+
+    #[test]
+    fn skips_records_without_system_block() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+        writeln!(
+            tmp,
+            r#"{{"type":"llm_call_started","request":{{"messages":[{{"role":"user","blocks":[{{"text":"hi"}}]}}]}}}}"#
+        )
+        .unwrap();
+        tmp.flush().unwrap();
+
+        let prompts = load_prompts_from_trace(tmp.path());
+        assert!(prompts.is_empty());
+    }
+
+    #[test]
+    fn trace_path_swaps_extension() {
+        let path = trace_path_for_session_db(Path::new("/tmp/sessions/20260503_220413.db"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/sessions/20260503_220413.trace.jsonl")
+        );
+    }
+}

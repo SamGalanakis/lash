@@ -189,9 +189,13 @@
   document.addEventListener('click', (ev) => {
     const a = ev.target.closest('.entry-num');
     if (!a) return;
+    // entry-num lives inside a <summary> in tool-call entries; without
+    // stopPropagation the click would also toggle the parent <details>.
+    ev.stopPropagation();
     const id = a.getAttribute('href').slice(1);
     flashEntry(id);
   });
+
 
   function flashEntry(id) {
     const el = document.getElementById(id);
@@ -240,10 +244,27 @@
 
   function jumpTo(el) {
     if (!el) return;
+    // open the entry's primary <details> so j/k navigation actually shows
+    // content rather than parking on a closed header
+    const det = el.querySelector(':scope > .entry-body > details');
+    if (det && !det.open) det.open = true;
     el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     setCurrent(el.id);
     flashEntry(el.id);
   }
+
+  // open details when arriving via hash (#e23)
+  function expandHashTarget() {
+    const id = location.hash.slice(1);
+    if (!id) return;
+    const el = document.getElementById(id);
+    if (!el) return;
+    const det = el.querySelector(':scope > .entry-body > details');
+    if (det && !det.open) det.open = true;
+    flashEntry(id);
+  }
+  window.addEventListener('hashchange', expandHashTarget);
+  if (location.hash) setTimeout(expandHashTarget, 0);
 
   document.addEventListener('keydown', (ev) => {
     if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement) {

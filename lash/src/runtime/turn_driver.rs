@@ -71,6 +71,62 @@ impl RuntimeTurnDriver {
         );
     }
 
+    fn emit_trace_at(
+        &self,
+        iteration: usize,
+        event: lash_trace::TraceEvent,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) {
+        crate::trace::emit_trace_at(
+            &self.host.core.trace_sink,
+            &self.host.core.trace_context,
+            lash_trace::TraceContext::default()
+                .for_session(self.session_id.clone())
+                .for_iteration(iteration),
+            event,
+            timestamp,
+        );
+    }
+
+    fn emit_tool_call_trace_at(
+        &self,
+        iteration: usize,
+        record: &crate::ToolCallRecord,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) {
+        self.emit_trace_at(
+            iteration,
+            lash_trace::TraceEvent::ToolCallCompleted {
+                call_id: record.call_id.clone(),
+                name: record.tool.clone(),
+                args: record.args.clone(),
+                result: record.result.clone(),
+                success: record.success,
+                duration_ms: record.duration_ms,
+            },
+            timestamp,
+        );
+    }
+
+    fn emit_tool_call_started_trace_at(
+        &self,
+        iteration: usize,
+        call_id: Option<String>,
+        name: String,
+        args: serde_json::Value,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) {
+        self.emit_trace_at(
+            iteration,
+            lash_trace::TraceEvent::ToolCallStarted {
+                call_id,
+                name,
+                args,
+            },
+            timestamp,
+        );
+    }
+
     fn emit_tool_call_trace(&self, iteration: usize, record: &crate::ToolCallRecord) {
         self.emit_trace(
             iteration,
@@ -328,6 +384,7 @@ impl RuntimeTurnDriver {
                                 }),
                             );
                         }
+                        let exec_started_at = chrono::Utc::now();
                         let result = self.run_exec_code(&code, &event_tx).await;
                         if let Ok(output) = &result {
                             if self.host.core.trace_sink.is_some() {
@@ -338,7 +395,6 @@ impl RuntimeTurnDriver {
                                         "duration_ms": output.duration_ms,
                                         "output": output.output,
                                         "output_chars": output.output.chars().count(),
-                                        "observations": output.observations,
                                         "observation_count": output.observations.len(),
                                         "observation_truncation": output.observation_truncation,
                                         "error": output.error,
@@ -347,25 +403,37 @@ impl RuntimeTurnDriver {
                                         "tool_call_count": output.tool_calls.len(),
                                     }),
                                 );
+                                // Reconstruct synthetic per-tool timestamps
+                                // by walking the cumulative durations forward
+                                // from when exec started. Tools fire
+                                // sequentially within a lashlang block, so
+                                // this is a close approximation to actual
+                                // wall-clock timing — far better than
+                                // stamping every event with the post-exec
+                                // emission time.
+                                let mut cursor = exec_started_at;
                                 for record in &output.tool_calls {
-                                    self.emit_tool_call_started_trace(
+                                    let started_at = cursor;
+                                    let completed_at = started_at
+                                        + chrono::Duration::milliseconds(record.duration_ms as i64);
+                                    self.emit_tool_call_started_trace_at(
                                         iteration,
                                         record.call_id.clone(),
                                         record.tool.clone(),
                                         record.args.clone(),
+                                        started_at,
                                     );
+                                    self.emit_tool_call_trace_at(iteration, record, completed_at);
+                                    cursor = completed_at;
                                 }
                                 if !output.observation_truncation.is_empty() {
                                     self.emit_rlm_exec_step(
                                         iteration,
                                         "observation_projection",
                                         serde_json::json!({
-                                            "observations": output.observation_truncation,
+                                            "projections": output.observation_truncation,
                                         }),
                                     );
-                                }
-                                for record in &output.tool_calls {
-                                    self.emit_tool_call_trace(iteration, record);
                                 }
                             }
                             self.turn_pipeline

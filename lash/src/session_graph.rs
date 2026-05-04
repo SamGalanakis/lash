@@ -1386,13 +1386,11 @@ mod tests {
                 iteration: 0,
                 reasoning: "think".to_string(),
                 code: "x = 1".to_string(),
-                output: "1".to_string(),
-                observations: vec!["observed".to_string()],
+                output: vec!["observed".to_string()],
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
                 final_output: None,
-                output_raw_len: 1,
             }),
         )));
         graph.append_event(SessionEventRecord::Tool(ToolEvent::Invocation {

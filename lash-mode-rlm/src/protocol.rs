@@ -65,10 +65,10 @@ pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
 
 - Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
 - Images: image-producing tools such as `read_file` on a PNG/JPEG return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ "type": "image", "id": ..., "label": ..., "size": ..., "width": ..., "height": ... }`. `len(image)` is invalid; use `.size`.
-- Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` is raw multiline and preserves content exactly. Use raw multiline strings for patches, scripts, JSON, Markdown, and other payloads with braces, backslashes, or `@@` hunk markers.
+- Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for patches, scripts, JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.
 - Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
-- Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Resolve it with `await handle` — that returns the same `{ ok, value }` wrapper as a synchronous `call`. Use `(await handle)?` for the common happy path. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort).
+- Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). `call monitor { ... }` also returns a handle because monitors are long-lived background event sources. Resolve a handle with `await handle` when you want to wait for completion, or use `(await handle)?` for fail-fast unwrapping. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort). Use `list_async_handles` to rediscover live monitor, subagent, and tool handles.
 - Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
 - Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
@@ -153,18 +153,31 @@ const RLM_DECOMPOSITION_SECTION: &str = r#"### Working with context
 
 Your turn's REPL trace is your working memory. Keep it small, decision-sized, and current. Big artifacts (files, search results, long pages, raw tool dumps) live outside — pull them in only when you need to compute over them yourself. Keep full results in variables; `print` only lengths, keys, selected fields, or slices, never large objects you intend to hand-copy IDs from.
 
-Two ways to keep your context lean while still making progress:
+Choose the lightest mechanism that preserves progress:
 
-- `spawn_agent` — branch a subagent that does focused work and returns its final value. A plain call blocks; use `start call spawn_agent` plus `await` for parallel fanout. Use it whenever the inputs would balloon your trace if you read them yourself: bulk reads, scans, validations, deep dives into one section. Prefer `output: { ... }` so the subagent returns typed facts, not prose. Use `list_async_handles` to inspect live await/cancel handles.
-- `continue_as` — tail-call to a fresh successor. Your turn ends; the successor inherits the same tools and a clean window. Use it when most of your trace has gone stale (failed attempts, large observations you've already extracted from) or you're approaching the context limit. The successor sees only `task` + `seed` — pack the goal, concrete IDs and paths, partial results, and next steps; leave dead ends behind.
+| Situation | Use | Why |
+|---|---|---|
+| Small task, data already in current variables | Inline lashlang / direct reasoning | No extra model call or context needed |
+| Semantic extraction, summarization, classification, judging, or transformation over data already in variables | `llm_query` | Cheap one-shot LLM call; no child session, no tools, no REPL |
+| Need file/repo/web inspection, shell commands, validation, edits, or multi-step investigation in isolated context | `spawn_agent` | Child session can use tools and return focused facts |
+| Several independent investigations can run in parallel | `start call spawn_agent` + `await` / `parallel` | Fanout while keeping the parent trace small |
+| Current trace is bloated/stale, failed attempts dominate, or context is tight | `continue_as` | Tail-call to a clean successor with only packed state |
+| Read-only investigation | `spawn_agent` with `capability: "explore"` | Safer restricted default |
+| Needs edits or recursive spawning | `spawn_agent` with `capability: "peer"` | Broader authority |
 
-Rule of thumb: many independent subproblems → `start call spawn_agent`, then `await` the handles. One thread outgrowing its window → `continue_as`. Small enough to keep in your head → just do it inline.
+Hard boundaries:
+
+- Do not use `llm_query` if the answer requires reading files, running commands, searching, fetching URLs, inspecting repository state, or using any tool. First gather the needed data inline or with a subagent; then use `llm_query` only on the gathered data.
+- `spawn_agent` branches work and returns a result to the current session. Use it when the parent should keep its current state and collect a focused result.
+- `continue_as` transfers the whole task to a successor and ends the current session. Use it when the current session state is no longer worth preserving.
+
+Anti-patterns: don't spawn a subagent for a trivial check you can do inline; don't use `llm_query` to avoid reading required source material; don't use `continue_as` to delegate one subtask; don't pass bulky raw logs/search results into `continue_as.seed`; don't use `peer` when `explore` is enough.
 
 Example fanout to two subagents (use `?` for fail-fast unwrapping):
 
 ```lashlang
-a = start call spawn_agent { agent_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "low", output: { claim: "str" } }
-b = start call spawn_agent { agent_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "low", output: { claim: "str" } }
+a = start call spawn_agent { agent_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "explore", output: { claim: "str" } }
+b = start call spawn_agent { agent_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "explore", output: { claim: "str" } }
 handles = (call list_async_handles {})?
 results = parallel { one: (await handles.subagent.read_chunk_1)?, two: (await handles.subagent.read_chunk_2)? }
 submit [results.one.claim, results.two.claim]
@@ -183,8 +196,11 @@ struct RlmDriverState {
     reasoning: String,
     tool_calls: Vec<ToolCallRecord>,
     images: Vec<AttachmentRef>,
-    observations: Vec<String>,
-    combined_output: String,
+    /// One entry per `print` from the executed lashlang block (plus any
+    /// raw stdout-style emission). Replaces the old split between a
+    /// concatenated `combined_output: String` and a parallel
+    /// `observations: Vec<String>` — the two carried the same content.
+    output: Vec<String>,
     exec_error: Option<String>,
     executed_code: Option<String>,
     terminal_finish: Option<Value>,
@@ -349,20 +365,13 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 state.tool_calls.extend(response.tool_calls);
                 state.images.extend(response.printed_images);
                 if !response.output.is_empty() {
-                    state.combined_output.push_str(&response.output);
+                    // Raw lashlang-runtime stdout (rare); treat as an
+                    // anonymous output entry alongside the typed prints.
+                    state.output.push(response.output);
                 }
                 for observation in response.observations {
                     if !observation.is_empty() {
-                        state.observations.push(observation.clone());
-                        if !state.combined_output.is_empty()
-                            && !state.combined_output.ends_with('\n')
-                        {
-                            state.combined_output.push('\n');
-                        }
-                        state.combined_output.push_str(&observation);
-                        if !state.combined_output.ends_with('\n') {
-                            state.combined_output.push('\n');
-                        }
+                        state.output.push(observation);
                     }
                 }
                 if let Some(raw_error) = response.error {
@@ -479,20 +488,16 @@ fn trajectory_entry(
     validation_error: Option<String>,
     final_output: Option<Value>,
 ) -> RlmTrajectoryEntry {
-    let output = state.combined_output.clone();
-    let output_raw_len = output.chars().count();
     RlmTrajectoryEntry {
         id: format!("rlm_step_{iteration}"),
         iteration,
         reasoning: state.reasoning.clone(),
         code: state.executed_code.clone().unwrap_or_default(),
-        output,
-        observations: state.observations.clone(),
+        output: state.output.clone(),
         tool_calls: state.tool_calls.clone(),
         images: state.images.clone(),
         error: validation_error.or_else(|| state.exec_error.clone()),
         final_output,
-        output_raw_len,
     }
 }
 

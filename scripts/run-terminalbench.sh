@@ -28,7 +28,7 @@ Options:
                                 (for example: codex; optional for --agent lash)
   --variant <name>              Provider-native model variant passed through when supported
                                 (required for all benchmark runs)
-  --execution-mode <mode>       Lash execution mode: rlm|rlmpure|standard
+  --execution-mode <mode>       Lash execution mode: rlm|standard
                                 (required for --agent lash; ignored for opencode)
   --context-approach <name>     Lash standard-mode context approach:
                                 rolling_history|observational_memory
@@ -56,20 +56,20 @@ Options:
 
 Examples:
   scripts/run-terminalbench.sh --sample --execution-mode rlm --variant high
-  scripts/run-terminalbench.sh --sample --execution-mode rlm --provider codex --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --preset trivial --execution-mode rlm --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --preset smoke --execution-mode rlm --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --full --preset memory-3 --execution-mode standard --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --full --preset recall-3 --execution-mode standard --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --full --preset representative-10 --execution-mode standard --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode rlm --provider codex --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --sample --preset trivial --execution-mode rlm --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --sample --preset smoke --execution-mode rlm --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --full --preset memory-3 --execution-mode standard --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --full --preset recall-3 --execution-mode standard --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --full --preset representative-10 --execution-mode standard --model gpt-5.5 --variant high
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,fix-code-vulnerability --variant high
-  scripts/run-terminalbench.sh --sample --execution-mode standard --context-approach rolling_history --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --execution-mode rlm --task chess-best-move --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --agent opencode --sample --model openai/gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --agent codex --sample --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode standard --context-approach rolling_history --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode rlm --task chess-best-move --model gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --agent opencode --sample --model openai/gpt-5.5 --variant high
+  scripts/run-terminalbench.sh --agent codex --sample --model gpt-5.5 --variant high
 EOF
 }
 
@@ -474,16 +474,12 @@ BINARY_PATH=""
 
 if [[ "${AGENT}" == "lash" ]]; then
   if [[ -z "${EXECUTION_MODE}" ]]; then
-    echo "error: --execution-mode is required for --agent lash (expected rlm|rlmpure|standard)" >&2
+    echo "error: --execution-mode is required for --agent lash (expected rlm|standard)" >&2
     exit 2
   fi
 
-  if [[ "${EXECUTION_MODE}" == "native-tools" ]]; then
-    EXECUTION_MODE="standard"
-  fi
-
-  if [[ "${EXECUTION_MODE}" != "rlm" && "${EXECUTION_MODE}" != "rlmpure" && "${EXECUTION_MODE}" != "standard" ]]; then
-    echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected rlm|rlmpure|standard)" >&2
+  if [[ "${EXECUTION_MODE}" != "rlm" && "${EXECUTION_MODE}" != "standard" ]]; then
+    echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected rlm|standard)" >&2
     exit 2
   fi
 

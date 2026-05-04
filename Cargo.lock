@@ -2209,7 +2209,10 @@ dependencies = [
  "clap",
  "dirs 6.0.0",
  "lash",
+ "pulldown-cmark",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

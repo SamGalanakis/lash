@@ -418,6 +418,29 @@ body::after {
   align-items: baseline;
   margin-bottom: 8px;
 }
+/* When the entry-head IS the <summary>, click anywhere to toggle. */
+summary.entry-head {
+  list-style: none;
+  cursor: pointer;
+  margin-bottom: 0;
+  padding: 2px 0;
+  border-radius: 0;
+  position: relative;
+}
+summary.entry-head::-webkit-details-marker { display: none; }
+summary.entry-head::after {
+  content: "▸";
+  color: var(--ash-mid);
+  margin-left: auto;
+  margin-right: 2px;
+  font-size: 11px;
+  transition: transform 120ms ease;
+  flex-shrink: 0;
+  align-self: center;
+}
+details[open] > summary.entry-head::after { transform: rotate(90deg); }
+details[open] > summary.entry-head { margin-bottom: 8px; }
+summary.entry-head:hover .entry-tag { color: var(--sodium); }
 
 .entry-tag {
   font-family: var(--font-ui);
@@ -457,6 +480,165 @@ body::after {
 }
 .entry-meta--ok { color: var(--lichen); }
 .entry-meta--err { color: var(--error); font-weight: 600; }
+.entry-meta--repeat {
+  color: var(--ash-text);
+  font-family: var(--font-ui);
+  letter-spacing: 0.04em;
+  cursor: help;
+}
+.entry-meta--repeat-link {
+  color: var(--info);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+  border-bottom: 1px dashed transparent;
+  white-space: nowrap;
+}
+.entry-meta--repeat-link:hover {
+  color: var(--sodium);
+  border-bottom-color: var(--sodium);
+}
+
+/* ─── system prompt (per-LLM-call snapshot from trace) ─── */
+
+.entry-tag--system { color: var(--ash-text) !important; font-weight: 600; }
+.entry-tag--request { color: var(--info) !important; font-weight: 600; }
+.prompt-request {
+  margin-top: 8px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+.entry--system .entry-headline {
+  color: var(--ash-mid);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.entry--system-repeat {
+  opacity: 0.62;
+}
+.entry--system-repeat .entry-headline {
+  font-style: italic;
+}
+.prompt-details > .entry-content,
+.prompt-details {
+  display: grid;
+  gap: 10px;
+}
+.prompt-body {
+  border: 1px solid var(--line);
+  background: rgba(20, 20, 18, 0.55);
+  display: grid;
+}
+.prompt-pre {
+  padding: 10px 14px;
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+/* ─── markdown rendering (used in prose + system prompt bodies) ─── */
+
+.md {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--chalk-mid);
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  max-width: 86ch;
+}
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 0.9em 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+  font-family: var(--font-ui);
+  color: var(--chalk);
+  margin: 1.2em 0 0.5em 0;
+  line-height: 1.25;
+  letter-spacing: 0.005em;
+}
+.md h1 { font-size: 18px; }
+.md h2 { font-size: 16px; color: var(--sodium); }
+.md h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ash-text); }
+.md h4, .md h5, .md h6 { font-size: 13px; color: var(--chalk-mid); }
+.md ul, .md ol { margin: 0.4em 0 0.9em 1.4em; padding: 0; }
+.md li { margin: 0.18em 0; }
+.md li > p { margin: 0 0 0.4em 0; }
+.md a {
+  color: var(--sodium);
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 184, 102, 0.4);
+  text-underline-offset: 2px;
+}
+.md a:hover { text-decoration-color: var(--sodium); }
+.md strong { color: var(--chalk); font-weight: 600; }
+.md em { color: var(--chalk-mid); font-style: italic; }
+.md code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  background: rgba(20, 20, 18, 0.6);
+  border: 1px solid var(--line);
+  padding: 0 4px;
+  border-radius: 2px;
+  color: var(--chalk);
+  word-break: break-word;
+}
+.md pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  background: rgba(20, 20, 18, 0.7);
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  margin: 0.5em 0 0.9em 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--chalk-mid);
+  tab-size: 2;
+}
+.md pre > code {
+  font-family: inherit;
+  font-size: inherit;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  word-break: normal;
+}
+.md blockquote {
+  margin: 0.6em 0;
+  padding: 4px 12px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--chalk-dim);
+}
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1.2em 0;
+}
+.md table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+}
+.md th, .md td {
+  border: 1px solid var(--line);
+  padding: 4px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md th {
+  background: rgba(20, 20, 18, 0.5);
+  color: var(--ash-text);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  font-size: 11px;
+}
 .entry-callid {
   font-family: var(--font-ui);
   font-size: 10px;
@@ -551,6 +733,27 @@ body::after {
   padding: 14px 16px 18px;
 }
 
+.prose-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.prose-tag {
+  font-family: var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 10px;
+  color: var(--ash-text);
+}
+.prose-size {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  color: var(--ash-text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+}
+
 .part--reasoning {
   display: grid;
   grid-template-columns: 12px 1fr;
@@ -571,6 +774,16 @@ body::after {
   font-style: normal;
 }
 .reasoning-text { white-space: pre-wrap; word-wrap: break-word; }
+.reasoning-size {
+  grid-column: 2;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  color: var(--ash-text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  font-style: normal;
+  margin-top: 4px;
+}
 
 .part--pruned {
   font-family: var(--font-ui);
@@ -706,7 +919,10 @@ details[open] > summary.code-bar::before { transform: rotate(90deg); }
   font-size: 12px;
   line-height: 1.55;
   color: var(--chalk-mid);
-  white-space: pre;
+  /* `pre-wrap` keeps newlines while letting CSS break long lines that
+   * have no whitespace to break on (think mashed-together JSON). */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   tab-size: 2;
 }
 .part--error .code-pre { color: var(--error); }

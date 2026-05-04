@@ -17,12 +17,22 @@ pub(crate) fn emit_trace(
     context: TraceContext,
     event: TraceEvent,
 ) {
+    emit_trace_at(sink, base_context, context, event, chrono::Utc::now());
+}
+
+pub(crate) fn emit_trace_at(
+    sink: &Option<Arc<dyn TraceSink>>,
+    base_context: &TraceContext,
+    context: TraceContext,
+    event: TraceEvent,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) {
     let Some(sink) = sink else {
         return;
     };
     let mut merged = base_context.clone();
     merge_context(&mut merged, context);
-    if let Err(err) = sink.append(&TraceRecord::new(merged, event)) {
+    if let Err(err) = sink.append(&TraceRecord::new_with_timestamp(merged, event, timestamp)) {
         tracing::warn!(error = %err, "failed to append trace record");
     }
 }

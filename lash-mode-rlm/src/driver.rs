@@ -328,7 +328,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
         let termination = ctx.config.termination.rlm_termination();
         let finalization = rlm_finalization_prompt(&termination);
         let user_prompt = format!(
-            "History\n{history}\n\nIteration\n{}\n\n{finalization}",
+            "=== HISTORY ===\n\n{history}\n\n\n=== CURRENT ITERATION: {} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
             ctx.iteration + 1
         );
 
@@ -368,13 +368,13 @@ fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
             include_submit_prompt: true,
             ..
         } => {
-            "Finalization\nCall `submit <value>` from lashlang when the task is complete. Do not answer in prose without a lashlang block."
+            "Call `submit <value>` from lashlang when the task is complete. Do not answer in prose without a lashlang block. Avoid submitting large raw variables; summarize results or submit a concise final answer instead."
         }
         RlmTermination::Finish {
             include_submit_prompt: false,
             ..
         } => {
-            "Finalization\nContinue in lashlang blocks until the task-specific completion path is satisfied. Do not answer in prose without a lashlang block."
+            "Continue in lashlang blocks until the task-specific completion path is satisfied. Do not answer in prose without a lashlang block."
         }
     }
 }
@@ -433,9 +433,8 @@ fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) ->
                 iteration,
                 reasoning,
                 code,
-                observations,
                 output,
-                tool_calls,
+                tool_calls: _,
                 images,
                 error,
                 final_output,
@@ -446,9 +445,7 @@ fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) ->
                     iteration: *iteration,
                     reasoning,
                     code,
-                    observations,
                     output,
-                    tool_calls,
                     images,
                     error: error.as_deref(),
                     final_output: final_output.as_ref(),
@@ -497,7 +494,7 @@ fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
     let status = if success { "ok" } else { "error" };
     let _ = write!(
         out,
-        "=== history[{index}] tool_call ===\nTool: {tool}\nStatus: {status}\nDuration: {duration_ms} ms\n\nArguments ({args_raw_len} chars{args_ref}):\n{args_preview}\n\nResult ({result_raw_len} chars{result_ref}):\n{result_preview}"
+        "--- history[{index}] · tool_call · {tool} · {status} · {duration_ms} ms ---\n\nArguments ({args_raw_len} chars{args_ref}):\n{args_preview}\n\nResult ({result_raw_len} chars{result_ref}):\n{result_preview}"
     );
 }
 
@@ -549,8 +546,8 @@ fn append_history_message(
     );
     let _ = write!(
         out,
-        "=== history[{index}] message ===\n{}:\nContent ({raw_len} chars{full_ref}):\n{preview}",
-        message_role_label(role),
+        "--- history[{index}] · {} message · {raw_len} chars{full_ref} ---\n\n{preview}",
+        message_role_label(role).to_lowercase(),
     );
     if !attachments.is_empty() {
         out.push_str("\n\nAttachments:");
@@ -578,9 +575,7 @@ struct ReplStepRender<'a> {
     iteration: usize,
     reasoning: &'a str,
     code: &'a str,
-    observations: &'a [String],
-    output: &'a str,
-    tool_calls: &'a [lash::ToolCallRecord],
+    output: &'a [String],
     images: &'a [RlmImageRef],
     error: Option<&'a str>,
     final_output: Option<&'a serde_json::Value>,
@@ -593,9 +588,7 @@ fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
         iteration,
         reasoning,
         code,
-        observations,
         output,
-        tool_calls,
         images,
         error,
         final_output,
@@ -610,7 +603,7 @@ fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
     );
     let _ = write!(
         out,
-        "=== history[{index}] rlm_step ===\nIteration: {iteration}\n\nReasoning ({reasoning_raw_len} chars{reasoning_ref}):\n{}\n\nCode:\n```lashlang\n{}\n```",
+        "--- history[{index}] · rlm step · iteration {iteration} ---\n\nReasoning ({reasoning_raw_len} chars{reasoning_ref}):\n{}\n\nCode:\n```lashlang\n{}\n```",
         if reasoning_preview.is_empty() {
             "(none)"
         } else {
@@ -619,42 +612,22 @@ fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
         code.trim(),
     );
 
-    if !observations.is_empty() {
-        out.push_str("\n\nObservations:");
-        for (observation_index, observation) in observations.iter().enumerate() {
-            let (preview, raw_len) = head_tail_truncate(observation, max_output_chars);
-            let full_ref = truncated_ref(
-                raw_len,
-                max_output_chars,
-                &format!("history[{index}].observations[{observation_index}]"),
-            );
-            let _ = write!(
-                out,
-                "\n\nhistory[{index}].observations[{observation_index}] ({raw_len} chars{full_ref}):\n{preview}"
-            );
-        }
-    }
-
-    if !output.trim().is_empty() {
-        let (preview, raw_len) = head_tail_truncate(output, max_output_chars);
+    // One block per `print` (or raw stdout emission). Tool calls used to
+    // get their own section here for retrieval-without-print, but that
+    // duplicated content the model could fetch via `print result` and
+    // bloated history; the `code` field above shows every `(call …)`
+    // the model wrote.
+    for (output_index, item) in output.iter().enumerate() {
+        let (preview, raw_len) = head_tail_truncate(item, max_output_chars);
         let full_ref = truncated_ref(
             raw_len,
             max_output_chars,
-            &format!("history[{index}].output"),
+            &format!("history[{index}].output[{output_index}]"),
         );
-        let _ = write!(out, "\n\nOutput ({raw_len} chars{full_ref}):\n{preview}");
-    }
-
-    if !tool_calls.is_empty() {
-        out.push_str("\n\nTool calls:");
-        for (tool_index, tool_call) in tool_calls.iter().enumerate() {
-            let rendered = serde_json::to_string(tool_call)
-                .unwrap_or_else(|_| "{\"error\":\"unrenderable tool call\"}".to_string());
-            let _ = write!(
-                out,
-                "\n- history[{index}].tool_calls[{tool_index}]: {rendered}"
-            );
-        }
+        let _ = write!(
+            out,
+            "\n\nhistory[{index}].output[{output_index}] ({raw_len} chars{full_ref}):\n{preview}"
+        );
     }
 
     if !images.is_empty() {
@@ -757,13 +730,15 @@ mod tests {
                 iteration,
                 reasoning: "thinking".to_string(),
                 code: code.to_string(),
-                output: output.to_string(),
-                observations: Vec::new(),
+                output: if output.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![output.to_string()]
+                },
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
                 final_output: None,
-                output_raw_len: output.chars().count(),
             },
         )))
     }
@@ -797,13 +772,18 @@ mod tests {
         ];
         let history = projector.format_history(&events);
 
-        assert!(history.contains("=== history[0] message ===\nUser:"));
-        assert!(history.contains("Content (5 chars):\nfirst"));
-        assert!(history.contains("=== history[1] rlm_step ==="));
+        assert!(history.contains("--- history[0] · user message · 5 chars ---\n\nfirst"));
+        assert!(history.contains("--- history[1] · rlm step · iteration 0 ---"));
         assert!(history.contains("Code:\n```lashlang\nprint 1\n```"));
-        assert!(history.contains("=== history[2] message ===\nUser:"));
-        assert!(history.contains("Content (6 chars):\nsecond"));
-        assert!(history.contains("=== history[3] rlm_step ==="));
+        assert!(history.contains("history[1].output[0] (1 chars):\n1"));
+        assert!(history.contains("--- history[2] · user message · 6 chars ---\n\nsecond"));
+        assert!(history.contains("--- history[3] · rlm step · iteration 1 ---"));
+        assert!(history.contains("history[3].output[0] (1 chars):\n2"));
+        // Old combined "Output" + "Tool calls" sections were removed —
+        // each `print` is now its own block, and tool calls are visible
+        // inline in the `code` block above.
+        assert!(!history.contains("\n\nOutput ("));
+        assert!(!history.contains("\n\nTool calls:"));
         assert!(!history.contains("Task"));
         assert!(!history.contains("user_input_"));
     }
@@ -818,10 +798,9 @@ mod tests {
         ];
         let history = projector.format_history(&events);
 
-        assert!(history.contains("=== history[0] message ==="));
-        assert!(history.contains("=== history[1] tool_call ==="));
-        assert!(history.contains("Tool: lookup"));
-        assert!(history.contains("=== history[2] rlm_step ==="));
+        assert!(history.contains("--- history[0] · user message"));
+        assert!(history.contains("--- history[1] · tool_call · lookup · ok · 4 ms ---"));
+        assert!(history.contains("--- history[2] · rlm step · iteration 0 ---"));
         assert!(!history.contains("full: history[1].result"));
     }
 
@@ -863,8 +842,7 @@ mod tests {
         });
 
         let history = projector.format_history(&[event]);
-        assert!(history.contains("=== history[0] message ==="));
-        assert!(history.contains("User:"));
+        assert!(history.contains("--- history[0] · user message"));
         assert!(history.contains("synthetic plugin message"));
         assert!(!history.contains("from plugin"));
         assert!(!history.contains("test"));
@@ -878,8 +856,7 @@ mod tests {
                 iteration: 1,
                 reasoning: String::new(),
                 code: "print img".to_string(),
-                output: r#"{"type":"image","id":"img"}"#.to_string(),
-                observations: Vec::new(),
+                output: vec![r#"{"type":"image","id":"img"}"#.to_string()],
                 tool_calls: Vec::new(),
                 images: vec![lash::AttachmentRef {
                     id: lash::AttachmentId::new("img-ref"),
@@ -891,7 +868,6 @@ mod tests {
                 }],
                 error: None,
                 final_output: None,
-                output_raw_len: 27,
             }),
         ));
         let mut attachments = Vec::new();
@@ -920,8 +896,8 @@ mod tests {
         let projector = projector(100);
         let initial =
             projector.format_history(&[user_event("u1", "first"), step_event(0, "print 1", "1")]);
-        assert!(initial.contains("=== history[0] message ==="));
-        assert!(initial.contains("=== history[1] rlm_step ==="));
+        assert!(initial.contains("--- history[0] · user message"));
+        assert!(initial.contains("--- history[1] · rlm step · iteration 0 ---"));
 
         let extended = projector.format_history(&[
             user_event("u1", "first"),
@@ -930,7 +906,7 @@ mod tests {
             step_event(1, "print 2", "2"),
         ]);
         assert!(extended.starts_with(&initial));
-        assert!(extended.contains("=== history[2] message ==="));
-        assert!(extended.contains("=== history[3] rlm_step ==="));
+        assert!(extended.contains("--- history[2] · user message"));
+        assert!(extended.contains("--- history[3] · rlm step · iteration 1 ---"));
     }
 }
