@@ -17,7 +17,8 @@ use lash::llm::types::{
     ResponseTextPhase,
 };
 use lash::provider::{
-    AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
+    AgentModelSelection, ProviderAuth, ProviderComponents, ProviderFactory, ProviderModelPolicy,
+    ProviderOptions, ProviderReadiness, ProviderState, ProviderTransport, VariantRequestConfig,
 };
 
 pub mod oauth;
@@ -75,6 +76,9 @@ pub struct CodexProvider {
     pub options: ProviderOptions,
     client: reqwest::Client,
 }
+
+#[derive(Clone, Debug)]
+struct CodexModelPolicy;
 
 #[derive(Clone, Debug, Default)]
 struct CodexStreamingToolCall {
@@ -1559,12 +1563,62 @@ impl CodexProvider {
     }
 }
 
-#[async_trait]
-impl Provider for CodexProvider {
+impl CodexProvider {
+    pub fn into_components(self) -> ProviderComponents {
+        ProviderComponents::shared(self, std::sync::Arc::new(CodexModelPolicy))
+    }
+}
+
+impl ProviderState for CodexProvider {
     fn kind(&self) -> &'static str {
         "codex"
     }
 
+    fn options(&self) -> ProviderOptions {
+        self.options.clone()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.options = options;
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "access_token".to_string(),
+            serde_json::Value::String(self.access_token.clone()),
+        );
+        map.insert(
+            "refresh_token".to_string(),
+            serde_json::Value::String(self.refresh_token.clone()),
+        );
+        map.insert(
+            "expires_at".to_string(),
+            serde_json::Value::Number(self.expires_at.into()),
+        );
+        if let Some(account_id) = &self.account_id {
+            map.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(account_id.clone()),
+            );
+        } else {
+            map.insert("account_id".to_string(), serde_json::Value::Null);
+        }
+        if !self.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+impl ProviderModelPolicy for CodexModelPolicy {
     fn default_model(&self) -> &str {
         "gpt-5.5"
     }
@@ -1606,7 +1660,7 @@ impl Provider for CodexProvider {
     }
 
     fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        if self.validate_variant(model, variant).is_err() {
+        if !self.supported_variants(model).contains(&variant) {
             return None;
         }
         Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
@@ -1641,19 +1695,10 @@ impl Provider for CodexProvider {
             format!("openai/{model}")
         }
     }
+}
 
-    fn options(&self) -> &ProviderOptions {
-        &self.options
-    }
-
-    fn options_mut(&mut self) -> &mut ProviderOptions {
-        &mut self.options
-    }
-
-    fn requires_streaming(&self) -> bool {
-        true
-    }
-
+#[async_trait]
+impl ProviderAuth for CodexProvider {
     async fn ensure_fresh(&mut self) -> Result<bool, lash::oauth::OAuthError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1672,6 +1717,28 @@ impl Provider for CodexProvider {
         Ok(false)
     }
 
+    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl ProviderReadiness for CodexProvider {
+    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+        Ok(false)
+    }
+
+    fn requires_streaming(&self) -> bool {
+        true
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl ProviderTransport for CodexProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
@@ -1962,38 +2029,7 @@ impl Provider for CodexProvider {
         ))
     }
 
-    fn serialize_config(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "access_token".to_string(),
-            serde_json::Value::String(self.access_token.clone()),
-        );
-        map.insert(
-            "refresh_token".to_string(),
-            serde_json::Value::String(self.refresh_token.clone()),
-        );
-        map.insert(
-            "expires_at".to_string(),
-            serde_json::Value::Number(self.expires_at.into()),
-        );
-        if let Some(account_id) = &self.account_id {
-            map.insert(
-                "account_id".to_string(),
-                serde_json::Value::String(account_id.clone()),
-            );
-        } else {
-            map.insert("account_id".to_string(), serde_json::Value::Null);
-        }
-        if !self.options.is_default() {
-            map.insert(
-                "options".to_string(),
-                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
-            );
-        }
-        serde_json::Value::Object(map)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn Provider> {
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
         Box::new(self.clone())
     }
 }
@@ -2032,35 +2068,25 @@ impl ProviderFactory for CodexProviderFactory {
     fn setup_description(&self) -> &'static str {
         "ChatGPT Plus/Pro/Team"
     }
-    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String> {
+    fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: CodexProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
-        Ok(Box::new(CodexProvider {
+        Ok(CodexProvider {
             access_token: cfg.access_token,
             refresh_token: cfg.refresh_token,
             expires_at: cfg.expires_at,
             account_id: cfg.account_id,
             options: cfg.options,
             client: build_http_client(),
-        }))
+        }
+        .into_components())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::provider::{Provider, ProviderOptions};
-
-    fn provider() -> CodexProvider {
-        CodexProvider {
-            access_token: String::new(),
-            refresh_token: String::new(),
-            expires_at: 0,
-            account_id: None,
-            options: ProviderOptions::default(),
-            client: build_http_client(),
-        }
-    }
+    use lash::provider::ProviderModelPolicy;
 
     fn process_event(state: &mut CodexStreamState, event: Value) {
         CodexProvider::process_sse_event(&event.to_string(), state, None).unwrap();
@@ -2080,20 +2106,28 @@ mod tests {
 
     #[test]
     fn gpt_55_variants_match_codex_catalog() {
-        let provider = provider();
+        let provider = CodexModelPolicy;
 
         assert_eq!(
             provider.supported_variants("gpt-5.5"),
             ["low", "medium", "high", "xhigh"]
         );
         assert_eq!(provider.default_model_variant("gpt-5.5"), Some("medium"));
-        assert!(provider.validate_variant("gpt-5.5", "xhigh").is_ok());
-        assert!(provider.validate_variant("gpt-5.5", "minimal").is_err());
+        assert!(
+            provider
+                .request_variant_config("gpt-5.5", "xhigh")
+                .is_some()
+        );
+        assert!(
+            provider
+                .request_variant_config("gpt-5.5", "minimal")
+                .is_none()
+        );
     }
 
     #[test]
     fn gpt_55_variant_match_ignores_provider_prefix() {
-        let provider = provider();
+        let provider = CodexModelPolicy;
 
         assert_eq!(
             provider.supported_variants("openai/gpt-5.5"),

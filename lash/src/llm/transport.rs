@@ -1,7 +1,4 @@
-//! Transport-level error type shared by all provider impls. The
-//! `LlmTransport` trait that used to live here has merged into
-//! [`crate::provider::Provider`] — each concrete provider now owns its
-//! own wire code and exposes a single `complete` method.
+//! Transport-level error type shared by provider transport components.
 
 #[derive(Debug, thiserror::Error, Clone)]
 #[error("{message}")]

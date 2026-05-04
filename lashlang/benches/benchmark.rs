@@ -12,6 +12,10 @@ use std::time::Duration;
 
 fn lashlang_benchmarks(c: &mut Criterion) {
     let host = BenchHost;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
 
     let mut group = c.benchmark_group("lashlang");
     group.measurement_time(Duration::from_secs(5));
@@ -19,9 +23,9 @@ fn lashlang_benchmarks(c: &mut Criterion) {
 
     for scenario in Scenario::ALL {
         if matches!(scenario, Scenario::Baseline | Scenario::LanguageSurface) {
-            benchmark_full_block_modes(&mut group, &host, *scenario);
+            benchmark_full_block_modes(&mut group, &rt, &host, *scenario);
         } else {
-            benchmark_execute_only(&mut group, &host, *scenario);
+            benchmark_execute_only(&mut group, &rt, &host, *scenario);
         }
     }
 
@@ -30,6 +34,7 @@ fn lashlang_benchmarks(c: &mut Criterion) {
 
 fn benchmark_full_block_modes(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    rt: &tokio::runtime::Runtime,
     host: &BenchHost,
     scenario: Scenario,
 ) {
@@ -40,8 +45,9 @@ fn benchmark_full_block_modes(
     group.bench_function(BenchmarkId::new("parse_execute", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state();
-            let outcome =
-                execute(black_box(source), &mut state, host).expect("benchmark execution");
+            let outcome = rt
+                .block_on(execute(black_box(source), &mut state, host))
+                .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
     });
@@ -56,7 +62,8 @@ fn benchmark_full_block_modes(
             let compiled = cache
                 .get_or_compile(black_box(source))
                 .expect("benchmark cache lookup");
-            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
+            let outcome = rt
+                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
@@ -72,7 +79,8 @@ fn benchmark_full_block_modes(
             let compiled = cache
                 .get_or_compile(black_box(source))
                 .expect("benchmark cache lookup");
-            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
+            let outcome = rt
+                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
@@ -81,7 +89,8 @@ fn benchmark_full_block_modes(
     group.bench_function(BenchmarkId::new("execute_only", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state();
-            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
+            let outcome = rt
+                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
@@ -94,7 +103,8 @@ fn benchmark_full_block_modes(
             let encoded = serde_json::to_vec(&snapshot).expect("snapshot encode");
             let decoded = serde_json::from_slice(&encoded).expect("snapshot decode");
             state = State::from_snapshot(decoded);
-            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
+            let outcome = rt
+                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
@@ -103,6 +113,7 @@ fn benchmark_full_block_modes(
 
 fn benchmark_execute_only(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    rt: &tokio::runtime::Runtime,
     host: &BenchHost,
     scenario: Scenario,
 ) {
@@ -113,7 +124,8 @@ fn benchmark_execute_only(
     group.bench_function(BenchmarkId::new("execute_only", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state();
-            let outcome = execute_compiled(black_box(&compiled), &mut state, host)
+            let outcome = rt
+                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });

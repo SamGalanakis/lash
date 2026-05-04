@@ -12,10 +12,8 @@ use lash::{
 use lash_rlm_types::RlmCreateExtras;
 
 use crate::driver::{RlmProjectorConfig, build_rlm_preamble};
-use crate::rlm_support::{
-    BoundVariablesCache, apply_globals_patch_nodes, budget_prompt_contributions,
-    restore_execution_state_and_globals,
-};
+use crate::executor::{RlmExecutionState, execute_code};
+use crate::rlm_support::{BoundVariablesCache, budget_prompt_contributions};
 use crate::stream_mask;
 
 const BUDGET_WARNING_STATUS: &str = "rlm_context_budget_warning";
@@ -91,7 +89,10 @@ impl SessionPlugin for RlmModePlugin {
         if !self.active {
             return Ok(());
         }
-        let mode_session = Arc::new(RlmModeSession::new(self.config.clone()));
+        let mode_session = Arc::new(
+            RlmModeSession::new(self.config.clone())
+                .map_err(|err| PluginError::Session(err.to_string()))?,
+        );
         reg.mode().session(mode_session.clone())?;
         reg.mode().protocol_driver(Arc::new(RlmProtocolDriver {
             config: self.config.clone(),
@@ -155,14 +156,18 @@ fn print_output_prompt_contribution() -> PromptContribution {
 struct RlmModeSession {
     config: RlmModePluginConfig,
     warned_at_threshold: Mutex<bool>,
+    execution: tokio::sync::Mutex<Option<RlmExecutionState>>,
 }
 
 impl RlmModeSession {
-    fn new(config: RlmModePluginConfig) -> Self {
-        Self {
+    fn new(config: RlmModePluginConfig) -> Result<Self, SessionError> {
+        Ok(Self {
+            execution: tokio::sync::Mutex::new(Some(RlmExecutionState::new(
+                config.observe_projection.clone(),
+            )?)),
             config,
             warned_at_threshold: Mutex::new(false),
-        }
+        })
     }
 
     fn soft_warn_directives(
@@ -205,29 +210,115 @@ impl RlmModeSession {
 
 #[async_trait::async_trait]
 impl ModeSessionPlugin for RlmModeSession {
-    async fn initialize_session(
-        &self,
-        mut ctx: ModeSessionContext<'_>,
-    ) -> Result<(), SessionError> {
-        ctx.set_execution_output_projection(self.config.observe_projection.clone());
-        ctx.start_lashlang_runtime().await?;
+    async fn initialize_session(&self, _ctx: ModeSessionContext<'_>) -> Result<(), SessionError> {
         Ok(())
     }
 
     async fn restore_session(
         &self,
-        mut ctx: ModeSessionContext<'_>,
+        _ctx: ModeSessionContext<'_>,
         state: &lash::runtime::PersistedSessionState,
     ) -> Result<(), SessionError> {
-        restore_execution_state_and_globals(&mut ctx, state).await
+        let mut execution = self.execution.lock().await;
+        let execution = execution
+            .as_mut()
+            .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
+        if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
+            execution.restore_execution_state(&snapshot)?;
+        }
+        for event in state.read_view().active_events() {
+            if let lash::SessionEventRecord::Mode(event) = event
+                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
+                    event.rlm_event()
+            {
+                execution.patch_globals(&patch)?;
+            }
+        }
+        Ok(())
     }
 
     async fn append_session_nodes(
         &self,
-        mut ctx: ModeSessionContext<'_>,
+        _ctx: ModeSessionContext<'_>,
         nodes: &[lash::SessionAppendNode],
     ) -> Result<(), SessionError> {
-        apply_globals_patch_nodes(&mut ctx, nodes).await
+        let mut execution = self.execution.lock().await;
+        let execution = execution
+            .as_mut()
+            .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
+        for node in nodes {
+            if let lash::SessionAppendNode::Event {
+                event: lash::SessionEventRecord::Mode(event),
+            } = node
+                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
+                    event.rlm_event()
+            {
+                execution.patch_globals(&patch)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn execute_code(
+        &self,
+        ctx: lash::ModeExecutionContext,
+        request: lash::ExecRequest,
+    ) -> Result<lash::ExecResponse, SessionError> {
+        let mut guard = self.execution.lock().await;
+        let state = guard
+            .take()
+            .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
+
+        let result = execute_code(state, ctx, request).await;
+        match result {
+            Ok((state, response)) => {
+                *guard = Some(state);
+                Ok(response)
+            }
+            Err(err) => {
+                *guard = Some(RlmExecutionState::new(
+                    self.config.observe_projection.clone(),
+                )?);
+                Err(err)
+            }
+        }
+    }
+
+    fn execution_state_dirty(&self) -> bool {
+        self.execution
+            .try_lock()
+            .map(|execution| {
+                execution
+                    .as_ref()
+                    .map(|execution| execution.execution_state_dirty())
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true)
+    }
+
+    async fn snapshot_execution_state(
+        &self,
+        _ctx: ModeSessionContext<'_>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        self.execution
+            .lock()
+            .await
+            .as_mut()
+            .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?
+            .snapshot_execution_state()
+    }
+
+    async fn restore_execution_state(
+        &self,
+        _ctx: ModeSessionContext<'_>,
+        data: &[u8],
+    ) -> Result<(), SessionError> {
+        self.execution
+            .lock()
+            .await
+            .as_mut()
+            .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?
+            .restore_execution_state(data)
     }
 
     fn configure_runtime_from_request(
@@ -239,7 +330,11 @@ impl ModeSessionPlugin for RlmModeSession {
             .mode_extras
             .decode::<RlmCreateExtras>(&ExecutionMode::new("rlm"))
         {
-            ctx.set_rlm_termination_mode(termination);
+            if let Ok(options) =
+                lash::ModeTurnOptions::typed(ExecutionMode::new("rlm"), termination)
+            {
+                ctx.set_mode_turn_options(options);
+            }
         }
     }
 }
@@ -295,9 +390,10 @@ mod tests {
     }
 
     #[test]
-    fn budget_prompt_contribution_omits_below_advisory_floor() {
-        // 23% of the configured handoff threshold — plenty of headroom; the
-        // model shouldn't be nagged about budget at all.
+    fn budget_prompt_contribution_below_advisory_floor_emits_status_only() {
+        // 23% of the configured handoff threshold — emit the status line so
+        // the model has continuous context-size awareness, but no
+        // `continue_as` nag.
         let state = lash::SessionStateEnvelope {
             policy: lash::SessionPolicy {
                 max_context_tokens: Some(1_050_000),
@@ -320,7 +416,13 @@ mod tests {
 
         let contributions = budget_prompt_contributions(&ctx, Some(200_000));
 
-        assert!(contributions.is_empty());
+        assert_eq!(contributions.len(), 1);
+        let content = &contributions[0].content;
+        assert!(content.contains("Tokens: 47213 · handoff threshold: 200000 (23%)"));
+        assert!(content.contains("Iteration:"));
+        assert!(!content.contains("Look for a clean handoff point"));
+        assert!(!content.contains("Budget tight"));
+        assert!(!content.contains("Past the handoff threshold"));
     }
 
     #[test]
@@ -416,7 +518,8 @@ mod tests {
         let session = RlmModeSession::new(RlmModePluginConfig {
             continue_as_soft_warn_tokens: Some(100_000),
             ..Default::default()
-        });
+        })
+        .expect("rlm mode session");
         let state = lash::SessionStateEnvelope {
             token_usage: lash::TokenUsage {
                 input_tokens: 120_292,

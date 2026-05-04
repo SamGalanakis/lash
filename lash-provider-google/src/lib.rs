@@ -18,7 +18,8 @@ use lash::llm::types::{
     LlmRequest, LlmResponse, LlmRole, LlmToolChoice, LlmUsage,
 };
 use lash::provider::{
-    AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
+    AgentModelSelection, ProviderAuth, ProviderComponents, ProviderFactory, ProviderModelPolicy,
+    ProviderOptions, ProviderReadiness, ProviderState, ProviderTransport, VariantRequestConfig,
 };
 
 pub mod oauth;
@@ -86,6 +87,9 @@ pub struct GoogleOAuthProvider {
     pub options: ProviderOptions,
     client: reqwest::Client,
 }
+
+#[derive(Clone, Debug)]
+struct GoogleModelPolicy;
 
 impl GoogleOAuthProvider {
     fn uploaded_attachment_cache()
@@ -793,7 +797,7 @@ impl GoogleOAuthProvider {
     }
 
     fn build_request(
-        provider: &GoogleOAuthProvider,
+        _provider: &GoogleOAuthProvider,
         req: &LlmRequest,
         contents: Vec<Value>,
         project_id: Option<&str>,
@@ -816,7 +820,7 @@ impl GoogleOAuthProvider {
             request["request"]["sessionId"] = json!(session_id);
         }
         if let Some(variant) = req.model_variant.as_deref()
-            && let Some(config) = provider.request_variant_config(&req.model, variant)
+            && let Some(config) = GoogleModelPolicy.request_variant_config(&req.model, variant)
         {
             match config {
                 VariantRequestConfig::GoogleThinkingLevel { level } => {
@@ -1081,12 +1085,60 @@ impl GoogleOAuthProvider {
     }
 }
 
-#[async_trait]
-impl Provider for GoogleOAuthProvider {
+impl GoogleOAuthProvider {
+    pub fn into_components(self) -> ProviderComponents {
+        ProviderComponents::shared(self, std::sync::Arc::new(GoogleModelPolicy))
+    }
+}
+
+impl ProviderState for GoogleOAuthProvider {
     fn kind(&self) -> &'static str {
         "google_oauth"
     }
 
+    fn options(&self) -> ProviderOptions {
+        self.options.clone()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.options = options;
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "access_token".to_string(),
+            serde_json::Value::String(self.access_token.clone()),
+        );
+        map.insert(
+            "refresh_token".to_string(),
+            serde_json::Value::String(self.refresh_token.clone()),
+        );
+        map.insert(
+            "expires_at".to_string(),
+            serde_json::Value::Number(self.expires_at.into()),
+        );
+        if let Some(project_id) = &self.project_id {
+            map.insert(
+                "project_id".to_string(),
+                serde_json::Value::String(project_id.clone()),
+            );
+        }
+        if !self.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+impl ProviderModelPolicy for GoogleModelPolicy {
     fn default_model(&self) -> &str {
         "gemini-3.1-pro-preview"
     }
@@ -1112,7 +1164,7 @@ impl Provider for GoogleOAuthProvider {
     }
 
     fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        if self.validate_variant(model, variant).is_err() {
+        if !self.supported_variants(model).contains(&variant) {
             return None;
         }
         let lower = model.to_ascii_lowercase();
@@ -1155,15 +1207,10 @@ impl Provider for GoogleOAuthProvider {
             format!("google/{model}")
         }
     }
+}
 
-    fn options(&self) -> &ProviderOptions {
-        &self.options
-    }
-
-    fn options_mut(&mut self) -> &mut ProviderOptions {
-        &mut self.options
-    }
-
+#[async_trait]
+impl ProviderAuth for GoogleOAuthProvider {
     async fn ensure_fresh(&mut self) -> Result<bool, lash::oauth::OAuthError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1179,6 +1226,13 @@ impl Provider for GoogleOAuthProvider {
         Ok(false)
     }
 
+    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl ProviderReadiness for GoogleOAuthProvider {
     async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
         if self.project_id.is_none() {
             let hint = std::env::var("GOOGLE_CLOUD_PROJECT")
@@ -1194,6 +1248,17 @@ impl Provider for GoogleOAuthProvider {
         Ok(false)
     }
 
+    fn requires_streaming(&self) -> bool {
+        false
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl ProviderTransport for GoogleOAuthProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
@@ -1239,36 +1304,7 @@ impl Provider for GoogleOAuthProvider {
         }
     }
 
-    fn serialize_config(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "access_token".to_string(),
-            serde_json::Value::String(self.access_token.clone()),
-        );
-        map.insert(
-            "refresh_token".to_string(),
-            serde_json::Value::String(self.refresh_token.clone()),
-        );
-        map.insert(
-            "expires_at".to_string(),
-            serde_json::Value::Number(self.expires_at.into()),
-        );
-        if let Some(project_id) = &self.project_id {
-            map.insert(
-                "project_id".to_string(),
-                serde_json::Value::String(project_id.clone()),
-            );
-        }
-        if !self.options.is_default() {
-            map.insert(
-                "options".to_string(),
-                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
-            );
-        }
-        serde_json::Value::Object(map)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn Provider> {
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
         Box::new(self.clone())
     }
 }
@@ -1305,16 +1341,17 @@ impl ProviderFactory for GoogleOAuthProviderFactory {
     fn setup_description(&self) -> &'static str {
         "Gemini via Google account"
     }
-    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String> {
+    fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: GoogleProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
-        Ok(Box::new(GoogleOAuthProvider {
+        Ok(GoogleOAuthProvider {
             access_token: cfg.access_token,
             refresh_token: cfg.refresh_token,
             expires_at: cfg.expires_at,
             project_id: cfg.project_id,
             options: cfg.options,
             client: build_http_client(),
-        }))
+        }
+        .into_components())
     }
 }

@@ -201,8 +201,9 @@ impl EmbeddedRuntimeBuilder {
             });
         }
         if let Some(store) = &self.store {
-            if let Some(mut state) =
-                crate::store::load_persisted_session_state(store.as_ref()).await
+            if let Some(mut state) = crate::store::load_persisted_session_state(store.as_ref())
+                .await
+                .map_err(|err| SessionError::Protocol(format!("failed to load store: {err}")))?
             {
                 if let Some(session_id) = &self.session_id
                     && &state.session_id != session_id

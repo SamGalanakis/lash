@@ -33,6 +33,10 @@ fn main() {
     };
 
     let host = BenchHost;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
     let mut profile = ProfileReport::default();
     let mut scratch = ExecutionScratch::new();
     let mut program_bytes = 0usize;
@@ -45,9 +49,14 @@ fn main() {
 
         for _ in 0..iterations {
             let mut state = seeded_state();
-            let (outcome, run_profile) =
-                profile_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
-                    .expect("profiled execution");
+            let (outcome, run_profile) = rt
+                .block_on(profile_compiled_with_scratch(
+                    &compiled,
+                    &mut state,
+                    &host,
+                    &mut scratch,
+                ))
+                .expect("profiled execution");
             profile.merge(&run_profile);
             let ExecutionOutcome::Finished(_) = outcome else {
                 panic!("benchmark program must finish");

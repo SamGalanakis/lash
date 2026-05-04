@@ -140,28 +140,33 @@ impl LashRuntime {
         else {
             return;
         };
-        let Some(head_meta) = store.load_session_head_meta().await else {
-            return;
+        let read = match store
+            .load_session(crate::store::SessionReadScope::FullGraph)
+            .await
+        {
+            Ok(Some(read)) => read,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!("failed to refresh session graph from store: {err}");
+                return;
+            }
         };
-        let has_newer_graph = head_meta.graph_node_count > self.state.persisted_graph_node_count
-            || head_meta.leaf_node_id != self.state.session_graph.leaf_node_id
-            || head_meta.checkpoint_ref != self.state.checkpoint_ref;
+        let has_newer_graph = self.state.head_revision != Some(read.head_revision)
+            || read.graph.leaf_node_id != self.state.session_graph.leaf_node_id
+            || read.checkpoint_ref != self.state.checkpoint_ref;
         if !has_newer_graph {
             return;
         }
-        let mut graph = store.load_session_graph().await;
-        graph.set_leaf_node_id(head_meta.leaf_node_id.clone());
         let head = crate::store::SessionHead {
-            session_id: head_meta.session_id.clone(),
-            graph,
-            config: head_meta.config.clone(),
-            checkpoint_ref: head_meta.checkpoint_ref.clone(),
-            token_ledger: merge_usage_delta_entries(store.load_usage_deltas().await),
+            session_id: read.session_id.clone(),
+            head_revision: read.head_revision,
+            graph: read.graph,
+            config: read.config.clone(),
+            checkpoint_ref: read.checkpoint_ref.clone(),
+            token_ledger: merge_usage_delta_entries(read.token_ledger),
         };
         apply_session_head(&mut self.state, &head);
-        let checkpoint =
-            load_session_checkpoint(store.as_ref(), head.checkpoint_ref.as_ref()).await;
-        apply_session_checkpoint(&mut self.state, checkpoint);
+        apply_session_checkpoint(&mut self.state, read.checkpoint);
     }
 
     pub(super) fn runtime_session_manager(

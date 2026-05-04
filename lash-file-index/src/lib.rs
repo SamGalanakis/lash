@@ -393,7 +393,7 @@ fn install_corpus(state: &Arc<Mutex<State>>, entries: Vec<Entry>) {
 /// silently — `@`-completion still works against the initial corpus, just
 /// without auto-refresh.
 fn run_watch_loop(root: &Path, state: &Arc<Mutex<State>>) {
-    let (event_tx, event_rx) = mpsc::channel::<()>();
+    let (event_tx, event_rx) = mpsc::channel::<Vec<PathBuf>>();
     let event_tx_for_watcher = event_tx.clone();
     // Drop the local sender once the watcher owns its clone; that way, when
     // the watcher dies, the receiver sees a clean disconnect and the loop
@@ -401,11 +401,15 @@ fn run_watch_loop(root: &Path, state: &Arc<Mutex<State>>) {
     drop(event_tx);
 
     let watcher_result = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        // We don't care about the event payload — any change is enough to
-        // trigger a re-walk. `walk()` will re-check gitignore and the entry
-        // cap on its own.
-        if res.is_ok() {
-            let _ = event_tx_for_watcher.send(());
+        if let Ok(event) = res {
+            let paths: Vec<PathBuf> = event
+                .paths
+                .into_iter()
+                .filter(|path| !should_ignore_notify_path(path))
+                .collect();
+            if !paths.is_empty() {
+                let _ = event_tx_for_watcher.send(paths);
+            }
         }
     });
     let mut watcher = match watcher_result {
@@ -421,7 +425,7 @@ fn run_watch_loop(root: &Path, state: &Arc<Mutex<State>>) {
     let _watcher_keepalive = watcher;
 
     loop {
-        // Block for the first event of a burst.
+        // Block for the first relevant event of a burst.
         if event_rx.recv().is_err() {
             break;
         }
@@ -430,6 +434,24 @@ fn run_watch_loop(root: &Path, state: &Arc<Mutex<State>>) {
 
         install_corpus(state, walk(root));
     }
+}
+
+fn should_ignore_notify_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        matches!(
+            name.as_ref(),
+            ".git"
+                | "target"
+                | "node_modules"
+                | ".next"
+                | ".turbo"
+                | "dist"
+                | "build"
+                | "coverage"
+                | ".cache"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -613,5 +635,14 @@ mod tests {
             "directory should have trailing slash, got {:?}",
             dir_match.path
         );
+    }
+
+    #[test]
+    fn notify_filter_ignores_generated_paths() {
+        assert!(should_ignore_notify_path(Path::new("target/debug/app")));
+        assert!(should_ignore_notify_path(Path::new(
+            "node_modules/pkg/index.js"
+        )));
+        assert!(!should_ignore_notify_path(Path::new("src/main.rs")));
     }
 }

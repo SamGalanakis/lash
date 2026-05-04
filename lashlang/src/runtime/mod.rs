@@ -4,7 +4,7 @@ use crate::ast::{
 };
 use crate::lexer::Span;
 use compact_str::CompactString;
-use rayon::prelude::*;
+use futures_util::{FutureExt as _, future::join_all};
 use rustc_hash::FxHashMap;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -24,7 +24,7 @@ mod schema;
 mod state;
 
 pub use cache::{CompiledProgramCache, CompiledProgramCacheStats};
-pub use host::{ToolHost, ToolHostError};
+pub use host::{ToolHost, ToolHostCall, ToolHostError};
 pub use record::Record;
 use record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
 use schema::{
@@ -216,13 +216,15 @@ pub fn prewarm() {
     }
 }
 
-pub fn execute_program<H: ToolHost>(
+const COOPERATIVE_YIELD_INSTRUCTION_BUDGET: usize = 1024;
+
+pub async fn execute_program<H: ToolHost>(
     program: &Program,
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, RuntimeError> {
     let compiled = compile_program(program);
-    execute_compiled(&compiled, state, host)
+    execute_compiled(&compiled, state, host).await
 }
 
 #[derive(Clone)]
@@ -245,7 +247,7 @@ pub fn compile_program(program: &Program) -> CompiledProgram {
     }
 }
 
-pub fn execute_compiled<H: ToolHost>(
+pub async fn execute_compiled<H: ToolHost>(
     program: &CompiledProgram,
     state: &mut State,
     host: &H,
@@ -259,12 +261,12 @@ pub fn execute_compiled<H: ToolHost>(
         host,
         false,
     );
-    let result = vm.run();
+    let result = vm.run().await;
     state.globals = vm.into_globals();
     result
 }
 
-pub fn execute_compiled_with_scratch<H: ToolHost>(
+pub async fn execute_compiled_with_scratch<H: ToolHost>(
     program: &CompiledProgram,
     state: &mut State,
     host: &H,
@@ -276,12 +278,12 @@ pub fn execute_compiled_with_scratch<H: ToolHost>(
         scratch,
     );
     let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
-    let result = vm.run();
+    let result = vm.run().await;
     state.globals = vm.recycle_into_globals(scratch);
     result
 }
 
-pub fn execute_compiled_traced<H: ToolHost>(
+pub async fn execute_compiled_traced<H: ToolHost>(
     program: &CompiledProgram,
     state: &mut State,
     host: &H,
@@ -295,12 +297,12 @@ pub fn execute_compiled_traced<H: ToolHost>(
         host,
         false,
     );
-    let result = vm.run_traced();
+    let result = vm.run_traced().await;
     state.globals = vm.into_globals();
     result
 }
 
-pub fn execute_compiled_traced_with_scratch<H: ToolHost>(
+pub async fn execute_compiled_traced_with_scratch<H: ToolHost>(
     program: &CompiledProgram,
     state: &mut State,
     host: &H,
@@ -312,12 +314,12 @@ pub fn execute_compiled_traced_with_scratch<H: ToolHost>(
         scratch,
     );
     let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
-    let result = vm.run_traced();
+    let result = vm.run_traced().await;
     state.globals = vm.recycle_into_globals(scratch);
     result
 }
 
-pub fn profile_compiled<H: ToolHost>(
+pub async fn profile_compiled<H: ToolHost>(
     program: &CompiledProgram,
     state: &mut State,
     host: &H,
@@ -332,14 +334,14 @@ pub fn profile_compiled<H: ToolHost>(
         false,
     );
     vm.enable_profile();
-    let result = vm.run();
+    let result = vm.run().await;
     let mut profile = vm.take_profile();
     state.globals = vm.into_globals();
     profile.compile_stats = program.compile_stats;
     result.map(|outcome| (outcome, profile))
 }
 
-pub fn profile_compiled_with_scratch<H: ToolHost>(
+pub async fn profile_compiled_with_scratch<H: ToolHost>(
     program: &CompiledProgram,
     state: &mut State,
     host: &H,
@@ -352,7 +354,7 @@ pub fn profile_compiled_with_scratch<H: ToolHost>(
     );
     let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
     vm.enable_profile();
-    let result = vm.run();
+    let result = vm.run().await;
     let mut profile = vm.take_profile();
     state.globals = vm.recycle_into_globals(scratch);
     profile.compile_stats = program.compile_stats;
@@ -2243,55 +2245,68 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         self.profile = Some(ProfileAccumulator::default());
     }
 
-    fn run(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
-        let result = self.run_inner();
+    async fn run(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
+        let result = self.run_inner().await;
         self.unwind_iterators();
         result
     }
 
-    fn run_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
-        let result = self.run_inner_traced();
+    async fn run_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
+        let result = self.run_inner_traced().await;
         self.unwind_iterators();
         result
     }
 
-    fn run_inner(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
+    async fn run_inner(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
         if self.profile.is_some() {
-            return self.run_inner_profiled();
+            return self.run_inner_profiled().await;
         }
 
+        let mut budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
         while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
             self.ip += 1;
-            if let Some(outcome) = self.execute_instruction(instruction)? {
+            if let Some(outcome) = self.execute_instruction(instruction).await? {
                 return Ok(outcome);
+            }
+            budget -= 1;
+            if budget == 0 {
+                self.host.yield_now().await;
+                budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
             }
         }
         Ok(ExecutionOutcome::Continued)
     }
 
-    fn run_inner_profiled(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
+    async fn run_inner_profiled(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
+        let mut budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
         while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
             self.ip += 1;
             let tag = instruction.profile_tag();
             let start = Instant::now();
-            let result = self.execute_instruction(instruction);
+            let result = self.execute_instruction(instruction).await;
             self.record_instruction_profile(tag, start.elapsed().as_nanos());
             if let Some(outcome) = result? {
                 return Ok(outcome);
             }
+            budget -= 1;
+            if budget == 0 {
+                self.host.yield_now().await;
+                budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
+            }
         }
         Ok(ExecutionOutcome::Continued)
     }
 
-    fn run_inner_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
+    async fn run_inner_traced(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
         if self.profile.is_some() {
-            return self.run_inner_traced_profiled();
+            return self.run_inner_traced_profiled().await;
         }
 
+        let mut budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
         while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
             let instruction_ip = self.ip;
             self.ip += 1;
-            let result = self.execute_instruction(instruction);
+            let result = self.execute_instruction(instruction).await;
             match result {
                 Ok(Some(outcome)) => return Ok(outcome),
                 Ok(None) => {}
@@ -2302,17 +2317,23 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     });
                 }
             }
+            budget -= 1;
+            if budget == 0 {
+                self.host.yield_now().await;
+                budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
+            }
         }
         Ok(ExecutionOutcome::Continued)
     }
 
-    fn run_inner_traced_profiled(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
+    async fn run_inner_traced_profiled(&mut self) -> Result<ExecutionOutcome, RuntimeFailure> {
+        let mut budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
         while let Some(instruction) = self.chunk.code.get(self.ip).copied() {
             let instruction_ip = self.ip;
             self.ip += 1;
             let tag = instruction.profile_tag();
             let start = Instant::now();
-            let result = self.execute_instruction(instruction);
+            let result = self.execute_instruction(instruction).await;
             self.record_instruction_profile(tag, start.elapsed().as_nanos());
             match result {
                 Ok(Some(outcome)) => return Ok(outcome),
@@ -2324,11 +2345,16 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     });
                 }
             }
+            budget -= 1;
+            if budget == 0 {
+                self.host.yield_now().await;
+                budget = COOPERATIVE_YIELD_INSTRUCTION_BUDGET;
+            }
         }
         Ok(ExecutionOutcome::Continued)
     }
 
-    fn execute_instruction(
+    async fn execute_instruction(
         &mut self,
         instruction: Instruction,
     ) -> Result<Option<ExecutionOutcome>, RuntimeError> {
@@ -2434,7 +2460,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::CallTool { name, keys } => {
                 let args = self.drain_record_from_stack(keys)?;
-                let result = match self.host.call(self.chunk.names[name].text.as_ref(), &args) {
+                let result = match self
+                    .host
+                    .call(self.chunk.names[name].text.to_string(), args)
+                    .await
+                {
                     Ok(value) => success(value),
                     Err(error) => error_value(error.to_string()),
                 };
@@ -2444,7 +2474,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let args = self.drain_record_from_stack(keys)?;
                 let value = self
                     .host
-                    .call(self.chunk.names[name].text.as_ref(), &args)
+                    .call(self.chunk.names[name].text.to_string(), args)
+                    .await
                     .map_err(|error| RuntimeError::ValueError {
                         message: format!("`?` unwrapped failed tool result: {error}"),
                     })?;
@@ -2454,7 +2485,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let args = self.drain_record_from_stack(keys)?;
                 let result = self
                     .host
-                    .start_call(self.chunk.names[name].text.as_ref(), &args)
+                    .start_call(self.chunk.names[name].text.to_string(), args)
+                    .await
                     .map_err(|err| RuntimeError::ValueError {
                         message: format!("async start failed: {err}"),
                     })?;
@@ -2462,22 +2494,21 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::AwaitHandle => {
                 let handle = self.pop_stack()?;
-                let result = self.await_value(handle);
+                let result = self.await_value(handle).await;
                 self.stack.push(result);
             }
             Instruction::AwaitHandleUnwrap => {
                 let handle = self.pop_stack()?;
-                let result = self.await_value_unwrap(handle)?;
+                let result = self.await_value_unwrap(handle).await?;
                 self.stack.push(result);
             }
             Instruction::CancelHandle => {
                 let handle = self.pop_stack()?;
-                let value =
-                    self.host
-                        .cancel_handle(&handle)
-                        .map_err(|err| RuntimeError::ValueError {
-                            message: format!("cancel failed: {err}"),
-                        })?;
+                let value = self.host.cancel_handle(handle).await.map_err(|err| {
+                    RuntimeError::ValueError {
+                        message: format!("cancel failed: {err}"),
+                    }
+                })?;
                 self.last_value = Some(value);
             }
             Instruction::CallBuiltin { builtin, argc } => {
@@ -2596,7 +2627,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::Print => {
                 let value = self.pop_stack()?;
                 self.host
-                    .print(&value)
+                    .print(value.clone())
+                    .await
                     .map_err(|err| RuntimeError::ValueError {
                         message: format!("print failed: {err}"),
                     })?;
@@ -2644,16 +2676,16 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 }
             }
             Instruction::ParallelCalls(branches) => {
-                self.exec_parallel_calls(branches)?;
+                self.exec_parallel_calls(branches).await?;
                 self.last_value = Some(Value::Null);
             }
             Instruction::ParallelCallsValue(branches) => {
-                let value = self.exec_parallel_calls_value(branches)?;
+                let value = self.exec_parallel_calls_value(branches).await?;
                 self.last_value = Some(value.clone());
                 self.stack.push(value);
             }
             Instruction::ParallelNamedCallsValue(branches) => {
-                let value = self.exec_parallel_named_calls_value(branches)?;
+                let value = self.exec_parallel_named_calls_value(branches).await?;
                 self.last_value = Some(value.clone());
                 self.stack.push(value);
             }
@@ -2668,20 +2700,20 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.stack.push(value);
             }
             Instruction::Parallel(branches) => {
-                self.exec_parallel(branches)?;
+                self.exec_parallel(branches).await?;
                 self.last_value = Some(Value::Null);
             }
             Instruction::ParallelValue(branches) => {
-                let value = self.exec_parallel_value(branches)?;
+                let value = self.exec_parallel_value(branches).await?;
                 self.last_value = Some(value.clone());
                 self.stack.push(value);
             }
             Instruction::ParallelNamed(branches) => {
-                self.exec_parallel_named(branches)?;
+                self.exec_parallel_named(branches).await?;
                 self.last_value = Some(Value::Null);
             }
             Instruction::ParallelNamedValue(branches) => {
-                let value = self.exec_parallel_named_value(branches)?;
+                let value = self.exec_parallel_named_value(branches).await?;
                 self.last_value = Some(value.clone());
                 self.stack.push(value);
             }
@@ -2713,17 +2745,19 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(None)
     }
 
-    fn exec_parallel(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
+    async fn exec_parallel(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
         let branches = &self.chunk.branch_sets[branches_index];
         if branches.is_empty() {
             return Ok(());
         }
 
         let base_slots = self.slots.clone();
-        let results = branches
-            .par_iter()
-            .map(|branch| Self::run_branch(branch, base_slots.clone(), self.host, true))
-            .collect::<Vec<_>>();
+        let results = join_all(
+            branches
+                .iter()
+                .map(|branch| Self::run_branch(branch, base_slots.clone(), self.host, true)),
+        )
+        .await;
 
         let mut merged_names = vec![false; self.chunk.slot_names.len()];
         for result in results {
@@ -2732,17 +2766,19 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(())
     }
 
-    fn exec_parallel_value(&mut self, branches_index: usize) -> Result<Value, RuntimeError> {
+    async fn exec_parallel_value(&mut self, branches_index: usize) -> Result<Value, RuntimeError> {
         let branches = &self.chunk.branch_sets[branches_index];
         if branches.is_empty() {
             return Ok(Value::List(Vec::<Value>::new().into()));
         }
 
         let base_slots = self.slots.clone();
-        let results = branches
-            .par_iter()
-            .map(|branch| Self::run_branch(branch, base_slots.clone(), self.host, true))
-            .collect::<Vec<_>>();
+        let results = join_all(
+            branches
+                .iter()
+                .map(|branch| Self::run_branch(branch, base_slots.clone(), self.host, true)),
+        )
+        .await;
 
         let mut outputs = Vec::with_capacity(results.len());
         let mut merged_names = vec![false; self.chunk.slot_names.len()];
@@ -2754,17 +2790,18 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(Value::List(outputs.into()))
     }
 
-    fn exec_parallel_named(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
+    async fn exec_parallel_named(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
         let branches = &self.chunk.named_branch_sets[branches_index];
         if branches.is_empty() {
             return Ok(());
         }
 
         let base_slots = self.slots.clone();
-        let results = branches
-            .par_iter()
-            .map(|branch| Self::run_branch(&branch.chunk, base_slots.clone(), self.host, true))
-            .collect::<Vec<_>>();
+        let results =
+            join_all(branches.iter().map(|branch| {
+                Self::run_branch(&branch.chunk, base_slots.clone(), self.host, true)
+            }))
+            .await;
 
         let mut merged_names = vec![false; self.chunk.slot_names.len()];
         for result in results {
@@ -2773,16 +2810,17 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(())
     }
 
-    fn exec_parallel_named_value(&mut self, branches_index: usize) -> Result<Value, RuntimeError> {
+    async fn exec_parallel_named_value(
+        &mut self,
+        branches_index: usize,
+    ) -> Result<Value, RuntimeError> {
         let branches = &self.chunk.named_branch_sets[branches_index];
         let base_slots = self.slots.clone();
-        let results = branches
-            .par_iter()
-            .map(|branch| {
-                let result = Self::run_branch(&branch.chunk, base_slots.clone(), self.host, true);
-                (branch.name, result)
-            })
-            .collect::<Vec<_>>();
+        let results = join_all(branches.iter().map(|branch| async {
+            let result = Self::run_branch(&branch.chunk, base_slots.clone(), self.host, true).await;
+            (branch.name, result)
+        }))
+        .await;
 
         let mut record = record_with_capacity(results.len());
         let mut merged_names = vec![false; self.chunk.slot_names.len()];
@@ -2824,7 +2862,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(Value::Record(Arc::new(record)))
     }
 
-    fn exec_parallel_named_calls_value(
+    async fn exec_parallel_named_calls_value(
         &self,
         branches_index: usize,
     ) -> Result<Value, RuntimeError> {
@@ -2833,7 +2871,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             0 => return Ok(Value::Record(Arc::new(Record::default()))),
             1 => {
                 let call = self.prepare_named_parallel_call(&branches[0])?;
-                let result = Self::run_prepared_named_call(self.chunk, &call, self.host)?;
+                let result = Self::run_prepared_named_call(self.chunk, call, self.host).await?;
                 let mut record = record_with_capacity(1);
                 self.insert_named_parallel_call_result(&mut record, result);
                 return Ok(Value::Record(Arc::new(record)));
@@ -2842,17 +2880,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let left_call = self.prepare_named_parallel_call(&branches[0])?;
                 let right_call = self.prepare_named_parallel_call(&branches[1])?;
                 let calls = [left_call, right_call];
-                let results = if let Some(results) =
-                    Self::run_prepared_named_calls_batch_2(self.chunk, &calls, self.host)
-                {
-                    results?
-                } else {
-                    let (left, right) = rayon::join(
-                        || Self::run_prepared_named_call(self.chunk, &calls[0], self.host),
-                        || Self::run_prepared_named_call(self.chunk, &calls[1], self.host),
-                    );
-                    [left?, right?]
-                };
+                let results =
+                    Self::run_prepared_named_calls_batch_2(self.chunk, &calls, self.host).await?;
                 let mut record = record_with_capacity(2);
                 for result in results {
                     self.insert_named_parallel_call_result(&mut record, result);
@@ -2867,18 +2896,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             calls.push(self.prepare_named_parallel_call(branch)?);
         }
 
-        let results = if let Some(results) =
-            Self::run_prepared_named_calls_batch(self.chunk, &calls, self.host)
-        {
-            results?
-        } else {
-            SmallVec::from_vec(
-                calls
-                    .par_iter()
-                    .map(|call| Self::run_prepared_named_call(self.chunk, call, self.host))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        };
+        let results = Self::run_prepared_named_calls_batch(self.chunk, &calls, self.host).await?;
         let mut record = record_with_capacity(results.len());
         for result in results {
             self.insert_named_parallel_call_result(&mut record, result);
@@ -2886,13 +2904,13 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(Value::Record(Arc::new(record)))
     }
 
-    fn exec_parallel_calls(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
+    async fn exec_parallel_calls(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
         let branches = &self.chunk.parallel_call_sets[branches_index];
         match branches.len() {
             0 => Ok(()),
             1 => {
                 let call = self.prepare_parallel_call(&branches[0])?;
-                let result = Self::run_prepared_call(self.chunk, &call, self.host)?;
+                let result = Self::run_prepared_call(self.chunk, call, self.host).await?;
                 self.slots.assign(result.slot, result.output);
                 self.record_assignment(result.slot);
                 Ok(())
@@ -2906,17 +2924,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                         name: self.chunk.slot_names[calls[0].slot].text.to_string(),
                     });
                 }
-                let results = if let Some(results) =
-                    Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host)
-                {
-                    results?
-                } else {
-                    let (left, right) = rayon::join(
-                        || Self::run_prepared_call(self.chunk, &calls[0], self.host),
-                        || Self::run_prepared_call(self.chunk, &calls[1], self.host),
-                    );
-                    [left?, right?]
-                };
+                let results =
+                    Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host).await?;
                 for result in results {
                     self.slots.assign(result.slot, result.output);
                     self.record_assignment(result.slot);
@@ -2929,35 +2938,26 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     calls.push(self.prepare_parallel_call(branch)?);
                 }
                 self.ensure_distinct_parallel_call_slots(&calls)?;
-                if let Some(results) = Self::run_prepared_calls_batch(self.chunk, &calls, self.host)
-                {
-                    for result in results? {
-                        self.slots.assign(result.slot, result.output);
-                        self.record_assignment(result.slot);
-                    }
-                } else {
-                    let results = calls
-                        .par_iter()
-                        .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
-                        .collect::<Vec<_>>();
-                    for result in results {
-                        let result = result?;
-                        self.slots.assign(result.slot, result.output);
-                        self.record_assignment(result.slot);
-                    }
+                let results = Self::run_prepared_calls_batch(self.chunk, &calls, self.host).await?;
+                for result in results {
+                    self.slots.assign(result.slot, result.output);
+                    self.record_assignment(result.slot);
                 }
                 Ok(())
             }
         }
     }
 
-    fn exec_parallel_calls_value(&mut self, branches_index: usize) -> Result<Value, RuntimeError> {
+    async fn exec_parallel_calls_value(
+        &mut self,
+        branches_index: usize,
+    ) -> Result<Value, RuntimeError> {
         let branches = &self.chunk.parallel_call_sets[branches_index];
         match branches.len() {
             0 => Ok(Value::List(Vec::<Value>::new().into())),
             1 => {
                 let call = self.prepare_parallel_call(&branches[0])?;
-                let result = Self::run_prepared_call(self.chunk, &call, self.host)?;
+                let result = Self::run_prepared_call(self.chunk, call, self.host).await?;
                 let output = result.output.clone();
                 self.slots.assign(result.slot, result.output);
                 self.record_assignment(result.slot);
@@ -2972,17 +2972,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                         name: self.chunk.slot_names[calls[0].slot].text.to_string(),
                     });
                 }
-                let results = if let Some(results) =
-                    Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host)
-                {
-                    results?
-                } else {
-                    let (left, right) = rayon::join(
-                        || Self::run_prepared_call(self.chunk, &calls[0], self.host),
-                        || Self::run_prepared_call(self.chunk, &calls[1], self.host),
-                    );
-                    [left?, right?]
-                };
+                let results =
+                    Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host).await?;
                 let mut outputs = Vec::with_capacity(2);
                 for result in results {
                     outputs.push(result.output.clone());
@@ -2997,31 +2988,14 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     calls.push(self.prepare_parallel_call(branch)?);
                 }
                 self.ensure_distinct_parallel_call_slots(&calls)?;
-                if let Some(results) = Self::run_prepared_calls_batch(self.chunk, &calls, self.host)
-                {
-                    let results = results?;
-                    let mut outputs = Vec::with_capacity(results.len());
-                    for result in results {
-                        outputs.push(result.output.clone());
-                        self.slots.assign(result.slot, result.output);
-                        self.record_assignment(result.slot);
-                    }
-                    Ok(Value::List(outputs.into()))
-                } else {
-                    let results = calls
-                        .par_iter()
-                        .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
-                        .collect::<Vec<_>>();
-
-                    let mut outputs = Vec::with_capacity(results.len());
-                    for result in results {
-                        let result = result?;
-                        outputs.push(result.output.clone());
-                        self.slots.assign(result.slot, result.output);
-                        self.record_assignment(result.slot);
-                    }
-                    Ok(Value::List(outputs.into()))
+                let results = Self::run_prepared_calls_batch(self.chunk, &calls, self.host).await?;
+                let mut outputs = Vec::with_capacity(results.len());
+                for result in results {
+                    outputs.push(result.output.clone());
+                    self.slots.assign(result.slot, result.output);
+                    self.record_assignment(result.slot);
                 }
+                Ok(Value::List(outputs.into()))
             }
         }
     }
@@ -3096,50 +3070,57 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), result.output);
     }
 
-    fn run_host_batch<const N: usize>(
-        host_calls: &[(&str, &Record)],
+    async fn run_host_batch<const N: usize>(
+        host_calls: Vec<ToolHostCall>,
         host: &'a H,
-    ) -> HostBatchRun<N>
+    ) -> Result<HostBatchResults<N>, RuntimeError>
     where
         [HostBatchItemResult; N]: smallvec::Array<Item = HostBatchItemResult>,
     {
-        let mut results = HostBatchResults::<N>::new();
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            host.call_batch(host_calls, &mut |result| results.push(result))
-        }));
+        let run = std::panic::AssertUnwindSafe(host.call_batch(host_calls))
+            .catch_unwind()
+            .await;
         match run {
-            Ok(true) => Some(Ok(results)),
-            Ok(false) => None,
-            Err(_) => Some(Err(RuntimeError::ValueError {
+            Ok(results) => Ok(results.into_iter().collect()),
+            Err(_) => Err(RuntimeError::ValueError {
                 message: "parallel branch panicked".to_string(),
-            })),
+            }),
         }
     }
 
-    fn run_prepared_calls_batch(
+    async fn run_prepared_calls_batch(
         chunk: &'a Chunk,
         calls: &[PreparedParallelCall],
         host: &'a H,
-    ) -> Option<Result<SmallVec<[ParallelCallResult; 4]>, RuntimeError>> {
+    ) -> Result<SmallVec<[ParallelCallResult; 4]>, RuntimeError> {
         let host_calls = calls
             .iter()
-            .map(|call| (chunk.names[call.name].text.as_ref(), &call.args))
-            .collect::<SmallVec<[(&str, &Record); 4]>>();
-        let results = Self::run_host_batch::<4>(&host_calls, host)?;
-        Some(results.and_then(|results| Self::finish_prepared_calls_batch(calls, results)))
+            .map(|call| ToolHostCall {
+                name: chunk.names[call.name].text.to_string(),
+                args: call.args.clone(),
+            })
+            .collect::<Vec<_>>();
+        let results = Self::run_host_batch::<4>(host_calls, host).await?;
+        Self::finish_prepared_calls_batch(calls, results)
     }
 
-    fn run_prepared_calls_batch_2(
+    async fn run_prepared_calls_batch_2(
         chunk: &'a Chunk,
         calls: &[PreparedParallelCall; 2],
         host: &'a H,
-    ) -> Option<Result<[ParallelCallResult; 2], RuntimeError>> {
-        let host_calls = [
-            (chunk.names[calls[0].name].text.as_ref(), &calls[0].args),
-            (chunk.names[calls[1].name].text.as_ref(), &calls[1].args),
+    ) -> Result<[ParallelCallResult; 2], RuntimeError> {
+        let host_calls = vec![
+            ToolHostCall {
+                name: chunk.names[calls[0].name].text.to_string(),
+                args: calls[0].args.clone(),
+            },
+            ToolHostCall {
+                name: chunk.names[calls[1].name].text.to_string(),
+                args: calls[1].args.clone(),
+            },
         ];
-        let results = Self::run_host_batch::<2>(&host_calls, host)?;
-        Some(results.and_then(|results| Self::finish_prepared_calls_batch_2(calls, results)))
+        let results = Self::run_host_batch::<2>(host_calls, host).await?;
+        Self::finish_prepared_calls_batch_2(calls, results)
     }
 
     fn finish_prepared_call_result(
@@ -3197,30 +3178,39 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             .collect())
     }
 
-    fn run_prepared_named_calls_batch(
+    async fn run_prepared_named_calls_batch(
         chunk: &'a Chunk,
         calls: &[PreparedNamedParallelCall],
         host: &'a H,
-    ) -> Option<Result<SmallVec<[NamedParallelCallResult; 4]>, RuntimeError>> {
+    ) -> Result<SmallVec<[NamedParallelCallResult; 4]>, RuntimeError> {
         let host_calls = calls
             .iter()
-            .map(|call| (chunk.names[call.name].text.as_ref(), &call.args))
-            .collect::<SmallVec<[(&str, &Record); 4]>>();
-        let results = Self::run_host_batch::<4>(&host_calls, host)?;
-        Some(results.and_then(|results| Self::finish_prepared_named_calls_batch(calls, results)))
+            .map(|call| ToolHostCall {
+                name: chunk.names[call.name].text.to_string(),
+                args: call.args.clone(),
+            })
+            .collect::<Vec<_>>();
+        let results = Self::run_host_batch::<4>(host_calls, host).await?;
+        Self::finish_prepared_named_calls_batch(calls, results)
     }
 
-    fn run_prepared_named_calls_batch_2(
+    async fn run_prepared_named_calls_batch_2(
         chunk: &'a Chunk,
         calls: &[PreparedNamedParallelCall; 2],
         host: &'a H,
-    ) -> Option<Result<[NamedParallelCallResult; 2], RuntimeError>> {
-        let host_calls = [
-            (chunk.names[calls[0].name].text.as_ref(), &calls[0].args),
-            (chunk.names[calls[1].name].text.as_ref(), &calls[1].args),
+    ) -> Result<[NamedParallelCallResult; 2], RuntimeError> {
+        let host_calls = vec![
+            ToolHostCall {
+                name: chunk.names[calls[0].name].text.to_string(),
+                args: calls[0].args.clone(),
+            },
+            ToolHostCall {
+                name: chunk.names[calls[1].name].text.to_string(),
+                args: calls[1].args.clone(),
+            },
         ];
-        let results = Self::run_host_batch::<2>(&host_calls, host)?;
-        Some(results.and_then(|results| Self::finish_prepared_named_calls_batch_2(calls, results)))
+        let results = Self::run_host_batch::<2>(host_calls, host).await?;
+        Self::finish_prepared_named_calls_batch_2(calls, results)
     }
 
     fn finish_prepared_named_call_result(
@@ -3263,14 +3253,14 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             .collect())
     }
 
-    fn run_branch(
+    async fn run_branch(
         chunk: &'a Chunk,
         slots: SlotState,
         host: &'a H,
         in_parallel_branch: bool,
     ) -> Result<BranchResult, RuntimeError> {
         let mut vm = Self::new(chunk, slots, host, in_parallel_branch);
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+        let run = std::panic::AssertUnwindSafe(vm.run()).catch_unwind().await;
         match run {
             Ok(Ok(ExecutionOutcome::Continued)) => Ok(vm.into_branch_result()),
             Ok(Ok(ExecutionOutcome::Finished(_))) => Err(RuntimeError::FinishInsideParallel),
@@ -3281,50 +3271,54 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         }
     }
 
-    fn run_prepared_call(
+    async fn run_prepared_call(
         chunk: &'a Chunk,
-        call: &PreparedParallelCall,
+        call: PreparedParallelCall,
         host: &'a H,
     ) -> Result<ParallelCallResult, RuntimeError> {
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match host.call(chunk.names[call.name].text.as_ref(), &call.args) {
+        let slot = call.slot;
+        let name = chunk.names[call.name].text.to_string();
+        let run = std::panic::AssertUnwindSafe(host.call(name, call.args))
+            .catch_unwind()
+            .await;
+        match run {
+            Ok(result) => match result {
                 Ok(value) => Ok(success(value)),
                 Err(error) => Ok(error_value(error.to_string())),
-            }
-        }));
-        match run {
-            Ok(Ok(value)) => Ok(ParallelCallResult {
-                slot: call.slot,
-                output: value,
-            }),
-            Ok(Err(error)) => Err(error),
+            },
             Err(_) => Err(RuntimeError::ValueError {
                 message: "parallel branch panicked".to_string(),
             }),
         }
+        .map(|value| ParallelCallResult {
+            slot,
+            output: value,
+        })
     }
 
-    fn run_prepared_named_call(
+    async fn run_prepared_named_call(
         chunk: &'a Chunk,
-        call: &PreparedNamedParallelCall,
+        call: PreparedNamedParallelCall,
         host: &'a H,
     ) -> Result<NamedParallelCallResult, RuntimeError> {
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match host.call(chunk.names[call.name].text.as_ref(), &call.args) {
+        let output_name = call.output_name;
+        let name = chunk.names[call.name].text.to_string();
+        let run = std::panic::AssertUnwindSafe(host.call(name, call.args))
+            .catch_unwind()
+            .await;
+        match run {
+            Ok(result) => match result {
                 Ok(value) => Ok(success(value)),
                 Err(error) => Ok(error_value(error.to_string())),
-            }
-        }));
-        match run {
-            Ok(Ok(value)) => Ok(NamedParallelCallResult {
-                output_name: call.output_name,
-                output: value,
-            }),
-            Ok(Err(error)) => Err(error),
+            },
             Err(_) => Err(RuntimeError::ValueError {
                 message: "parallel branch panicked".to_string(),
             }),
         }
+        .map(|output| NamedParallelCallResult {
+            output_name,
+            output,
+        })
     }
 
     fn merge_branch_result(
@@ -3369,55 +3363,62 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         Ok(record)
     }
 
-    fn await_value(&self, handle: Value) -> Value {
-        match handle {
-            Value::List(handles) => Value::List(
-                handles
-                    .iter()
-                    .cloned()
-                    .map(|handle| self.await_value(handle))
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-            Value::Record(handles) if is_async_handle_record(&handles) => {
-                match self.host.await_handle(&Value::Record(handles)) {
+    fn await_value(
+        &self,
+        handle: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
+        Box::pin(async move {
+            match handle {
+                Value::List(handles) => {
+                    let mut values = Vec::with_capacity(handles.len());
+                    for handle in handles.iter().cloned() {
+                        values.push(self.await_value(handle).await);
+                    }
+                    Value::List(values.into())
+                }
+                Value::Record(handles) if is_async_handle_record(&handles) => {
+                    match self.host.await_handle(Value::Record(handles)).await {
+                        Ok(value) => success(value),
+                        Err(error) => error_value(error.to_string()),
+                    }
+                }
+                Value::Record(handles) => {
+                    let mut record = record_with_capacity(handles.len());
+                    for entry in handles.entries.iter() {
+                        record.insert_symbolized(
+                            entry.symbol,
+                            entry.name.clone(),
+                            self.await_value(entry.value.clone()).await,
+                        );
+                    }
+                    Value::Record(Arc::new(record))
+                }
+                handle => match self.host.await_handle(handle).await {
                     Ok(value) => success(value),
                     Err(error) => error_value(error.to_string()),
-                }
+                },
             }
-            Value::Record(handles) => {
-                let mut record = record_with_capacity(handles.len());
-                for entry in handles.entries.iter() {
-                    record.insert_symbolized(
-                        entry.symbol,
-                        entry.name.clone(),
-                        self.await_value(entry.value.clone()),
-                    );
-                }
-                Value::Record(Arc::new(record))
-            }
-            handle => match self.host.await_handle(&handle) {
-                Ok(value) => success(value),
-                Err(error) => error_value(error.to_string()),
-            },
-        }
+        })
     }
 
-    fn await_value_unwrap(&self, handle: Value) -> Result<Value, RuntimeError> {
+    async fn await_value_unwrap(&self, handle: Value) -> Result<Value, RuntimeError> {
         match handle {
             Value::Record(handles) if is_async_handle_record(&handles) => self
                 .host
-                .await_handle(&Value::Record(handles))
+                .await_handle(Value::Record(handles))
+                .await
                 .map_err(|error| RuntimeError::ValueError {
                     message: format!("`?` unwrapped failed tool result: {error}"),
                 }),
-            Value::List(_) | Value::Record(_) => unwrap_tool_result(self.await_value(handle)),
-            handle => self
-                .host
-                .await_handle(&handle)
-                .map_err(|error| RuntimeError::ValueError {
-                    message: format!("`?` unwrapped failed tool result: {error}"),
-                }),
+            Value::List(_) | Value::Record(_) => unwrap_tool_result(self.await_value(handle).await),
+            handle => {
+                self.host
+                    .await_handle(handle)
+                    .await
+                    .map_err(|error| RuntimeError::ValueError {
+                        message: format!("`?` unwrapped failed tool result: {error}"),
+                    })
+            }
         }
     }
 
@@ -3544,7 +3545,6 @@ struct PreparedNamedParallelCall {
 
 type HostBatchItemResult = Result<Value, ToolHostError>;
 type HostBatchResults<const N: usize> = SmallVec<[HostBatchItemResult; N]>;
-type HostBatchRun<const N: usize> = Option<Result<HostBatchResults<N>, RuntimeError>>;
 
 struct IterState {
     values: Arc<[Value]>,

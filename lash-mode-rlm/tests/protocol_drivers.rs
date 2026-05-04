@@ -36,7 +36,8 @@ fn test_config_with_termination(
         system_prompt: std::sync::Arc::from(""),
         session_id: "test".to_string(),
         emit_llm_trace: false,
-        termination: lash::ModeTurnOptions::rlm(rlm_termination),
+        termination: lash::ModeTurnOptions::typed(lash::ExecutionMode::new("rlm"), rlm_termination)
+            .expect("valid rlm turn options"),
         retry_policy: RetryPolicy::default(),
     }
 }

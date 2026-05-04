@@ -319,6 +319,18 @@ struct Args {
     #[arg(long, hide = true, value_name = "OUT.json")]
     ui_perf_out: Option<std::path::PathBuf>,
 
+    /// Write a dhat heap profile for the measured UI benchmark window
+    #[arg(long, hide = true)]
+    ui_perf_dhat: bool,
+
+    /// Write a dhat heap profile for the measured UI benchmark window
+    #[arg(long, hide = true, value_name = "OUT.json")]
+    ui_perf_dhat_out: Option<std::path::PathBuf>,
+
+    /// Trim dhat backtraces to this many frames
+    #[arg(long, hide = true, value_name = "FRAMES")]
+    ui_perf_dhat_frames: Option<usize>,
+
     /// Number of measured runs for the UI benchmark
     #[arg(long, hide = true, default_value_t = 5)]
     ui_perf_runs: usize,
@@ -326,6 +338,22 @@ struct Args {
     /// Number of warmup runs for the UI benchmark
     #[arg(long, hide = true, default_value_t = 1)]
     ui_perf_warmups: usize,
+
+    /// Limit the UI benchmark to one or more named scenarios
+    #[arg(long, hide = true, value_name = "SCENARIO")]
+    ui_perf_scenario: Vec<String>,
+
+    /// UI benchmark workload profile: quick, full, or stress
+    #[arg(long, hide = true, default_value = "quick", value_name = "PROFILE")]
+    ui_perf_profile: String,
+
+    /// Include baseline report paths as comparison inputs in the UI perf report
+    #[arg(long, hide = true, value_name = "REPORT.json")]
+    ui_perf_compare: Vec<std::path::PathBuf>,
+
+    /// Exit non-zero when a UI perf budget is exceeded
+    #[arg(long, hide = true)]
+    ui_perf_enforce_budgets: bool,
 
     /// Run the synthetic non-inference runtime performance benchmark and exit
     #[arg(long, hide = true)]
@@ -415,9 +443,17 @@ async fn main() -> anyhow::Result<()> {
     if args.ui_perf_benchmark {
         return ui_perf::run_cli(
             args.ui_perf_out,
+            args.ui_perf_dhat,
+            args.ui_perf_dhat_out,
+            args.ui_perf_dhat_frames,
             args.ui_perf_runs,
             args.ui_perf_warmups,
+            args.ui_perf_scenario,
+            args.ui_perf_profile,
+            args.ui_perf_compare,
+            args.ui_perf_enforce_budgets,
             APP_VERSION,
+            BUILD_GIT_HEAD,
         );
     }
     if args.runtime_perf_benchmark {

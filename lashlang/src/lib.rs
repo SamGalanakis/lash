@@ -12,32 +12,36 @@ pub use parser::{ParseError, parse};
 pub use runtime::{
     CompileStats, CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats,
     ExecutionOutcome, ExecutionScratch, ImageValue, LASH_TYPE_KEY, ProfileReport, ProfileStat,
-    Record, RuntimeError, RuntimeFailure, Snapshot, State, ToolHost, ToolHostError, Value,
-    compile_program, compile_source, execute_compiled, execute_compiled_traced,
+    Record, RuntimeError, RuntimeFailure, Snapshot, State, ToolHost, ToolHostCall, ToolHostError,
+    Value, compile_program, compile_source, execute_compiled, execute_compiled_traced,
     execute_compiled_traced_with_scratch, execute_compiled_with_scratch, execute_program, prewarm,
     profile_compiled, profile_compiled_with_scratch, unwrap_type_value,
 };
 
-pub fn execute<H: ToolHost>(
+pub async fn execute<H: ToolHost>(
     source: &str,
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, ExecuteError> {
     let program = parse(source)?;
-    execute_program(&program, state, host).map_err(ExecuteError::Runtime)
+    execute_program(&program, state, host)
+        .await
+        .map_err(ExecuteError::Runtime)
 }
 
-pub fn execute_with_diagnostics<H: ToolHost>(
+pub async fn execute_with_diagnostics<H: ToolHost>(
     source: &str,
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, ExecuteError> {
     let compiled = compile_source(source)?;
-    execute_compiled_traced(&compiled, state, host).map_err(|failure| {
-        ExecuteError::Runtime(RuntimeError::ValueError {
-            message: format_runtime_diagnostic(source, &failure.error, failure.span),
+    execute_compiled_traced(&compiled, state, host)
+        .await
+        .map_err(|failure| {
+            ExecuteError::Runtime(RuntimeError::ValueError {
+                message: format_runtime_diagnostic(source, &failure.error, failure.span),
+            })
         })
-    })
 }
 
 pub fn format_runtime_diagnostic(source: &str, error: &RuntimeError, span: Option<Span>) -> String {
@@ -88,29 +92,34 @@ mod tests {
     struct Host;
 
     impl ToolHost for Host {
-        fn call(&self, _name: &str, _args: &Record) -> Result<Value, ToolHostError> {
+        async fn call(&self, _name: String, _args: Record) -> Result<Value, ToolHostError> {
             Ok(Value::Null)
         }
     }
 
-    #[test]
-    fn execute_wraps_parse_errors() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_wraps_parse_errors() {
         let mut state = State::new();
-        let err = execute("if true", &mut state, &Host).expect_err("parse should fail");
+        let err = execute("if true", &mut state, &Host)
+            .await
+            .expect_err("parse should fail");
         assert!(matches!(err, ExecuteError::Parse(_)));
     }
 
-    #[test]
-    fn execute_wraps_runtime_errors() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_wraps_runtime_errors() {
         let mut state = State::new();
-        let err = execute("submit missing", &mut state, &Host).expect_err("runtime should fail");
+        let err = execute("submit missing", &mut state, &Host)
+            .await
+            .expect_err("runtime should fail");
         assert!(matches!(err, ExecuteError::Runtime(_)));
     }
 
-    #[test]
-    fn execute_with_diagnostics_includes_source_location() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_diagnostics_includes_source_location() {
         let mut state = State::new();
         let err = execute_with_diagnostics("x = 1\nsubmit missing", &mut state, &Host)
+            .await
             .expect_err("runtime should fail");
         let message = diagnostic_message(err);
         assert!(message.contains("unknown name `missing`"), "{message}");
@@ -118,14 +127,15 @@ mod tests {
         assert!(message.contains("submit missing"), "{message}");
     }
 
-    #[test]
-    fn compile_source_prewarm_and_traced_scratch_execution_work_together() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn compile_source_prewarm_and_traced_scratch_execution_work_together() {
         prewarm();
         let compiled = compile_source("submit 7").expect("source should compile");
         let mut state = State::new();
         let mut scratch = ExecutionScratch::new();
         let outcome =
             execute_compiled_traced_with_scratch(&compiled, &mut state, &Host, &mut scratch)
+                .await
                 .expect("execution should succeed");
         assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));
     }
@@ -150,8 +160,8 @@ mod tests {
         assert_eq!(stats.capacity, 2);
     }
 
-    #[test]
-    fn execute_with_diagnostics_covers_representative_runtime_failures() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_diagnostics_covers_representative_runtime_failures() {
         let cases = [
             (
                 "x = 1\nsubmit ({ ok: false, error: \"boom\" })?",
@@ -174,6 +184,7 @@ mod tests {
         for (source, expected_error, expected_snippet) in cases {
             let mut state = State::new();
             let err = execute_with_diagnostics(source, &mut state, &Host)
+                .await
                 .expect_err("runtime should fail");
             let message = diagnostic_message(err);
             assert!(message.contains(expected_error), "{message}");
@@ -182,11 +193,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn execute_success_path_uses_host() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_success_path_uses_host() {
         let mut state = State::new();
-        let outcome =
-            execute("v = call anything {} submit v", &mut state, &Host).expect("should succeed");
+        let outcome = execute("v = call anything {} submit v", &mut state, &Host)
+            .await
+            .expect("should succeed");
         let ExecutionOutcome::Finished(value) = outcome else {
             panic!("expected finish");
         };
@@ -196,10 +208,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execute_allows_bare_finish() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_allows_bare_finish() {
         let mut state = State::new();
-        let outcome = execute("submit", &mut state, &Host).expect("should succeed");
+        let outcome = execute("submit", &mut state, &Host)
+            .await
+            .expect("should succeed");
         let ExecutionOutcome::Finished(value) = outcome else {
             panic!("expected finish");
         };

@@ -256,7 +256,7 @@ impl RuntimeTurnDriver {
                         {
                             self.turn_pipeline.state_mut().token_usage = cumulative.clone();
                             self.turn_pipeline.state_mut().last_prompt_usage =
-                                normalize_prompt_usage(self.policy.provider.as_dyn(), usage);
+                                normalize_prompt_usage(&self.policy.provider, usage);
                         }
                         emit!(event)
                     }
@@ -290,7 +290,7 @@ impl RuntimeTurnDriver {
                                 reasoning_tokens: response.usage.reasoning_tokens,
                             };
                             self.turn_pipeline.state_mut().last_prompt_usage =
-                                normalize_prompt_usage(self.policy.provider.as_dyn(), &usage);
+                                normalize_prompt_usage(&self.policy.provider, &usage);
                         }
                         machine.handle_response(Response::LlmComplete {
                             id,

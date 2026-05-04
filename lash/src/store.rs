@@ -14,7 +14,7 @@ use flate2::read::ZlibDecoder;
 #[cfg(feature = "sqlite-store")]
 use flate2::write::ZlibEncoder;
 #[cfg(feature = "sqlite-store")]
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 #[cfg(feature = "sqlite-store")]
 use sha2::{Digest, Sha256};
 
@@ -31,6 +31,13 @@ pub enum StoreError {
         bound_session_id: String,
         attempted_session_id: String,
     },
+    #[error("store does not support read scope {0:?}")]
+    UnsupportedReadScope(SessionReadScope),
+    #[error("store head revision conflict: expected {expected:?}, actual {actual}")]
+    HeadRevisionConflict { expected: Option<u64>, actual: u64 },
+    #[cfg(feature = "sqlite-store")]
+    #[error("sqlite store error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 /// SQLite-backed store for checkpoint blobs and the canonical session head.
@@ -54,7 +61,8 @@ CREATE TABLE IF NOT EXISTS blobs (
 CREATE TABLE IF NOT EXISTS session_head (
     singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
     session_id     TEXT NOT NULL DEFAULT 'root',
-    head_json      TEXT NOT NULL DEFAULT '{}'
+    head_json      TEXT NOT NULL DEFAULT '{}',
+    head_revision  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS graph_nodes (
@@ -86,7 +94,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
 ";
 
 #[cfg(feature = "sqlite-store")]
-const SCHEMA_VERSION: i32 = 14;
+const SCHEMA_VERSION: i32 = 15;
 
 #[cfg(feature = "sqlite-store")]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -238,7 +246,7 @@ pub struct GcReport {
     pub deleted_blob_count: usize,
 }
 
-/// Result of a `RetentionStore::vacuum()` call.
+/// Result of a `RuntimePersistence::vacuum()` call.
 /// `removed_node_count` counts the tombstoned graph-node rows that were
 /// physically deleted from the store. Returned so hosts can emit metrics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -337,6 +345,8 @@ pub struct StoredSessionCheckpoint {
 pub struct SessionHead {
     #[serde(default = "default_root_session_id")]
     pub session_id: String,
+    #[serde(default)]
+    pub head_revision: u64,
     pub graph: crate::SessionGraph,
     pub config: crate::PersistedSessionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,6 +359,8 @@ pub struct SessionHead {
 pub struct SessionHeadMeta {
     #[serde(default = "default_root_session_id")]
     pub session_id: String,
+    #[serde(default)]
+    pub head_revision: u64,
     pub config: crate::PersistedSessionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<BlobRef>,
@@ -360,9 +372,11 @@ pub struct SessionHeadMeta {
     pub token_ledger: Vec<crate::TokenLedgerEntry>,
 }
 
+#[cfg(feature = "sqlite-store")]
 fn session_head_meta(head: &SessionHead) -> SessionHeadMeta {
     SessionHeadMeta {
         session_id: head.session_id.clone(),
+        head_revision: 0,
         config: head.config.clone(),
         checkpoint_ref: head.checkpoint_ref.clone(),
         leaf_node_id: head.graph.leaf_node_id.clone(),
@@ -384,50 +398,61 @@ fn persisted_session_config_from_state(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionReadScope {
+    FullGraph,
+    ActivePath { leaf_node_id: Option<String> },
+}
+
 #[derive(Clone, Debug)]
-pub enum SessionGraphCommit {
-    Replace(crate::SessionGraph),
+pub struct PersistedSessionRead {
+    pub session_id: String,
+    pub head_revision: u64,
+    pub config: crate::PersistedSessionConfig,
+    pub graph: crate::SessionGraph,
+    pub checkpoint_ref: Option<BlobRef>,
+    pub checkpoint: Option<HydratedSessionCheckpoint>,
+    pub token_ledger: Vec<crate::TokenLedgerEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub enum GraphCommitDelta {
+    Unchanged {
+        leaf_node_id: Option<String>,
+    },
     Append {
         nodes: Vec<crate::SessionNodeRecord>,
         leaf_node_id: Option<String>,
-        graph_node_count: usize,
     },
+    ReplaceFull(crate::SessionGraph),
 }
 
-impl SessionGraphCommit {
-    pub fn graph_node_count(&self) -> usize {
-        match self {
-            Self::Replace(graph) => graph.nodes.len(),
-            Self::Append {
-                graph_node_count, ..
-            } => *graph_node_count,
-        }
-    }
-
+impl GraphCommitDelta {
     pub fn leaf_node_id(&self) -> Option<&String> {
         match self {
-            Self::Replace(graph) => graph.leaf_node_id.as_ref(),
-            Self::Append { leaf_node_id, .. } => leaf_node_id.as_ref(),
+            Self::Unchanged { leaf_node_id } | Self::Append { leaf_node_id, .. } => {
+                leaf_node_id.as_ref()
+            }
+            Self::ReplaceFull(graph) => graph.leaf_node_id.as_ref(),
         }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct PersistedStateCommit {
+pub struct RuntimeCommit {
     pub session_id: String,
+    pub expected_head_revision: Option<u64>,
     pub config: crate::PersistedSessionConfig,
-    pub graph: SessionGraphCommit,
+    pub graph: GraphCommitDelta,
     pub checkpoint: HydratedSessionCheckpoint,
     pub usage_deltas: Vec<crate::TokenLedgerEntry>,
 }
 
 #[derive(Clone, Debug)]
-pub struct PersistedStateCommitResult {
+pub struct RuntimeCommitResult {
+    pub head_revision: u64,
     pub checkpoint_ref: BlobRef,
     pub manifest: SessionCheckpoint,
-    /// Total node count the store now holds after the commit. The runtime
-    /// replaces its `persisted_graph_node_count` with this value.
-    pub persisted_graph_node_count: usize,
 }
 
 fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::PersistedTurnState {
@@ -454,38 +479,22 @@ fn build_checkpoint_from_persisted_state(
     }
 }
 
-fn graph_commit_from_state(state: &crate::PersistedSessionState) -> SessionGraphCommit {
-    let nodes_len = state.session_graph.nodes.len();
-    debug_assert!(
-        state.persisted_graph_node_count <= nodes_len || state.graph_replace_required,
-        "graph_commit_from_state: persisted count ({}) > resident ({}) without \
-         graph_replace_required — residency trim or heal forgot to reset the count",
-        state.persisted_graph_node_count,
-        nodes_len
-    );
-    if state.graph_replace_required || state.persisted_graph_node_count > nodes_len {
-        return SessionGraphCommit::Replace(state.session_graph.clone());
-    }
-    // Append only the tail — indices `[persisted_graph_node_count..]`.
-    // Residency trim resets `persisted_graph_node_count` so the tail
-    // stays in bounds; heal/rewrite sets `graph_replace_required` above.
-    let new_nodes = state.session_graph.nodes[state.persisted_graph_node_count..].to_vec();
-    SessionGraphCommit::Append {
-        nodes: new_nodes,
-        leaf_node_id: state.session_graph.leaf_node_id.clone(),
-        graph_node_count: nodes_len,
-    }
-}
-
-impl PersistedStateCommit {
+impl RuntimeCommit {
     pub fn persisted_state(
         state: &crate::PersistedSessionState,
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Self {
         Self {
             session_id: state.session_id.clone(),
+            expected_head_revision: state.head_revision,
             config: persisted_session_config_from_state(state),
-            graph: graph_commit_from_state(state),
+            graph: if state.graph_replace_required {
+                GraphCommitDelta::ReplaceFull(state.session_graph.clone())
+            } else {
+                GraphCommitDelta::Unchanged {
+                    leaf_node_id: state.session_graph.leaf_node_id.clone(),
+                }
+            },
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
         }
@@ -493,11 +502,12 @@ impl PersistedStateCommit {
 
     pub(crate) fn persisted_state_with_graph_commit(
         state: &crate::PersistedSessionState,
-        graph: SessionGraphCommit,
+        graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Self {
         Self {
             session_id: state.session_id.clone(),
+            expected_head_revision: state.head_revision,
             config: persisted_session_config_from_state(state),
             graph,
             checkpoint: build_checkpoint_from_persisted_state(state),
@@ -528,10 +538,9 @@ fn persisted_session_state_from_head(
         execution_state_snapshot: None,
         token_ledger: head.token_ledger,
         checkpoint_ref: head.checkpoint_ref.clone(),
-        persisted_graph_node_count: 0,
+        head_revision: Some(head.head_revision),
         graph_replace_required: false,
     };
-    state.persisted_graph_node_count = state.session_graph.nodes.len();
     state.policy.model = head.config.configured_model.clone();
     if head.config.context_window > 0 {
         state.policy.max_context_tokens = Some(head.config.context_window as usize);
@@ -563,6 +572,7 @@ impl Default for SessionHead {
     fn default() -> Self {
         Self {
             session_id: default_root_session_id(),
+            head_revision: 0,
             graph: crate::SessionGraph::default(),
             config: crate::PersistedSessionConfig::default(),
             checkpoint_ref: None,
@@ -575,6 +585,7 @@ impl Default for SessionHeadMeta {
     fn default() -> Self {
         Self {
             session_id: default_root_session_id(),
+            head_revision: 0,
             config: crate::PersistedSessionConfig::default(),
             checkpoint_ref: None,
             leaf_node_id: None,
@@ -584,168 +595,70 @@ impl Default for SessionHeadMeta {
     }
 }
 
-/// Blob/artifact blob persistence.
+/// Exact persistence protocol required by the runtime.
 #[async_trait::async_trait]
-pub trait BlobStore: Send + Sync {
-    #[doc(hidden)]
-    async fn put_blob(&self, content: &[u8]) -> BlobRef;
-    async fn put_artifact_blob(
+pub trait RuntimePersistence: Send + Sync {
+    async fn load_session(
         &self,
-        descriptor: BlobArtifactDescriptor,
-        content: &[u8],
-    ) -> BlobRef {
-        let _ = descriptor;
-        self.put_blob(content).await
-    }
-    #[doc(hidden)]
-    async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>>;
+        scope: SessionReadScope,
+    ) -> Result<Option<PersistedSessionRead>, StoreError>;
+
+    async fn load_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<crate::SessionNodeRecord>, StoreError>;
+
+    async fn commit_runtime_state(
+        &self,
+        commit: RuntimeCommit,
+    ) -> Result<RuntimeCommitResult, StoreError>;
+
+    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError>;
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError>;
+
+    async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError>;
+    async fn vacuum(&self) -> Result<VacuumReport, StoreError>;
+    async fn gc_unreachable(&self) -> Result<GcReport, StoreError>;
 }
 
-/// Persistent usage ledger storage.
-#[async_trait::async_trait]
-pub trait UsageLedgerStore: Send + Sync {
-    #[doc(hidden)]
-    async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]);
-    #[doc(hidden)]
-    async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry>;
+fn persisted_session_state_from_read(read: PersistedSessionRead) -> crate::PersistedSessionState {
+    persisted_session_state_from_head(
+        SessionHead {
+            session_id: read.session_id,
+            head_revision: read.head_revision,
+            graph: read.graph,
+            config: read.config,
+            checkpoint_ref: read.checkpoint_ref,
+            token_ledger: read.token_ledger,
+        },
+        read.checkpoint,
+    )
 }
 
-/// Session head and session metadata storage.
-#[async_trait::async_trait]
-pub trait SessionHeadStore: Send + Sync {
-    #[doc(hidden)]
-    async fn save_session_head_meta(&self, meta: SessionHeadMeta);
-    #[doc(hidden)]
-    async fn load_session_head_meta(&self) -> Option<SessionHeadMeta>;
-    async fn save_session_meta(&self, meta: SessionMeta);
-    async fn load_session_meta(&self) -> Option<SessionMeta>;
+pub async fn load_persisted_session_state(
+    store: &(dyn RuntimePersistence + '_),
+) -> Result<Option<crate::PersistedSessionState>, StoreError> {
+    Ok(store
+        .load_session(SessionReadScope::FullGraph)
+        .await?
+        .map(persisted_session_state_from_read))
 }
 
-/// Session graph storage.
-#[async_trait::async_trait]
-pub trait SessionGraphStore: Send + Sync {
-    #[doc(hidden)]
-    async fn replace_session_graph(&self, graph: &crate::SessionGraph);
-    #[doc(hidden)]
-    async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]);
-    #[doc(hidden)]
-    async fn load_session_graph(&self) -> crate::SessionGraph;
-
-    /// Load only the active-path chain from `leaf_node_id` back to its
-    /// root (or from `load_session_head_meta().leaf_node_id` when
-    /// `leaf_node_id` is `None`). Embedder-optimal constructors use this
-    /// when `Residency::ActivePathOnly` so session hydration is
-    /// O(active-path), not O(total-history).
-    ///
-    /// Default: fall back to `load_session_graph().await` and filter to
-    /// the active-path. SQLite impls should override with a recursive
-    /// CTE.
-    async fn load_active_path_graph(&self, leaf_node_id: Option<&str>) -> crate::SessionGraph {
-        let mut graph = self.load_session_graph().await;
-        if let Some(leaf) = leaf_node_id
-            && graph.find_node(leaf).is_some()
-        {
-            graph.set_leaf_node_id(Some(leaf.to_string()));
-        }
-        if graph
-            .leaf_node_id
-            .as_ref()
-            .is_some_and(|id| graph.find_node(id).is_some())
-        {
-            graph.fork_current_path()
-        } else {
-            graph
-        }
-    }
-
-    /// Fetch a single node by id. Used for opt-in historic-node reads
-    /// under `ActivePathOnly` residency. Default: load the full graph
-    /// and linear-search; SQLite impls should override with an indexed
-    /// lookup.
-    async fn get_node(&self, node_id: &str) -> Option<crate::SessionNodeRecord> {
-        self.load_session_graph().await.find_node(node_id).cloned()
-    }
+pub async fn load_persisted_session_state_active_path(
+    store: &(dyn RuntimePersistence + '_),
+    leaf_node_id: Option<String>,
+) -> Result<Option<crate::PersistedSessionState>, StoreError> {
+    Ok(store
+        .load_session(SessionReadScope::ActivePath { leaf_node_id })
+        .await?
+        .map(persisted_session_state_from_read))
 }
 
-/// Retention and space-reclamation storage primitives.
-#[async_trait::async_trait]
-pub trait RetentionStore: Send + Sync {
-    async fn gc_unreachable(&self) -> GcReport {
-        GcReport::default()
-    }
-
-    #[doc(hidden)]
-    async fn record_runtime_commit(&self) {}
-
-    /// Mark nodes as eligible for `vacuum()`. Host-called primitive for
-    /// bounded-disk embedders. Default: no-op (backends that don't
-    /// support tombstoning behave as append-only).
-    async fn tombstone_nodes(&self, _ids: &[String]) {}
-
-    /// Physically remove nodes previously marked by `tombstone_nodes`.
-    /// Host-called primitive; the runtime never invokes it. Default:
-    /// no-op.
-    async fn vacuum(&self) -> VacuumReport {
-        VacuumReport::default()
-    }
-}
-
-/// Composite persistence capability required by the runtime.
-pub trait RuntimePersistence:
-    BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + RetentionStore
-{
-}
-
-impl<T> RuntimePersistence for T where
-    T: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + RetentionStore
-{
-}
-
-pub async fn load_persisted_session_state<S>(store: &S) -> Option<crate::PersistedSessionState>
-where
-    S: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
-{
-    let head = load_session_head(store).await?;
-    let checkpoint = match head.checkpoint_ref.as_ref() {
-        Some(blob_ref) => get_checkpoint(store, blob_ref).await,
-        None => None,
-    };
-    Some(persisted_session_state_from_head(head, checkpoint))
-}
-
-/// Like `load_persisted_session_state` but loads only the active-path
-/// chain. Used by `LashRuntime::resume` under `Residency::ActivePathOnly`
-/// so hydration is O(active-path) instead of O(total-history).
-pub async fn load_persisted_session_state_active_path<S>(
-    store: &S,
-) -> Option<crate::PersistedSessionState>
-where
-    S: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
-{
-    let meta = store.load_session_head_meta().await?;
-    let mut graph = store
-        .load_active_path_graph(meta.leaf_node_id.as_deref())
-        .await;
-    graph.set_leaf_node_id(meta.leaf_node_id.clone());
-    let head = SessionHead {
-        session_id: meta.session_id,
-        graph,
-        config: meta.config,
-        checkpoint_ref: meta.checkpoint_ref.clone(),
-        token_ledger: merge_token_ledger_entries(store.load_usage_deltas().await),
-    };
-    let checkpoint = match head.checkpoint_ref.as_ref() {
-        Some(blob_ref) => get_checkpoint(store, blob_ref).await,
-        None => None,
-    };
-    Some(persisted_session_state_from_head(head, checkpoint))
-}
-
-pub async fn refresh_persisted_session_state<S>(store: &S, state: &mut crate::PersistedSessionState)
-where
-    S: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
-{
-    if let Some(mut fresh) = load_persisted_session_state(store).await {
+pub async fn refresh_persisted_session_state(
+    store: &(dyn RuntimePersistence + '_),
+    state: &mut crate::PersistedSessionState,
+) -> Result<(), StoreError> {
+    if let Some(mut fresh) = load_persisted_session_state(store).await? {
         // The store owns persisted graph/checkpoint/config state, but not
         // live provider credentials or other runtime-only policy fields.
         fresh.policy.provider = state.policy.provider.clone();
@@ -753,96 +666,7 @@ where
         fresh.policy.max_turns = state.policy.max_turns;
         *state = fresh;
     }
-}
-
-pub async fn apply_runtime_commit<S>(
-    store: &S,
-    commit: PersistedStateCommit,
-) -> Result<PersistedStateCommitResult, StoreError>
-where
-    S: RuntimePersistence + ?Sized,
-{
-    if let Some(bound_session_id) = store
-        .load_session_head_meta()
-        .await
-        .map(|meta| meta.session_id)
-        && bound_session_id != commit.session_id
-    {
-        return Err(StoreError::SessionBindingMismatch {
-            bound_session_id,
-            attempted_session_id: commit.session_id,
-        });
-    }
-    let stored_checkpoint = put_checkpoint(store, &commit.checkpoint).await;
-    if !commit.usage_deltas.is_empty() {
-        store.append_usage_deltas(&commit.usage_deltas).await;
-    }
-    match &commit.graph {
-        SessionGraphCommit::Replace(graph) => {
-            store.replace_session_graph(graph).await;
-        }
-        SessionGraphCommit::Append { nodes, .. } if !nodes.is_empty() => {
-            store.append_session_graph_nodes(nodes).await;
-        }
-        SessionGraphCommit::Append { .. } => {}
-    }
-    let graph_node_count = commit.graph.graph_node_count();
-    store
-        .save_session_head_meta(SessionHeadMeta {
-            session_id: commit.session_id,
-            config: commit.config,
-            checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
-            leaf_node_id: commit.graph.leaf_node_id().cloned(),
-            graph_node_count,
-            token_ledger: Vec::new(),
-        })
-        .await;
-    store.record_runtime_commit().await;
-    Ok(PersistedStateCommitResult {
-        checkpoint_ref: stored_checkpoint.checkpoint_ref,
-        manifest: stored_checkpoint.manifest,
-        persisted_graph_node_count: graph_node_count,
-    })
-}
-
-pub async fn save_session_head<S>(store: &S, head: SessionHead)
-where
-    S: SessionHeadStore + SessionGraphStore + ?Sized,
-{
-    store.replace_session_graph(&head.graph).await;
-    store.save_session_head_meta(session_head_meta(&head)).await;
-}
-
-pub async fn load_session_head<S>(store: &S) -> Option<SessionHead>
-where
-    S: SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
-{
-    let meta = store.load_session_head_meta().await?;
-    let mut graph = store.load_session_graph().await;
-    graph.set_leaf_node_id(meta.leaf_node_id.clone());
-    Some(SessionHead {
-        session_id: meta.session_id,
-        graph,
-        config: meta.config,
-        checkpoint_ref: meta.checkpoint_ref,
-        token_ledger: merge_token_ledger_entries(store.load_usage_deltas().await),
-    })
-}
-
-pub async fn head_copy_from_store<T, S>(target: &T, source: &S)
-where
-    T: BlobStore + SessionHeadStore + SessionGraphStore + ?Sized,
-    S: BlobStore + SessionHeadStore + SessionGraphStore + UsageLedgerStore + ?Sized,
-{
-    if let Some(head) = load_session_head(source).await {
-        if let Some(checkpoint_ref) = &head.checkpoint_ref {
-            let _ = copy_checkpoint_blobs_from_store(target, source, checkpoint_ref).await;
-        }
-        target.replace_session_graph(&head.graph).await;
-        target
-            .save_session_head_meta(session_head_meta(&head))
-            .await;
-    }
+    Ok(())
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -911,14 +735,16 @@ fn decode_artifact_blob(bytes: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(feature = "sqlite-store")]
 fn load_session_head_meta_from_conn(conn: &Connection) -> Option<SessionHeadMeta> {
-    let head_json: String = conn
+    let (head_json, head_revision): (String, u64) = conn
         .query_row(
-            "SELECT head_json FROM session_head WHERE singleton = 1",
+            "SELECT head_json, head_revision FROM session_head WHERE singleton = 1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)),
         )
         .ok()?;
-    serde_json::from_str(&head_json).ok()
+    let mut meta: SessionHeadMeta = serde_json::from_str(&head_json).ok()?;
+    meta.head_revision = head_revision;
+    Some(meta)
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -959,10 +785,12 @@ fn encode_msgpack<T: serde::Serialize>(value: &T) -> Vec<u8> {
     buf
 }
 
+#[cfg(feature = "sqlite-store")]
 fn decode_msgpack<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     rmp_serde::from_slice(bytes).ok()
 }
 
+#[cfg(feature = "sqlite-store")]
 fn merge_token_ledger_entries(
     entries: Vec<crate::TokenLedgerEntry>,
 ) -> Vec<crate::TokenLedgerEntry> {
@@ -984,172 +812,6 @@ fn merge_token_ledger_entries(
         }
     }
     merged
-}
-
-pub async fn put_typed_blob<T: serde::Serialize, S: BlobStore + ?Sized>(
-    store: &S,
-    value: &T,
-) -> BlobRef {
-    put_typed_artifact_blob(
-        store,
-        BlobArtifactDescriptor::new(PersistedArtifactKind::GenericBlob, Vec::new()),
-        value,
-    )
-    .await
-}
-
-pub async fn put_typed_artifact_blob<T: serde::Serialize, S: BlobStore + ?Sized>(
-    store: &S,
-    descriptor: BlobArtifactDescriptor,
-    value: &T,
-) -> BlobRef {
-    let bytes = encode_msgpack(value);
-    store.put_artifact_blob(descriptor, &bytes).await
-}
-
-pub async fn get_typed_blob<T: serde::de::DeserializeOwned, S: BlobStore + ?Sized>(
-    store: &S,
-    blob_ref: &BlobRef,
-) -> Option<T> {
-    let bytes = store.get_blob(blob_ref).await?;
-    decode_msgpack(&bytes)
-}
-
-pub async fn put_checkpoint<S: BlobStore + ?Sized>(
-    store: &S,
-    checkpoint: &HydratedSessionCheckpoint,
-) -> StoredSessionCheckpoint {
-    let dynamic_state_ref = match checkpoint.dynamic_state.as_ref() {
-        Some(snapshot) => Some(
-            put_typed_artifact_blob(
-                store,
-                BlobArtifactDescriptor::dynamic_state_snapshot(),
-                snapshot,
-            )
-            .await,
-        ),
-        None => checkpoint.dynamic_state_ref.clone(),
-    };
-    let plugin_snapshot_ref = match checkpoint.plugin_snapshot.as_ref() {
-        Some(snapshot) => Some(
-            put_typed_artifact_blob(
-                store,
-                BlobArtifactDescriptor::plugin_session_snapshot(),
-                snapshot,
-            )
-            .await,
-        ),
-        None => checkpoint.plugin_snapshot_ref.clone(),
-    };
-    let execution_state_ref = match checkpoint.execution_state.as_ref() {
-        Some(snapshot) => Some(
-            put_typed_artifact_blob(
-                store,
-                BlobArtifactDescriptor::execution_state_snapshot(),
-                snapshot,
-            )
-            .await,
-        ),
-        None => checkpoint.execution_state_ref.clone(),
-    };
-    let record = SessionCheckpoint {
-        turn_state: checkpoint.turn_state.clone(),
-        dynamic_state_ref,
-        plugin_snapshot_ref,
-        plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
-        execution_state_ref,
-    };
-    let checkpoint_ref = put_typed_artifact_blob(
-        store,
-        BlobArtifactDescriptor::checkpoint_manifest(),
-        &record,
-    )
-    .await;
-    StoredSessionCheckpoint {
-        checkpoint_ref,
-        manifest: record,
-    }
-}
-
-pub async fn append_usage_deltas<S: UsageLedgerStore + ?Sized>(
-    store: &S,
-    entries: &[crate::TokenLedgerEntry],
-) {
-    store.append_usage_deltas(entries).await;
-}
-
-pub async fn load_usage_deltas<S: UsageLedgerStore + ?Sized>(
-    store: &S,
-) -> Vec<crate::TokenLedgerEntry> {
-    store.load_usage_deltas().await
-}
-
-pub async fn get_checkpoint<S: BlobStore + ?Sized>(
-    store: &S,
-    checkpoint_ref: &BlobRef,
-) -> Option<HydratedSessionCheckpoint> {
-    let record: SessionCheckpoint = get_typed_blob(store, checkpoint_ref).await?;
-    let dynamic_state = match record.dynamic_state_ref.as_ref() {
-        Some(blob_ref) => get_typed_blob(store, blob_ref).await,
-        None => None,
-    };
-    let plugin_snapshot = match record.plugin_snapshot_ref.as_ref() {
-        Some(blob_ref) => get_typed_blob(store, blob_ref).await,
-        None => None,
-    };
-    let execution_state = match record.execution_state_ref.as_ref() {
-        Some(blob_ref) => get_typed_blob(store, blob_ref).await,
-        None => None,
-    };
-    Some(HydratedSessionCheckpoint {
-        turn_state: record.turn_state,
-        dynamic_state_ref: record.dynamic_state_ref,
-        dynamic_state,
-        plugin_snapshot_ref: record.plugin_snapshot_ref,
-        plugin_snapshot,
-        plugin_snapshot_revision: record.plugin_snapshot_revision,
-        execution_state_ref: record.execution_state_ref,
-        execution_state,
-    })
-}
-
-pub async fn copy_checkpoint_blobs_from_store<T: BlobStore + ?Sized, S: BlobStore + ?Sized>(
-    target: &T,
-    source: &S,
-    checkpoint_ref: &BlobRef,
-) -> Option<BlobRef> {
-    let record: SessionCheckpoint = get_typed_blob(source, checkpoint_ref).await?;
-    for blob_ref in [
-        record.dynamic_state_ref.as_ref(),
-        record.plugin_snapshot_ref.as_ref(),
-        record.execution_state_ref.as_ref(),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (index, blob_ref) = blob_ref;
-        let Some(blob_ref) = blob_ref else {
-            continue;
-        };
-        if let Some(bytes) = source.get_blob(blob_ref).await {
-            let descriptor = match index {
-                0 => BlobArtifactDescriptor::dynamic_state_snapshot(),
-                1 => BlobArtifactDescriptor::plugin_session_snapshot(),
-                2 => BlobArtifactDescriptor::execution_state_snapshot(),
-                _ => BlobArtifactDescriptor::new(PersistedArtifactKind::GenericBlob, Vec::new()),
-            };
-            let _ = target.put_artifact_blob(descriptor, &bytes).await;
-        }
-    }
-    let checkpoint_bytes = source.get_blob(checkpoint_ref).await?;
-    Some(
-        target
-            .put_artifact_blob(
-                BlobArtifactDescriptor::checkpoint_manifest(),
-                &checkpoint_bytes,
-            )
-            .await,
-    )
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -1187,6 +849,135 @@ impl Store {
             nodes.push(node);
         }
         crate::SessionGraph::from_nodes(nodes, leaf_node_id)
+    }
+
+    fn load_active_path_session_graph_from_conn(
+        conn: &Connection,
+        leaf_node_id: Option<String>,
+    ) -> Result<crate::SessionGraph, StoreError> {
+        let Some(leaf_node_id) = leaf_node_id else {
+            return Ok(crate::SessionGraph::default());
+        };
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE active(node_id, node_json, parent_node_id, depth) AS (
+                SELECT
+                    node_id,
+                    node_json,
+                    json_extract(node_json, '$.parent_node_id'),
+                    0
+                FROM graph_nodes
+                WHERE node_id = ?1 AND tombstoned = 0
+              UNION ALL
+                SELECT
+                    g.node_id,
+                    g.node_json,
+                    json_extract(g.node_json, '$.parent_node_id'),
+                    active.depth + 1
+                FROM graph_nodes g
+                JOIN active ON g.node_id = active.parent_node_id
+                WHERE g.tombstoned = 0
+            )
+            SELECT node_json FROM active ORDER BY depth DESC",
+        )?;
+        let rows = stmt.query_map(params![leaf_node_id.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut nodes = Vec::new();
+        for row in rows {
+            let node_json = row?;
+            if let Ok(node) = serde_json::from_str::<crate::SessionNodeRecord>(&node_json) {
+                nodes.push(node);
+            }
+        }
+        Ok(crate::SessionGraph::from_nodes(nodes, Some(leaf_node_id)))
+    }
+
+    fn insert_artifact_blob_conn(
+        conn: &Connection,
+        descriptor: BlobArtifactDescriptor,
+        content: &[u8],
+        profile: BuiltinBlobProfile,
+    ) -> Result<BlobRef, StoreError> {
+        let hash = format!("{:x}", Sha256::digest(content));
+        let stored = encode_artifact_blob(&descriptor, profile, content);
+        conn.execute(
+            "INSERT OR IGNORE INTO blobs (hash, content) VALUES (?1, ?2)",
+            params![hash, stored],
+        )?;
+        Ok(BlobRef(hash))
+    }
+
+    fn put_typed_artifact_blob_conn<T: serde::Serialize>(
+        conn: &Connection,
+        descriptor: BlobArtifactDescriptor,
+        value: &T,
+        profile: BuiltinBlobProfile,
+    ) -> Result<BlobRef, StoreError> {
+        let bytes = encode_msgpack(value);
+        Self::insert_artifact_blob_conn(conn, descriptor, &bytes, profile)
+    }
+
+    fn put_checkpoint_conn(
+        conn: &Connection,
+        checkpoint: &HydratedSessionCheckpoint,
+        profile: BuiltinBlobProfile,
+    ) -> Result<StoredSessionCheckpoint, StoreError> {
+        let dynamic_state_ref = checkpoint
+            .dynamic_state
+            .as_ref()
+            .map(|snapshot| {
+                Self::put_typed_artifact_blob_conn(
+                    conn,
+                    BlobArtifactDescriptor::dynamic_state_snapshot(),
+                    snapshot,
+                    profile,
+                )
+            })
+            .transpose()?
+            .or_else(|| checkpoint.dynamic_state_ref.clone());
+        let plugin_snapshot_ref = checkpoint
+            .plugin_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                Self::put_typed_artifact_blob_conn(
+                    conn,
+                    BlobArtifactDescriptor::plugin_session_snapshot(),
+                    snapshot,
+                    profile,
+                )
+            })
+            .transpose()?
+            .or_else(|| checkpoint.plugin_snapshot_ref.clone());
+        let execution_state_ref = checkpoint
+            .execution_state
+            .as_ref()
+            .map(|snapshot| {
+                Self::put_typed_artifact_blob_conn(
+                    conn,
+                    BlobArtifactDescriptor::execution_state_snapshot(),
+                    snapshot,
+                    profile,
+                )
+            })
+            .transpose()?
+            .or_else(|| checkpoint.execution_state_ref.clone());
+        let manifest = SessionCheckpoint {
+            turn_state: checkpoint.turn_state.clone(),
+            dynamic_state_ref,
+            plugin_snapshot_ref,
+            plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+            execution_state_ref,
+        };
+        let checkpoint_ref = Self::put_typed_artifact_blob_conn(
+            conn,
+            BlobArtifactDescriptor::checkpoint_manifest(),
+            &manifest,
+            profile,
+        )?;
+        Ok(StoredSessionCheckpoint {
+            checkpoint_ref,
+            manifest,
+        })
     }
 
     fn maybe_auto_gc(&self) {
@@ -1475,9 +1266,9 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let head_json = encode_json(&meta);
         if let Err(err) = conn.execute(
-            "INSERT OR REPLACE INTO session_head (singleton, session_id, head_json)
-             VALUES (1, ?1, ?2)",
-            params![meta.session_id, head_json],
+            "INSERT OR REPLACE INTO session_head (singleton, session_id, head_json, head_revision)
+             VALUES (1, ?1, ?2, ?3)",
+            params![meta.session_id, head_json, meta.head_revision as i64],
         ) {
             tracing::warn!(error = %err, "failed to persist session head");
         }
@@ -1630,6 +1421,7 @@ impl Store {
         graph.set_leaf_node_id(meta.leaf_node_id.clone());
         Some(SessionHead {
             session_id: meta.session_id,
+            head_revision: meta.head_revision,
             graph,
             config: meta.config,
             checkpoint_ref: meta.checkpoint_ref,
@@ -1702,72 +1494,49 @@ impl Store {
 
 #[cfg(feature = "sqlite-store")]
 #[async_trait::async_trait]
-impl BlobStore for Store {
-    async fn put_blob(&self, content: &[u8]) -> BlobRef {
-        Self::put_blob(self, content)
-    }
-
-    async fn put_artifact_blob(
+impl RuntimePersistence for Store {
+    async fn load_session(
         &self,
-        descriptor: BlobArtifactDescriptor,
-        content: &[u8],
-    ) -> BlobRef {
-        Self::put_artifact_blob(self, descriptor, content)
+        scope: SessionReadScope,
+    ) -> Result<Option<PersistedSessionRead>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let Some(meta) = load_session_head_meta_from_conn(&conn) else {
+            return Ok(None);
+        };
+        let leaf_node_id = match &scope {
+            SessionReadScope::FullGraph => meta.leaf_node_id.clone(),
+            SessionReadScope::ActivePath { leaf_node_id } => {
+                leaf_node_id.clone().or_else(|| meta.leaf_node_id.clone())
+            }
+        };
+        let mut graph = match scope {
+            SessionReadScope::FullGraph => {
+                Self::load_session_graph_from_conn(&conn, meta.leaf_node_id.clone())
+            }
+            SessionReadScope::ActivePath { .. } => {
+                Self::load_active_path_session_graph_from_conn(&conn, leaf_node_id.clone())?
+            }
+        };
+        graph.set_leaf_node_id(leaf_node_id);
+        let checkpoint = meta
+            .checkpoint_ref
+            .as_ref()
+            .and_then(|blob_ref| Self::get_checkpoint(self, blob_ref));
+        Ok(Some(PersistedSessionRead {
+            session_id: meta.session_id,
+            head_revision: meta.head_revision,
+            config: meta.config,
+            graph,
+            checkpoint_ref: meta.checkpoint_ref,
+            checkpoint,
+            token_ledger: merge_token_ledger_entries(Self::load_usage_deltas(self)),
+        }))
     }
 
-    async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>> {
-        Self::get_blob(self, blob_ref)
-    }
-}
-
-#[cfg(feature = "sqlite-store")]
-#[async_trait::async_trait]
-impl UsageLedgerStore for Store {
-    async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
-        Self::append_usage_deltas(self, entries);
-    }
-
-    async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry> {
-        Self::load_usage_deltas(self)
-    }
-}
-
-#[cfg(feature = "sqlite-store")]
-#[async_trait::async_trait]
-impl SessionHeadStore for Store {
-    async fn save_session_head_meta(&self, meta: SessionHeadMeta) {
-        Self::save_session_head_meta(self, meta);
-    }
-
-    async fn load_session_head_meta(&self) -> Option<SessionHeadMeta> {
-        Self::load_session_head_meta(self)
-    }
-
-    async fn save_session_meta(&self, meta: SessionMeta) {
-        Self::save_session_meta(self, meta);
-    }
-
-    async fn load_session_meta(&self) -> Option<SessionMeta> {
-        Self::load_session_meta(self)
-    }
-}
-
-#[cfg(feature = "sqlite-store")]
-#[async_trait::async_trait]
-impl SessionGraphStore for Store {
-    async fn replace_session_graph(&self, graph: &crate::SessionGraph) {
-        Self::replace_session_graph(self, graph);
-    }
-
-    async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]) {
-        Self::append_session_graph_nodes(self, nodes);
-    }
-
-    async fn load_session_graph(&self) -> crate::SessionGraph {
-        Self::load_session_graph(self)
-    }
-
-    async fn get_node(&self, node_id: &str) -> Option<crate::SessionNodeRecord> {
+    async fn load_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<crate::SessionNodeRecord>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let row: Option<String> = conn
             .query_row(
@@ -1775,46 +1544,167 @@ impl SessionGraphStore for Store {
                 params![node_id],
                 |row| row.get(0),
             )
-            .ok();
-        row.and_then(|json| serde_json::from_str(&json).ok())
-    }
-}
-
-#[cfg(feature = "sqlite-store")]
-#[async_trait::async_trait]
-impl RetentionStore for Store {
-    async fn gc_unreachable(&self) -> GcReport {
-        Self::gc_unreachable(self)
+            .optional()?;
+        Ok(row.and_then(|json| serde_json::from_str(&json).ok()))
     }
 
-    async fn record_runtime_commit(&self) {
+    async fn commit_runtime_state(
+        &self,
+        commit: RuntimeCommit,
+    ) -> Result<RuntimeCommitResult, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let existing = load_session_head_meta_from_conn(&tx);
+        if let Some(bound_session_id) = existing.as_ref().map(|meta| meta.session_id.as_str())
+            && bound_session_id != commit.session_id
+        {
+            return Err(StoreError::SessionBindingMismatch {
+                bound_session_id: bound_session_id.to_string(),
+                attempted_session_id: commit.session_id,
+            });
+        }
+        let actual_revision = existing.as_ref().map_or(0, |meta| meta.head_revision);
+        if commit.expected_head_revision.is_some()
+            && commit.expected_head_revision != Some(actual_revision)
+        {
+            return Err(StoreError::HeadRevisionConflict {
+                expected: commit.expected_head_revision,
+                actual: actual_revision,
+            });
+        }
+
+        let stored_checkpoint =
+            Self::put_checkpoint_conn(&tx, &commit.checkpoint, self.options.blob_profile)?;
+
+        if !commit.usage_deltas.is_empty() {
+            {
+                let mut stmt = tx.prepare(
+                "INSERT INTO usage_deltas (
+                    source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+                for entry in &commit.usage_deltas {
+                    stmt.execute(params![
+                        entry.source,
+                        entry.model,
+                        entry.usage.input_tokens,
+                        entry.usage.output_tokens,
+                        entry.usage.cached_input_tokens,
+                        entry.usage.reasoning_tokens,
+                    ])?;
+                }
+            }
+        }
+
+        let leaf_node_id = match &commit.graph {
+            GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
+            GraphCommitDelta::Append {
+                nodes,
+                leaf_node_id,
+            } => {
+                for node in nodes {
+                    let node_json = encode_json(node);
+                    tx.execute(
+                        "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
+                        params![node.node_id, node_json],
+                    )?;
+                }
+                leaf_node_id.clone()
+            }
+            GraphCommitDelta::ReplaceFull(graph) => {
+                tx.execute("DELETE FROM graph_nodes", [])?;
+                for node in &graph.nodes {
+                    let node_json = encode_json(node);
+                    tx.execute(
+                        "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
+                        params![node.node_id, node_json],
+                    )?;
+                }
+                graph.leaf_node_id.clone()
+            }
+        };
+        let graph_node_count: usize = tx.query_row(
+            "SELECT COUNT(*) FROM graph_nodes WHERE tombstoned = 0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let next_revision = actual_revision + 1;
+        let meta = SessionHeadMeta {
+            session_id: commit.session_id,
+            head_revision: next_revision,
+            config: commit.config,
+            checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
+            leaf_node_id,
+            graph_node_count,
+            token_ledger: Vec::new(),
+        };
+        tx.execute(
+            "INSERT OR REPLACE INTO session_head (singleton, session_id, head_json, head_revision)
+             VALUES (1, ?1, ?2, ?3)",
+            params![
+                meta.session_id,
+                encode_json(&meta),
+                meta.head_revision as i64
+            ],
+        )?;
+        tx.commit()?;
         self.maybe_auto_gc();
+        Ok(RuntimeCommitResult {
+            head_revision: next_revision,
+            checkpoint_ref: stored_checkpoint.checkpoint_ref,
+            manifest: stored_checkpoint.manifest,
+        })
     }
 
-    async fn tombstone_nodes(&self, ids: &[String]) {
+    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO session_meta
+             (singleton, session_id, session_name, created_at, model, cwd, parent_session_id)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                meta.session_id,
+                meta.session_name,
+                meta.created_at,
+                meta.model,
+                meta.cwd,
+                meta.parent_session_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(load_session_meta_from_conn(&conn))
+    }
+
+    async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError> {
         if ids.is_empty() {
-            return;
+            return Ok(());
         }
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction().expect("tombstone transaction");
+        let tx = conn.transaction()?;
         for id in ids {
             tx.execute(
                 "UPDATE graph_nodes SET tombstoned = 1 WHERE node_id = ?1",
                 params![id],
-            )
-            .expect("tombstone graph node");
+            )?;
         }
-        tx.commit().expect("commit tombstone");
+        tx.commit()?;
+        Ok(())
     }
 
-    async fn vacuum(&self) -> VacuumReport {
+    async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let removed = conn
-            .execute("DELETE FROM graph_nodes WHERE tombstoned = 1", [])
-            .unwrap_or(0);
-        VacuumReport {
+        let removed = conn.execute("DELETE FROM graph_nodes WHERE tombstoned = 1", [])?;
+        Ok(VacuumReport {
             removed_node_count: removed,
-        }
+        })
+    }
+
+    async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
+        Ok(Self::gc_unreachable(self))
     }
 }
 
@@ -1829,6 +1719,15 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     if user_version == 0 && !has_user_schema_objects(conn)? {
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        return Ok(());
+    }
+
+    if user_version == 14 {
+        conn.execute_batch(
+            "ALTER TABLE session_head ADD COLUMN head_revision INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        conn.execute_batch(SCHEMA)?;
         return Ok(());
     }
 
@@ -1931,6 +1830,7 @@ mod tests {
         let source = mem();
         source.save_session_head(SessionHead {
             session_id: "root".to_string(),
+            head_revision: 0,
             graph: crate::SessionGraph::from_active_read_state(
                 &[
                     text_message("u0", MessageRole::User, "hello"),
@@ -1959,6 +1859,7 @@ mod tests {
         let store = mem();
         store.save_session_head(SessionHead {
             session_id: "root".to_string(),
+            head_revision: 0,
             graph: crate::SessionGraph::from_active_read_state(
                 &[text_message("u0", MessageRole::User, "old")],
                 &[],
@@ -1970,6 +1871,7 @@ mod tests {
 
         store.save_session_head(SessionHead {
             session_id: "root".to_string(),
+            head_revision: 0,
             graph: crate::SessionGraph::from_active_read_state(
                 &[text_message("u1", MessageRole::User, "updated")],
                 &[],
@@ -1999,6 +1901,7 @@ mod tests {
         });
         store.save_session_head(SessionHead {
             session_id: "s1".to_string(),
+            head_revision: 0,
             graph: crate::SessionGraph::from_active_read_state(
                 &[
                     text_message("u0", MessageRole::User, "hello there"),
@@ -2069,10 +1972,12 @@ mod tests {
             ..crate::PersistedSessionState::default()
         };
 
-        let result =
-            apply_runtime_commit(&store, PersistedStateCommit::persisted_state(&state, &[]))
-                .await
-                .expect("first commit");
+        let result = RuntimePersistence::commit_runtime_state(
+            &store,
+            RuntimeCommit::persisted_state(&state, &[]),
+        )
+        .await
+        .expect("first commit");
         state.apply_persisted_commit_result(result);
         let execution_ref = state
             .execution_state_ref
@@ -2080,10 +1985,12 @@ mod tests {
             .expect("execution state ref");
 
         state.iteration += 1;
-        let result =
-            apply_runtime_commit(&store, PersistedStateCommit::persisted_state(&state, &[]))
-                .await
-                .expect("second commit");
+        let result = RuntimePersistence::commit_runtime_state(
+            &store,
+            RuntimeCommit::persisted_state(&state, &[]),
+        )
+        .await
+        .expect("second commit");
         state.apply_persisted_commit_result(result);
 
         assert_eq!(state.execution_state_ref.as_ref(), Some(&execution_ref));

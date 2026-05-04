@@ -75,7 +75,7 @@ use io::normalize_input_items;
 pub use state::{PersistedSessionState, SessionStateEnvelope};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
-    apply_session_head, load_session_checkpoint, normalize_session_graph,
+    apply_session_head, normalize_session_graph,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,

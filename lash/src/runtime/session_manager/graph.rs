@@ -51,8 +51,20 @@ impl RuntimeSessionManager {
         }
         let node_ids = append_session_nodes_to_state(&mut state, &request.nodes);
         let leaf_node_id = state.session_graph.leaf_node_id.clone().unwrap_or_default();
-        let commit = crate::store::PersistedStateCommit::persisted_state(&state, &usage_deltas);
-        let result = crate::store::apply_runtime_commit(store.as_ref(), commit)
+        let graph = crate::store::GraphCommitDelta::Append {
+            nodes: node_ids
+                .iter()
+                .filter_map(|id| state.session_graph.find_node(id).cloned())
+                .collect(),
+            leaf_node_id: state.session_graph.leaf_node_id.clone(),
+        };
+        let commit = crate::store::RuntimeCommit::persisted_state_with_graph_commit(
+            &state,
+            graph,
+            &usage_deltas,
+        );
+        let result = store
+            .commit_runtime_state(commit)
             .await
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         state.apply_persisted_commit_result(result);

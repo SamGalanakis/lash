@@ -33,21 +33,24 @@ const OPENAI_COMPAT_STREAM_CHUNK_BYTES: usize = 96;
 pub(crate) enum RuntimePerfScenario {
     Standard,
     Rlm,
+    RlmToolCalls,
     RlmGlobals,
     ObservationalMemory,
     OpenAiCompatStream,
 }
 
 impl RuntimePerfScenario {
-    const DEFAULTS: [Self; 4] = [
+    const DEFAULTS: [Self; 5] = [
         Self::Standard,
         Self::Rlm,
+        Self::RlmToolCalls,
         Self::RlmGlobals,
         Self::ObservationalMemory,
     ];
-    const KNOWN: [Self; 5] = [
+    const KNOWN: [Self; 6] = [
         Self::Standard,
         Self::Rlm,
+        Self::RlmToolCalls,
         Self::RlmGlobals,
         Self::ObservationalMemory,
         Self::OpenAiCompatStream,
@@ -57,6 +60,7 @@ impl RuntimePerfScenario {
         match value {
             "standard" => Some(Self::Standard),
             "rlm" => Some(Self::Rlm),
+            "rlm_tool_calls" => Some(Self::RlmToolCalls),
             "rlm_globals" => Some(Self::RlmGlobals),
             "observational_memory" => Some(Self::ObservationalMemory),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
@@ -68,6 +72,7 @@ impl RuntimePerfScenario {
         match self {
             Self::Standard => "standard",
             Self::Rlm => "rlm",
+            Self::RlmToolCalls => "rlm_tool_calls",
             Self::RlmGlobals => "rlm_globals",
             Self::ObservationalMemory => "observational_memory",
             Self::OpenAiCompatStream => "openai_compat_stream",
@@ -79,7 +84,7 @@ impl RuntimePerfScenario {
             Self::Standard | Self::ObservationalMemory | Self::OpenAiCompatStream => {
                 ExecutionMode::standard()
             }
-            Self::Rlm | Self::RlmGlobals => ExecutionMode::new("rlm"),
+            Self::Rlm | Self::RlmToolCalls | Self::RlmGlobals => ExecutionMode::new("rlm"),
         }
     }
 
@@ -297,7 +302,6 @@ struct BenchmarkStreamProfile {
 #[derive(Default)]
 struct RuntimePerfStore {
     next_blob_id: AtomicU64,
-    blobs: Mutex<HashMap<String, Vec<u8>>>,
     session_head_meta: Mutex<Option<SessionHeadMeta>>,
     session_graph: Mutex<SessionGraph>,
     usage_deltas: Mutex<Vec<TokenLedgerEntry>>,
@@ -305,91 +309,144 @@ struct RuntimePerfStore {
 }
 
 #[async_trait::async_trait]
-impl BlobStore for RuntimePerfStore {
-    async fn put_blob(&self, content: &[u8]) -> BlobRef {
-        let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
-        let key = format!("perf-blob-{id}");
-        self.blobs
-            .lock()
-            .expect("lock perf blobs")
-            .insert(key.clone(), content.to_vec());
-        BlobRef(key)
-    }
-
-    async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>> {
-        self.blobs
-            .lock()
-            .expect("lock perf blobs")
-            .get(blob_ref.as_str())
-            .cloned()
-    }
-}
-
-#[async_trait::async_trait]
-impl UsageLedgerStore for RuntimePerfStore {
-    async fn append_usage_deltas(&self, entries: &[TokenLedgerEntry]) {
-        self.usage_deltas
-            .lock()
-            .expect("lock perf usage deltas")
-            .extend(entries.iter().cloned());
-    }
-
-    async fn load_usage_deltas(&self) -> Vec<TokenLedgerEntry> {
-        self.usage_deltas
-            .lock()
-            .expect("lock perf usage deltas")
-            .clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl SessionHeadStore for RuntimePerfStore {
-    async fn save_session_head_meta(&self, meta: SessionHeadMeta) {
-        *self
+impl RuntimePersistence for RuntimePerfStore {
+    async fn load_session(
+        &self,
+        scope: SessionReadScope,
+    ) -> Result<Option<PersistedSessionRead>, store::StoreError> {
+        let Some(meta) = self
             .session_head_meta
-            .lock()
-            .expect("lock perf session head meta") = Some(meta);
-    }
-
-    async fn load_session_head_meta(&self) -> Option<SessionHeadMeta> {
-        self.session_head_meta
             .lock()
             .expect("lock perf session head meta")
             .clone()
+        else {
+            return Ok(None);
+        };
+        let mut graph = self.session_graph.lock().expect("lock perf graph").clone();
+        match scope {
+            SessionReadScope::FullGraph => {}
+            SessionReadScope::ActivePath { leaf_node_id } => {
+                if let Some(leaf_node_id) = leaf_node_id.or_else(|| meta.leaf_node_id.clone()) {
+                    graph.set_leaf_node_id(Some(leaf_node_id));
+                }
+                graph = graph.fork_current_path();
+            }
+        }
+        Ok(Some(PersistedSessionRead {
+            session_id: meta.session_id,
+            head_revision: meta.head_revision,
+            config: meta.config,
+            graph,
+            checkpoint_ref: meta.checkpoint_ref,
+            checkpoint: None,
+            token_ledger: self
+                .usage_deltas
+                .lock()
+                .expect("lock perf usage deltas")
+                .clone(),
+        }))
     }
 
-    async fn save_session_meta(&self, meta: store::SessionMeta) {
-        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
-    }
-
-    async fn load_session_meta(&self) -> Option<store::SessionMeta> {
-        self.session_meta
-            .lock()
-            .expect("lock perf session meta")
-            .clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl SessionGraphStore for RuntimePerfStore {
-    async fn replace_session_graph(&self, graph: &SessionGraph) {
-        *self.session_graph.lock().expect("lock perf graph") = graph.clone();
-    }
-
-    async fn append_session_graph_nodes(&self, nodes: &[SessionNodeRecord]) {
-        self.session_graph
+    async fn load_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<SessionNodeRecord>, store::StoreError> {
+        Ok(self
+            .session_graph
             .lock()
             .expect("lock perf graph")
-            .extend_node_records(nodes.iter().cloned());
+            .find_node(node_id)
+            .cloned())
     }
 
-    async fn load_session_graph(&self) -> SessionGraph {
-        self.session_graph.lock().expect("lock perf graph").clone()
+    async fn commit_runtime_state(
+        &self,
+        commit: RuntimeCommit,
+    ) -> Result<RuntimeCommitResult, store::StoreError> {
+        let mut meta_guard = self
+            .session_head_meta
+            .lock()
+            .expect("lock perf session head meta");
+        let actual = meta_guard.as_ref().map_or(0, |meta| meta.head_revision);
+        if commit.expected_head_revision.is_some() && commit.expected_head_revision != Some(actual)
+        {
+            return Err(store::StoreError::HeadRevisionConflict {
+                expected: commit.expected_head_revision,
+                actual,
+            });
+        }
+        let mut graph = self.session_graph.lock().expect("lock perf graph");
+        let leaf_node_id = match &commit.graph {
+            GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
+            GraphCommitDelta::Append {
+                nodes,
+                leaf_node_id,
+            } => {
+                graph.extend_node_records(nodes.iter().cloned());
+                leaf_node_id.clone()
+            }
+            GraphCommitDelta::ReplaceFull(next) => {
+                *graph = next.clone();
+                next.leaf_node_id.clone()
+            }
+        };
+        if !commit.usage_deltas.is_empty() {
+            self.usage_deltas
+                .lock()
+                .expect("lock perf usage deltas")
+                .extend(commit.usage_deltas.iter().cloned());
+        }
+        let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
+        let checkpoint_ref = BlobRef(format!("perf-checkpoint-{id}"));
+        let manifest = SessionCheckpoint {
+            turn_state: commit.checkpoint.turn_state,
+            dynamic_state_ref: commit.checkpoint.dynamic_state_ref,
+            plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
+            plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
+            execution_state_ref: commit.checkpoint.execution_state_ref,
+        };
+        let head_revision = actual + 1;
+        *meta_guard = Some(SessionHeadMeta {
+            session_id: commit.session_id,
+            head_revision,
+            config: commit.config,
+            checkpoint_ref: Some(checkpoint_ref.clone()),
+            leaf_node_id,
+            graph_node_count: graph.nodes.len(),
+            token_ledger: Vec::new(),
+        });
+        Ok(RuntimeCommitResult {
+            head_revision,
+            checkpoint_ref,
+            manifest,
+        })
+    }
+
+    async fn save_session_meta(&self, meta: store::SessionMeta) -> Result<(), store::StoreError> {
+        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<store::SessionMeta>, store::StoreError> {
+        Ok(self
+            .session_meta
+            .lock()
+            .expect("lock perf session meta")
+            .clone())
+    }
+
+    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), store::StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(&self) -> Result<VacuumReport, store::StoreError> {
+        Ok(VacuumReport::default())
+    }
+
+    async fn gc_unreachable(&self) -> Result<GcReport, store::StoreError> {
+        Ok(GcReport::default())
     }
 }
-
-#[async_trait::async_trait]
-impl RetentionStore for RuntimePerfStore {}
 
 impl OpenAiCompatBenchServer {
     async fn start(profile: BenchmarkStreamProfile) -> anyhow::Result<Self> {
@@ -520,6 +577,41 @@ fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider {
             })
         })
         .build()
+}
+
+struct BenchmarkEchoTool;
+
+#[async_trait::async_trait]
+impl ToolProvider for BenchmarkEchoTool {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition::new(
+                "benchmark_echo",
+                "Return the input payload with a tiny async yield for runtime profiling.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": ["string", "number", "boolean", "object", "array", "null"] },
+                        "ordinal": { "type": "integer" }
+                    },
+                    "additionalProperties": true
+                }),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_execution_mode(ToolExecutionMode::Parallel),
+        ]
+    }
+
+    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
+        if name != "benchmark_echo" {
+            return ToolResult::err_fmt(format_args!("Unknown benchmark tool: {name}"));
+        }
+        tokio::task::yield_now().await;
+        ToolResult::ok(serde_json::json!({
+            "value": args.get("value").cloned().unwrap_or(serde_json::Value::Null),
+            "ordinal": args.get("ordinal").cloned().unwrap_or(serde_json::Value::Null),
+        }))
+    }
 }
 
 pub(crate) fn default_output_path() -> PathBuf {
@@ -856,9 +948,9 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         .map(|server| server.base_url.clone())
         .unwrap_or_else(|| "https://example.invalid/v1".to_string());
     let provider: ProviderHandle = match scenario {
-        RuntimePerfScenario::OpenAiCompatStream => ProviderHandle::new(Box::new(
-            OpenAiGenericProvider::new("test-key", base_url.clone()),
-        )),
+        RuntimePerfScenario::OpenAiCompatStream => ProviderHandle::new(
+            OpenAiGenericProvider::new("test-key", base_url.clone()).into_components(),
+        ),
         _ => benchmark_provider(scenario).into_handle(),
     };
     let policy = SessionPolicy {
@@ -882,6 +974,10 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
     });
     factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
     factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
+    factories.push(Arc::new(lash::plugin::StaticPluginFactory::new(
+        "runtime_perf_tools",
+        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
+    )));
     factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));
@@ -1052,6 +1148,14 @@ fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize) -> String 
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
+        RuntimePerfScenario::RlmToolCalls => format!(
+            "Turn {} in RLM mode. Exercise the benchmark_echo tool path and reply with exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
         RuntimePerfScenario::RlmGlobals => format!(
             "Turn {} in RLM mode with bound variables updated for this turn. Inspect the current state and reply with exactly: {}",
             turn_index + 1,
@@ -1099,6 +1203,23 @@ fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> BenchmarkStreamPro
         }
         RuntimePerfScenario::Rlm | RuntimePerfScenario::RlmGlobals => {
             let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
+            BenchmarkStreamProfile {
+                full_text: text.clone(),
+                deltas: vec![text],
+            }
+        }
+        RuntimePerfScenario::RlmToolCalls => {
+            let text = r#"```lashlang
+fanout = parallel {
+  a: call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 1 }
+  b: call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 2 }
+  c: call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 3 }
+  d: call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 4 }
+}
+first = fanout.a?
+submit first.value
+```"#
+                .to_string();
             BenchmarkStreamProfile {
                 full_text: text.clone(),
                 deltas: vec![text],

@@ -1015,6 +1015,7 @@ impl StandardShell {
                 full_output_path.as_deref(),
                 started.elapsed().as_secs_f64(),
                 params.timeout_ms,
+                params.allow_nonzero_exit,
             ),
             Ok(PollOutcome::Exited {
                 output,
@@ -1245,14 +1246,14 @@ impl ToolProvider for StandardShell {
         vec![
             ToolDefinition::new(
                 "exec_command",
-                "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and fail the tool call. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 {
                     let mut properties = command_common("Shell command to execute.");
                     properties["timeout_ms"] = json!({
                         "type": "integer",
                         "minimum": 1,
                         "default": DEFAULT_EXEC_COMMAND_TIMEOUT_MS,
-                        "description": "Hard timeout in milliseconds. If reached before the command exits, the process is killed and the tool call fails with `status: \"timed_out\"`. Defaults to 600000 ms."
+                        "description": "Hard timeout in milliseconds. If reached before the command exits, the process is killed and the result has `status: \"timed_out\"` and `timed_out: true`. By default this fails the tool; pass `allow_nonzero_exit: true` to receive the timed-out result without failure. Defaults to 600000 ms."
                     });
                     object_schema(properties, &["cmd"])
                 },
@@ -1689,6 +1690,7 @@ fn timed_out_shell_io_result(
     full_output_path: Option<&Path>,
     wall_time_seconds: f64,
     timeout_ms: u64,
+    allow_nonzero_exit: bool,
 ) -> ToolResult {
     let mut record = standard_shell_io_record(
         id,
@@ -1709,7 +1711,11 @@ fn timed_out_shell_io_result(
             json!(format!("Command timed out after {timeout_ms} ms")),
         );
     }
-    ToolResult::err(record)
+    if allow_nonzero_exit {
+        ToolResult::ok(record)
+    } else {
+        ToolResult::err(record)
+    }
 }
 
 fn parse_standard_session_id(args: &serde_json::Value) -> Result<String, ToolResult> {
@@ -1872,7 +1878,7 @@ mod tests {
             )
             .await;
 
-        assert!(!result.success, "{}", result.result);
+        assert!(result.success, "{}", result.result);
         assert_eq!(result.result["status"], "timed_out");
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(!marker.exists(), "timed-out child process wrote marker");

@@ -1,6 +1,5 @@
 use super::*;
 use serde_json::json;
-use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -93,83 +92,146 @@ impl RecordingSink {
 
 #[derive(Default)]
 struct RecordingStore {
-    blobs: Mutex<HashMap<String, Vec<u8>>>,
     session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
     session_graph: Mutex<crate::SessionGraph>,
     usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
 }
 
 #[async_trait::async_trait]
-impl crate::store::BlobStore for RecordingStore {
-    async fn put_blob(&self, content: &[u8]) -> crate::BlobRef {
-        let hash = format!("{:x}", sha2::Sha256::digest(content));
-        self.blobs
-            .lock()
-            .expect("lock blobs")
-            .insert(hash.clone(), content.to_vec());
-        crate::BlobRef(hash)
+impl crate::store::RuntimePersistence for RecordingStore {
+    async fn load_session(
+        &self,
+        scope: crate::store::SessionReadScope,
+    ) -> Result<Option<crate::store::PersistedSessionRead>, crate::store::StoreError> {
+        let Some(meta) = self.session_head_meta.lock().expect("lock store").clone() else {
+            return Ok(None);
+        };
+        let mut graph = self.session_graph.lock().expect("lock graph").clone();
+        if let crate::store::SessionReadScope::ActivePath { leaf_node_id } = scope {
+            if let Some(leaf_node_id) = leaf_node_id.or_else(|| meta.leaf_node_id.clone()) {
+                graph.set_leaf_node_id(Some(leaf_node_id));
+            }
+            graph = graph.fork_current_path();
+        }
+        Ok(Some(crate::store::PersistedSessionRead {
+            session_id: meta.session_id,
+            head_revision: meta.head_revision,
+            config: meta.config,
+            graph,
+            checkpoint_ref: meta.checkpoint_ref,
+            checkpoint: None,
+            token_ledger: self.usage_deltas.lock().expect("lock usage deltas").clone(),
+        }))
     }
 
-    async fn get_blob(&self, blob_ref: &crate::BlobRef) -> Option<Vec<u8>> {
-        self.blobs
+    async fn load_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<crate::SessionNodeRecord>, crate::store::StoreError> {
+        Ok(self
+            .session_graph
             .lock()
-            .expect("lock blobs")
-            .get(blob_ref.as_str())
-            .cloned()
+            .expect("lock graph")
+            .find_node(node_id)
+            .cloned())
     }
-}
 
-#[async_trait::async_trait]
-impl crate::store::UsageLedgerStore for RecordingStore {
-    async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
+    async fn commit_runtime_state(
+        &self,
+        commit: crate::store::RuntimeCommit,
+    ) -> Result<crate::store::RuntimeCommitResult, crate::store::StoreError> {
+        let mut meta = self.session_head_meta.lock().expect("lock store");
+        let actual = meta.as_ref().map_or(0, |meta| meta.head_revision);
+        if let Some(bound) = meta.as_ref().map(|meta| meta.session_id.clone())
+            && bound != commit.session_id
+        {
+            return Err(crate::store::StoreError::SessionBindingMismatch {
+                bound_session_id: bound,
+                attempted_session_id: commit.session_id,
+            });
+        }
+        if commit.expected_head_revision.is_some() && commit.expected_head_revision != Some(actual)
+        {
+            return Err(crate::store::StoreError::HeadRevisionConflict {
+                expected: commit.expected_head_revision,
+                actual,
+            });
+        }
+        let mut graph = self.session_graph.lock().expect("lock graph");
+        let leaf_node_id = match &commit.graph {
+            crate::store::GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
+            crate::store::GraphCommitDelta::Append {
+                nodes,
+                leaf_node_id,
+            } => {
+                graph.extend_node_records(nodes.iter().cloned());
+                leaf_node_id.clone()
+            }
+            crate::store::GraphCommitDelta::ReplaceFull(next) => {
+                *graph = next.clone();
+                next.leaf_node_id.clone()
+            }
+        };
         self.usage_deltas
             .lock()
             .expect("lock usage deltas")
-            .extend(entries.iter().cloned());
+            .extend(commit.usage_deltas.iter().cloned());
+        let checkpoint_ref = crate::BlobRef(format!("recording-checkpoint-{}", actual + 1));
+        let manifest = crate::store::SessionCheckpoint {
+            turn_state: commit.checkpoint.turn_state,
+            dynamic_state_ref: commit.checkpoint.dynamic_state_ref,
+            plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
+            plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
+            execution_state_ref: commit.checkpoint.execution_state_ref,
+        };
+        let head_revision = actual + 1;
+        *meta = Some(crate::SessionHeadMeta {
+            session_id: commit.session_id,
+            head_revision,
+            config: commit.config,
+            checkpoint_ref: Some(checkpoint_ref.clone()),
+            leaf_node_id,
+            graph_node_count: graph.nodes.len(),
+            token_ledger: Vec::new(),
+        });
+        Ok(crate::store::RuntimeCommitResult {
+            head_revision,
+            checkpoint_ref,
+            manifest,
+        })
     }
 
-    async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry> {
-        self.usage_deltas.lock().expect("lock usage deltas").clone()
+    async fn save_session_meta(
+        &self,
+        _meta: crate::store::SessionMeta,
+    ) -> Result<(), crate::store::StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> Result<Option<crate::store::SessionMeta>, crate::store::StoreError> {
+        Ok(None)
+    }
+
+    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), crate::store::StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(&self) -> Result<crate::store::VacuumReport, crate::store::StoreError> {
+        Ok(crate::store::VacuumReport::default())
+    }
+
+    async fn gc_unreachable(&self) -> Result<crate::store::GcReport, crate::store::StoreError> {
+        Ok(crate::store::GcReport::default())
     }
 }
 
-#[async_trait::async_trait]
-impl crate::store::SessionHeadStore for RecordingStore {
+impl RecordingStore {
     async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
         *self.session_head_meta.lock().expect("lock store") = Some(meta);
     }
-
-    async fn load_session_head_meta(&self) -> Option<crate::SessionHeadMeta> {
-        self.session_head_meta.lock().expect("lock store").clone()
-    }
-
-    async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
-
-    async fn load_session_meta(&self) -> Option<crate::store::SessionMeta> {
-        None
-    }
 }
-
-#[async_trait::async_trait]
-impl crate::store::SessionGraphStore for RecordingStore {
-    async fn replace_session_graph(&self, graph: &crate::SessionGraph) {
-        *self.session_graph.lock().expect("lock graph") = graph.clone();
-    }
-
-    async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]) {
-        self.session_graph
-            .lock()
-            .expect("lock graph")
-            .extend_node_records(nodes.iter().cloned());
-    }
-
-    async fn load_session_graph(&self) -> crate::SessionGraph {
-        self.session_graph.lock().expect("lock graph").clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::store::RetentionStore for RecordingStore {}
 
 #[derive(Debug)]
 struct MockCall {
@@ -518,7 +580,7 @@ fn rlm_test_policy() -> SessionPolicy {
 }
 
 #[cfg(feature = "tool-impls")]
-async fn rlm_runtime_with_transport(transport: TestProvider) -> LashRuntime {
+async fn rlm_mode_with_transport(transport: TestProvider) -> LashRuntime {
     let plugins = default_tool_session("root", ExecutionMode::new("rlm"), true);
     let mut runtime = LashRuntime::from_embedded_state(
         rlm_test_policy(),
@@ -544,7 +606,7 @@ async fn rlm_runtime_with_transport(transport: TestProvider) -> LashRuntime {
 }
 
 #[cfg(all(feature = "sqlite-store", feature = "tool-impls"))]
-async fn rlm_runtime_with_transport_and_store(
+async fn rlm_mode_with_transport_and_store(
     transport: TestProvider,
     store: Arc<dyn crate::store::RuntimePersistence>,
 ) -> LashRuntime {
@@ -2927,7 +2989,7 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_session_manager_forwards_user_prompts_when_available() {
     let transport = mock_provider(Vec::new());
-    let runtime = rlm_runtime_with_transport(transport).await;
+    let runtime = rlm_mode_with_transport(transport).await;
     let prompt_bridge = HostPromptBridge::new();
     let manager = runtime
         .runtime_session_manager_with_prompt_bridge(Some(prompt_bridge.clone()))
@@ -3472,7 +3534,7 @@ fn normalize_prompt_usage_uses_input_tokens_for_openai_compatible() {
         cached_input_tokens: 20,
         reasoning_tokens: 0,
     };
-    let stub = mock_provider(Vec::new());
+    let stub = mock_provider(Vec::new()).into_handle();
     let prompt_usage = normalize_prompt_usage(&stub, &usage).expect("prompt usage");
     assert_eq!(prompt_usage.prompt_context_tokens, 80);
     assert_eq!(prompt_usage.context_budget_tokens, 80);
@@ -3682,17 +3744,62 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
         .await
         .expect("turn");
 
-    let read_model = crate::store::load_session_head(store.as_ref())
-        .await
-        .expect("session head")
-        .graph
-        .read_model();
+    let read_model = crate::store::RuntimePersistence::load_session(
+        store.as_ref(),
+        crate::store::SessionReadScope::FullGraph,
+    )
+    .await
+    .expect("load session")
+    .expect("session head")
+    .graph
+    .read_model();
     let messages = read_model.messages.as_slice();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, MessageRole::User);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
     assert_eq!(messages[1].role, MessageRole::Assistant);
     assert_eq!(messages[1].parts[0].content, "Stored answer");
+}
+
+#[tokio::test]
+async fn park_returns_error_when_final_commit_fails() {
+    let store = Arc::new(RecordingStore::default());
+    store
+        .save_session_head_meta(crate::SessionHeadMeta {
+            session_id: "other-session".to_string(),
+            ..crate::SessionHeadMeta::default()
+        })
+        .await;
+    let plugins = plugin_session_with_tools(
+        "park-session",
+        ExecutionMode::standard(),
+        Arc::new(EmptyTools),
+    );
+    let runtime = LashRuntime::from_persistent_embedded_state(
+        standard_test_policy(),
+        test_host_config(),
+        crate::PersistentRuntimeServices::new(
+            plugins,
+            store as Arc<dyn crate::store::RuntimePersistence>,
+        ),
+        PersistedSessionState {
+            session_id: "park-session".to_string(),
+            policy: standard_test_policy(),
+            ..PersistedSessionState::default()
+        },
+    )
+    .await
+    .expect("runtime");
+
+    let err = match runtime.park().await {
+        Ok(_) => panic!("park should fail when final persistence fails"),
+        Err(err) => err,
+    };
+
+    let message = err.to_string();
+    assert!(message.contains("failed to persist runtime state"));
+    assert!(message.contains("other-session"));
+    assert!(message.contains("park-session"));
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -3836,7 +3943,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
     let store = Arc::new(crate::store::Store::memory().expect("store"));
     let store_trait = store.clone() as Arc<dyn crate::store::RuntimePersistence>;
 
-    let mut runtime = rlm_runtime_with_transport_and_store(transport.clone(), store_trait).await;
+    let mut runtime = rlm_mode_with_transport_and_store(transport.clone(), store_trait).await;
     let first_turn = runtime
         .run_turn_assembled(
             TurnInput {
@@ -4154,6 +4261,6 @@ async fn environment_park_resume_preserves_active_path() {
     // paths return empty / zero.
     let orphans = resumed.orphaned_node_ids().await.expect("orphans");
     assert!(orphans.is_empty());
-    let report = store.vacuum().await;
+    let report = store.vacuum().await.expect("vacuum");
     assert_eq!(report.removed_node_count, 0);
 }

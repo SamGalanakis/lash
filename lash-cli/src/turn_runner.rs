@@ -143,6 +143,7 @@ mod tests {
         store.append_usage_deltas(&ledger);
         store.save_session_head(lash::SessionHead {
             session_id: "root".to_string(),
+            head_revision: 0,
             graph: graph.clone(),
             config: PersistedSessionConfig {
                 provider_id: "openai-compatible".into(),

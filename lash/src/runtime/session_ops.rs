@@ -59,8 +59,19 @@ impl LashRuntime {
             .as_ref()
             .and_then(|session| session.history_store())
         {
-            let commit = crate::store::PersistedStateCommit::persisted_state(&self.state, &[]);
-            match crate::store::apply_runtime_commit(store.as_ref(), commit).await {
+            let graph = crate::store::GraphCommitDelta::Append {
+                nodes: node_ids
+                    .iter()
+                    .filter_map(|id| self.state.session_graph.find_node(id).cloned())
+                    .collect(),
+                leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
+            };
+            let commit = crate::store::RuntimeCommit::persisted_state_with_graph_commit(
+                &self.state,
+                graph,
+                &[],
+            );
+            match store.commit_runtime_state(commit).await {
                 Ok(result) => self.state.apply_persisted_commit_result(result),
                 Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
             }
@@ -142,7 +153,11 @@ impl LashRuntime {
                 "runtime session not available".to_string(),
             ));
         };
-        let blob = session.snapshot_execution_state().await?;
+        let mode_session = Arc::clone(session.plugins().mode_session());
+        let session_id = self.state.session_id.clone();
+        let blob = mode_session
+            .snapshot_execution_state(crate::plugin::ModeSessionContext::new(session, &session_id))
+            .await?;
         self.state.execution_state_snapshot = blob.clone();
         Ok(blob)
     }
@@ -154,7 +169,14 @@ impl LashRuntime {
                 "runtime session not available".to_string(),
             ));
         };
-        session.restore_execution_state(snapshot).await?;
+        let mode_session = Arc::clone(session.plugins().mode_session());
+        let session_id = self.state.session_id.clone();
+        mode_session
+            .restore_execution_state(
+                crate::plugin::ModeSessionContext::new(session, &session_id),
+                snapshot,
+            )
+            .await?;
         self.state.execution_state_snapshot = Some(snapshot.to_vec());
         Ok(())
     }

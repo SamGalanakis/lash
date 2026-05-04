@@ -59,7 +59,7 @@ pub type CommandHandler =
 mod mode;
 pub use mode::{
     ModeExtras, ModeNativeToolsPlugin, ModeProtocolDriverPlugin, ModeRuntimeContext,
-    ModeSessionContext, ModeSessionPlugin, RlmCreateExtras, StandardCreateExtras,
+    ModeSessionContext, ModeSessionPlugin, StandardCreateExtras,
 };
 
 mod history;

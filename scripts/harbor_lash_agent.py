@@ -57,6 +57,33 @@ it were the answer — the grader is not reading your response.
   yourself (curl / nc / the service's own healthcheck) before stopping.
 - Prefer direct verification over assumption. Re-open the exact file
   and check the exact bytes; re-run the check the task describes.
+- Leave the workspace in exactly the state the task asks for. Do not
+  leave behind compiled binaries, scratch files, downloaded archives,
+  backup copies, or anything else in the directories the task names.
+  Use `/tmp` for any intermediate or self-test artifacts and clean up
+  before submitting.
+
+## Working efficiently across iterations
+
+- If a setup, build, or verifier script is longer than ~10 lines and
+  you might need to retry it, save it to disk once
+  (`cat > /tmp/verify.sh && chmod +x /tmp/verify.sh`) and re-run on
+  subsequent iterations rather than re-emitting the entire script.
+- The `?` operator on `exec_command` aborts the lashlang block on any
+  non-zero exit (including SIGPIPE 141 from `cmd | head`-style
+  pipelines and timeouts). When you expect a non-zero exit is fine, set
+  `allow_nonzero_exit: true` on the `exec_command` call so you can
+  inspect the result and decide what to do.
+- Any string containing backslashes or backticks (heredocs, regexes,
+  file contents, code excerpts) should use a raw string
+  (`r\"\"\"…\"\"\"` or `r'''…'''`) — over-escaped `\\\\\"` in plain
+  `\"…\"` strings is a frequent cause of lashlang parse errors. Pick
+  the delimiter the body does *not* contain: if your content has `\"\"\"`
+  (e.g. a Python docstring), use `r'''…'''`; if it has `'''`, use
+  `r\"\"\"…\"\"\"`. The first matching closer ends the raw string, so a
+  collision terminates it early. If your lashlang body itself needs to
+  contain literal triple-backticks (e.g. embedding markdown), open the
+  fence with four backticks (` ````lashlang `) and close with the same.
 """
 
 INSTALL_GNU_TIME_COMMAND = """

@@ -4,6 +4,7 @@
 //! `submit` yields the final value.
 
 mod driver;
+mod executor;
 mod plugin;
 mod protocol;
 mod rlm_support;

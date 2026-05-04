@@ -17,9 +17,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lash::llm::types::ResponseTextMeta;
 use lash::plugin::{
-    AssistantResponseTransform, ModeNativeToolsPlugin, ModeProtocolDriverPlugin,
-    ModeSessionContext, ModeSessionPlugin, PluginError, PluginFactory, PluginRegistrar,
-    PluginSessionContext, SessionPlugin,
+    ModeNativeToolsPlugin, ModeProtocolDriverPlugin, ModeSessionContext, ModeSessionPlugin,
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash::sansio::{
     CheckpointResumeAction, CompletedToolCall, PendingToolCall, ProtocolDriverHandle,
@@ -37,9 +36,9 @@ use lash::tool_dispatch::{
 use lash::tools::batch::batch_tool_definition;
 use lash::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
-    ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolCallRecord,
-    ToolDefinition, ToolExecutionMode, ToolImage, ToolResult, append_assistant_text_part,
-    normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
+    ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolDefinition,
+    ToolResult, append_assistant_text_part, normalized_response_parts, reasoning_part,
+    turn_limit_exhausted_message,
 };
 use serde_json::Value;
 
@@ -676,11 +675,3 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
 fn conversation_event(message: Message) -> SessionEventRecord {
     SessionEventRecord::Conversation(ConversationRecord::from_message(message))
 }
-
-// Silence unused-import warnings if any
-#[allow(dead_code)]
-const _: Option<&[ToolCallRecord]> = None;
-#[allow(dead_code)]
-const _BATCH_TOOL_MODE: ToolExecutionMode = ToolExecutionMode::Parallel;
-#[allow(dead_code)]
-fn _image_warning_silencer(_img: ToolImage, _: AssistantResponseTransform) {}

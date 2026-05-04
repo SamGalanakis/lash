@@ -128,7 +128,7 @@ impl RuntimeSessionManager {
             execution_state_snapshot: None,
             token_ledger: runtime.state.token_ledger.clone(),
             checkpoint_ref: runtime.state.checkpoint_ref.clone(),
-            persisted_graph_node_count: runtime.state.persisted_graph_node_count,
+            head_revision: runtime.state.head_revision,
             graph_replace_required: runtime.state.graph_replace_required,
         }
     }

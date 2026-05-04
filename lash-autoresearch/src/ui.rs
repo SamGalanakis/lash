@@ -92,7 +92,7 @@ impl UiExtension for AutoresearchUiExtension {
         AUTORESEARCH_SHORTCUTS
     }
 
-    async fn sync(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
+    async fn snapshot(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
         let summary = fetch_status(ctx).await?;
         let mut state = self.lock_state()?;
         state.summary = summary;

@@ -14,7 +14,9 @@ use lash::llm::types::{
     LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
 };
 use lash::provider::{
-    AgentModelSelection, Provider, ProviderFactory, ProviderOptions, VariantRequestConfig,
+    AgentModelSelection, NoopProviderAuth, NoopProviderReadiness, ProviderComponents,
+    ProviderFactory, ProviderModelPolicy, ProviderOptions, ProviderState, ProviderTransport,
+    VariantRequestConfig,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -72,9 +74,7 @@ pub(crate) fn anthropic_supports_max(model: &str) -> bool {
     lower.contains("opus-4-6") || lower.contains("opus-4.6")
 }
 
-/// Anthropic API (Claude) provider. Implements the `Provider` trait
-/// directly — the old `AnthropicProvider` split has collapsed into one
-/// type that owns both config and transport.
+/// Anthropic API (Claude) provider state and transport.
 #[derive(Clone, Debug)]
 pub struct AnthropicProvider {
     pub api_key: String,
@@ -82,6 +82,9 @@ pub struct AnthropicProvider {
     pub options: ProviderOptions,
     client: reqwest::Client,
 }
+
+#[derive(Clone, Debug)]
+struct AnthropicModelPolicy;
 
 impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
@@ -374,7 +377,7 @@ impl AnthropicProvider {
         // it whenever thinking is enabled (matches Anthropic API rules).
         let mut thinking_enabled = false;
         if let Some(variant) = req.model_variant.as_deref()
-            && let Some(cfg) = self.request_variant_config(&req.model, variant)
+            && let Some(cfg) = AnthropicModelPolicy.request_variant_config(&req.model, variant)
         {
             match cfg {
                 VariantRequestConfig::AnthropicAdaptiveThinking { effort } => {
@@ -834,12 +837,58 @@ fn extract_error_detail(raw: &str) -> Option<String> {
     Some(trimmed.chars().take(200).collect())
 }
 
-#[async_trait]
-impl Provider for AnthropicProvider {
+impl AnthropicProvider {
+    pub fn into_components(self) -> ProviderComponents {
+        ProviderComponents::new(
+            Box::new(self.clone()),
+            Box::new(NoopProviderAuth),
+            Box::new(NoopProviderReadiness::new()),
+            Box::new(self),
+            std::sync::Arc::new(AnthropicModelPolicy),
+        )
+    }
+}
+
+impl ProviderState for AnthropicProvider {
     fn kind(&self) -> &'static str {
         "anthropic"
     }
 
+    fn options(&self) -> ProviderOptions {
+        self.options.clone()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.options = options;
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "api_key".to_string(),
+            serde_json::Value::String(self.api_key.clone()),
+        );
+        if let Some(base_url) = &self.base_url {
+            map.insert(
+                "base_url".to_string(),
+                serde_json::Value::String(base_url.clone()),
+            );
+        }
+        if !self.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+impl ProviderModelPolicy for AnthropicModelPolicy {
     fn default_model(&self) -> &str {
         "claude-opus-4-7"
     }
@@ -879,7 +928,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        if self.validate_variant(model, variant).is_err() {
+        if !self.supported_variants(model).contains(&variant) {
             return None;
         }
         if anthropic_supports_adaptive_thinking(model) {
@@ -926,15 +975,10 @@ impl Provider for AnthropicProvider {
             format!("anthropic/{model}")
         }
     }
+}
 
-    fn options(&self) -> &ProviderOptions {
-        &self.options
-    }
-
-    fn options_mut(&mut self) -> &mut ProviderOptions {
-        &mut self.options
-    }
-
+#[async_trait]
+impl ProviderTransport for AnthropicProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
@@ -1031,28 +1075,7 @@ impl Provider for AnthropicProvider {
         })
     }
 
-    fn serialize_config(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "api_key".to_string(),
-            serde_json::Value::String(self.api_key.clone()),
-        );
-        if let Some(base_url) = &self.base_url {
-            map.insert(
-                "base_url".to_string(),
-                serde_json::Value::String(base_url.clone()),
-            );
-        }
-        if !self.options.is_default() {
-            map.insert(
-                "options".to_string(),
-                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
-            );
-        }
-        serde_json::Value::Object(map)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn Provider> {
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
         Box::new(self.clone())
     }
 }
@@ -1095,15 +1118,16 @@ impl ProviderFactory for AnthropicProviderFactory {
     fn default_base_url(&self) -> Option<&'static str> {
         Some("https://api.anthropic.com")
     }
-    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String> {
+    fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: AnthropicProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
-        Ok(Box::new(AnthropicProvider {
+        Ok(AnthropicProvider {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             options: cfg.options,
             client: build_http_client(),
-        }))
+        }
+        .into_components())
     }
 }
 

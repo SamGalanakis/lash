@@ -21,10 +21,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
-use lash::{ChronologicalPayload, RlmTrajectoryEntry, ToolCallRecord};
+use lash::{ChronologicalPayload, ToolCallRecord};
+use lash_rlm_types::RlmTrajectoryEntry;
 
-use crate::trace::LlmPromptSnapshot;
 use crate::LoadedSession;
+use crate::trace::LlmPromptSnapshot;
 
 pub fn render(session: &LoadedSession) -> String {
     let stats = compute_stats(session);
@@ -440,32 +441,33 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
         }
     }
 
-    let emit_prompt =
-        |entries: &mut String,
-         spine: &mut String,
-         ctx: &mut RenderCtx<'_>,
-         last_hash: &mut Option<String>,
-         first_seen: &mut HashMap<String, PromptAnchor>,
-         prompt_idx: usize| {
-            let prompt = &session.llm_prompts[prompt_idx];
-            let anchor = first_seen.get(&prompt.system_hash).cloned();
-            let id = render_system_prompt(
-                entries,
-                spine,
-                ctx,
-                prompt,
-                last_hash.as_deref(),
-                anchor.as_ref(),
-            );
-            first_seen.entry(prompt.system_hash.clone()).or_insert(PromptAnchor {
+    let emit_prompt = |entries: &mut String,
+                       spine: &mut String,
+                       ctx: &mut RenderCtx<'_>,
+                       last_hash: &mut Option<String>,
+                       first_seen: &mut HashMap<String, PromptAnchor>,
+                       prompt_idx: usize| {
+        let prompt = &session.llm_prompts[prompt_idx];
+        let anchor = first_seen.get(&prompt.system_hash).cloned();
+        let id = render_system_prompt(
+            entries,
+            spine,
+            ctx,
+            prompt,
+            last_hash.as_deref(),
+            anchor.as_ref(),
+        );
+        first_seen
+            .entry(prompt.system_hash.clone())
+            .or_insert(PromptAnchor {
                 entry_id: id,
                 iter_label: prompt
                     .iteration
                     .map(|i| format!("iter {i}"))
                     .unwrap_or_else(|| "first call".to_string()),
             });
-            *last_hash = Some(prompt.system_hash.clone());
-        };
+        *last_hash = Some(prompt.system_hash.clone());
+    };
 
     for (i, entry) in session.chronological.iter().enumerate() {
         for &prompt_idx in &insertions.before_index[i] {
@@ -628,7 +630,6 @@ fn compute_prompt_insertions(
         trailing,
     }
 }
-
 
 // ─── messages ───────────────────────────────────────────────────────────────
 
@@ -893,10 +894,10 @@ fn pick_display_title(session: &LoadedSession, name: &str, id: &str) -> String {
                 if !matches!(message.role, MessageRole::User) {
                     continue;
                 }
-                if let Some(text) = message.display_user_text() {
-                    if !text.trim().is_empty() {
-                        return one_line_summary(text, 110);
-                    }
+                if let Some(text) = message.display_user_text()
+                    && !text.trim().is_empty()
+                {
+                    return one_line_summary(text, 110);
                 }
                 for part in message.parts.iter() {
                     if matches!(part.kind, PartKind::Text | PartKind::Prose)
@@ -1327,11 +1328,7 @@ fn render_system_prompt(
         (Some(m), _) => m.to_string(),
         _ => String::new(),
     };
-    let hash_short = prompt
-        .system_hash
-        .chars()
-        .take(12)
-        .collect::<String>();
+    let hash_short = prompt.system_hash.chars().take(12).collect::<String>();
     let chars_label = format_count(prompt.system_chars as u64);
     let total_label = format_count(prompt.total_chars as u64);
     // Show the system block size in the headline; the right-aligned
@@ -1471,7 +1468,11 @@ fn render_system_prompt(
             out,
             "            <span class=\"entry-headline\">{} non-system message{} sent at this call</span>",
             prompt.request_messages.len(),
-            if prompt.request_messages.len() == 1 { "" } else { "s" }
+            if prompt.request_messages.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
         let _ = writeln!(
             out,
@@ -1599,8 +1600,8 @@ fn summarize_args(value: &serde_json::Value) -> String {
             // its query instead of its path. Tools without an action key
             // fall through to path naturally.
             const PRIORITY: &[&str] = &[
-                "query", "q", "command", "cmd", "shell", "url", "uri", "prompt",
-                "path", "file", "filename", "filepath", "name", "title", "id", "key",
+                "query", "q", "command", "cmd", "shell", "url", "uri", "prompt", "path", "file",
+                "filename", "filepath", "name", "title", "id", "key",
             ];
             for k in PRIORITY {
                 if let Some(v) = map.get(*k) {
@@ -1673,7 +1674,11 @@ fn strip_first_lashlang_fence(text: &str) -> String {
     let Some(open_rel) = text.find("```") else {
         return text.to_string();
     };
-    let after_open = open_rel + 3;
+    let opener_len = text.as_bytes()[open_rel..]
+        .iter()
+        .take_while(|&&b| b == b'`')
+        .count();
+    let after_open = open_rel + opener_len;
     let rest = &text[after_open..];
     let Some(lang_end_rel) = rest.find('\n') else {
         return text[..open_rel].to_string();
@@ -1683,11 +1688,26 @@ fn strip_first_lashlang_fence(text: &str) -> String {
         return text.to_string();
     }
     let body_start = after_open + lang_end_rel + 1;
-    let close = text[body_start..]
-        .find("```")
-        .map(|rel| body_start + rel)
-        .unwrap_or(text.len());
-    let after_close = (close + 3).min(text.len());
+    let body_bytes = &text.as_bytes()[body_start..];
+    let mut close = text.len();
+    let mut consumed = 0usize;
+    let mut i = 0;
+    while i < body_bytes.len() {
+        if body_bytes[i] == b'`' {
+            let start = i;
+            while i < body_bytes.len() && body_bytes[i] == b'`' {
+                i += 1;
+            }
+            if i - start >= opener_len {
+                close = body_start + start;
+                consumed = opener_len;
+                break;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let after_close = (close + consumed).min(text.len());
     let mut out = String::new();
     out.push_str(text[..open_rel].trim_end());
     let tail = text[after_close..].trim_start();

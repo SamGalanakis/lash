@@ -13,11 +13,11 @@ For each task, the runner:
 Generated state lives under ignored `.benchmarks/appworld/`.
 
 The AppWorld tool surface is explicit: it registers RLM, AppWorld MCP tools,
-RLM tool discovery, subagent/handoff tools, and `tasks_list`/`tasks_stop`.
-AppWorld MCP tools are callable and discoverable, but not injected into the
-initial `Available Tools` prompt. It does not register local shell, local
-file/search/edit/web tools, autoresearch, host docs, or the shell-backed
-`monitor` tool.
+RLM tool discovery, and subagent/handoff tools. AppWorld MCP tools are
+callable and discoverable, but not injected into the initial `Available Tools`
+prompt. It does not register local shell, local file/search/edit/web tools,
+autoresearch, host docs, the shell-backed `monitor` tool, or `tasks_list` /
+`tasks_stop` (RLM exposes the equivalent through lashlang async handles).
 
 ## Quickstart
 

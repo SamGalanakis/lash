@@ -178,8 +178,9 @@ impl RuntimeSessionManager {
         if let Some(store) = &session_store {
             let mut persisted_state = runtime.export_persisted_state();
             super::normalize_session_graph(&mut persisted_state);
-            let commit = crate::store::PersistedStateCommit::persisted_state(&persisted_state, &[]);
-            let result = crate::store::apply_runtime_commit(store.as_ref(), commit)
+            let commit = crate::store::RuntimeCommit::persisted_state(&persisted_state, &[]);
+            let result = store
+                .commit_runtime_state(commit)
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
             persisted_state.apply_persisted_commit_result(result);

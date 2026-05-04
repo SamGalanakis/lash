@@ -399,7 +399,7 @@ mod tests {
         let mut state = SessionStateEnvelope {
             session_id: "session-read-view-test".to_string(),
             iteration: 7,
-            mode_turn_options: crate::ModeTurnOptions::Unit,
+            mode_turn_options: crate::ModeTurnOptions::default(),
             ..SessionStateEnvelope::default()
         };
         state.policy.max_turns = Some(3);
@@ -456,21 +456,21 @@ mod tests {
             owned.session_graph.nodes.len(),
             state.session_graph.nodes.len()
         );
-        assert!(matches!(
-            owned.mode_turn_options,
-            crate::ModeTurnOptions::Unit
-        ));
-        assert!(matches!(
-            view.mode_turn_options(),
-            crate::ModeTurnOptions::Unit
-        ));
+        assert_eq!(
+            owned.mode_turn_options.mode_id,
+            crate::ExecutionMode::standard()
+        );
+        assert_eq!(
+            view.mode_turn_options().mode_id,
+            crate::ExecutionMode::standard()
+        );
     }
 
     #[test]
     fn derived_read_view_materializes_graph_lazily_and_preserves_mode_turn_options() {
         let state = SessionStateEnvelope {
             session_id: "derived-read-view".to_string(),
-            mode_turn_options: crate::ModeTurnOptions::Unit,
+            mode_turn_options: crate::ModeTurnOptions::default(),
             ..SessionStateEnvelope::default()
         };
         let base_graph = Arc::new(crate::SessionGraph::default());
@@ -496,10 +496,10 @@ mod tests {
 
         let owned = view.to_owned_state();
 
-        assert!(matches!(
-            owned.mode_turn_options,
-            crate::ModeTurnOptions::Unit
-        ));
+        assert_eq!(
+            owned.mode_turn_options.mode_id,
+            crate::ExecutionMode::standard()
+        );
         match &view.0.graph {
             SessionReadGraph::Derived { cache, .. } => assert!(cache.get().is_some()),
             SessionReadGraph::Owned(_) => panic!("expected derived read graph"),

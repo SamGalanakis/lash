@@ -107,10 +107,12 @@ struct FenceDetector {
     pending: String,
     inside_fence: bool,
     emitted_start: bool,
+    /// Number of backticks in the active opener (≥3). The closer must
+    /// be at least this long. Always 0 when not `inside_fence`.
+    opener_len: usize,
     /// Accumulated fence body (everything after the opener), used to
-    /// detect a closing ` ``` ` on its own line so we can raise
-    /// `abort_stream` and end the LLM call the moment the model
-    /// finishes its one block.
+    /// detect a closing fence so we can raise `abort_stream` and end
+    /// the LLM call the moment the model finishes its one block.
     fence_body: String,
     fence_closed: bool,
 }
@@ -121,6 +123,7 @@ impl FenceDetector {
             pending: String::new(),
             inside_fence: false,
             emitted_start: false,
+            opener_len: 0,
             fence_body: String::new(),
             fence_closed: false,
         }
@@ -130,6 +133,7 @@ impl FenceDetector {
         self.pending.clear();
         self.inside_fence = false;
         self.emitted_start = false;
+        self.opener_len = 0;
         self.fence_body.clear();
         self.fence_closed = false;
     }
@@ -146,7 +150,7 @@ impl FenceDetector {
                 };
             }
             self.fence_body.push_str(chunk);
-            if has_closing_fence(&self.fence_body) {
+            if has_closing_fence(&self.fence_body, self.opener_len) {
                 self.fence_closed = true;
                 // Signal the runtime: stop the LLM stream, we have the
                 // full block.
@@ -167,8 +171,9 @@ impl FenceDetector {
 
         self.pending.push_str(chunk);
 
-        if let Some((fence_start, body_start)) = find_fence_opener(&self.pending) {
+        if let Some((fence_start, body_start, opener_len)) = find_fence_opener(&self.pending) {
             self.inside_fence = true;
+            self.opener_len = opener_len;
             let prose_before = self.pending[..fence_start].to_string();
             // Preserve any body content that arrived in the same chunk as
             // the opener — `pending.clear()` would otherwise drop it.
@@ -186,7 +191,7 @@ impl FenceDetector {
 
             if !initial_body.is_empty() {
                 self.fence_body.push_str(&initial_body);
-                if has_closing_fence(&self.fence_body) {
+                if has_closing_fence(&self.fence_body, self.opener_len) {
                     self.fence_closed = true;
                     return AssistantStreamTransform {
                         chunk: prose_before,
@@ -232,25 +237,48 @@ impl FenceDetector {
 }
 
 /// Return `true` when `text` (the accumulated fence body) contains a
-/// closing ` ``` ` on its own line. A fence close is any ` ``` ` that
-/// either starts at byte 0 of the body or is immediately preceded by
-/// `\n`.
-/// Any `\`\`\`` closes the fence body, regardless of position. Must
-/// stay in lockstep with `first_lashlang_fence_span` in `driver.rs`.
-fn has_closing_fence(text: &str) -> bool {
-    text.contains("```")
+/// closing run of at least `opener_len` consecutive backticks. Must
+/// stay in lockstep with `first_lashlang_fence_span` in `protocol.rs`:
+/// CommonMark variable-length fences — a 4-backtick opener requires a
+/// 4+-backtick closer.
+fn has_closing_fence(text: &str, opener_len: usize) -> bool {
+    if opener_len == 0 {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            if i - start >= opener_len {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 /// Locate a complete ` ```lashlang ` opener in `text`. Returns
-/// `(fence_start, body_start)` where `fence_start` is the offset of the
-/// opening backticks and `body_start` is the first byte after the
-/// language tag's terminating `\n` (or end-of-text if the tag isn't
-/// newline-terminated yet — in which case the body is still empty).
-fn find_fence_opener(text: &str) -> Option<(usize, usize)> {
+/// `(fence_start, body_start, opener_len)` where `fence_start` is the
+/// offset of the opening backtick run, `body_start` is the first byte
+/// after the language tag's terminating `\n` (or end-of-text if the
+/// tag isn't newline-terminated yet — in which case the body is still
+/// empty), and `opener_len` is the number of backticks in the opener
+/// (≥3, used to validate the closer length).
+fn find_fence_opener(text: &str) -> Option<(usize, usize, usize)> {
     let mut search_from = 0usize;
     while let Some(rel) = text[search_from..].find("```") {
         let pos = search_from + rel;
-        let after_ticks = pos + 3;
+        let opener_len = text.as_bytes()[pos..]
+            .iter()
+            .take_while(|&&b| b == b'`')
+            .count();
+        let after_ticks = pos + opener_len;
         let after = &text[after_ticks..];
         let line_end = after.find('\n').unwrap_or(after.len());
         let lang = after[..line_end].trim();
@@ -265,9 +293,9 @@ fn find_fence_opener(text: &str) -> Option<(usize, usize)> {
             } else {
                 after_ticks + line_end
             };
-            return Some((pos, body_start));
+            return Some((pos, body_start, opener_len));
         }
-        search_from = pos + 3;
+        search_from = after_ticks;
     }
     None
 }
@@ -285,19 +313,23 @@ fn suffix_can_be_fence_opener_prefix(suffix: &str) -> bool {
     if suffix.is_empty() {
         return false;
     }
-    const BACKTICKS: &str = "```";
     const LANG: &str = "lashlang";
 
-    if BACKTICKS.starts_with(suffix) {
-        return true;
-    }
-    let Some(after_ticks) = suffix.strip_prefix(BACKTICKS) else {
-        return false;
-    };
+    // Count leading backticks in the suffix. If everything in the
+    // suffix is backticks, it could still grow into a longer opener
+    // run — preserve it. Variable-length opener support means a run
+    // of any length ≥1 is a potential prefix.
+    let backtick_count = suffix.chars().take_while(|&c| c == '`').count();
+    let after_ticks: String = suffix.chars().skip(backtick_count).collect();
+
     if after_ticks.is_empty() {
-        return true;
+        return backtick_count > 0;
     }
-    let after_padding = after_ticks.trim_start();
+    if backtick_count < 3 {
+        // Not enough backticks AND there's text after — not an opener.
+        return false;
+    }
+    let after_padding = after_ticks.trim_start_matches(' ');
     after_padding.is_empty() || LANG.starts_with(after_padding)
 }
 

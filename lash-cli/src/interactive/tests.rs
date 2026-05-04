@@ -1,3 +1,4 @@
+use super::helpers::RuntimeEventBridge;
 use super::*;
 use crate::app::App;
 use crate::clipboard::{ClipboardEnv, osc52_allowed_by_env, osc52_sequence_for};
@@ -5,32 +6,42 @@ use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
 use lash::{InjectedTurnInput, MessageRole, TurnInputInjectionBridge};
 
-#[test]
-fn pending_text_delta_buffer_coalesces_adjacent_chunks() {
-    let mut pending = PendingTextDeltaBuffer::default();
-    pending.push("Hello".to_string());
-    pending.push(", world".to_string());
+#[tokio::test]
+async fn runtime_event_bridge_coalesces_text_before_structural_event() {
+    let mut pump = crate::event::AppEventPump::new();
+    let sink = RuntimeEventBridge::spawn(7, pump.sender());
 
-    match pending.take_event() {
-        Some(SessionEvent::TextDelta { content }) => assert_eq!(content, "Hello, world"),
-        other => panic!("expected coalesced text delta, got {other:?}"),
+    sink.emit(SessionEvent::TextDelta {
+        content: "Hello".to_string(),
+    })
+    .await;
+    sink.emit(SessionEvent::TextDelta {
+        content: ", world".to_string(),
+    })
+    .await;
+    sink.emit(SessionEvent::Message {
+        text: "done".to_string(),
+        kind: "system".to_string(),
+    })
+    .await;
+
+    let first = pump.recv().await.expect("text event").event;
+    match first {
+        AppEvent::Session {
+            stream_id: 7,
+            event: SessionEvent::TextDelta { content },
+        } => assert_eq!(content, "Hello, world"),
+        _ => panic!("expected coalesced text delta"),
     }
-}
 
-#[test]
-fn pending_text_delta_buffer_uses_first_chunk_deadline() {
-    let mut pending = PendingTextDeltaBuffer::default();
-    let now = tokio::time::Instant::now();
-    pending.push_at("first".to_string(), now);
-    pending.push_at(
-        " second".to_string(),
-        now + std::time::Duration::from_millis(10),
-    );
-
-    let deadline = pending.flush_deadline().expect("deadline");
-    assert_eq!(deadline, now + TEXT_DELTA_REDRAW_INTERVAL);
-    assert!(!pending.should_flush(now + std::time::Duration::from_millis(32)));
-    assert!(pending.should_flush(now + std::time::Duration::from_millis(33)));
+    let second = pump.recv().await.expect("structural event").event;
+    assert!(matches!(
+        second,
+        AppEvent::Session {
+            stream_id: 7,
+            event: SessionEvent::Message { .. },
+        }
+    ));
 }
 
 #[test]

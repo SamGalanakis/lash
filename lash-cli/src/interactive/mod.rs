@@ -14,12 +14,11 @@ use lash::*;
 use lash_subagents::SubagentHost;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_ui::{UiCommandInvocation, UiContext, UiExtensions};
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{self, App, PreparedTurn, UiTimelineItem};
 use crate::command;
-use crate::event::AppEvent;
+use crate::event::{AppEvent, AppEventPump};
 use crate::render;
 use crate::resume;
 use crate::session_log::{self, SessionLogger};
@@ -32,13 +31,13 @@ use crate::update;
 use crate::{Args, scratch_tui};
 use crate::{
     apply_ui_host_effects, controls_text, hash12, help_text, info_text,
-    normalize_prepared_turn_for_dispatch, push_system_message, sync_ui_extensions,
-    turn_has_visible_output, version_text,
+    normalize_prepared_turn_for_dispatch, push_system_message, turn_has_visible_output,
+    version_text,
 };
 
 use self::helpers::{
-    AppEventSink, PendingTextDeltaBuffer, TurnReplayPayload, cleared_session_state,
-    drain_aux_trace_ops, flush_pending_text_deltas, log_runtime_handoff, record_queue_turn,
+    TurnReplayPayload, UiSnapshotWorker, cleared_session_state, drain_aux_trace_ops,
+    log_runtime_handoff, record_queue_turn,
 };
 
 use self::commands::{dispatch_next_queued_turn, promote_pending_steers_to_queue};
@@ -142,7 +141,13 @@ pub(crate) async fn run_app(
     let mut cancel_token: Option<CancellationToken> = None;
 
     // Unified event channel
-    let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
+    let mut event_pump = AppEventPump::new();
+    let app_tx = event_pump.sender();
+    let mut snapshot_worker = UiSnapshotWorker::spawn(
+        app_tx.clone(),
+        Arc::clone(&ui_extensions),
+        plugin_host.clone(),
+    );
 
     // Kick off the background `@`-completion file index. Starting it here
     // (rather than lazily on the first `@` keystroke) means the walk is
@@ -228,16 +233,9 @@ pub(crate) async fn run_app(
     let mut active_stream_id: u64 = 0;
     let mut pending_clear_after_return = false;
     let mut pending_handoff_session_id: Option<String> = None;
-    let mut pending_text_deltas = PendingTextDeltaBuffer::default();
     let mut last_ui_sync = tokio::time::Instant::now();
 
-    sync_ui_extensions(
-        &mut app,
-        ui_extensions.as_ref(),
-        &plugin_host,
-        Arc::clone(&session_manager),
-    )
-    .await;
+    let _ = app_tx.send(AppEvent::RequestUiSnapshot);
     if let Some(message) = startup_system_message {
         push_system_message(&mut app, message);
     }
@@ -269,13 +267,7 @@ pub(crate) async fn run_app(
                     ),
                 }
             }
-            sync_ui_extensions(
-                &mut app,
-                ui_extensions.as_ref(),
-                &plugin_host,
-                Arc::clone(&session_manager),
-            )
-            .await;
+            let _ = app_tx.send(AppEvent::RequestUiSnapshot);
             toolset_hash = hash12(
                 &serde_json::to_vec(&dynamic_tools.definitions())
                     .unwrap_or_else(|_| b"[]".to_vec()),
@@ -342,10 +334,6 @@ pub(crate) async fn run_app(
     });
 
     loop {
-        if pending_text_deltas.should_flush(tokio::time::Instant::now()) {
-            flush_pending_text_deltas(&mut app, &mut pending_text_deltas, ui_trace.as_mut());
-        }
-
         log_runtime_handoff(
             "loop_top",
             &app,
@@ -427,11 +415,6 @@ pub(crate) async fn run_app(
                         done_reason = ?done.result.done_reason,
                         active_stream_id,
                         "runtime return received in interactive loop"
-                    );
-                    flush_pending_text_deltas(
-                        &mut app,
-                        &mut pending_text_deltas,
-                        ui_trace.as_mut(),
                     );
                     runtime = Some(done.runtime);
                     if done.stream_id == active_stream_id
@@ -692,11 +675,6 @@ pub(crate) async fn run_app(
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     tracing::debug!("runtime return channel closed before delivering runtime");
-                    flush_pending_text_deltas(
-                        &mut app,
-                        &mut pending_text_deltas,
-                        ui_trace.as_mut(),
-                    );
                     app.stop_turn();
                     app.recycle_unaccepted_monitor_wakes();
                     runtime_return_rx = None;
@@ -716,6 +694,7 @@ pub(crate) async fn run_app(
 
         // Draw only when dirty
         if app.dirty {
+            let render_started = std::time::Instant::now();
             // Pre-compute height cache before immutable borrow in draw
             let (width, height) = terminal.size()?;
             if let Some(recorder) = ui_trace.as_mut() {
@@ -739,39 +718,77 @@ pub(crate) async fn run_app(
                 recorder.maybe_record_render_checkpoint(&screen);
             }
             app.dirty = false;
+            let render_elapsed = render_started.elapsed();
+            if render_elapsed > std::time::Duration::from_millis(16) {
+                tracing::warn!(duration_ms = render_elapsed.as_millis(), "slow TUI render");
+            } else {
+                tracing::trace!(
+                    duration_ms = render_elapsed.as_millis(),
+                    "TUI render completed"
+                );
+            }
         }
 
         // Wait for next event
-        let event = if let Some(deadline) = pending_text_deltas.flush_deadline() {
-            tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(deadline) => {
-                    flush_pending_text_deltas(&mut app, &mut pending_text_deltas, ui_trace.as_mut());
-                    continue;
-                }
-                maybe_event = app_rx.recv() => match maybe_event {
-                    Some(event) => event,
-                    None => break,
-                },
-            }
-        } else {
-            match app_rx.recv().await {
-                Some(event) => event,
-                None => break,
-            }
+        let Some(queued_event) = event_pump.recv().await else {
+            break;
         };
-
-        if !matches!(
-            &event,
-            AppEvent::Session {
-                event: SessionEvent::TextDelta { .. },
-                ..
-            }
-        ) {
-            flush_pending_text_deltas(&mut app, &mut pending_text_deltas, ui_trace.as_mut());
+        let input_latency = queued_event.enqueued_at.elapsed();
+        let (high_depth, normal_depth, low_depth) = event_pump.lane_depths();
+        if input_latency > std::time::Duration::from_millis(100) {
+            tracing::warn!(
+                lane = ?queued_event.lane,
+                latency_ms = input_latency.as_millis(),
+                high_depth,
+                normal_depth,
+                low_depth,
+                "slow TUI event handling latency"
+            );
+        } else {
+            tracing::trace!(
+                lane = ?queued_event.lane,
+                latency_ms = input_latency.as_millis(),
+                high_depth,
+                normal_depth,
+                low_depth,
+                "TUI event dequeued"
+            );
         }
+        let handler_started = std::time::Instant::now();
+        let event = queued_event.event;
 
         match event {
+            AppEvent::FrameRequested => {
+                event_pump.mark_frame_consumed();
+                app.dirty = true;
+            }
+            AppEvent::RequestUiSnapshot => {
+                snapshot_worker.request(app.session_id.clone(), Arc::clone(&session_manager));
+            }
+            AppEvent::UiSnapshot { generation, result } => {
+                if !snapshot_worker.complete(
+                    generation,
+                    app.session_id.clone(),
+                    Arc::clone(&session_manager),
+                ) {
+                    tracing::debug!(generation, "discarding stale UI snapshot");
+                    continue;
+                }
+                tracing::trace!(
+                    generation,
+                    duration_ms = result.duration.as_millis(),
+                    timed_out = result.timed_out,
+                    "applying UI snapshot"
+                );
+                if let Some(tasks) = result.background_tasks {
+                    app.update_background_tasks(tasks);
+                }
+                for diagnostic in result.diagnostics {
+                    tracing::warn!(%diagnostic, "UI snapshot diagnostic");
+                }
+                apply_ui_host_effects(&mut app, result.effects);
+                app_tx.request_frame();
+            }
             AppEvent::Terminal(TermEvent::Paste(text)) => {
                 app.dirty = true;
 
@@ -940,13 +957,7 @@ pub(crate) async fn run_app(
                     &mut app,
                 );
                 if last_ui_sync.elapsed() >= std::time::Duration::from_millis(250) {
-                    sync_ui_extensions(
-                        &mut app,
-                        ui_extensions.as_ref(),
-                        &plugin_host,
-                        Arc::clone(&session_manager),
-                    )
-                    .await;
+                    let _ = app_tx.send(AppEvent::RequestUiSnapshot);
                     last_ui_sync = tokio::time::Instant::now();
                 }
             }
@@ -954,8 +965,12 @@ pub(crate) async fn run_app(
                 if stream_id != active_stream_id {
                     continue;
                 }
-                if let SessionEvent::TextDelta { content } = event {
-                    pending_text_deltas.push(content);
+                if matches!(event, SessionEvent::TextDelta { .. }) {
+                    if let Some(recorder) = ui_trace.as_mut() {
+                        recorder.record_session_event(&event);
+                    }
+                    app.handle_session_event(event);
+                    app.dirty = true;
                     continue;
                 }
                 app.dirty = true;
@@ -1005,7 +1020,6 @@ pub(crate) async fn run_app(
                     }
                     if let SessionEvent::SessionHandoff { session_id } = &event {
                         pending_handoff_session_id = Some(session_id.clone());
-                        pending_text_deltas.clear();
                     }
                     app.handle_session_event(event);
                     apply_ui_host_effects(&mut app, ui_effects);
@@ -1017,10 +1031,16 @@ pub(crate) async fn run_app(
             AppEvent::Quit => break,
         }
 
+        let handler_elapsed = handler_started.elapsed();
+        if handler_elapsed > std::time::Duration::from_millis(16) {
+            tracing::warn!(
+                duration_ms = handler_elapsed.as_millis(),
+                "slow foreground TUI handler"
+            );
+        }
         drain_aux_trace_ops(&mut ui_trace);
     }
 
-    flush_pending_text_deltas(&mut app, &mut pending_text_deltas, ui_trace.as_mut());
     drain_aux_trace_ops(&mut ui_trace);
 
     if let Some(recorder) = ui_trace.take() {

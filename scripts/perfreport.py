@@ -52,7 +52,11 @@ def is_runtime_report(payload: dict[str, Any]) -> bool:
 
 
 def is_ui_report(payload: dict[str, Any]) -> bool:
-    return "summary" in payload and not is_runtime_report(payload) and "ui" in str(payload).lower()
+    return (
+        "parameters" in payload
+        and isinstance(payload.get("scenarios"), list)
+        and any("budgets" in s for s in payload.get("scenarios", []) if isinstance(s, dict))
+    )
 
 
 def summarize_runtime(report: dict[str, Any]) -> str:
@@ -191,6 +195,72 @@ def summarize_runtime(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def summarize_ui(report: dict[str, Any]) -> str:
+    params = report.get("parameters", {})
+    profile = params.get("profile", "?")
+    scenario_names = ", ".join(params.get("scenarios", []))
+    lines: list[str] = []
+    lines.append(
+        f"# ui-perf report  ({report.get('created_at', '?')[:19]}, {params.get('runs')} runs, {profile} profile)"
+    )
+    git = report.get("git", {})
+    dirty = "dirty" if git.get("dirty") else "clean"
+    lines.append(
+        f"version: {report.get('version', '?')}  build={report.get('build_mode', '?')}  "
+        f"git={git.get('sha', '?')} ({dirty})  scenarios: {scenario_names}"
+    )
+    if params.get("dhat_out"):
+        lines.append(f"dhat profile: {params['dhat_out']}")
+    if params.get("compare_inputs"):
+        lines.append("comparison inputs: " + ", ".join(str(p) for p in params["compare_inputs"]))
+    lines.append("")
+
+    interesting = [
+        "initial_render_ms",
+        "height_cache_rebuild_ms",
+        "steady_scroll_selection_render_ms",
+        "render_build_ms",
+        "diff_scan_ms",
+        "foreground_handler_ms",
+        "input_control_latency_ms",
+        "render_frame_ms",
+        "snapshot_ms",
+        "file_index_suggestion_query_ms",
+        "file_index_refresh_visible_ms",
+        "total_ms",
+    ]
+
+    for scenario in report.get("scenarios", []):
+        lines.append(f"## scenario: {scenario.get('scenario', '?')}")
+        summary = scenario.get("summary", {})
+        for metric in interesting:
+            if metric not in summary:
+                continue
+            m = summary[metric]
+            lines.append(
+                f"  {metric:36s} p50={fmt_ms(m.get('p50')):>9s}  "
+                f"p95={fmt_ms(m.get('p95')):>9s}  p99={fmt_ms(m.get('p99')):>9s}  "
+                f"max={fmt_ms(m.get('max')):>9s}"
+            )
+        budgets = scenario.get("budgets", [])
+        if budgets:
+            failed = [b for b in budgets if not b.get("passed")]
+            if failed:
+                lines.append("  budget failures:")
+                for b in failed:
+                    lines.append(
+                        f"    {b['metric']} {b['statistic']} {fmt_ms(b['actual_ms'])} > {fmt_ms(b['budget_ms'])}"
+                    )
+            else:
+                lines.append("  budgets: pass")
+        counters = scenario.get("counters", {})
+        if counters:
+            short = ", ".join(f"{k}={v}" for k, v in counters.items())
+            lines.append(f"  counters: {short}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def metric_pairs(name: str, baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
     rows: list[str] = []
 
@@ -261,6 +331,39 @@ def diff_runtime(baseline: dict[str, Any], current: dict[str, Any]) -> str:
     cs = {s["scenario"]: s for s in current.get("summary", [])}
     for name in sorted(set(bs) & set(cs)):
         lines.extend(metric_pairs(name, bs[name], cs[name]))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def diff_ui(baseline: dict[str, Any], current: dict[str, Any]) -> str:
+    lines = ["# ui-perf diff", ""]
+    bp = baseline.get("parameters", {})
+    cp = current.get("parameters", {})
+    lines.append(
+        f"baseline: {baseline.get('created_at', '?')[:19]}  profile={bp.get('profile', '?')}"
+    )
+    lines.append(
+        f"current:  {current.get('created_at', '?')[:19]}  profile={cp.get('profile', '?')}"
+    )
+    lines.append("")
+    bs = {s["scenario"]: s for s in baseline.get("scenarios", [])}
+    cs = {s["scenario"]: s for s in current.get("scenarios", [])}
+    for name in sorted(set(bs) & set(cs)):
+        lines.append(f"### {name}")
+        bsum = bs[name].get("summary", {})
+        csum = cs[name].get("summary", {})
+        for metric in sorted(set(bsum) & set(csum)):
+            for stat in ("p95", "p99", "max"):
+                b = bsum[metric].get(stat)
+                c = csum[metric].get(stat)
+                if b is None or c is None:
+                    continue
+                delta = c - b
+                pct = (delta / b * 100.0) if b else 0.0
+                lines.append(
+                    f"  {metric:36s} {stat:>3s} baseline={fmt_ms(b):>9s}  "
+                    f"current={fmt_ms(c):>9s}  Δ={delta:+.2f}ms ({pct:+.1f}%)"
+                )
         lines.append("")
     return "\n".join(lines)
 
@@ -355,10 +458,16 @@ def main() -> int:
         if is_runtime_report(payload) and is_runtime_report(baseline):
             print(diff_runtime(baseline, payload))
             return 0
-        print("error: --diff currently only supports runtime-perf JSON pairs", file=sys.stderr)
+        if is_ui_report(payload) and is_ui_report(baseline):
+            print(diff_ui(baseline, payload))
+            return 0
+        print("error: --diff expects matching runtime-perf or ui-perf JSON pairs", file=sys.stderr)
         return 2
     if is_runtime_report(payload):
         print(summarize_runtime(payload))
+        return 0
+    if is_ui_report(payload):
+        print(summarize_ui(payload))
         return 0
     print(f"error: unrecognized report format at {args.report}", file=sys.stderr)
     return 2

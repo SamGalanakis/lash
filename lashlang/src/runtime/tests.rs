@@ -8,8 +8,8 @@ use std::sync::{
 struct Host;
 
 impl ToolHost for Host {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        match name {
+    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+        match name.as_str() {
             "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
             "err" => Err(ToolHostError::new("boom")),
             "panic" => panic!("boom"),
@@ -18,23 +18,23 @@ impl ToolHost for Host {
     }
 }
 
-fn exec(source: &str) -> Result<Value, RuntimeError> {
+async fn exec(source: &str) -> Result<Value, RuntimeError> {
     let program = crate::parse(source).expect("program should parse");
     let mut state = State::new();
-    match execute_program(&program, &mut state, &Host)? {
+    match execute_program(&program, &mut state, &Host).await? {
         ExecutionOutcome::Finished(value) => Ok(value),
         ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
     }
 }
 
-fn exec_outcome(source: &str) -> Result<ExecutionOutcome, RuntimeError> {
+async fn exec_outcome(source: &str) -> Result<ExecutionOutcome, RuntimeError> {
     let program = crate::parse(source).expect("program should parse");
     let mut state = State::new();
-    execute_program(&program, &mut state, &Host)
+    execute_program(&program, &mut state, &Host).await
 }
 
-#[test]
-fn value_helpers_and_display_cover_all_variants() {
+#[tokio::test(flavor = "current_thread")]
+async fn value_helpers_and_display_cover_all_variants() {
     let mut record = Record::default();
     record.insert("k".to_string(), Value::Number(1.0));
 
@@ -54,8 +54,8 @@ fn value_helpers_and_display_cover_all_variants() {
     assert!(Value::Record(record.into()).to_string().contains("\"k\":1"));
 }
 
-#[test]
-fn compiler_folds_constant_list_and_record_literals() {
+#[tokio::test(flavor = "current_thread")]
+async fn compiler_folds_constant_list_and_record_literals() {
     let program = crate::parse(
         r#"
         items = [{ label: "a", weight: 1 }, { label: "b", weight: 2 }]
@@ -81,15 +81,17 @@ fn compiler_folds_constant_list_and_record_literals() {
     );
 
     let mut state = State::new();
-    let outcome = execute_compiled(&compiled, &mut state, &Host).expect("program should run");
+    let outcome = execute_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("program should run");
     let ExecutionOutcome::Finished(Value::List(items)) = outcome else {
         panic!("expected folded list result");
     };
     assert_eq!(items.len(), 2);
 }
 
-#[test]
-fn compiler_propagates_safe_straight_line_constants() {
+#[tokio::test(flavor = "current_thread")]
+async fn compiler_propagates_safe_straight_line_constants() {
     let program = crate::parse(
         r#"
         items = [1, 2, 3]
@@ -113,7 +115,9 @@ fn compiler_propagates_safe_straight_line_constants() {
     );
 
     let mut state = State::new();
-    let outcome = execute_compiled(&compiled, &mut state, &Host).expect("program should run");
+    let outcome = execute_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("program should run");
     assert_eq!(
         outcome,
         ExecutionOutcome::Finished(Value::List(
@@ -128,8 +132,8 @@ fn compiler_propagates_safe_straight_line_constants() {
     );
 }
 
-#[test]
-fn constant_propagation_does_not_cross_control_flow_boundaries() {
+#[tokio::test(flavor = "current_thread")]
+async fn constant_propagation_does_not_cross_control_flow_boundaries() {
     let value = exec(
         r#"
         x = 1
@@ -140,13 +144,14 @@ fn constant_propagation_does_not_cross_control_flow_boundaries() {
         submit y
         "#,
     )
+    .await
     .expect("program should succeed");
 
     assert_eq!(value, Value::Number(2.0));
 }
 
-#[test]
-fn reusable_execution_scratch_preserves_results_across_runs() {
+#[tokio::test(flavor = "current_thread")]
+async fn reusable_execution_scratch_preserves_results_across_runs() {
     let program = crate::parse(
         r#"
         items = [1, 2, 3]
@@ -164,20 +169,25 @@ fn reusable_execution_scratch_preserves_results_across_runs() {
     for _ in 0..3 {
         let mut state = State::new();
         let outcome = execute_compiled_with_scratch(&compiled, &mut state, &Host, &mut scratch)
+            .await
             .expect("program should run");
         assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(6.0)));
     }
 }
 
-#[test]
-fn continuation_and_undefined_variable_are_reported() {
-    let outcome = exec_outcome("x = 1").expect("missing submit should continue");
+#[tokio::test(flavor = "current_thread")]
+async fn continuation_and_undefined_variable_are_reported() {
+    let outcome = exec_outcome("x = 1")
+        .await
+        .expect("missing submit should continue");
     assert_eq!(outcome, ExecutionOutcome::Continued);
 
-    let value = exec("submit").expect("bare submit should succeed");
+    let value = exec("submit").await.expect("bare submit should succeed");
     assert_eq!(value, Value::Null);
 
-    let err = exec("submit x").expect_err("undefined variable should fail");
+    let err = exec("submit x")
+        .await
+        .expect_err("undefined variable should fail");
     assert_eq!(
         err,
         RuntimeError::UndefinedVariable {
@@ -186,39 +196,50 @@ fn continuation_and_undefined_variable_are_reported() {
     );
 }
 
-#[test]
-fn condition_and_iteration_errors_are_reported() {
-    let value =
-        exec("if 1 { submit 1 } else { submit 2 }").expect("numeric truthiness should be accepted");
+#[tokio::test(flavor = "current_thread")]
+async fn condition_and_iteration_errors_are_reported() {
+    let value = exec("if 1 { submit 1 } else { submit 2 }")
+        .await
+        .expect("numeric truthiness should be accepted");
     assert_eq!(value, Value::Number(1.0));
 
-    let value =
-        exec("if \"\" { submit 1 } else { submit 2 }").expect("empty string should be falsy");
+    let value = exec("if \"\" { submit 1 } else { submit 2 }")
+        .await
+        .expect("empty string should be falsy");
     assert_eq!(value, Value::Number(2.0));
 
-    let err = exec("for x in 1 { submit x }").expect_err("non-list iteration should fail");
+    let err = exec("for x in 1 { submit x }")
+        .await
+        .expect_err("non-list iteration should fail");
     assert_eq!(err, RuntimeError::NonListIteration);
 }
 
-#[test]
-fn stmt_call_and_tool_results_cover_success_and_error() {
-    exec("call echo { value: 1 } submit 1").expect("statement call should succeed");
-    let missing = exec("bad = call missing {} submit bad").expect("missing tool should be wrapped");
+#[tokio::test(flavor = "current_thread")]
+async fn stmt_call_and_tool_results_cover_success_and_error() {
+    exec("call echo { value: 1 } submit 1")
+        .await
+        .expect("statement call should succeed");
+    let missing = exec("bad = call missing {} submit bad")
+        .await
+        .expect("missing tool should be wrapped");
     assert_eq!(
         missing.as_record().expect("result should be a record")["ok"],
         Value::Bool(false)
     );
 
     let value = exec("ok = call echo { value: 7 } bad = call err {} submit { ok: ok, bad: bad }")
+        .await
         .expect("tool call program should succeed");
     let record = value.as_record().expect("expected record");
     assert_eq!(record["ok"].as_record().unwrap()["ok"], Value::Bool(true));
     assert_eq!(record["bad"].as_record().unwrap()["ok"], Value::Bool(false));
 }
 
-#[test]
-fn result_unwrap_extracts_success_and_preserves_manual_handling() {
-    let value = exec("submit (call echo { value: 7 })?").expect("unwrap should succeed");
+#[tokio::test(flavor = "current_thread")]
+async fn result_unwrap_extracts_success_and_preserves_manual_handling() {
+    let value = exec("submit (call echo { value: 7 })?")
+        .await
+        .expect("unwrap should succeed");
     assert_eq!(value, Value::Number(7.0));
 
     let value = exec(
@@ -227,12 +248,13 @@ fn result_unwrap_extracts_success_and_preserves_manual_handling() {
         submit result.ok ? result.error : "unexpected"
         "#,
     )
+    .await
     .expect("manual wrapper handling should still work");
     assert_eq!(value, Value::String("unexpected".into()));
 }
 
-#[test]
-fn direct_tool_call_unwrap_skips_observable_wrapper() {
+#[tokio::test(flavor = "current_thread")]
+async fn direct_tool_call_unwrap_skips_observable_wrapper() {
     let program = crate::parse("submit (call echo { value: 7 })?").expect("program should parse");
     let compiled = compile_program(&program);
     assert!(
@@ -251,10 +273,14 @@ fn direct_tool_call_unwrap_skips_observable_wrapper() {
     );
 
     let mut state = State::new();
-    let outcome = execute_compiled(&compiled, &mut state, &Host).expect("program should run");
+    let outcome = execute_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("program should run");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));
 
-    let err = exec("submit (call err {})?").expect_err("failed unwrap should abort");
+    let err = exec("submit (call err {})?")
+        .await
+        .expect_err("failed unwrap should abort");
     assert_eq!(
         err,
         RuntimeError::ValueError {
@@ -263,9 +289,11 @@ fn direct_tool_call_unwrap_skips_observable_wrapper() {
     );
 }
 
-#[test]
-fn result_unwrap_reports_failed_and_malformed_wrappers() {
-    let err = exec("submit (call err {})?").expect_err("failed tool unwrap should abort");
+#[tokio::test(flavor = "current_thread")]
+async fn result_unwrap_reports_failed_and_malformed_wrappers() {
+    let err = exec("submit (call err {})?")
+        .await
+        .expect_err("failed tool unwrap should abort");
     assert_eq!(
         err,
         RuntimeError::ValueError {
@@ -273,7 +301,9 @@ fn result_unwrap_reports_failed_and_malformed_wrappers() {
         }
     );
 
-    let err = exec("submit 1?").expect_err("non-wrapper should fail");
+    let err = exec("submit 1?")
+        .await
+        .expect_err("non-wrapper should fail");
     assert_eq!(
         err,
         RuntimeError::TypeError {
@@ -281,7 +311,9 @@ fn result_unwrap_reports_failed_and_malformed_wrappers() {
         }
     );
 
-    let err = exec("submit { ok: true }?").expect_err("missing value should fail");
+    let err = exec("submit { ok: true }?")
+        .await
+        .expect_err("missing value should fail");
     assert_eq!(
         err,
         RuntimeError::TypeError {
@@ -290,8 +322,8 @@ fn result_unwrap_reports_failed_and_malformed_wrappers() {
     );
 }
 
-#[test]
-fn field_index_unary_and_boolean_paths_are_covered() {
+#[tokio::test(flavor = "current_thread")]
+async fn field_index_unary_and_boolean_paths_are_covered() {
     let value = exec(
         r#"
         rec = { nested: { name: "lash" } }
@@ -301,6 +333,7 @@ fn field_index_unary_and_boolean_paths_are_covered() {
         submit [rec.nested.name, xs[1], "abc"[2], -1, not false, !false, ok, alt]
         "#,
     )
+    .await
     .expect("program should succeed");
 
     assert_eq!(
@@ -320,115 +353,160 @@ fn field_index_unary_and_boolean_paths_are_covered() {
         )
     );
 
-    let value = exec("submit true and false").expect("and path should succeed");
+    let value = exec("submit true and false")
+        .await
+        .expect("and path should succeed");
     assert_eq!(value, Value::Bool(false));
 
-    let value = exec("submit false or true").expect("or path should succeed");
+    let value = exec("submit false or true")
+        .await
+        .expect("or path should succeed");
     assert_eq!(value, Value::Bool(true));
 }
 
-#[test]
-fn field_index_and_type_errors_are_covered() {
-    let err = exec("n = 1 submit n.name").expect_err("field access should fail");
+#[tokio::test(flavor = "current_thread")]
+async fn field_index_and_type_errors_are_covered() {
+    let err = exec("n = 1 submit n.name")
+        .await
+        .expect_err("field access should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("rec = {} submit rec.name").expect("missing field should yield null");
+    let value = exec("rec = {} submit rec.name")
+        .await
+        .expect("missing field should yield null");
     assert_eq!(value, Value::Null);
 
-    let err = exec("submit 1[0]").expect_err("bad index target should fail");
+    let err = exec("submit 1[0]")
+        .await
+        .expect_err("bad index target should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("submit [1][2]").expect("list oob should yield null");
+    let value = exec("submit [1][2]")
+        .await
+        .expect("list oob should yield null");
     assert_eq!(value, Value::Null);
 
-    let value = exec("submit \"a\"[2]").expect("string oob should yield null");
+    let value = exec("submit \"a\"[2]")
+        .await
+        .expect("string oob should yield null");
     assert_eq!(value, Value::Null);
 
-    let err = exec("submit [1][1.5]").expect_err("fractional index should fail");
+    let err = exec("submit [1][1.5]")
+        .await
+        .expect_err("fractional index should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-    let value = exec("submit [1][-1]").expect("negative index should resolve from the end");
+    let value = exec("submit [1][-1]")
+        .await
+        .expect("negative index should resolve from the end");
     assert_eq!(value, Value::Number(1.0));
 
-    let value = exec("submit not 1").expect("not should use truthiness");
+    let value = exec("submit not 1")
+        .await
+        .expect("not should use truthiness");
     assert_eq!(value, Value::Bool(false));
 
-    let value = exec("submit not 0").expect("zero should be falsy");
+    let value = exec("submit not 0").await.expect("zero should be falsy");
     assert_eq!(value, Value::Bool(true));
 
-    let value =
-        exec("rec = { ok: false } submit len(rec.value.items)").expect("null chain should work");
+    let value = exec("rec = { ok: false } submit len(rec.value.items)")
+        .await
+        .expect("null chain should work");
     assert_eq!(value, Value::Number(0.0));
 }
 
-#[test]
-fn arithmetic_and_compare_errors_are_covered() {
+#[tokio::test(flavor = "current_thread")]
+async fn arithmetic_and_compare_errors_are_covered() {
     assert_eq!(
-        exec("submit 7 - 2").expect("subtract should succeed"),
+        exec("submit 7 - 2").await.expect("subtract should succeed"),
         Value::Number(5.0)
     );
     assert_eq!(
-        exec("submit 3 * 4").expect("multiply should succeed"),
+        exec("submit 3 * 4").await.expect("multiply should succeed"),
         Value::Number(12.0)
     );
     assert_eq!(
-        exec("submit 8 / 2").expect("divide should succeed"),
+        exec("submit 8 / 2").await.expect("divide should succeed"),
         Value::Number(4.0)
     );
     assert_eq!(
-        exec("submit 8 % 3").expect("modulo should succeed"),
+        exec("submit 8 % 3").await.expect("modulo should succeed"),
         Value::Number(2.0)
     );
     assert_eq!(
-        exec("submit 1 != 2").expect("not equal should succeed"),
+        exec("submit 1 != 2")
+            .await
+            .expect("not equal should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("submit 1 <= 2").expect("less-equal should succeed"),
+        exec("submit 1 <= 2")
+            .await
+            .expect("less-equal should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("submit 2 > 1").expect("greater should succeed"),
+        exec("submit 2 > 1").await.expect("greater should succeed"),
         Value::Bool(true)
     );
     assert_eq!(
-        exec("submit 2 >= 1").expect("greater-equal should succeed"),
+        exec("submit 2 >= 1")
+            .await
+            .expect("greater-equal should succeed"),
         Value::Bool(true)
     );
 
-    let value = exec("submit [1,2] + [3]").expect("list concat should succeed");
+    let value = exec("submit [1,2] + [3]")
+        .await
+        .expect("list concat should succeed");
     assert_eq!(
         value,
         Value::List(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)].into())
     );
 
-    let value = exec("submit \"a\" + \"b\"").expect("string add should succeed");
+    let value = exec("submit \"a\" + \"b\"")
+        .await
+        .expect("string add should succeed");
     assert_eq!(value, Value::String("ab".to_string().into()));
 
-    let value = exec("submit \"a\" + 1").expect("string coercion should succeed");
+    let value = exec("submit \"a\" + 1")
+        .await
+        .expect("string coercion should succeed");
     assert_eq!(value, Value::String("a1".to_string().into()));
 
-    let value = exec("submit 1 + \"b\"").expect("string coercion should succeed");
+    let value = exec("submit 1 + \"b\"")
+        .await
+        .expect("string coercion should succeed");
     assert_eq!(value, Value::String("1b".to_string().into()));
 
-    let value = exec("submit 1 + true").expect("bool should coerce for addition");
+    let value = exec("submit 1 + true")
+        .await
+        .expect("bool should coerce for addition");
     assert_eq!(value, Value::Number(2.0));
 
-    let value = exec("submit null + 2").expect("null should coerce for addition");
+    let value = exec("submit null + 2")
+        .await
+        .expect("null should coerce for addition");
     assert_eq!(value, Value::Number(2.0));
 
-    let value = exec("submit \"2\" * 3").expect("numeric strings should coerce");
+    let value = exec("submit \"2\" * 3")
+        .await
+        .expect("numeric strings should coerce");
     assert_eq!(value, Value::Number(6.0));
 
-    let value = exec("submit \"2\" < 10").expect("numeric strings should compare");
+    let value = exec("submit \"2\" < 10")
+        .await
+        .expect("numeric strings should compare");
     assert_eq!(value, Value::Bool(true));
 
-    let err = exec("submit {} + 1").expect_err("records should still fail arithmetic");
+    let err = exec("submit {} + 1")
+        .await
+        .expect_err("records should still fail arithmetic");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 }
 
-#[test]
-fn builtin_success_matrix_is_covered() {
+#[tokio::test(flavor = "current_thread")]
+async fn builtin_success_matrix_is_covered() {
     let value = exec(
         r#"
         rec = { a: 1, b: 2 }
@@ -494,6 +572,7 @@ fn builtin_success_matrix_is_covered() {
         }
         "#,
     )
+    .await
     .expect("builtins should succeed");
 
     let record = value.as_record().expect("expected record");
@@ -578,8 +657,8 @@ fn builtin_success_matrix_is_covered() {
     );
 }
 
-#[test]
-fn builtin_error_matrix_is_covered() {
+#[tokio::test(flavor = "current_thread")]
+async fn builtin_error_matrix_is_covered() {
     let cases = [
         ("submit len(true)", "len"),
         ("submit empty(true)", "empty"),
@@ -620,7 +699,7 @@ fn builtin_error_matrix_is_covered() {
     ];
 
     for (source, _) in cases {
-        let err = exec(source).expect_err("builtin should fail");
+        let err = exec(source).await.expect_err("builtin should fail");
         assert!(matches!(
             err,
             RuntimeError::TypeError { .. }
@@ -629,12 +708,14 @@ fn builtin_error_matrix_is_covered() {
         ));
     }
 
-    let err = exec("submit len()").expect_err("arity error should fail");
+    let err = exec("submit len()")
+        .await
+        .expect_err("arity error should fail");
     assert!(matches!(err, RuntimeError::TypeError { .. }));
 }
 
-#[test]
-fn validate_reports_precise_shape_errors() {
+#[tokio::test(flavor = "current_thread")]
+async fn validate_reports_precise_shape_errors() {
     let cases = [
         (
             "submit validate({ name: \"pkg\" }, Type { name: str, version: str })",
@@ -655,7 +736,9 @@ fn validate_reports_precise_shape_errors() {
     ];
 
     for (source, expected) in cases {
-        let err = exec(source).expect_err("validate should reject bad value");
+        let err = exec(source)
+            .await
+            .expect_err("validate should reject bad value");
         assert_eq!(
             err,
             RuntimeError::ValueError {
@@ -665,6 +748,7 @@ fn validate_reports_precise_shape_errors() {
     }
 
     let err = exec("submit validate({ name: \"pkg\" }, { type: \"object\" })")
+        .await
         .expect_err("raw schema records should be rejected");
     assert_eq!(
         err,
@@ -674,10 +758,11 @@ fn validate_reports_precise_shape_errors() {
     );
 }
 
-#[test]
-fn validate_union_accepts_any_variant() {
+#[tokio::test(flavor = "current_thread")]
+async fn validate_union_accepts_any_variant() {
     // `str | null` must accept both a string and a null.
     let out = exec(r#"submit validate({ email: "a@b" }, Type { email: str | null })"#)
+        .await
         .expect("string-branch validate should succeed");
     assert_eq!(
         out,
@@ -689,6 +774,7 @@ fn validate_union_accepts_any_variant() {
     );
 
     let out = exec(r#"submit validate({ email: null }, Type { email: str | null })"#)
+        .await
         .expect("null-branch validate should succeed");
     let Value::Record(rec) = &out else {
         panic!("expected record");
@@ -696,9 +782,10 @@ fn validate_union_accepts_any_variant() {
     assert!(matches!(rec.get("email"), Some(Value::Null)));
 }
 
-#[test]
-fn validate_union_rejects_value_matching_no_variant() {
+#[tokio::test(flavor = "current_thread")]
+async fn validate_union_rejects_value_matching_no_variant() {
     let err = exec(r#"submit validate({ email: 42 }, Type { email: str | null })"#)
+        .await
         .expect_err("number should not match str | null");
     let RuntimeError::ValueError { message } = err else {
         panic!("expected ValueError");
@@ -709,8 +796,8 @@ fn validate_union_rejects_value_matching_no_variant() {
     );
 }
 
-#[test]
-fn helper_functions_are_covered_directly() {
+#[tokio::test(flavor = "current_thread")]
+async fn helper_functions_are_covered_directly() {
     assert!(expect_arg_count("x", &[Value::Null], 1).is_ok());
     assert!(expect_arg_count("x", &[], 1).is_err());
     assert_eq!(as_number(&Value::Number(1.0)).expect("number"), 1.0);
@@ -883,8 +970,8 @@ fn helper_functions_are_covered_directly() {
     );
 }
 
-#[test]
-fn json_helpers_cover_special_paths() {
+#[tokio::test(flavor = "current_thread")]
+async fn json_helpers_cover_special_paths() {
     let json = to_json(&Value::Number(f64::NAN));
     assert_eq!(json, serde_json::Value::Null);
     assert_eq!(to_json(&Value::Null), serde_json::Value::Null);
@@ -923,23 +1010,24 @@ fn test_image() -> Value {
     ))
 }
 
-fn exec_with_global(name: &str, value: Value, source: &str) -> Result<Value, RuntimeError> {
+async fn exec_with_global(name: &str, value: Value, source: &str) -> Result<Value, RuntimeError> {
     let program = crate::parse(source).expect("program should parse");
     let mut state = State::new();
     state.globals.insert(name.to_string(), value);
-    match execute_program(&program, &mut state, &Host)? {
+    match execute_program(&program, &mut state, &Host).await? {
         ExecutionOutcome::Finished(value) => Ok(value),
         ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
     }
 }
 
-#[test]
-fn image_values_expose_read_only_metadata_fields() {
+#[tokio::test(flavor = "current_thread")]
+async fn image_values_expose_read_only_metadata_fields() {
     let value = exec_with_global(
         "img",
         test_image(),
         "submit [img.id, img.label, img.size, img.width, img.height, img.missing]",
     )
+    .await
     .expect("image fields should read");
 
     assert_eq!(
@@ -958,8 +1046,8 @@ fn image_values_expose_read_only_metadata_fields() {
     );
 }
 
-#[test]
-fn image_values_serialize_as_descriptors() {
+#[tokio::test(flavor = "current_thread")]
+async fn image_values_serialize_as_descriptors() {
     let image = test_image();
     assert_eq!(
         to_json(&image),
@@ -977,14 +1065,17 @@ fn image_values_serialize_as_descriptors() {
         r#"{"height":480,"id":"img-1","label":"chart.png","size":1234,"type":"image","width":640}"#
     );
     assert_eq!(
-        exec_with_global("img", image.clone(), "submit img").expect("submit image"),
+        exec_with_global("img", image.clone(), "submit img")
+            .await
+            .expect("submit image"),
         image
     );
 }
 
-#[test]
-fn image_values_are_immutable_and_len_is_unsupported() {
+#[tokio::test(flavor = "current_thread")]
+async fn image_values_are_immutable_and_len_is_unsupported() {
     let err = exec_with_global("img", test_image(), "img.label = \"other\"\nsubmit img")
+        .await
         .expect_err("image field assignment should fail");
     assert_eq!(
         err,
@@ -994,6 +1085,7 @@ fn image_values_are_immutable_and_len_is_unsupported() {
     );
 
     let err = exec_with_global("img", test_image(), "submit len(img)")
+        .await
         .expect_err("len image should fail");
     assert_eq!(
         err,
@@ -1004,8 +1096,8 @@ fn image_values_are_immutable_and_len_is_unsupported() {
     );
 }
 
-#[test]
-fn false_if_branch_and_finish_inside_loop_are_covered() {
+#[tokio::test(flavor = "current_thread")]
+async fn false_if_branch_and_finish_inside_loop_are_covered() {
     let value = exec(
         r#"
         if false {
@@ -1016,6 +1108,7 @@ fn false_if_branch_and_finish_inside_loop_are_covered() {
         submit out
         "#,
     )
+    .await
     .expect("else branch should succeed");
     assert_eq!(value, Value::Number(2.0));
 
@@ -1027,12 +1120,13 @@ fn false_if_branch_and_finish_inside_loop_are_covered() {
         submit 0
         "#,
     )
+    .await
     .expect("submit inside loop should bubble out");
     assert_eq!(value, Value::Number(1.0));
 }
 
-#[test]
-fn parallel_branch_panics_are_reported_as_runtime_errors() {
+#[tokio::test(flavor = "current_thread")]
+async fn parallel_branch_panics_are_reported_as_runtime_errors() {
     let err = exec(
         r#"
         parallel {
@@ -1041,6 +1135,7 @@ fn parallel_branch_panics_are_reported_as_runtime_errors() {
         submit 1
         "#,
     )
+    .await
     .expect_err("parallel panic should be reported");
 
     assert_eq!(
@@ -1051,32 +1146,28 @@ fn parallel_branch_panics_are_reported_as_runtime_errors() {
     );
 }
 
-#[test]
-fn parallel_tool_calls_use_host_batch_when_available() {
+#[tokio::test(flavor = "current_thread")]
+async fn parallel_tool_calls_use_host_batch_when_available() {
     struct BatchHost {
         calls: AtomicUsize,
         batches: AtomicUsize,
     }
 
     impl ToolHost for BatchHost {
-        fn call(&self, _name: &str, _args: &Record) -> Result<Value, ToolHostError> {
+        async fn call(&self, _name: String, _args: Record) -> Result<Value, ToolHostError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Err(ToolHostError::new("single call should not be used"))
         }
 
-        fn call_batch(
-            &self,
-            calls: &[(&str, &Record)],
-            push_result: &mut dyn FnMut(Result<Value, ToolHostError>),
-        ) -> bool {
+        async fn call_batch(&self, calls: Vec<ToolHostCall>) -> Vec<Result<Value, ToolHostError>> {
             self.batches.fetch_add(1, Ordering::Relaxed);
-            for (name, args) in calls {
-                push_result(match *name {
-                    "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
+            calls
+                .into_iter()
+                .map(|call| match call.name.as_str() {
+                    "echo" => Ok(call.args.get("value").cloned().unwrap_or(Value::Null)),
                     other => Err(ToolHostError::new(format!("unknown tool: {other}"))),
-                });
-            }
-            true
+                })
+                .collect()
         }
     }
 
@@ -1095,7 +1186,9 @@ fn parallel_tool_calls_use_host_batch_when_available() {
     )
     .expect("program should parse");
     let mut state = State::new();
-    let outcome = execute_program(&program, &mut state, &host).expect("program should run");
+    let outcome = execute_program(&program, &mut state, &host)
+        .await
+        .expect("program should run");
 
     assert_eq!(
         outcome,
@@ -1107,8 +1200,8 @@ fn parallel_tool_calls_use_host_batch_when_available() {
     assert_eq!(host.batches.load(Ordering::Relaxed), 1);
 }
 
-#[test]
-fn truthiness_covers_scalar_and_container_values() {
+#[tokio::test(flavor = "current_thread")]
+async fn truthiness_covers_scalar_and_container_values() {
     assert!(!is_truthy(&Value::Null));
     assert!(!is_truthy(&Value::Bool(false)));
     assert!(!is_truthy(&Value::Number(0.0)));
@@ -1122,14 +1215,14 @@ fn truthiness_covers_scalar_and_container_values() {
 struct AsyncHost;
 
 impl ToolHost for AsyncHost {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        Host.call(name, args)
+    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+        Host.call(name, args).await
     }
 
-    fn start_call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
+    async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
         let mut record = Record::default();
         record.insert("__handle__".to_string(), Value::String("task".into()));
-        record.insert("tool".to_string(), Value::String(name.to_string().into()));
+        record.insert("tool".to_string(), Value::String(name.into()));
         record.insert(
             "value".to_string(),
             args.get("value").cloned().unwrap_or(Value::Null),
@@ -1137,20 +1230,20 @@ impl ToolHost for AsyncHost {
         Ok(Value::Record(Arc::new(record)))
     }
 
-    fn await_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
+    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
         let record = handle
             .as_record()
             .ok_or_else(|| ToolHostError::new("expected handle record"))?;
         Ok(record.get("value").cloned().unwrap_or(Value::Null))
     }
 
-    fn cancel_handle(&self, _handle: &Value) -> Result<Value, ToolHostError> {
+    async fn cancel_handle(&self, _handle: Value) -> Result<Value, ToolHostError> {
         Ok(Value::Null)
     }
 }
 
-#[test]
-fn async_tool_handles_can_be_started_awaited_and_cancelled() {
+#[tokio::test(flavor = "current_thread")]
+async fn async_tool_handles_can_be_started_awaited_and_cancelled() {
     let program = crate::parse(
         r#"
         handle = start call echo { value: "done" }
@@ -1161,7 +1254,9 @@ fn async_tool_handles_can_be_started_awaited_and_cancelled() {
     )
     .expect("program should parse");
     let mut state = State::new();
-    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let outcome = execute_program(&program, &mut state, &AsyncHost)
+        .await
+        .expect("program should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1172,8 +1267,8 @@ fn async_tool_handles_can_be_started_awaited_and_cancelled() {
     assert_eq!(record["value"], Value::String("done".into()));
 }
 
-#[test]
-fn await_unknown_handle_surfaces_runtime_error() {
+#[tokio::test(flavor = "current_thread")]
+async fn await_unknown_handle_surfaces_runtime_error() {
     let program = crate::parse(
         r#"
         result = await 1
@@ -1182,7 +1277,9 @@ fn await_unknown_handle_surfaces_runtime_error() {
     )
     .expect("program should parse");
     let mut state = State::new();
-    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let outcome = execute_program(&program, &mut state, &AsyncHost)
+        .await
+        .expect("program should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1196,8 +1293,8 @@ fn await_unknown_handle_surfaces_runtime_error() {
     );
 }
 
-#[test]
-fn await_list_of_handles_returns_results_in_order() {
+#[tokio::test(flavor = "current_thread")]
+async fn await_list_of_handles_returns_results_in_order() {
     let program = crate::parse(
         r#"
         handles = [
@@ -1211,7 +1308,9 @@ fn await_list_of_handles_returns_results_in_order() {
     )
     .expect("program should parse");
     let mut state = State::new();
-    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let outcome = execute_program(&program, &mut state, &AsyncHost)
+        .await
+        .expect("program should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1228,8 +1327,8 @@ fn await_list_of_handles_returns_results_in_order() {
     }
 }
 
-#[test]
-fn await_list_preserves_per_item_errors() {
+#[tokio::test(flavor = "current_thread")]
+async fn await_list_preserves_per_item_errors() {
     let program = crate::parse(
         r#"
         handles = [start call echo { value: "done" }, 1]
@@ -1239,7 +1338,9 @@ fn await_list_preserves_per_item_errors() {
     )
     .expect("program should parse");
     let mut state = State::new();
-    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let outcome = execute_program(&program, &mut state, &AsyncHost)
+        .await
+        .expect("program should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1259,8 +1360,8 @@ fn await_list_preserves_per_item_errors() {
     assert_eq!(err["error"], Value::String("expected handle record".into()));
 }
 
-#[test]
-fn await_record_of_handles_returns_record_of_wrappers() {
+#[tokio::test(flavor = "current_thread")]
+async fn await_record_of_handles_returns_record_of_wrappers() {
     let program = crate::parse(
         r#"
         handles = {
@@ -1273,7 +1374,9 @@ fn await_record_of_handles_returns_record_of_wrappers() {
     )
     .expect("program should parse");
     let mut state = State::new();
-    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let outcome = execute_program(&program, &mut state, &AsyncHost)
+        .await
+        .expect("program should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1283,8 +1386,8 @@ fn await_record_of_handles_returns_record_of_wrappers() {
     );
 }
 
-#[test]
-fn result_unwrap_extracts_awaited_handles_and_parallel_results() {
+#[tokio::test(flavor = "current_thread")]
+async fn result_unwrap_extracts_awaited_handles_and_parallel_results() {
     let program = crate::parse(
         r#"
         handle = start call echo { value: "done" }
@@ -1294,7 +1397,9 @@ fn result_unwrap_extracts_awaited_handles_and_parallel_results() {
     )
     .expect("program should parse");
     let mut state = State::new();
-    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let outcome = execute_program(&program, &mut state, &AsyncHost)
+        .await
+        .expect("program should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1311,7 +1416,9 @@ fn result_unwrap_extracts_awaited_handles_and_parallel_results() {
     )
     .expect("program should parse");
     let mut state = State::new();
-    let outcome = execute_program(&program, &mut state, &AsyncHost).expect("program should run");
+    let outcome = execute_program(&program, &mut state, &AsyncHost)
+        .await
+        .expect("program should run");
     let ExecutionOutcome::Finished(value) = outcome else {
         panic!("expected finish");
     };
@@ -1333,8 +1440,8 @@ fn unwrap_schema(value: &Value) -> &Record {
         .expect("Type value must unwrap to a schema record")
 }
 
-#[test]
-fn type_scalar_schemas_const_fold_to_json_schema() {
+#[tokio::test(flavor = "current_thread")]
+async fn type_scalar_schemas_const_fold_to_json_schema() {
     for (src, expected) in [
         ("submit Type { v: str }", "string"),
         ("submit Type { v: int }", "integer"),
@@ -1342,7 +1449,7 @@ fn type_scalar_schemas_const_fold_to_json_schema() {
         ("submit Type { v: bool }", "boolean"),
         ("submit Type { v: dict }", "object"),
     ] {
-        let value = exec(src).expect("should succeed");
+        let value = exec(src).await.expect("should succeed");
         let schema = unwrap_schema(&value);
         assert_eq!(schema["type"], Value::String("object".into()));
         let props = schema["properties"]
@@ -1358,19 +1465,22 @@ fn type_scalar_schemas_const_fold_to_json_schema() {
     }
 }
 
-#[test]
-fn type_any_is_empty_schema() {
-    let value = exec("submit Type { v: any }").expect("should succeed");
+#[tokio::test(flavor = "current_thread")]
+async fn type_any_is_empty_schema() {
+    let value = exec("submit Type { v: any }")
+        .await
+        .expect("should succeed");
     let schema = unwrap_schema(&value);
     let props = schema["properties"].as_record().expect("properties");
     let v = props["v"].as_record().expect("field schema");
     assert!(v.is_empty(), "any must be an empty JSON Schema");
 }
 
-#[test]
-fn type_enum_produces_string_with_enum_array() {
-    let value =
-        exec(r#"submit Type { status: enum["ok", "err", "pending"] }"#).expect("should succeed");
+#[tokio::test(flavor = "current_thread")]
+async fn type_enum_produces_string_with_enum_array() {
+    let value = exec(r#"submit Type { status: enum["ok", "err", "pending"] }"#)
+        .await
+        .expect("should succeed");
     let schema = unwrap_schema(&value);
     let status = schema["properties"].as_record().unwrap()["status"]
         .as_record()
@@ -1385,9 +1495,11 @@ fn type_enum_produces_string_with_enum_array() {
     assert_eq!(strings[2], &Value::String("pending".into()));
 }
 
-#[test]
-fn type_list_schema_wraps_inner_type_as_items() {
-    let value = exec("submit Type { tags: list[str] }").expect("should succeed");
+#[tokio::test(flavor = "current_thread")]
+async fn type_list_schema_wraps_inner_type_as_items() {
+    let value = exec("submit Type { tags: list[str] }")
+        .await
+        .expect("should succeed");
     let schema = unwrap_schema(&value);
     let tags = schema["properties"].as_record().unwrap()["tags"]
         .as_record()
@@ -1397,9 +1509,11 @@ fn type_list_schema_wraps_inner_type_as_items() {
     assert_eq!(items["type"], Value::String("string".into()));
 }
 
-#[test]
-fn type_list_of_enum_preserves_nested_shape() {
-    let value = exec(r#"submit Type { labels: list[enum["a", "b"]] }"#).expect("should succeed");
+#[tokio::test(flavor = "current_thread")]
+async fn type_list_of_enum_preserves_nested_shape() {
+    let value = exec(r#"submit Type { labels: list[enum["a", "b"]] }"#)
+        .await
+        .expect("should succeed");
     let schema = unwrap_schema(&value);
     let labels = schema["properties"].as_record().unwrap()["labels"]
         .as_record()
@@ -1409,8 +1523,8 @@ fn type_list_of_enum_preserves_nested_shape() {
     assert!(matches!(items["enum"], Value::List(_)));
 }
 
-#[test]
-fn type_nested_object_is_full_subschema() {
+#[tokio::test(flavor = "current_thread")]
+async fn type_nested_object_is_full_subschema() {
     let value = exec(
         r#"
         submit Type {
@@ -1422,6 +1536,7 @@ fn type_nested_object_is_full_subschema() {
         }
         "#,
     )
+    .await
     .expect("should succeed");
     let schema = unwrap_schema(&value);
     let meta = schema["properties"].as_record().unwrap()["meta"]
@@ -1440,9 +1555,11 @@ fn type_nested_object_is_full_subschema() {
     assert_eq!(required.len(), 2);
 }
 
-#[test]
-fn type_optional_field_drops_from_required() {
-    let value = exec("submit Type { a: str, b: int? }").expect("should succeed");
+#[tokio::test(flavor = "current_thread")]
+async fn type_optional_field_drops_from_required() {
+    let value = exec("submit Type { a: str, b: int? }")
+        .await
+        .expect("should succeed");
     let schema = unwrap_schema(&value);
     let required = match &schema["required"] {
         Value::List(items) => items,
@@ -1455,14 +1572,14 @@ fn type_optional_field_drops_from_required() {
     assert!(props.get("b").is_some());
 }
 
-#[test]
-fn type_ref_resolves_previously_defined_type() {
+#[tokio::test(flavor = "current_thread")]
+async fn type_ref_resolves_previously_defined_type() {
     let src = r#"
         Inner = Type { count: int }
         Outer = Type { name: str, nested: Inner }
         submit Outer
     "#;
-    let value = exec(src).expect("should succeed");
+    let value = exec(src).await.expect("should succeed");
     let schema = unwrap_schema(&value);
     let nested = schema["properties"].as_record().unwrap()["nested"]
         .as_record()
@@ -1475,8 +1592,8 @@ fn type_ref_resolves_previously_defined_type() {
     );
 }
 
-#[test]
-fn type_ref_to_non_type_value_is_type_error() {
+#[tokio::test(flavor = "current_thread")]
+async fn type_ref_to_non_type_value_is_type_error() {
     let err = exec(
         r#"
         Inner = { count: 5 }
@@ -1484,6 +1601,7 @@ fn type_ref_to_non_type_value_is_type_error() {
         submit Outer
         "#,
     )
+    .await
     .expect_err("should fail: Inner is not a Type value");
     assert!(
         matches!(err, RuntimeError::TypeError { .. }),
@@ -1491,9 +1609,11 @@ fn type_ref_to_non_type_value_is_type_error() {
     );
 }
 
-#[test]
-fn type_ref_with_undefined_name_is_undefined_variable() {
-    let err = exec("submit Type { nested: MissingType }").expect_err("unknown ref should fail");
+#[tokio::test(flavor = "current_thread")]
+async fn type_ref_with_undefined_name_is_undefined_variable() {
+    let err = exec("submit Type { nested: MissingType }")
+        .await
+        .expect_err("unknown ref should fail");
     assert_eq!(
         err,
         RuntimeError::UndefinedVariable {
@@ -1502,8 +1622,8 @@ fn type_ref_with_undefined_name_is_undefined_variable() {
     );
 }
 
-#[test]
-fn compile_stats_count_const_folded_and_dynamic_literals() {
+#[tokio::test(flavor = "current_thread")]
+async fn compile_stats_count_const_folded_and_dynamic_literals() {
     let src = r#"
         Inner = Type { n: int }
         A = Type { x: str }
@@ -1522,8 +1642,8 @@ fn compile_stats_count_const_folded_and_dynamic_literals() {
     assert_eq!(stats.type_ref_sites, 1);
 }
 
-#[test]
-fn profile_report_surfaces_resolve_type_ref_counts() {
+#[tokio::test(flavor = "current_thread")]
+async fn profile_report_surfaces_resolve_type_ref_counts() {
     let src = r#"
         Inner = Type { n: int }
         Outer = Type { nested: Inner }
@@ -1535,8 +1655,9 @@ fn profile_report_surfaces_resolve_type_ref_counts() {
     let program = crate::parse(src).expect("should parse");
     let compiled = crate::compile_program(&program);
     let mut state = State::new();
-    let (_outcome, report) =
-        crate::profile_compiled(&compiled, &mut state, &Host).expect("profile should succeed");
+    let (_outcome, report) = crate::profile_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("profile should succeed");
     let names: Vec<_> = report.instruction_stats().iter().map(|s| s.name).collect();
     assert!(
         names.contains(&"resolve_type_ref"),
@@ -1562,13 +1683,13 @@ fn profile_report_surfaces_resolve_type_ref_counts() {
     assert_eq!(report.compile_stats().type_literals_total, 2);
 }
 
-#[test]
-fn type_literal_inside_tool_call_args_passes_through_as_record() {
+#[tokio::test(flavor = "current_thread")]
+async fn type_literal_inside_tool_call_args_passes_through_as_record() {
     struct CaptureHost {
         captured: std::sync::Mutex<Option<Value>>,
     }
     impl ToolHost for CaptureHost {
-        fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
+        async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
             if name == "spawn" {
                 let schema = args
                     .get("output")
@@ -1592,7 +1713,9 @@ fn type_literal_inside_tool_call_args_passes_through_as_record() {
     )
     .expect("should parse");
     let mut state = State::new();
-    crate::execute_program(&program, &mut state, &host).expect("should run");
+    crate::execute_program(&program, &mut state, &host)
+        .await
+        .expect("should run");
 
     let captured = host.captured.lock().unwrap().clone().expect("captured");
     let inner = crate::runtime::unwrap_type_value(&captured).expect("has $lash_type");
@@ -1600,31 +1723,33 @@ fn type_literal_inside_tool_call_args_passes_through_as_record() {
     assert_eq!(schema["type"], Value::String("object".into()));
 }
 
-#[test]
-fn duplicate_field_name_is_parse_error() {
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_field_name_is_parse_error() {
     let err = crate::parse("x = Type { a: str, a: int }").expect_err("duplicate field");
     let message = format!("{err}");
     assert!(message.contains("duplicate field"), "{message}");
 }
 
-#[test]
-fn empty_enum_is_parse_error() {
+#[tokio::test(flavor = "current_thread")]
+async fn empty_enum_is_parse_error() {
     let err = crate::parse("x = Type { status: enum[] }").expect_err("empty enum");
     let message = format!("{err}");
     assert!(message.contains("enum"), "{message}");
 }
 
-#[test]
-fn unknown_type_constructor_becomes_ref_not_error_at_parse() {
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_type_constructor_becomes_ref_not_error_at_parse() {
     // Unknown identifiers in type position are treated as refs; runtime
     // resolution is what errors out.
     let program = crate::parse("submit Type { x: Unknown }").expect("should parse as ref");
     assert!(matches!(program.statements.last(), Some(Stmt::Submit(_))));
 }
 
-#[test]
-fn lash_type_wrapper_survives_round_trip_through_json() {
-    let value = exec("submit Type { n: int }").expect("should succeed");
+#[tokio::test(flavor = "current_thread")]
+async fn lash_type_wrapper_survives_round_trip_through_json() {
+    let value = exec("submit Type { n: int }")
+        .await
+        .expect("should succeed");
     // to_json + from_json must preserve the Type-ness.
     let json = crate::runtime::to_json(&value);
     let recovered = crate::runtime::from_json(json);

@@ -1,31 +1,63 @@
 use super::{Record, Value};
+use futures_util::future::join_all;
+use std::future::Future;
 use thiserror::Error;
 
+#[derive(Clone, Debug)]
+pub struct ToolHostCall {
+    pub name: String,
+    pub args: Record,
+}
+
 pub trait ToolHost: Sync {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError>;
+    fn call(
+        &self,
+        name: String,
+        args: Record,
+    ) -> impl Future<Output = Result<Value, ToolHostError>> + Send;
 
     fn call_batch(
         &self,
-        _calls: &[(&str, &Record)],
-        _push_result: &mut dyn FnMut(Result<Value, ToolHostError>),
-    ) -> bool {
-        false
+        calls: Vec<ToolHostCall>,
+    ) -> impl Future<Output = Vec<Result<Value, ToolHostError>>> + Send {
+        async move {
+            join_all(
+                calls
+                    .into_iter()
+                    .map(|call| self.call(call.name, call.args)),
+            )
+            .await
+        }
     }
 
-    fn start_call(&self, _name: &str, _args: &Record) -> Result<Value, ToolHostError> {
-        Err(ToolHostError::new("async tool starts are unavailable"))
+    fn start_call(
+        &self,
+        _name: String,
+        _args: Record,
+    ) -> impl Future<Output = Result<Value, ToolHostError>> + Send {
+        async { Err(ToolHostError::new("async tool starts are unavailable")) }
     }
 
-    fn await_handle(&self, _handle: &Value) -> Result<Value, ToolHostError> {
-        Err(ToolHostError::new("async tool handles are unavailable"))
+    fn await_handle(
+        &self,
+        _handle: Value,
+    ) -> impl Future<Output = Result<Value, ToolHostError>> + Send {
+        async { Err(ToolHostError::new("async tool handles are unavailable")) }
     }
 
-    fn cancel_handle(&self, _handle: &Value) -> Result<Value, ToolHostError> {
-        Err(ToolHostError::new("async tool handles are unavailable"))
+    fn cancel_handle(
+        &self,
+        _handle: Value,
+    ) -> impl Future<Output = Result<Value, ToolHostError>> + Send {
+        async { Err(ToolHostError::new("async tool handles are unavailable")) }
     }
 
-    fn print(&self, _value: &Value) -> Result<(), ToolHostError> {
-        Ok(())
+    fn print(&self, _value: Value) -> impl Future<Output = Result<(), ToolHostError>> + Send {
+        async { Ok(()) }
+    }
+
+    fn yield_now(&self) -> impl Future<Output = ()> + Send {
+        async {}
     }
 }
 

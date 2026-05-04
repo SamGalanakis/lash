@@ -148,10 +148,6 @@ impl App {
         self.ui_extensions.as_ref()
     }
 
-    pub fn ui_extensions_handle(&self) -> Arc<UiExtensions> {
-        Arc::clone(&self.ui_extensions)
-    }
-
     /// Whether the session picker is active.
     pub fn has_session_picker(&self) -> bool {
         matches!(&self.overlay, Some(OverlayState::SessionPicker(state)) if !state.items.is_empty())

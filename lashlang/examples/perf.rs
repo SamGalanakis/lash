@@ -114,11 +114,15 @@ fn main() {
         if index > 0 {
             println!();
         }
-        run_perf(mode, scenario, iterations);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        run_perf(&rt, mode, scenario, iterations);
     }
 }
 
-fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
+fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterations: usize) {
     let source = benchmark_program(scenario);
     let host = BenchHost;
     let mut scratch = ExecutionScratch::new();
@@ -132,9 +136,14 @@ fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
             let compiled = compile_program(&program);
             for _ in 0..iterations {
                 let mut state = seeded_state();
-                let outcome =
-                    execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
-                        .expect("benchmark execution should succeed");
+                let outcome = rt
+                    .block_on(execute_compiled_with_scratch(
+                        &compiled,
+                        &mut state,
+                        &host,
+                        &mut scratch,
+                    ))
+                    .expect("benchmark execution should succeed");
                 expect_finished(outcome);
             }
         }
@@ -156,9 +165,14 @@ fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
                 let mut state = seeded_state();
                 let compiled =
                     compile_source(std::hint::black_box(source)).expect("compile should succeed");
-                let outcome =
-                    execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
-                        .expect("benchmark execution should succeed");
+                let outcome = rt
+                    .block_on(execute_compiled_with_scratch(
+                        &compiled,
+                        &mut state,
+                        &host,
+                        &mut scratch,
+                    ))
+                    .expect("benchmark execution should succeed");
                 expect_finished(outcome);
             }
         }
@@ -173,9 +187,14 @@ fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
                 let compiled = cache
                     .get_or_compile(std::hint::black_box(source))
                     .expect("cached compile should succeed");
-                let outcome =
-                    execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
-                        .expect("benchmark execution should succeed");
+                let outcome = rt
+                    .block_on(execute_compiled_with_scratch(
+                        &compiled,
+                        &mut state,
+                        &host,
+                        &mut scratch,
+                    ))
+                    .expect("benchmark execution should succeed");
                 expect_finished(outcome);
             }
         }
@@ -190,9 +209,14 @@ fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
                 let compiled = cache
                     .get_or_compile(std::hint::black_box(source))
                     .expect("cached compile should succeed");
-                let outcome =
-                    execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
-                        .expect("benchmark execution should succeed");
+                let outcome = rt
+                    .block_on(execute_compiled_with_scratch(
+                        &compiled,
+                        &mut state,
+                        &host,
+                        &mut scratch,
+                    ))
+                    .expect("benchmark execution should succeed");
                 expect_finished(outcome);
             }
         }
@@ -200,7 +224,13 @@ fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
             let mut state = seeded_state();
             let compiled =
                 compile_source(std::hint::black_box(source)).expect("compile should succeed");
-            let outcome = execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
+            let outcome = rt
+                .block_on(execute_compiled_with_scratch(
+                    &compiled,
+                    &mut state,
+                    &host,
+                    &mut scratch,
+                ))
                 .expect("benchmark execution should succeed");
             expect_finished(outcome);
         }
@@ -211,7 +241,13 @@ fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
             let mut state = seeded_state();
             let compiled =
                 compile_source(std::hint::black_box(source)).expect("compile should succeed");
-            let outcome = execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
+            let outcome = rt
+                .block_on(execute_compiled_with_scratch(
+                    &compiled,
+                    &mut state,
+                    &host,
+                    &mut scratch,
+                ))
                 .expect("benchmark execution should succeed");
             expect_finished(outcome);
         }
@@ -220,7 +256,13 @@ fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
             let compiled = cache
                 .get_or_compile(std::hint::black_box(source))
                 .expect("cached compile should succeed");
-            let outcome = execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
+            let outcome = rt
+                .block_on(execute_compiled_with_scratch(
+                    &compiled,
+                    &mut state,
+                    &host,
+                    &mut scratch,
+                ))
                 .expect("benchmark execution should succeed");
             expect_finished(outcome);
         }
@@ -233,9 +275,14 @@ fn run_perf(mode: Mode, scenario: Scenario, iterations: usize) {
                 let encoded = serde_json::to_vec(&snapshot).expect("snapshot encode");
                 let decoded = serde_json::from_slice(&encoded).expect("snapshot decode");
                 state = State::from_snapshot(decoded);
-                let outcome =
-                    execute_compiled_with_scratch(&compiled, &mut state, &host, &mut scratch)
-                        .expect("benchmark execution should succeed");
+                let outcome = rt
+                    .block_on(execute_compiled_with_scratch(
+                        &compiled,
+                        &mut state,
+                        &host,
+                        &mut scratch,
+                    ))
+                    .expect("benchmark execution should succeed");
                 expect_finished(outcome);
             }
         }

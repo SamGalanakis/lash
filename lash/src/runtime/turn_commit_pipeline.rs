@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::session_model::SessionEventRecord;
-use crate::store::{PersistedStateCommit, RuntimePersistence, SessionGraphCommit, StoreError};
+use crate::store::{GraphCommitDelta, RuntimeCommit, RuntimePersistence, StoreError};
 use crate::{
     AssembledTurn, MessageSequence, PluginSession, Session, SessionPolicy, SessionReadView,
     ToolCallRecord,
@@ -27,6 +27,7 @@ struct ProgressBoundarySnapshot<'a> {
 pub(super) struct TurnCommitPipeline {
     progress: Option<TurnProgress>,
     final_state: Option<PersistedSessionState>,
+    final_graph_commit: Option<GraphCommitDelta>,
 }
 
 impl TurnCommitPipeline {
@@ -34,6 +35,7 @@ impl TurnCommitPipeline {
         Self {
             progress: Some(TurnProgress::from_state(state)),
             final_state: None,
+            final_graph_commit: None,
         }
     }
 
@@ -267,6 +269,8 @@ impl TurnCommitPipeline {
                 .progress
                 .take()
                 .expect("turn commit pipeline progress must be present");
+            self.final_graph_commit =
+                Some(progress.graph_commit(progress.state().graph_replace_required));
             self.final_state = Some(progress.into_final_state());
         }
         self.final_state
@@ -281,11 +285,8 @@ impl TurnCommitPipeline {
     ) -> Result<(), StoreError> {
         let progress = self.progress_mut();
         let state = progress.state();
-        let graph = progress.graph_commit(
-            state.persisted_graph_node_count,
-            state.graph_replace_required,
-        );
-        Self::apply_commit(store, progress.state_mut(), graph, usage_deltas).await
+        let graph = progress.graph_commit(state.graph_replace_required);
+        self.apply_commit(store, graph, usage_deltas).await
     }
 
     async fn final_commit_with_snapshots(
@@ -296,8 +297,17 @@ impl TurnCommitPipeline {
         store: Option<&(dyn RuntimePersistence + '_)>,
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Result<(), StoreError> {
+        let progress_graph = self
+            .progress
+            .as_ref()
+            .map(|progress| progress.graph_commit(progress.state().graph_replace_required))
+            .or_else(|| self.final_graph_commit.clone());
         let state = self.final_state_mut();
+        let materialized_graph = state.session_graph.clone();
         state.apply_exported_state(returned_state);
+        if state.session_graph.nodes.is_empty() && !materialized_graph.nodes.is_empty() {
+            state.session_graph = materialized_graph;
+        }
         for entry in usage_deltas.iter().cloned() {
             merge_ledger_entry(&mut state.token_ledger, entry);
         }
@@ -308,36 +318,66 @@ impl TurnCommitPipeline {
             state.set_execution_state_snapshot(execution_state_snapshot);
         }
 
-        match store {
-            Some(store) => {
-                let graph = PersistedStateCommit::persisted_state(state, usage_deltas).graph;
-                Self::apply_commit(store, state, graph, usage_deltas).await
-            }
-            None => {
-                state.discard_runtime_snapshots();
-                Ok(())
-            }
+        if let Some(store) = store {
+            let graph = if state.graph_replace_required {
+                GraphCommitDelta::ReplaceFull(state.session_graph.clone())
+            } else if state.head_revision.is_none() {
+                match progress_graph {
+                    Some(GraphCommitDelta::Append {
+                        nodes,
+                        leaf_node_id,
+                    }) if state.session_graph.nodes.is_empty() => GraphCommitDelta::ReplaceFull(
+                        crate::SessionGraph::from_nodes(nodes, leaf_node_id),
+                    ),
+                    _ => GraphCommitDelta::ReplaceFull(state.session_graph.clone()),
+                }
+            } else {
+                match progress_graph {
+                    Some(GraphCommitDelta::Unchanged { .. })
+                        if !state.session_graph.nodes.is_empty() =>
+                    {
+                        GraphCommitDelta::ReplaceFull(state.session_graph.clone())
+                    }
+                    Some(graph) => graph,
+                    None => GraphCommitDelta::Unchanged {
+                        leaf_node_id: state.session_graph.leaf_node_id.clone(),
+                    },
+                }
+            };
+            self.apply_commit(store, graph, usage_deltas).await
+        } else {
+            state.discard_runtime_snapshots();
+            Ok(())
         }
     }
 
     async fn apply_commit(
+        &mut self,
         store: &(dyn RuntimePersistence + '_),
-        state: &mut PersistedSessionState,
-        graph: SessionGraphCommit,
+        graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Result<(), StoreError> {
+        let state = self.state_mut();
         let commit =
-            PersistedStateCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
-        let result = crate::store::apply_runtime_commit(store, commit).await?;
+            RuntimeCommit::persisted_state_with_graph_commit(state, graph.clone(), usage_deltas);
+        let result = store.commit_runtime_state(commit).await?;
         state.apply_persisted_commit_result(result);
+        if let Some(progress) = self.progress.as_mut() {
+            progress.mark_graph_commit_persisted(&graph);
+        }
         Ok(())
     }
 
     async fn snapshot_dirty_execution_state(session: &mut Session) -> Option<Option<Vec<u8>>> {
-        if !session.execution_state_dirty() {
+        let mode_session = std::sync::Arc::clone(session.plugins().mode_session());
+        if !mode_session.execution_state_dirty() {
             return None;
         }
-        match session.snapshot_execution_state().await {
+        let session_id = session.session_id().to_string();
+        match mode_session
+            .snapshot_execution_state(crate::plugin::ModeSessionContext::new(session, &session_id))
+            .await
+        {
             Ok(snapshot) => Some(snapshot),
             Err(err) => {
                 tracing::warn!("failed to snapshot dirty execution state: {err}");
@@ -349,104 +389,162 @@ impl TurnCommitPipeline {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
-
-    use sha2::Digest;
 
     use super::*;
     use crate::session_model::{ConversationRecord, MessageRole, Part, PartKind, PruneState};
-    use crate::store::{BlobStore, RetentionStore, SessionGraphStore, SessionHeadStore};
-    use crate::{Message, SessionGraph, TokenUsage, UsageLedgerStore, shared_parts};
+    use crate::{Message, SessionGraph, TokenUsage, shared_parts};
 
     #[derive(Default)]
     struct RecordingStore {
-        blobs: Mutex<HashMap<String, Vec<u8>>>,
         session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
         session_graph: Mutex<SessionGraph>,
         usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
         runtime_commit_count: Mutex<usize>,
     }
 
-    #[async_trait::async_trait]
-    impl BlobStore for RecordingStore {
-        async fn put_blob(&self, content: &[u8]) -> crate::BlobRef {
-            let hash = format!("{:x}", sha2::Sha256::digest(content));
-            self.blobs
-                .lock()
-                .expect("lock blobs")
-                .insert(hash.clone(), content.to_vec());
-            crate::BlobRef(hash)
-        }
-
-        async fn get_blob(&self, blob_ref: &crate::BlobRef) -> Option<Vec<u8>> {
-            self.blobs
-                .lock()
-                .expect("lock blobs")
-                .get(blob_ref.as_str())
-                .cloned()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl UsageLedgerStore for RecordingStore {
-        async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
-            self.usage_deltas
-                .lock()
-                .expect("lock usage deltas")
-                .extend(entries.iter().cloned());
-        }
-
-        async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry> {
-            self.usage_deltas.lock().expect("lock usage deltas").clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl SessionHeadStore for RecordingStore {
+    impl RecordingStore {
         async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
             *self.session_head_meta.lock().expect("lock head meta") = Some(meta);
         }
+    }
 
-        async fn load_session_head_meta(&self) -> Option<crate::SessionHeadMeta> {
-            self.session_head_meta
+    #[async_trait::async_trait]
+    impl RuntimePersistence for RecordingStore {
+        async fn load_session(
+            &self,
+            scope: crate::store::SessionReadScope,
+        ) -> Result<Option<crate::store::PersistedSessionRead>, StoreError> {
+            let Some(meta) = self
+                .session_head_meta
                 .lock()
                 .expect("lock head meta")
                 .clone()
+            else {
+                return Ok(None);
+            };
+            let mut graph = self.session_graph.lock().expect("lock graph").clone();
+            if let crate::store::SessionReadScope::ActivePath { leaf_node_id } = scope {
+                if let Some(leaf_node_id) = leaf_node_id.or_else(|| meta.leaf_node_id.clone()) {
+                    graph.set_leaf_node_id(Some(leaf_node_id));
+                }
+                graph = graph.fork_current_path();
+            }
+            Ok(Some(crate::store::PersistedSessionRead {
+                session_id: meta.session_id,
+                head_revision: meta.head_revision,
+                config: meta.config,
+                graph,
+                checkpoint_ref: meta.checkpoint_ref,
+                checkpoint: None,
+                token_ledger: self.usage_deltas.lock().expect("lock usage deltas").clone(),
+            }))
         }
 
-        async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
-
-        async fn load_session_meta(&self) -> Option<crate::store::SessionMeta> {
-            None
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl SessionGraphStore for RecordingStore {
-        async fn replace_session_graph(&self, graph: &SessionGraph) {
-            *self.session_graph.lock().expect("lock graph") = graph.clone();
-        }
-
-        async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]) {
-            self.session_graph
+        async fn load_node(
+            &self,
+            node_id: &str,
+        ) -> Result<Option<crate::SessionNodeRecord>, StoreError> {
+            Ok(self
+                .session_graph
                 .lock()
                 .expect("lock graph")
-                .extend_node_records(nodes.iter().cloned());
+                .find_node(node_id)
+                .cloned())
         }
 
-        async fn load_session_graph(&self) -> SessionGraph {
-            self.session_graph.lock().expect("lock graph").clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl RetentionStore for RecordingStore {
-        async fn record_runtime_commit(&self) {
+        async fn commit_runtime_state(
+            &self,
+            commit: RuntimeCommit,
+        ) -> Result<crate::store::RuntimeCommitResult, StoreError> {
+            let mut meta = self.session_head_meta.lock().expect("lock head meta");
+            let actual = meta.as_ref().map_or(0, |meta| meta.head_revision);
+            if let Some(bound) = meta.as_ref().map(|meta| meta.session_id.clone())
+                && bound != commit.session_id
+            {
+                return Err(StoreError::SessionBindingMismatch {
+                    bound_session_id: bound,
+                    attempted_session_id: commit.session_id,
+                });
+            }
+            if commit.expected_head_revision.is_some()
+                && commit.expected_head_revision != Some(actual)
+            {
+                return Err(StoreError::HeadRevisionConflict {
+                    expected: commit.expected_head_revision,
+                    actual,
+                });
+            }
+            let mut graph = self.session_graph.lock().expect("lock graph");
+            let leaf_node_id = match &commit.graph {
+                GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
+                GraphCommitDelta::Append {
+                    nodes,
+                    leaf_node_id,
+                } => {
+                    graph.extend_node_records(nodes.iter().cloned());
+                    leaf_node_id.clone()
+                }
+                GraphCommitDelta::ReplaceFull(next) => {
+                    *graph = next.clone();
+                    next.leaf_node_id.clone()
+                }
+            };
+            self.usage_deltas
+                .lock()
+                .expect("lock usage deltas")
+                .extend(commit.usage_deltas.iter().cloned());
+            let checkpoint_ref = crate::BlobRef(format!("recording-checkpoint-{}", actual + 1));
+            let manifest = crate::store::SessionCheckpoint {
+                turn_state: commit.checkpoint.turn_state,
+                dynamic_state_ref: commit.checkpoint.dynamic_state_ref,
+                plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
+                plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
+                execution_state_ref: commit.checkpoint.execution_state_ref,
+            };
+            let head_revision = actual + 1;
+            *meta = Some(crate::SessionHeadMeta {
+                session_id: commit.session_id,
+                head_revision,
+                config: commit.config,
+                checkpoint_ref: Some(checkpoint_ref.clone()),
+                leaf_node_id,
+                graph_node_count: graph.nodes.len(),
+                token_ledger: Vec::new(),
+            });
             *self
                 .runtime_commit_count
                 .lock()
                 .expect("lock runtime commit count") += 1;
+            Ok(crate::store::RuntimeCommitResult {
+                head_revision,
+                checkpoint_ref,
+                manifest,
+            })
+        }
+
+        async fn save_session_meta(
+            &self,
+            _meta: crate::store::SessionMeta,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn load_session_meta(&self) -> Result<Option<crate::store::SessionMeta>, StoreError> {
+            Ok(None)
+        }
+
+        async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn vacuum(&self) -> Result<crate::store::VacuumReport, StoreError> {
+            Ok(crate::store::VacuumReport::default())
+        }
+
+        async fn gc_unreachable(&self) -> Result<crate::store::GcReport, StoreError> {
+            Ok(crate::store::GcReport::default())
         }
     }
 
@@ -499,16 +597,15 @@ mod tests {
             &[text_message("u0", MessageRole::User, "old")],
             &[],
         );
-        let persisted_count = graph.nodes.len();
+        let base_graph = graph.clone();
         graph.append_message(text_message("a0", MessageRole::Assistant, "new"));
-        let mut state = state_with_graph(graph.clone());
-        state.persisted_graph_node_count = persisted_count;
+        let state = state_with_graph(base_graph.clone());
         let store = RecordingStore::default();
         store
             .session_graph
             .lock()
             .expect("lock graph")
-            .extend_node_records(graph.nodes[..persisted_count].iter().cloned());
+            .extend_node_records(base_graph.nodes.iter().cloned());
         let mut pipeline = TurnCommitPipeline::from_state(state);
 
         pipeline
@@ -528,13 +625,10 @@ mod tests {
             .await
             .expect("commit");
 
-        let stored_graph = store.load_session_graph().await;
+        let stored_graph = store.session_graph.lock().expect("lock graph").clone();
         assert_eq!(stored_graph.nodes.len(), graph.nodes.len());
         assert_eq!(stored_graph.nodes[1].node_id, graph.nodes[1].node_id);
-        assert_eq!(
-            pipeline.state_mut().persisted_graph_node_count,
-            graph.nodes.len()
-        );
+        assert!(pipeline.state_mut().head_revision.is_some());
     }
 
     #[tokio::test]
@@ -691,10 +785,7 @@ mod tests {
         );
         assert_eq!(pipeline.state_mut().token_ledger.len(), 2);
         assert!(pipeline.state_mut().execution_state_snapshot().is_none());
-        assert_eq!(
-            pipeline.state_mut().persisted_graph_node_count,
-            graph.nodes.len()
-        );
+        assert!(pipeline.state_mut().head_revision.is_some());
     }
 
     #[tokio::test]

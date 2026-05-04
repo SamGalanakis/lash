@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use lash_sansio::PromptUsage;
 
-use crate::provider::Provider;
+use crate::provider::ProviderHandle;
 use crate::session_model::TokenUsage;
 
 /// A single row in the token cost ledger. One per unique
@@ -229,7 +229,7 @@ pub(super) fn merge_usage_delta_entries(entries: Vec<TokenLedgerEntry>) -> Vec<T
 }
 
 pub(super) fn normalize_prompt_usage(
-    provider: &dyn Provider,
+    provider: &ProviderHandle,
     usage: &TokenUsage,
 ) -> Option<PromptUsage> {
     let input_tokens = usage.input_tokens.max(0) as usize;

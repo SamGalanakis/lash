@@ -5,9 +5,9 @@ pub(crate) async fn persist_committed_runtime_state(
     store: &Store,
     state: &mut PersistedSessionState,
 ) {
-    match lash::apply_runtime_commit(
+    match lash::RuntimePersistence::commit_runtime_state(
         store,
-        lash::PersistedStateCommit::persisted_state(state, &[]),
+        lash::RuntimeCommit::persisted_state(state, &[]),
     )
     .await
     {

@@ -87,8 +87,8 @@ impl RuntimeSessionManager {
         for entry in drained.iter().cloned() {
             merge_ledger_entry(&mut state.token_ledger, entry);
         }
-        let commit = crate::store::PersistedStateCommit::persisted_state(&state, &drained);
-        match crate::store::apply_runtime_commit(store.as_ref(), commit).await {
+        let commit = crate::store::RuntimeCommit::persisted_state(&state, &drained);
+        match store.commit_runtime_state(commit).await {
             Ok(result) => state.apply_persisted_commit_result(result),
             Err(err) => tracing::warn!("failed to persist current usage ledger: {err}"),
         }

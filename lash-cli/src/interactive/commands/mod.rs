@@ -106,7 +106,7 @@ pub(super) async fn dispatch_next_queued_turn(
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    app_tx: &crate::event::AppEventTx,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<()> {
     while let Some((queued, was_pending)) = app.take_next_queued_turn() {
@@ -234,7 +234,7 @@ pub(super) async fn handle_parsed_slash_command(
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    app_tx: &crate::event::AppEventTx,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
     match command {
@@ -308,7 +308,7 @@ async fn handle_slash_command(
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    app_tx: &crate::event::AppEventTx,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
     match cmd {

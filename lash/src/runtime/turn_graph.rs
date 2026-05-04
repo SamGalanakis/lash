@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::session_graph::SessionReadModel;
 use crate::session_graph::tool_call_record_active_read_key;
 use crate::session_model::SessionEventRecord;
-use crate::store::SessionGraphCommit;
+use crate::store::GraphCommitDelta;
 use crate::{
     BaseRenderCache, Message, MessageSequence, SessionGraph, SessionNodeRecord, ToolCallRecord,
 };
@@ -18,6 +18,7 @@ pub(super) struct TurnGraphOverlay {
     read_tool_calls: Arc<Vec<ToolCallRecord>>,
     append_builder: crate::session_graph::SessionGraphAppendBuilder,
     appended_nodes: Vec<SessionNodeRecord>,
+    committed_node_ids: HashSet<String>,
     materialized: Option<SessionGraph>,
 }
 
@@ -27,6 +28,11 @@ impl TurnGraphOverlay {
         let active_messages = MessageSequence::from_base(base_read_model.messages);
         let graph_tool_calls = base_read_model.tool_calls.as_ref().clone();
         Self {
+            committed_node_ids: base_graph
+                .nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect(),
             base_graph,
             active_events: base_read_model.active_events,
             active_messages,
@@ -221,48 +227,61 @@ impl TurnGraphOverlay {
         self.refresh_from_materialized();
     }
 
-    pub(super) fn graph_commit(
-        &self,
-        persisted_graph_node_count: usize,
-        graph_replace_required: bool,
-    ) -> SessionGraphCommit {
+    pub(super) fn graph_commit(&self, graph_replace_required: bool) -> GraphCommitDelta {
         if graph_replace_required {
-            return SessionGraphCommit::Replace(self.materialized_graph());
+            return GraphCommitDelta::ReplaceFull(self.materialized_graph());
         }
         if let Some(graph) = self.materialized.as_ref() {
-            let nodes_len = graph.nodes.len();
-            if persisted_graph_node_count > nodes_len {
-                return SessionGraphCommit::Replace(graph.clone());
-            }
-            return SessionGraphCommit::Append {
-                nodes: graph.nodes[persisted_graph_node_count..].to_vec(),
-                leaf_node_id: graph.leaf_node_id.clone(),
-                graph_node_count: nodes_len,
+            let nodes = graph
+                .nodes
+                .iter()
+                .filter(|node| !self.committed_node_ids.contains(&node.node_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            return if nodes.is_empty() {
+                GraphCommitDelta::Unchanged {
+                    leaf_node_id: graph.leaf_node_id.clone(),
+                }
+            } else {
+                GraphCommitDelta::Append {
+                    nodes,
+                    leaf_node_id: graph.leaf_node_id.clone(),
+                }
             };
         }
 
-        let base_len = self.base_graph.nodes.len();
-        let graph_node_count = base_len + self.appended_nodes.len();
-        if persisted_graph_node_count > graph_node_count {
-            return SessionGraphCommit::Replace(self.materialized_graph());
-        }
-
-        let mut nodes = Vec::new();
-        let appended_start = if persisted_graph_node_count < base_len {
-            nodes.extend(
-                self.base_graph.nodes[persisted_graph_node_count..]
-                    .iter()
-                    .cloned(),
-            );
-            0
+        let nodes = self
+            .appended_nodes
+            .iter()
+            .filter(|node| !self.committed_node_ids.contains(&node.node_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if nodes.is_empty() {
+            GraphCommitDelta::Unchanged {
+                leaf_node_id: self.leaf_node_id(),
+            }
         } else {
-            persisted_graph_node_count - base_len
-        };
-        nodes.extend(self.appended_nodes[appended_start..].iter().cloned());
-        SessionGraphCommit::Append {
-            nodes,
-            leaf_node_id: self.leaf_node_id(),
-            graph_node_count,
+            GraphCommitDelta::Append {
+                nodes,
+                leaf_node_id: self.leaf_node_id(),
+            }
+        }
+    }
+
+    pub(super) fn mark_graph_commit_persisted(&mut self, graph: &GraphCommitDelta) {
+        match graph {
+            GraphCommitDelta::Unchanged { .. } => {}
+            GraphCommitDelta::Append { nodes, .. } => {
+                self.committed_node_ids
+                    .extend(nodes.iter().map(|node| node.node_id.clone()));
+            }
+            GraphCommitDelta::ReplaceFull(graph) => {
+                self.committed_node_ids = graph
+                    .nodes
+                    .iter()
+                    .map(|node| node.node_id.clone())
+                    .collect();
+            }
         }
     }
 
@@ -411,16 +430,14 @@ mod tests {
         ));
 
         overlay.append_active_conversation_messages(std::slice::from_ref(&second));
-        let commit = overlay.graph_commit(1, false);
-        let SessionGraphCommit::Append {
+        let commit = overlay.graph_commit(false);
+        let GraphCommitDelta::Append {
             nodes,
             leaf_node_id,
-            graph_node_count,
         } = commit
         else {
             panic!("overlay should append graph tail");
         };
-        assert_eq!(graph_node_count, 2);
         assert_eq!(leaf_node_id.as_deref(), Some("a1"));
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_id, "a1");
@@ -448,17 +465,17 @@ mod tests {
         ));
 
         overlay.append_active_conversation_messages(std::slice::from_ref(&second));
+        let first_commit = overlay.graph_commit(false);
+        overlay.mark_graph_commit_persisted(&first_commit);
         overlay.append_active_conversation_messages(std::slice::from_ref(&third));
-        let commit = overlay.graph_commit(2, false);
-        let SessionGraphCommit::Append {
+        let commit = overlay.graph_commit(false);
+        let GraphCommitDelta::Append {
             nodes,
             leaf_node_id,
-            graph_node_count,
         } = commit
         else {
             panic!("overlay should append graph tail");
         };
-        assert_eq!(graph_node_count, 3);
         assert_eq!(leaf_node_id.as_deref(), Some("u2"));
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_id, "u2");
@@ -519,16 +536,14 @@ mod tests {
         let mut overlay = overlay_from_graph(base);
 
         overlay.replace_active_read_state(&[first, new], &[]);
-        let commit = overlay.graph_commit(2, false);
-        let SessionGraphCommit::Append {
+        let commit = overlay.graph_commit(false);
+        let GraphCommitDelta::Append {
             nodes,
             leaf_node_id,
-            graph_node_count,
         } = commit
         else {
             panic!("replacement branch should append new tail");
         };
-        assert_eq!(graph_node_count, 3);
         assert_eq!(leaf_node_id.as_deref(), Some("a2"));
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_id, "a2");

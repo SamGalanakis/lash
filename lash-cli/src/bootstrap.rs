@@ -335,10 +335,9 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     let (mut lash_config, active_provider) = if args.provider || existing_config.is_none() {
         if let Some(ref key) = args.api_key {
             // Shortcut: env var or --api-key activates OpenAI-compatible directly.
-            let provider = ProviderHandle::new(Box::new(OpenAiGenericProvider::new(
-                key.clone(),
-                args.base_url.clone(),
-            )));
+            let provider = ProviderHandle::new(
+                OpenAiGenericProvider::new(key.clone(), args.base_url.clone()).into_components(),
+            );
             let mut cfg = existing_config
                 .clone()
                 .unwrap_or_else(|| LashConfig::new(&provider));
@@ -560,12 +559,13 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     let rlm_turn_options = if rlm_globals_supported
         && (args.rlm_require_submit || tool_surface == CliToolSurface::AppWorld)
     {
-        Some(lash::ModeTurnOptions::rlm(
+        Some(lash::ModeTurnOptions::typed(
+            lash::ExecutionMode::new("rlm"),
             lash_rlm_types::RlmTermination::Finish {
                 schema: None,
                 include_submit_prompt: args.rlm_require_submit,
             },
-        ))
+        )?)
     } else {
         None
     };
@@ -807,7 +807,8 @@ mod tests {
     }
 
     fn plugin_factory_ids_for_autonomous(autonomous: bool) -> Vec<&'static str> {
-        let provider = ProviderHandle::new(Box::new(OpenAiGenericProvider::new("test", "")));
+        let provider =
+            ProviderHandle::new(OpenAiGenericProvider::new("test", "").into_components());
         let lash_config = LashConfig::new(&provider);
         plugin_factories_for_surface(PluginFactorySurfaceInput {
             tool_surface: CliToolSurface::Default,

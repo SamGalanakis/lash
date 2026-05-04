@@ -102,7 +102,7 @@ impl<'a> Lexer<'a> {
     fn lex_all(&mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens = Vec::with_capacity((self.source.len() / 4).max(8));
         while let Some((offset, ch)) = self.peek() {
-            if ch.is_whitespace() {
+            if ch.is_whitespace() || ch == ';' {
                 self.bump();
                 continue;
             }

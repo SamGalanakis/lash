@@ -42,7 +42,10 @@ def parse_args() -> argparse.Namespace:
         "--scenario",
         action="append",
         default=[],
-        help="Limit to one or more runtime perf scenarios.",
+        help=(
+            "Limit to one or more runtime perf scenarios: standard, rlm, "
+            "rlm_tool_calls, rlm_globals, observational_memory, openai_compat_stream."
+        ),
     )
     parser.add_argument(
         "--turns",

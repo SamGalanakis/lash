@@ -1,11 +1,9 @@
-//! Provider trait and registry for pluggable LLM backends.
+//! Provider components and registry for pluggable LLM backends.
 //!
-//! `Provider` is the trait every concrete LLM backend implements. It
-//! merges what used to be two concepts — a `Provider` enum that held
-//! config state and an `LlmTransport` trait that drove the wire
-//! protocol — into one type per backend. Each provider crate exports a
-//! concrete struct + [`ProviderFactory`]; lash core holds no adapter
-//! code of its own.
+//! A provider is split into narrow capabilities: persisted state,
+//! authentication refresh, readiness/warmup, request transport, and
+//! model policy. [`ProviderHandle`] owns those components and is the
+//! persisted handle stored by session policy and config.
 //!
 //! Serialization: [`ProviderHandle`] is the owning handle that
 //! [`SessionPolicy`] stores. It round-trips through [`ProviderSpec`] —
@@ -14,7 +12,7 @@
 //! `~/.lash/config.json` files load without migration.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -41,7 +39,7 @@ pub enum VariantRequestConfig {
     AnthropicThinkingBudget { budget_tokens: i32 },
 }
 
-/// Model + optional variant returned by `Provider::default_agent_model`.
+/// Model + optional variant returned by provider model policies for agent tiers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentModelSelection {
     pub model: String,
@@ -178,19 +176,386 @@ pub struct ModelDefault {
     pub variant: Option<String>,
 }
 
-/// Concrete LLM backend. Each provider crate (`lash-provider-anthropic`,
-/// `lash-provider-openai`, `lash-provider-codex`, `lash-provider-google`)
-/// ships one `impl Provider` struct plus a [`ProviderFactory`] that
-/// registers it with lash's global registry.
-#[async_trait]
-pub trait Provider: Send + Sync + std::fmt::Debug {
+/// Persisted provider state: stable kind, serializable config, and
+/// request timeout options.
+pub trait ProviderState: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> &'static str;
 
+    fn options(&self) -> ProviderOptions;
+    fn set_options(&mut self, options: ProviderOptions);
+
+    /// Emit the provider-specific JSON body used by [`ProviderSpec`]. The
+    /// object must NOT contain a `type` field — [`ProviderSpec::Serialize`]
+    /// layers that on top.
+    fn serialize_config(&self) -> serde_json::Value;
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState>;
+}
+
+#[async_trait]
+pub trait ProviderAuth: Send + Sync + std::fmt::Debug {
+    /// Refresh OAuth tokens if needed. Returns `true` if persisted
+    /// credentials changed.
+    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError>;
+
+    fn clone_boxed(&self) -> Box<dyn ProviderAuth>;
+}
+
+#[async_trait]
+pub trait ProviderReadiness: Send + Sync + std::fmt::Debug {
+    /// Adapter-level warmup (project-id discovery, handshake, etc.).
+    /// Returns `true` if provider state changed and should be persisted.
+    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError>;
+
+    fn requires_streaming(&self) -> bool;
+
+    fn clone_boxed(&self) -> Box<dyn ProviderReadiness>;
+}
+
+#[async_trait]
+pub trait ProviderTransport: Send + Sync + std::fmt::Debug {
+    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError>;
+
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport>;
+}
+
+pub trait ProviderModelPolicy: Send + Sync + std::fmt::Debug {
     fn default_model(&self) -> &str;
     fn supported_variants(&self, model: &str) -> &'static [&'static str];
     fn default_model_variant(&self, model: &str) -> Option<&'static str>;
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig>;
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection>;
 
-    fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
+    fn resolve_model(&self, model: &str) -> String {
+        model.to_string()
+    }
+
+    fn context_lookup_model(&self, model: &str) -> String {
+        model.to_string()
+    }
+
+    fn input_usage_excludes_cached_tokens(&self) -> bool {
+        false
+    }
+}
+
+/// Provider auth component for API-key providers.
+#[derive(Clone, Debug, Default)]
+pub struct NoopProviderAuth;
+
+#[async_trait]
+impl ProviderAuth for NoopProviderAuth {
+    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
+        Ok(false)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
+        Box::new(self.clone())
+    }
+}
+
+/// Readiness component for providers with no warmup requirement.
+#[derive(Clone, Debug, Default)]
+pub struct NoopProviderReadiness {
+    requires_streaming: bool,
+}
+
+impl NoopProviderReadiness {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn requiring_streaming() -> Self {
+        Self {
+            requires_streaming: true,
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderReadiness for NoopProviderReadiness {
+    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+        Ok(false)
+    }
+
+    fn requires_streaming(&self) -> bool {
+        self.requires_streaming
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
+        Box::new(self.clone())
+    }
+}
+
+/// Static model policy for simple providers and tests.
+#[derive(Clone, Debug)]
+pub struct StaticModelPolicy {
+    default_model: &'static str,
+    supported_variants: &'static [&'static str],
+    default_variant: Option<&'static str>,
+}
+
+impl StaticModelPolicy {
+    pub fn new(default_model: &'static str) -> Self {
+        Self {
+            default_model,
+            supported_variants: &[],
+            default_variant: None,
+        }
+    }
+
+    pub fn with_variants(
+        default_model: &'static str,
+        supported_variants: &'static [&'static str],
+        default_variant: Option<&'static str>,
+    ) -> Self {
+        Self {
+            default_model,
+            supported_variants,
+            default_variant,
+        }
+    }
+}
+
+impl ProviderModelPolicy for StaticModelPolicy {
+    fn default_model(&self) -> &str {
+        self.default_model
+    }
+
+    fn supported_variants(&self, _model: &str) -> &'static [&'static str] {
+        self.supported_variants
+    }
+
+    fn default_model_variant(&self, _model: &str) -> Option<&'static str> {
+        self.default_variant
+    }
+
+    fn request_variant_config(&self, _model: &str, variant: &str) -> Option<VariantRequestConfig> {
+        self.supported_variants
+            .contains(&variant)
+            .then(|| VariantRequestConfig::ReasoningEffort(variant.to_string()))
+    }
+
+    fn default_agent_model(&self, _tier: &str) -> Option<AgentModelSelection> {
+        None
+    }
+}
+
+#[derive(Debug)]
+struct SharedProviderComponent<T> {
+    inner: Arc<Mutex<T>>,
+}
+
+impl<T> Clone for SharedProviderComponent<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T> SharedProviderComponent<T> {
+    fn new(inner: Arc<Mutex<T>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T> ProviderState for SharedProviderComponent<T>
+where
+    T: ProviderState + Clone + Send + Sync + std::fmt::Debug + 'static,
+{
+    fn kind(&self) -> &'static str {
+        self.inner.lock().expect("provider state lock").kind()
+    }
+
+    fn options(&self) -> ProviderOptions {
+        self.inner.lock().expect("provider state lock").options()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.inner
+            .lock()
+            .expect("provider state lock")
+            .set_options(options);
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        self.inner
+            .lock()
+            .expect("provider state lock")
+            .serialize_config()
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl<T> ProviderAuth for SharedProviderComponent<T>
+where
+    T: ProviderAuth + Clone + Send + Sync + std::fmt::Debug + 'static,
+{
+    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
+        let mut provider = self.inner.lock().expect("provider auth lock").clone();
+        let result = provider.ensure_fresh().await;
+        *self.inner.lock().expect("provider auth lock") = provider;
+        result
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl<T> ProviderReadiness for SharedProviderComponent<T>
+where
+    T: ProviderReadiness + Clone + Send + Sync + std::fmt::Debug + 'static,
+{
+    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+        let mut provider = self.inner.lock().expect("provider readiness lock").clone();
+        let result = provider.ensure_ready().await;
+        *self.inner.lock().expect("provider readiness lock") = provider;
+        result
+    }
+
+    fn requires_streaming(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("provider readiness lock")
+            .requires_streaming()
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl<T> ProviderTransport for SharedProviderComponent<T>
+where
+    T: ProviderTransport + Clone + Send + Sync + std::fmt::Debug + 'static,
+{
+    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        let mut provider = self.inner.lock().expect("provider transport lock").clone();
+        let result = provider.complete(request).await;
+        *self.inner.lock().expect("provider transport lock") = provider;
+        result
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+        Box::new(self.clone())
+    }
+}
+
+/// Component bundle returned by provider factories.
+#[derive(Debug)]
+pub struct ProviderComponents {
+    pub state: Box<dyn ProviderState>,
+    pub auth: Box<dyn ProviderAuth>,
+    pub readiness: Box<dyn ProviderReadiness>,
+    pub transport: Box<dyn ProviderTransport>,
+    pub model_policy: Arc<dyn ProviderModelPolicy>,
+}
+
+impl ProviderComponents {
+    pub fn new(
+        state: Box<dyn ProviderState>,
+        auth: Box<dyn ProviderAuth>,
+        readiness: Box<dyn ProviderReadiness>,
+        transport: Box<dyn ProviderTransport>,
+        model_policy: Arc<dyn ProviderModelPolicy>,
+    ) -> Self {
+        Self {
+            state,
+            auth,
+            readiness,
+            transport,
+            model_policy,
+        }
+    }
+
+    pub fn shared<T>(provider: T, model_policy: Arc<dyn ProviderModelPolicy>) -> Self
+    where
+        T: ProviderState
+            + ProviderAuth
+            + ProviderReadiness
+            + ProviderTransport
+            + Clone
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+    {
+        let inner = Arc::new(Mutex::new(provider));
+        Self {
+            state: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
+            auth: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
+            readiness: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
+            transport: Box::new(SharedProviderComponent::new(inner)),
+            model_policy,
+        }
+    }
+
+    pub fn map_transport(
+        mut self,
+        map: impl FnOnce(Box<dyn ProviderTransport>) -> Box<dyn ProviderTransport>,
+    ) -> Self {
+        self.transport = map(self.transport);
+        self
+    }
+}
+
+impl Clone for ProviderComponents {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone_boxed(),
+            auth: self.auth.clone_boxed(),
+            readiness: self.readiness.clone_boxed(),
+            transport: self.transport.clone_boxed(),
+            model_policy: Arc::clone(&self.model_policy),
+        }
+    }
+}
+
+/// Owning handle to provider components. Session state + config store this
+/// so we can add Clone / Serialize / Deserialize impls without running
+/// into orphan-rule conflicts.
+pub struct ProviderHandle {
+    components: ProviderComponents,
+}
+
+impl ProviderHandle {
+    pub fn new(components: ProviderComponents) -> Self {
+        Self { components }
+    }
+
+    pub fn components(&self) -> &ProviderComponents {
+        &self.components
+    }
+
+    pub fn components_mut(&mut self) -> &mut ProviderComponents {
+        &mut self.components
+    }
+
+    pub fn kind(&self) -> &'static str {
+        self.components.state.kind()
+    }
+
+    pub fn default_model(&self) -> &str {
+        self.components.model_policy.default_model()
+    }
+
+    pub fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        self.components.model_policy.supported_variants(model)
+    }
+
+    pub fn default_model_variant(&self, model: &str) -> Option<&'static str> {
+        self.components.model_policy.default_model_variant(model)
+    }
+
+    pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
         let variants = self.supported_variants(model);
         if variants.is_empty() {
             return Err(format!(
@@ -211,53 +576,68 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
         ))
     }
 
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig>;
-
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection>;
-
-    fn resolve_model(&self, model: &str) -> String {
-        model.to_string()
+    pub fn request_variant_config(
+        &self,
+        model: &str,
+        variant: &str,
+    ) -> Option<VariantRequestConfig> {
+        self.components
+            .model_policy
+            .request_variant_config(model, variant)
     }
 
-    fn context_lookup_model(&self, model: &str) -> String {
-        model.to_string()
+    pub fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
+        self.components.model_policy.default_agent_model(tier)
     }
 
-    fn input_usage_excludes_cached_tokens(&self) -> bool {
-        false
+    pub fn resolve_model(&self, model: &str) -> String {
+        self.components.model_policy.resolve_model(model)
     }
 
-    fn options(&self) -> &ProviderOptions;
-    fn options_mut(&mut self) -> &mut ProviderOptions;
-
-    fn requires_streaming(&self) -> bool {
-        false
+    pub fn context_lookup_model(&self, model: &str) -> String {
+        self.components.model_policy.context_lookup_model(model)
     }
 
-    /// Refresh OAuth tokens if needed. Returns `true` if the provider's
-    /// stored credentials were updated (caller should persist via
-    /// `LashConfig::save`). Default is a no-op for API-key providers.
-    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
-        Ok(false)
+    pub fn input_usage_excludes_cached_tokens(&self) -> bool {
+        self.components
+            .model_policy
+            .input_usage_excludes_cached_tokens()
     }
 
-    /// Adapter-level warmup (project-id discovery, handshake, etc.).
-    /// Returns `true` if provider state changed and should be persisted.
-    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-        Ok(false)
+    pub fn options(&self) -> ProviderOptions {
+        self.components.state.options()
     }
 
-    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError>;
+    pub fn set_options(&mut self, options: ProviderOptions) {
+        self.components.state.set_options(options)
+    }
 
-    /// Emit the provider-specific JSON body used by [`ProviderSpec`]. The
-    /// object must NOT contain a `type` field — [`ProviderSpec::Serialize`]
-    /// layers that on top.
-    fn serialize_config(&self) -> serde_json::Value;
+    pub fn requires_streaming(&self) -> bool {
+        self.components.readiness.requires_streaming()
+    }
 
-    fn clone_boxed(&self) -> Box<dyn Provider>;
-}
+    pub async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
+        self.components.auth.ensure_fresh().await
+    }
 
-impl dyn Provider {
+    pub async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+        self.components.readiness.ensure_ready().await
+    }
+
+    pub async fn complete(
+        &mut self,
+        request: LlmRequest,
+    ) -> Result<LlmResponse, LlmTransportError> {
+        self.components.transport.complete(request).await
+    }
+
+    pub fn to_spec(&self) -> ProviderSpec {
+        ProviderSpec {
+            kind: self.kind().to_string(),
+            config: self.components.state.serialize_config(),
+        }
+    }
+
     /// Validate model syntax only.
     pub fn validate_model_name(&self, model: &str) -> Result<(), String> {
         let m = model.trim();
@@ -295,65 +675,27 @@ impl dyn Provider {
     }
 }
 
-/// Owning handle to a boxed provider. Session state + config store this
-/// instead of `Box<dyn Provider>` so we can add Clone / Serialize /
-/// Deserialize impls without running into orphan-rule conflicts.
-pub struct ProviderHandle {
-    inner: Box<dyn Provider>,
-}
-
-impl ProviderHandle {
-    pub fn new(provider: Box<dyn Provider>) -> Self {
-        Self { inner: provider }
-    }
-
-    pub fn as_dyn(&self) -> &dyn Provider {
-        &*self.inner
-    }
-
-    pub fn to_spec(&self) -> ProviderSpec {
-        ProviderSpec {
-            kind: self.inner.kind().to_string(),
-            config: self.inner.serialize_config(),
-        }
-    }
-}
-
 impl std::fmt::Debug for ProviderHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.inner.fmt(f)
+        self.components.fmt(f)
     }
 }
 
 impl Clone for ProviderHandle {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone_boxed(),
+            components: self.components.clone(),
         }
     }
 }
 
 impl PartialEq for ProviderHandle {
     fn eq(&self, other: &Self) -> bool {
-        self.inner.kind() == other.inner.kind()
-            && self.inner.serialize_config() == other.inner.serialize_config()
+        self.kind() == other.kind() && self.to_spec().config == other.to_spec().config
     }
 }
 
 impl Eq for ProviderHandle {}
-
-impl std::ops::Deref for ProviderHandle {
-    type Target = dyn Provider;
-    fn deref(&self) -> &Self::Target {
-        &*self.inner
-    }
-}
-
-impl std::ops::DerefMut for ProviderHandle {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.inner
-    }
-}
 
 impl Serialize for ProviderHandle {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -372,7 +714,7 @@ impl<'de> Deserialize<'de> for ProviderHandle {
 
 impl Default for ProviderHandle {
     fn default() -> Self {
-        Self::new(Box::new(UnconfiguredProvider::default()))
+        Self::new(UnconfiguredProvider::default().into_components())
     }
 }
 
@@ -386,51 +728,69 @@ pub struct UnconfiguredProvider {
     options: ProviderOptions,
 }
 
-#[async_trait]
-impl Provider for UnconfiguredProvider {
+impl UnconfiguredProvider {
+    fn into_components(self) -> ProviderComponents {
+        ProviderComponents::shared(self, Arc::new(StaticModelPolicy::new("")))
+    }
+}
+
+impl ProviderState for UnconfiguredProvider {
     fn kind(&self) -> &'static str {
         "unconfigured"
     }
 
-    fn default_model(&self) -> &str {
-        ""
+    fn options(&self) -> ProviderOptions {
+        self.options.clone()
     }
 
-    fn supported_variants(&self, _model: &str) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn default_model_variant(&self, _model: &str) -> Option<&'static str> {
-        None
-    }
-
-    fn request_variant_config(&self, _model: &str, _variant: &str) -> Option<VariantRequestConfig> {
-        None
-    }
-
-    fn default_agent_model(&self, _tier: &str) -> Option<AgentModelSelection> {
-        None
-    }
-
-    fn options(&self) -> &ProviderOptions {
-        &self.options
-    }
-
-    fn options_mut(&mut self) -> &mut ProviderOptions {
-        &mut self.options
-    }
-
-    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        Err(LlmTransportError::new(
-            "no provider configured: host must install a provider factory and set SessionPolicy.provider before running a turn",
-        ))
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.options = options;
     }
 
     fn serialize_config(&self) -> serde_json::Value {
         serde_json::Value::Object(Default::default())
     }
 
-    fn clone_boxed(&self) -> Box<dyn Provider> {
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl ProviderAuth for UnconfiguredProvider {
+    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
+        Ok(false)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl ProviderReadiness for UnconfiguredProvider {
+    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+        Ok(false)
+    }
+
+    fn requires_streaming(&self) -> bool {
+        false
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl ProviderTransport for UnconfiguredProvider {
+    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        Err(LlmTransportError::new(
+            "no provider configured: host must install a provider factory and set SessionPolicy.provider before running a turn",
+        ))
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
         Box::new(self.clone())
     }
 }
@@ -516,7 +876,7 @@ pub trait ProviderFactory: Send + Sync {
     }
 
     /// Instantiate a provider from its [`ProviderSpec::config`] blob.
-    fn deserialize(&self, config: serde_json::Value) -> Result<Box<dyn Provider>, String>;
+    fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String>;
 }
 
 #[derive(Clone, Default)]
@@ -533,7 +893,7 @@ impl ProviderRegistry {
         self.factories.insert(factory.kind(), factory);
     }
 
-    pub fn build_from_spec(&self, spec: &ProviderSpec) -> Result<Box<dyn Provider>, String> {
+    pub fn build_from_spec(&self, spec: &ProviderSpec) -> Result<ProviderComponents, String> {
         let factory = self.factories.get(spec.kind.as_str()).ok_or_else(|| {
             format!(
                 "provider `{}` is not registered. Call `lash::register_provider_factory` at startup.",
@@ -560,7 +920,7 @@ pub fn register_provider_factory(factory: Arc<dyn ProviderFactory>) {
 
 /// Materialize a provider from its serialized form using the global
 /// registry. Returns `Err` if no factory is registered for `spec.kind`.
-pub fn build_provider(spec: &ProviderSpec) -> Result<Box<dyn Provider>, String> {
+pub fn build_provider(spec: &ProviderSpec) -> Result<ProviderComponents, String> {
     PROVIDER_REGISTRY.read().unwrap().build_from_spec(spec)
 }
 
@@ -792,6 +1152,138 @@ pub fn save_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::llm::types::{LlmToolChoice, LlmUsage};
+
+    #[derive(Clone, Debug, Default)]
+    struct MutatingProvider {
+        options: ProviderOptions,
+        marker: String,
+    }
+
+    impl MutatingProvider {
+        fn into_components(self, policy: Arc<dyn ProviderModelPolicy>) -> ProviderComponents {
+            ProviderComponents::shared(self, policy)
+        }
+    }
+
+    impl ProviderState for MutatingProvider {
+        fn kind(&self) -> &'static str {
+            "mutating"
+        }
+
+        fn options(&self) -> ProviderOptions {
+            self.options.clone()
+        }
+
+        fn set_options(&mut self, options: ProviderOptions) {
+            self.options = options;
+        }
+
+        fn serialize_config(&self) -> serde_json::Value {
+            serde_json::json!({ "marker": self.marker })
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderState> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderAuth for MutatingProvider {
+        async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
+            self.marker = "fresh".to_string();
+            Ok(true)
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderReadiness for MutatingProvider {
+        async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+            Ok(false)
+        }
+
+        fn requires_streaming(&self) -> bool {
+            false
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderTransport for MutatingProvider {
+        async fn complete(
+            &mut self,
+            _request: LlmRequest,
+        ) -> Result<LlmResponse, LlmTransportError> {
+            self.marker = "complete".to_string();
+            Ok(LlmResponse {
+                deltas: vec!["ok".to_string()],
+                full_text: "ok".to_string(),
+                parts: Vec::new(),
+                usage: LlmUsage::default(),
+                provider_usage: None,
+                request_body: None,
+                http_summary: None,
+            })
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct MetricsTransport {
+        inner: Box<dyn ProviderTransport>,
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl Clone for MetricsTransport {
+        fn clone(&self) -> Self {
+            Self {
+                inner: self.inner.clone_boxed(),
+                hits: Arc::clone(&self.hits),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderTransport for MetricsTransport {
+        async fn complete(
+            &mut self,
+            request: LlmRequest,
+        ) -> Result<LlmResponse, LlmTransportError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            self.inner.complete(request).await
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn empty_request() -> LlmRequest {
+        LlmRequest {
+            model: "model".to_string(),
+            messages: Vec::new(),
+            attachments: Vec::new(),
+            tools: Arc::new(Vec::new()),
+            tool_choice: LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+            provider_trace: None,
+        }
+    }
 
     #[test]
     fn provider_spec_roundtrips_as_flat_object() {
@@ -910,6 +1402,66 @@ mod tests {
                 variant: None,
             })
         );
+    }
+
+    #[test]
+    fn provider_handle_delegates_model_policy_resolution() {
+        static VARIANTS: &[&str] = &["low", "high"];
+        let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
+            StaticModelPolicy::with_variants("model-a", VARIANTS, Some("high")),
+        )));
+
+        assert_eq!(handle.default_model(), "model-a");
+        assert_eq!(handle.supported_variants("model-a"), VARIANTS);
+        assert_eq!(handle.default_model_variant("model-a"), Some("high"));
+        assert!(handle.validate_variant("model-a", "low").is_ok());
+        assert!(handle.validate_variant("model-a", "medium").is_err());
+    }
+
+    #[tokio::test]
+    async fn refreshed_provider_state_is_visible_to_serialization() {
+        let mut handle = ProviderHandle::new(
+            MutatingProvider::default()
+                .into_components(Arc::new(StaticModelPolicy::new("model-a"))),
+        );
+
+        assert!(handle.ensure_fresh().await.expect("refresh succeeds"));
+
+        assert_eq!(
+            handle.to_spec().config["marker"],
+            serde_json::json!("fresh")
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_mutations_are_visible_after_completion_returns() {
+        let mut handle = ProviderHandle::new(
+            MutatingProvider::default()
+                .into_components(Arc::new(StaticModelPolicy::new("model-a"))),
+        );
+
+        handle.complete(empty_request()).await.expect("complete");
+
+        assert_eq!(
+            handle.to_spec().config["marker"],
+            serde_json::json!("complete")
+        );
+    }
+
+    #[tokio::test]
+    async fn map_transport_installs_transport_only_decorator() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let components = MutatingProvider::default()
+            .into_components(Arc::new(StaticModelPolicy::new("model-a")))
+            .map_transport({
+                let hits = Arc::clone(&hits);
+                move |inner| Box::new(MetricsTransport { inner, hits })
+            });
+        let mut handle = ProviderHandle::new(components);
+
+        handle.complete(empty_request()).await.expect("complete");
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[test]

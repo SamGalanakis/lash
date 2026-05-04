@@ -1,4 +1,4 @@
-use lashlang::{Record, State, ToolHost, ToolHostError, Value};
+use lashlang::{Record, State, ToolHost, ToolHostCall, ToolHostError, Value};
 use std::fmt;
 use std::sync::Arc;
 
@@ -301,34 +301,30 @@ submit { counts: counts, state: state, summary: join(summary, ",") }
 pub struct BenchHost;
 
 impl ToolHost for BenchHost {
-    fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        bench_call(name, args)
+    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+        bench_call(&name, &args)
     }
 
-    fn call_batch(
-        &self,
-        calls: &[(&str, &Record)],
-        push_result: &mut dyn FnMut(Result<Value, ToolHostError>),
-    ) -> bool {
-        for (name, args) in calls {
-            push_result(bench_call(name, args));
-        }
-        true
+    async fn call_batch(&self, calls: Vec<ToolHostCall>) -> Vec<Result<Value, ToolHostError>> {
+        calls
+            .into_iter()
+            .map(|call| bench_call(&call.name, &call.args))
+            .collect()
     }
 
-    fn start_call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError> {
-        Self::task_handle(name, args)
+    async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+        Self::task_handle(&name, &args)
     }
 
-    fn await_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
+    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
         let record = handle
             .as_record()
             .ok_or_else(|| ToolHostError::new("expected handle record"))?;
         Ok(record.get("value").cloned().unwrap_or(Value::Null))
     }
 
-    fn cancel_handle(&self, handle: &Value) -> Result<Value, ToolHostError> {
-        Ok(handle.clone())
+    async fn cancel_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
+        Ok(handle)
     }
 }
 

@@ -631,7 +631,7 @@ impl LashRuntime {
 
         let last_prompt_usage = assembler
             .last_llm_usage()
-            .and_then(|usage| normalize_prompt_usage(self.policy.provider.as_dyn(), usage));
+            .and_then(|usage| normalize_prompt_usage(&self.policy.provider, usage));
         let finalize_manager = if self.session.is_some() {
             Some(
                 self.runtime_session_manager_for_turn(None, None)
@@ -698,7 +698,7 @@ impl LashRuntime {
                 .await?;
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                persisted_graph_node_count = returned_turn.state.session_graph.nodes.len(),
+                resident_graph_node_count = returned_turn.state.session_graph.nodes.len(),
                 persisted_message_count = returned_turn.state.read_model().messages.len(),
                 "runtime after stamp_runtime_state"
             );
