@@ -265,10 +265,12 @@ impl ModeSessionPlugin for RlmModeSession {
         request: lash::ExecRequest,
     ) -> Result<lash::ExecResponse, SessionError> {
         let mut guard = self.execution.lock().await;
-        let state = guard
+        let mut state = guard
             .take()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
 
+        let projected_globals = ctx.rlm_projected_globals();
+        state.sync_projected_globals(projected_globals.as_ref())?;
         let result = execute_code(state, ctx, request).await;
         match result {
             Ok((state, response)) => {

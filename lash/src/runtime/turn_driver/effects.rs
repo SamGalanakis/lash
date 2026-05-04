@@ -122,6 +122,8 @@ impl RuntimeTurnDriver {
     pub(super) async fn run_exec_code(
         &mut self,
         code: &str,
+        messages: crate::MessageSequence,
+        iteration: usize,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
         let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
@@ -171,10 +173,14 @@ impl RuntimeTurnDriver {
         });
         let manager = self.session_manager.clone();
         let mode_session = Arc::clone(self.session.plugins().mode_session());
+        let rlm_projected_globals = self
+            .checkpoint_state_view(messages, iteration)
+            .shared_rlm_globals();
         let context = self.session.mode_execution_context(
             &self.session_id,
             manager,
             session_event_tx.clone(),
+            rlm_projected_globals,
         );
         let result = mode_session
             .execute_code(
