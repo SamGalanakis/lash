@@ -58,6 +58,10 @@ impl ToolProvider for Glob {
                 ),
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
+            .with_examples(vec![
+                r#"glob(pattern="**/*.rs", path="lash/src", limit=50)"#.into(),
+                r#"glob(pattern="**/Cargo.toml", path=".")"#.into(),
+            ])
             .with_discovery(crate::tools::discovery_metadata("filesystem", &["find_files"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]

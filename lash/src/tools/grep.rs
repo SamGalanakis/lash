@@ -303,6 +303,11 @@ impl ToolProvider for Grep {
                 ),
                 json!({ "type": "object", "additionalProperties": true }),
             )
+            .with_examples(vec![
+                r#"grep(query="ToolProvider", path="lash/src")"#.into(),
+                r#"grep(query="*.rs apply_patch", path=".")"#.into(),
+                r#"grep(query="current_query")"#.into(),
+            ])
             .with_discovery(crate::tools::discovery_metadata(
                 "filesystem",
                 &["search_files", "ripgrep"],

@@ -148,7 +148,10 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
         "llm_query",
         "Run a one-shot LLM prompt and return its result. The `task` plus everything in `inputs` is rendered into that single prompt; the call cannot use tools, inspect files, or gather more context. Use this for extracting information from supplied data, classification, summarization, judging, or transformation. `inputs` can be any structured value. `output` is optional and defaults to a string; when present, it requests structured output using record descriptors or `Type { ... }` literals.",
         llm_query_input_schema(),
-        Vec::new(),
+        vec![
+            r#"llm_query(task="Summarize the supplied notes in three bullets", inputs={ notes: notes })"#.into(),
+            r#"llm_query(task="Extract the key claim from each supplied chunk", inputs={ chunks: chunks }, output={ claims: "list[str]" })"#.into(),
+        ],
         ToolExecutionMode::Parallel,
     )
     .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
