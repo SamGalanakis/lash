@@ -159,20 +159,18 @@ Choose the lightest mechanism that preserves progress:
 | Situation | Use | Why |
 |---|---|---|
 | Small task, data already in current variables | Inline lashlang / direct reasoning | No extra model call or context needed |
-| Semantic extraction, summarization, classification, judging, or transformation over data already in variables | `llm_query` | Cheap one-shot LLM call; no child session, no tools, no REPL |
-| Need file/repo/web inspection, shell commands, validation, edits, or multi-step investigation in isolated context | `spawn_agent` | Child session can use tools and return focused facts |
+| Extract, classify, summarize, judge, or transform information already in variables | `llm_query` | One-shot prompt over supplied inputs, with optional structured output |
+| Need an isolated, multi-step investigation allowed by available subagent capabilities | `spawn_agent` | Child session can return focused facts |
 | Several independent investigations can run in parallel | `start call spawn_agent` + `await` / `parallel` | Fanout while keeping the parent trace small |
 | Current trace is bloated/stale, failed attempts dominate, or context is tight | `continue_as` | Tail-call to a clean successor with only packed state |
-| Read-only investigation | `spawn_agent` with `capability: "explore"` | Safer restricted default |
-| Needs edits or recursive spawning | `spawn_agent` with `capability: "peer"` | Broader authority |
 
-Hard boundaries:
+Mechanism boundaries:
 
-- Do not use `llm_query` if the answer requires reading files, running commands, searching, fetching URLs, inspecting repository state, or using any tool. First gather the needed data inline or with a subagent; then use `llm_query` only on the gathered data.
+- `llm_query` builds one prompt from its `task` and `inputs`, sends exactly one LLM call, and returns either plain text or the optional structured `output` shape. It cannot gather more context after the call starts. Use it for extraction, classification, summarization, judging, or transformation over data you already supplied.
 - `spawn_agent` branches work and returns a result to the current session. Use it when the parent should keep its current state and collect a focused result.
 - `continue_as` transfers the whole task to a successor and ends the current session. Use it when the current session state is no longer worth preserving.
 
-Anti-patterns: don't spawn a subagent for a trivial check you can do inline; don't use `llm_query` to avoid reading required source material; don't use `continue_as` to delegate one subtask; don't pass bulky raw logs/search results into `continue_as.seed`; don't use `peer` when `explore` is enough.
+Anti-patterns: don't spawn a subagent for a trivial check you can do inline; don't use `llm_query` to avoid reading required source material; don't use `continue_as` to delegate one subtask; don't pass bulky raw logs/search results into `continue_as.seed`.
 
 Example fanout to two subagents (use `?` for fail-fast unwrapping):
 
@@ -568,12 +566,6 @@ pub fn contains_closed_lashlang_fence(text: &str) -> bool {
 
 #[derive(Debug, Clone, Copy)]
 struct FenceSpan {
-    /// Byte offset of the first backtick of the opener.
-    #[allow(dead_code)]
-    open_pos: usize,
-    /// Number of backticks in the opener (≥3).
-    #[allow(dead_code)]
-    opener_len: usize,
     /// Byte offset of the first byte of the body (after the opener
     /// line's terminating `\n`).
     body_start: usize,
@@ -628,8 +620,6 @@ fn first_lashlang_fence_span(text: &str) -> Option<FenceSpan> {
             None => (text.len(), 0),
         };
         return Some(FenceSpan {
-            open_pos: open,
-            opener_len,
             body_start,
             body_end: close,
             close_len,
@@ -781,6 +771,14 @@ fn validate_finish_value(value: &Value, schema: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_section_does_not_advertise_unregistered_peer_capability() {
+        let section = rlm_execution_section();
+
+        assert!(!section.contains("capability: \"peer\""));
+        assert!(!section.contains("`peer`"));
+    }
 
     #[test]
     fn fence_detector_accepts_inline_opener_after_prose() {

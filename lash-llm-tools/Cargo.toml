@@ -1,0 +1,16 @@
+[package]
+name = "lash-llm-tools"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash", default-features = false, features = ["full"] }
+lashlang = { path = "../lashlang" }
+async-trait = "0.1"
+jsonschema = "0.18"
+serde_json = "1"
+
+[dev-dependencies]
+lash = { path = "../lash", default-features = false, features = ["full", "testing"] }
+tokio = { version = "1", features = ["full"] }

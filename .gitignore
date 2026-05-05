@@ -21,6 +21,8 @@ bench/**/results/
 # SWE-bench eval outputs dumped into the repo root by the runner.
 /logs/
 /*.stratified-*.json
+# Ad hoc screenshots/exported benchmark charts saved from local inspection.
+/*.png
 __pycache__/
 *.pyc
 .DS_Store

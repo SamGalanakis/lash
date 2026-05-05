@@ -57,10 +57,8 @@ pub fn budget_prompt_contributions(
 
 pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
     let globals = ctx.state.shared_rlm_globals();
-    if globals.is_empty() {
-        return Vec::new();
-    }
-    vec![render_bound_variables(&globals)]
+    let history_len = ctx.state.chronological_projection().rlm_history_len();
+    vec![render_bound_variables(&globals, history_len)]
 }
 
 /// Memoizes the rendered "Bound Variables" `PromptContribution`. The
@@ -76,6 +74,7 @@ pub struct BoundVariablesCache {
 
 struct CachedBoundVariables {
     globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    history_len: usize,
     rendered: PromptContribution,
 }
 
@@ -86,19 +85,19 @@ impl BoundVariablesCache {
 
     pub fn contributions(&self, ctx: &PromptHookContext) -> Vec<PromptContribution> {
         let globals = ctx.state.shared_rlm_globals();
-        if globals.is_empty() {
-            return Vec::new();
-        }
+        let history_len = ctx.state.chronological_projection().rlm_history_len();
         if let Ok(guard) = self.inner.lock()
             && let Some(cached) = guard.as_ref()
             && Arc::ptr_eq(&cached.globals, &globals)
+            && cached.history_len == history_len
         {
             return vec![cached.rendered.clone()];
         }
-        let rendered = render_bound_variables(&globals);
+        let rendered = render_bound_variables(&globals, history_len);
         if let Ok(mut guard) = self.inner.lock() {
             *guard = Some(CachedBoundVariables {
                 globals,
+                history_len,
                 rendered: rendered.clone(),
             });
         }
@@ -108,6 +107,7 @@ impl BoundVariablesCache {
 
 fn render_bound_variables(
     globals: &Arc<serde_json::Map<String, serde_json::Value>>,
+    history_len: usize,
 ) -> PromptContribution {
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
@@ -126,6 +126,9 @@ fn render_bound_variables(
 
     lines.push(String::new());
     lines.push("Available variables:".to_string());
+    lines.push(format!(
+        "- `history`: `list<HistoryItem>`, projected read-only binding, {history_len} entries"
+    ));
     for (name, shape) in &variable_types {
         let value = globals
             .get(*name)

@@ -24,7 +24,7 @@ use lash::{ChronologicalPayload, ToolCallRecord};
 use lash_rlm_types::RlmTrajectoryEntry;
 
 use crate::LoadedSession;
-use crate::trace::LlmPromptSnapshot;
+use crate::trace::{LlmCallUsage, LlmPromptSnapshot};
 
 pub fn render(session: &LoadedSession) -> String {
     let stats = compute_stats(session);
@@ -48,6 +48,7 @@ pub fn render(session: &LoadedSession) -> String {
     out.push_str("<div class=\"page\"><div class=\"frame\">\n");
     write_hero(&mut out, session, &stats);
     write_session_bar(&mut out, session, &stats);
+    write_usage_overview(&mut out, session);
     write_controls(&mut out, &stats);
     write_body(&mut out, session, &mut ctx);
     write_footer(&mut out, &stats);
@@ -76,6 +77,12 @@ struct SessionStats {
     cleared_parts: usize,
     total_chars: usize,
     chronological: usize,
+    llm_calls_with_usage: usize,
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_input_tokens: i64,
+    reasoning_tokens: i64,
+    max_context_percent: Option<f64>,
     tool_freq: Vec<(String, usize)>,
     tool_names_set: Vec<String>,
 }
@@ -142,6 +149,25 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
     freq.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     s.tool_names_set = freq.iter().map(|(name, _)| name.clone()).collect();
     s.tool_freq = freq;
+
+    for prompt in &session.llm_prompts {
+        let Some(usage) = &prompt.usage else {
+            continue;
+        };
+        s.llm_calls_with_usage += 1;
+        s.input_tokens = s.input_tokens.saturating_add(usage.input_tokens);
+        s.output_tokens = s.output_tokens.saturating_add(usage.output_tokens);
+        s.cached_input_tokens = s
+            .cached_input_tokens
+            .saturating_add(usage.cached_input_tokens);
+        s.reasoning_tokens = s.reasoning_tokens.saturating_add(usage.reasoning_tokens);
+        if let Some(context_window) = session.context_window_tokens
+            && context_window > 0
+        {
+            let pct = usage.input_tokens.max(0) as f64 * 100.0 / context_window as f64;
+            s.max_context_percent = Some(s.max_context_percent.map_or(pct, |max| max.max(pct)));
+        }
+    }
     s
 }
 
@@ -237,6 +263,16 @@ fn write_hero(out: &mut String, session: &LoadedSession, _stats: &SessionStats) 
             escape(&parent)
         );
     }
+    let _ = writeln!(
+        out,
+        "      <span class=\"meta-row\"><span class=\"meta-key\">trace</span><span class=\"meta-val\">{}</span></span>",
+        escape(&session.trace_path.display().to_string())
+    );
+    let _ = writeln!(
+        out,
+        "      <span class=\"meta-row\"><span class=\"meta-key\">llm prompts</span><span class=\"meta-val\">{}</span></span>",
+        session.llm_prompts.len()
+    );
     out.push_str("    </div>\n");
     out.push_str("  </div>\n");
     out.push_str("</header>\n");
@@ -289,6 +325,21 @@ fn write_session_bar(out: &mut String, _session: &LoadedSession, stats: &Session
         format_count(stats.total_chars as u64),
         stats.chronological,
     );
+    if stats.llm_calls_with_usage > 0 {
+        let cached_pct = percent_of(stats.cached_input_tokens, stats.input_tokens)
+            .map(|pct| format!("{pct:.1}% cached"))
+            .unwrap_or_else(|| "cache n/a".to_string());
+        let context_label = stats
+            .max_context_percent
+            .map(|pct| format!("max ctx {pct:.1}%"))
+            .unwrap_or_else(|| "ctx n/a".to_string());
+        let _ = writeln!(
+            out,
+            "  <div class=\"stat\"><span class=\"stat-key\">tokens</span><span class=\"stat-val\">{}</span><span class=\"stat-sub\">{} out · {cached_pct} · {context_label}</span></div>",
+            format_tokens(stats.input_tokens),
+            format_tokens(stats.output_tokens),
+        );
+    }
     if stats.pruned_parts + stats.cleared_parts > 0 {
         let _ = writeln!(
             out,
@@ -296,6 +347,50 @@ fn write_session_bar(out: &mut String, _session: &LoadedSession, stats: &Session
             stats.pruned_parts, stats.cleared_parts,
         );
     }
+    out.push_str("</section>\n");
+}
+
+fn write_usage_overview(out: &mut String, session: &LoadedSession) {
+    if session.llm_prompts.is_empty() {
+        return;
+    }
+    out.push_str("<section class=\"usage-overview\" aria-label=\"LLM usage overview\">\n");
+    out.push_str("  <div class=\"usage-overview-label\">context</div>\n");
+    out.push_str("  <div class=\"usage-overview-bars\">\n");
+    for (idx, prompt) in session.llm_prompts.iter().enumerate() {
+        let id = prompt
+            .iteration
+            .map(|i| format!("iter {i}"))
+            .unwrap_or_else(|| format!("call {idx}"));
+        let Some(usage) = prompt.usage.as_ref() else {
+            let _ = writeln!(
+                out,
+                "    <a class=\"usage-overview-bar usage-overview-bar--missing\" href=\"#\" title=\"{}\"><span></span></a>",
+                escape_attr(&format!("{id} · token usage not recorded")),
+            );
+            continue;
+        };
+        let context_pct = context_percent(usage, session.context_window_tokens);
+        let width = context_pct
+            .map(|pct| pct.clamp(0.0, 100.0).max(2.0))
+            .unwrap_or(100.0);
+        let level_class = match context_pct {
+            Some(pct) if pct >= 90.0 => " usage-overview-bar--critical",
+            Some(pct) if pct >= 75.0 => " usage-overview-bar--hot",
+            Some(pct) if pct >= 50.0 => " usage-overview-bar--warm",
+            Some(_) => "",
+            None => " usage-overview-bar--unknown",
+        };
+        // The body renderer will assign deterministic entry ids in prompt
+        // order, but other chronological entries are interleaved. Use JS to
+        // bind overview bars to the final usage rows after render.
+        let _ = writeln!(
+            out,
+            "    <a class=\"usage-overview-bar{level_class}\" href=\"#\" data-usage-index=\"{idx}\" title=\"{title}\"><span style=\"--usage-width: {width:.3}%\"></span></a>",
+            title = escape_attr(&format!("{id} · {}", usage_title(Some(usage), session.context_window_tokens))),
+        );
+    }
+    out.push_str("  </div>\n");
     out.push_str("</section>\n");
 }
 
@@ -309,6 +404,7 @@ fn write_controls(out: &mut String, stats: &SessionStats) {
         ("assistant", "assistant"),
         ("tool", "tool"),
         ("rlm", "rlm"),
+        ("prompt", "prompt"),
         ("system", "system"),
     ] {
         let _ = writeln!(
@@ -375,17 +471,22 @@ fn write_body(out: &mut String, session: &LoadedSession, ctx: &mut RenderCtx<'_>
     out.push_str("  <main class=\"transcript\" id=\"transcript\">\n");
     out.push_str(&entries_html.entries);
     out.push_str("  </main>\n");
+    out.push_str("  <aside class=\"usage-chart\" aria-label=\"LLM token usage chart\">\n");
+    out.push_str(&entries_html.usage_chart);
+    out.push_str("  </aside>\n");
     out.push_str("</div>\n");
 }
 
 struct EntriesHtml {
     entries: String,
     spine: String,
+    usage_chart: String,
 }
 
 fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHtml {
     let mut entries = String::with_capacity(32 * 1024);
     let mut spine = String::with_capacity(2 * 1024);
+    let mut usage_chart = String::with_capacity(2 * 1024);
 
     let insertions = compute_prompt_insertions(&session.chronological, &session.llm_prompts);
     let mut last_hash: Option<String> = None;
@@ -419,6 +520,7 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
                        ctx: &mut RenderCtx<'_>,
                        last_hash: &mut Option<String>,
                        first_seen: &mut HashMap<String, PromptAnchor>,
+                       usage_chart: &mut String,
                        prompt_idx: usize| {
         let prompt = &session.llm_prompts[prompt_idx];
         let anchor = first_seen.get(&prompt.system_hash).cloned();
@@ -427,9 +529,11 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
             spine,
             ctx,
             prompt,
+            session.context_window_tokens,
             last_hash.as_deref(),
             anchor.as_ref(),
         );
+        write_usage_chart_bar(usage_chart, &id, prompt, session.context_window_tokens);
         first_seen
             .entry(prompt.system_hash.clone())
             .or_insert(PromptAnchor {
@@ -450,6 +554,7 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
                 ctx,
                 &mut last_hash,
                 &mut first_seen,
+                &mut usage_chart,
                 prompt_idx,
             );
         }
@@ -476,11 +581,16 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
             ctx,
             &mut last_hash,
             &mut first_seen,
+            &mut usage_chart,
             prompt_idx,
         );
     }
 
-    EntriesHtml { entries, spine }
+    EntriesHtml {
+        entries,
+        spine,
+        usage_chart,
+    }
 }
 
 #[derive(Clone)]
@@ -1093,6 +1203,22 @@ fn render_tool_call_entry(
     }
     out.push_str("          </summary>\n");
 
+    render_tool_call_payload(out, record);
+
+    out.push_str("        </details>\n");
+    out.push_str("      </div>\n");
+    out.push_str("    </article>\n");
+
+    let _ = writeln!(
+        spine,
+        "    <a class=\"spine-tick spine-tick--{status_key}\" href=\"#{id}\" data-spine=\"tool\" data-status=\"{status_key}\" title=\"{tool} · {status_label} · {dur}\"></a>",
+        tool = escape_attr(&record.tool),
+    );
+}
+
+fn render_tool_call_payload(out: &mut String, record: &ToolCallRecord) {
+    let args_size = json_byte_size(&record.args);
+    let result_size = json_byte_size(&record.result);
     let args_str = pretty_json(&record.args);
     let result_str = pretty_json(&record.result);
 
@@ -1128,16 +1254,6 @@ fn render_tool_call_entry(
         json_highlight(&result_str)
     );
     out.push_str("          </div>\n");
-
-    out.push_str("        </details>\n");
-    out.push_str("      </div>\n");
-    out.push_str("    </article>\n");
-
-    let _ = writeln!(
-        spine,
-        "    <a class=\"spine-tick spine-tick--{status_key}\" href=\"#{id}\" data-spine=\"tool\" data-status=\"{status_key}\" title=\"{tool} · {status_label} · {dur}\"></a>",
-        tool = escape_attr(&record.tool),
-    );
 }
 
 // ─── RLM step ───────────────────────────────────────────────────────────────
@@ -1247,6 +1363,7 @@ fn render_rlm_step(
             json_highlight(&pretty),
         );
     }
+    render_inline_rlm_tool_calls(out, step);
 
     out.push_str("        </div>\n");
     out.push_str("      </div>\n");
@@ -1269,6 +1386,83 @@ fn render_rlm_step(
     }
 }
 
+fn render_inline_rlm_tool_calls(out: &mut String, step: &RlmTrajectoryEntry) {
+    if step.tool_calls.is_empty() {
+        return;
+    }
+    let has_error = step.tool_calls.iter().any(|record| !record.success);
+    let open_attr = if has_error { " open" } else { "" };
+    let total_ms: u64 = step
+        .tool_calls
+        .iter()
+        .map(|record| record.duration_ms)
+        .sum();
+    let _ = writeln!(
+        out,
+        "          <details class=\"rlm-tool-list\"{open_attr}>"
+    );
+    let _ = writeln!(
+        out,
+        "            <summary class=\"code-bar\"><span class=\"code-tag\">tool calls</span><span class=\"code-size\">{} · {}</span></summary>",
+        step.tool_calls.len(),
+        format_duration(total_ms),
+    );
+    out.push_str("            <div class=\"rlm-tool-stack\">\n");
+    for (idx, record) in step.tool_calls.iter().enumerate() {
+        render_inline_tool_call(out, idx + 1, record);
+    }
+    out.push_str("            </div>\n");
+    out.push_str("          </details>\n");
+}
+
+fn render_inline_tool_call(out: &mut String, ordinal: usize, record: &ToolCallRecord) {
+    let (status_key, status_label) = if record.success {
+        ("ok", "ok")
+    } else {
+        ("err", "error")
+    };
+    let summary = summarize_args(&record.args);
+    let result_size = json_byte_size(&record.result);
+    let open_attr = if record.success { "" } else { " open" };
+    let _ = writeln!(
+        out,
+        "              <details class=\"tool-details rlm-tool-details rlm-tool-details--{status_key}\"{open_attr}>"
+    );
+    out.push_str("                <summary class=\"tool-summary\">\n");
+    let _ = writeln!(
+        out,
+        "                  <span class=\"entry-tag entry-tag--tool\">{}</span>",
+        escape(&record.tool)
+    );
+    let _ = writeln!(
+        out,
+        "                  <span class=\"entry-headline\">#{ordinal} · {}</span>",
+        escape(&summary)
+    );
+    let _ = writeln!(
+        out,
+        "                  <span class=\"entry-meta entry-meta--{status_key}\">{status_label} · {}</span>",
+        format_duration(record.duration_ms)
+    );
+    let _ = writeln!(
+        out,
+        "                  <span class=\"entry-meta\">{}</span>",
+        format_count(result_size as u64)
+    );
+    if let Some(call_id) = record.call_id.as_deref() {
+        let short = call_id_short(call_id);
+        let _ = writeln!(
+            out,
+            "                  <span class=\"entry-callid\" title=\"call_id: {full}\">{short}</span>",
+            full = escape_attr(call_id),
+            short = escape(&short),
+        );
+    }
+    out.push_str("                </summary>\n");
+    render_tool_call_payload(out, record);
+    out.push_str("              </details>\n");
+}
+
 // ─── system prompt (per-LLM-call snapshot from trace) ───────────────────────
 
 fn render_system_prompt(
@@ -1276,6 +1470,7 @@ fn render_system_prompt(
     spine: &mut String,
     ctx: &mut RenderCtx<'_>,
     prompt: &LlmPromptSnapshot,
+    context_window_tokens: Option<u64>,
     prev_hash: Option<&str>,
     first_seen: Option<&PromptAnchor>,
 ) -> String {
@@ -1301,6 +1496,14 @@ fn render_system_prompt(
     } else {
         total_label.clone()
     };
+    let usage_label = prompt
+        .usage
+        .as_ref()
+        .map(|usage| compact_usage_label(usage, context_window_tokens));
+    let context_label = prompt
+        .usage
+        .as_ref()
+        .and_then(|usage| context_percent_label(usage, context_window_tokens));
 
     let mut headline = String::new();
     headline.push_str(&iter_label);
@@ -1335,7 +1538,7 @@ fn render_system_prompt(
 
     let _ = writeln!(
         out,
-        "    <article class=\"entry entry--system{repeat_class}\" id=\"{id}\" data-role=\"system\" data-kind=\"system_prompt\" data-search=\"{search}\">",
+        "    <article class=\"entry entry--system{repeat_class}\" id=\"{id}\" data-role=\"prompt\" data-kind=\"system_prompt\" data-search=\"{search}\">",
         search = escape_attr(&search)
     );
     out.push_str("      <div class=\"entry-rail\">\n");
@@ -1376,6 +1579,14 @@ fn render_system_prompt(
             "          <span class=\"entry-meta\" title=\"total request size: system + history + user\">{}</span>",
             escape(&request_size_label)
         );
+        if let Some(label) = &usage_label {
+            let _ = writeln!(
+                out,
+                "          <span class=\"entry-meta entry-meta--usage\" title=\"{}\">{}</span>",
+                escape_attr(&usage_title(prompt.usage.as_ref(), context_window_tokens)),
+                escape(label)
+            );
+        }
         out.push_str("        </header>\n");
     } else {
         out.push_str("        <details class=\"entry-content prompt-details\">\n");
@@ -1398,6 +1609,14 @@ fn render_system_prompt(
             "            <span class=\"entry-meta\" title=\"total request size: system + history + user\">{}</span>",
             escape(&request_size_label)
         );
+        if let Some(label) = &usage_label {
+            let _ = writeln!(
+                out,
+                "            <span class=\"entry-meta entry-meta--usage\" title=\"{}\">{}</span>",
+                escape_attr(&usage_title(prompt.usage.as_ref(), context_window_tokens)),
+                escape(label)
+            );
+        }
         out.push_str("          </summary>\n");
         out.push_str(
             "          <div class=\"prompt-body\"><div class=\"code-bar\"><span class=\"code-tag\">system</span>",
@@ -1484,9 +1703,14 @@ fn render_system_prompt(
     } else {
         format!("system prompt · {iter_label} · {chars_label}")
     };
+    let title = if let Some(context_label) = context_label {
+        format!("{title} · {context_label}")
+    } else {
+        title
+    };
     let _ = writeln!(
         spine,
-        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"system\" title=\"{}\"></a>",
+        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"prompt\" title=\"{}\"></a>",
         escape_attr(&title)
     );
 
@@ -1502,6 +1726,59 @@ fn submit_value_text(value: &serde_json::Value) -> String {
     }
 }
 
+fn write_usage_chart_bar(
+    out: &mut String,
+    entry_id: &str,
+    prompt: &LlmPromptSnapshot,
+    context_window_tokens: Option<u64>,
+) {
+    let iter_label = prompt
+        .iteration
+        .map(|i| i.to_string())
+        .unwrap_or_else(|| "llm".to_string());
+    let Some(usage) = prompt.usage.as_ref() else {
+        let _ = writeln!(
+            out,
+            "    <a class=\"usage-row usage-row--missing\" href=\"#{id}\" title=\"{title}\"><span class=\"usage-row-label\">{iter}</span><span class=\"usage-track\"><span class=\"usage-bar\"></span></span><span class=\"usage-row-pct\">n/a</span></a>",
+            id = escape_attr(entry_id),
+            title = escape_attr(&format!("iter {iter_label} · token usage not recorded")),
+            iter = escape(&iter_label),
+        );
+        return;
+    };
+
+    let context_pct = context_percent(usage, context_window_tokens);
+    let cached_pct = percent_of(usage.cached_input_tokens, usage.input_tokens);
+    let width = context_pct
+        .map(|pct| {
+            let clamped = pct.clamp(0.0, 100.0);
+            if clamped > 0.0 { clamped.max(2.0) } else { 1.0 }
+        })
+        .unwrap_or_else(|| cached_pct.map(|pct| pct.clamp(2.0, 100.0)).unwrap_or(1.0));
+    let level_class = match context_pct {
+        Some(pct) if pct >= 90.0 => " usage-row--critical",
+        Some(pct) if pct >= 75.0 => " usage-row--hot",
+        Some(pct) if pct >= 50.0 => " usage-row--warm",
+        Some(_) => "",
+        None => " usage-row--unknown",
+    };
+    let pct_label = context_pct
+        .map(|pct| format!("{pct:.1}%"))
+        .unwrap_or_else(|| "ctx n/a".to_string());
+    let title = usage_title(Some(usage), context_window_tokens);
+    let _ = writeln!(
+        out,
+        "    <a class=\"usage-row{level_class}\" href=\"#{id}\" title=\"{title}\" data-usage-entry=\"{id}\" data-context-pct=\"{pct}\"><span class=\"usage-row-label\">{iter}</span><span class=\"usage-track\"><span class=\"usage-bar\" style=\"--usage-width: {width:.3}%\"></span></span><span class=\"usage-row-pct\">{pct_label}</span></a>",
+        id = escape_attr(entry_id),
+        title = escape_attr(&format!("iter {iter_label} · {title}")),
+        pct = context_pct
+            .map(|pct| format!("{pct:.6}"))
+            .unwrap_or_default(),
+        iter = escape(&iter_label),
+        pct_label = escape(&pct_label),
+    );
+}
+
 fn message_matches_text(message: &Message, expected: &str) -> bool {
     let expected = expected.trim();
     if expected.is_empty() {
@@ -1515,6 +1792,75 @@ fn message_matches_text(message: &Message, expected: &str) -> bool {
         .collect::<Vec<_>>()
         .join("\n");
     collected.trim() == expected
+}
+
+fn compact_usage_label(usage: &LlmCallUsage, context_window_tokens: Option<u64>) -> String {
+    let context = context_percent_label(usage, context_window_tokens)
+        .unwrap_or_else(|| "ctx n/a".to_string());
+    let cached = percent_of(usage.cached_input_tokens, usage.input_tokens)
+        .map(|pct| format!("{pct:.1}% cached"))
+        .unwrap_or_else(|| "cache n/a".to_string());
+    format!("{context} · {cached}")
+}
+
+fn context_percent_label(
+    usage: &LlmCallUsage,
+    context_window_tokens: Option<u64>,
+) -> Option<String> {
+    context_percent(usage, context_window_tokens).map(|pct| format!("ctx {pct:.1}%"))
+}
+
+fn usage_title(usage: Option<&LlmCallUsage>, context_window_tokens: Option<u64>) -> String {
+    let Some(usage) = usage else {
+        return "token usage not recorded".to_string();
+    };
+    let context = match (
+        context_percent(usage, context_window_tokens),
+        context_window_tokens,
+    ) {
+        (Some(pct), Some(window)) => format!(
+            "context {pct:.3}% ({input} / {window})",
+            input = usage.input_tokens.max(0),
+        ),
+        _ => format!(
+            "context n/a ({input} input)",
+            input = usage.input_tokens.max(0)
+        ),
+    };
+    let cached = percent_of(usage.cached_input_tokens, usage.input_tokens)
+        .map(|pct| {
+            format!(
+                "cached {pct:.3}% ({cached} / {input})",
+                cached = usage.cached_input_tokens.max(0),
+                input = usage.input_tokens.max(0),
+            )
+        })
+        .unwrap_or_else(|| "cached n/a".to_string());
+    let duration = usage
+        .duration_ms
+        .map(|ms| format!(" · duration {}", format_duration(ms)))
+        .unwrap_or_default();
+    format!(
+        "{context} · {cached} · input {input} · output {output} · reasoning {reasoning}{duration}",
+        input = usage.input_tokens.max(0),
+        output = usage.output_tokens.max(0),
+        reasoning = usage.reasoning_tokens.max(0),
+    )
+}
+
+fn context_percent(usage: &LlmCallUsage, context_window_tokens: Option<u64>) -> Option<f64> {
+    let window = context_window_tokens?;
+    if window == 0 {
+        return None;
+    }
+    Some(usage.input_tokens.max(0) as f64 * 100.0 / window as f64)
+}
+
+fn percent_of(numerator: i64, denominator: i64) -> Option<f64> {
+    if denominator <= 0 {
+        return None;
+    }
+    Some(numerator.max(0) as f64 * 100.0 / denominator as f64)
 }
 
 fn one_line_summary(text: &str, max_chars: usize) -> String {
@@ -1629,6 +1975,17 @@ fn format_count(n: u64) -> String {
         format!("{:.1}mb", n as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.2}gb", n as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn format_tokens(n: i64) -> String {
+    let n = n.max(0) as f64;
+    if n < 1_000.0 {
+        format!("{}", n as u64)
+    } else if n < 1_000_000.0 {
+        format!("{:.1}k", n / 1_000.0)
+    } else {
+        format!("{:.2}m", n / 1_000_000.0)
     }
 }
 
@@ -1815,7 +2172,9 @@ const JS: &str = include_str!("html_assets/script.js");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::{LlmCallUsage, LlmPromptSnapshot, RequestMessage};
     use lash::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
+    use std::path::PathBuf;
 
     #[test]
     fn html_export_renders_chronological_tool_and_rlm_step() {
@@ -1848,6 +2207,8 @@ mod tests {
                     }),
                 },
             ],
+            trace_path: PathBuf::from("session.trace.jsonl"),
+            context_window_tokens: None,
             llm_prompts: Vec::new(),
         };
 
@@ -1904,6 +2265,8 @@ mod tests {
                     }),
                 },
             ],
+            trace_path: PathBuf::from("session.trace.jsonl"),
+            context_window_tokens: None,
             llm_prompts: Vec::new(),
         };
 
@@ -1919,5 +2282,86 @@ mod tests {
         // The JSON highlighter wraps strings in spans and escapes quotes,
         // so look for the bare key text — proves the result block rendered.
         assert!(rendered.contains("answer"), "result missing");
+    }
+
+    #[test]
+    fn rlm_step_renders_inline_expandable_tool_calls() {
+        let session = LoadedSession {
+            meta: None,
+            chronological: vec![ChronologicalEntry {
+                index: 0,
+                payload: ChronologicalPayload::RlmStep(RlmTrajectoryEntry {
+                    id: "rlm_step_0".to_string(),
+                    iteration: 0,
+                    reasoning: "checking".to_string(),
+                    code: "data = (call lookup { q: \"x\" })?".to_string(),
+                    output: Vec::new(),
+                    tool_calls: vec![ToolCallRecord {
+                        call_id: Some("call_1".to_string()),
+                        tool: "lookup".to_string(),
+                        args: serde_json::json!({"q": "x"}),
+                        result: serde_json::json!({"answer": "y"}),
+                        success: true,
+                        duration_ms: 4,
+                    }],
+                    images: Vec::new(),
+                    error: None,
+                    final_output: None,
+                }),
+            }],
+            trace_path: PathBuf::from("session.trace.jsonl"),
+            context_window_tokens: None,
+            llm_prompts: Vec::new(),
+        };
+
+        let rendered = render(&session);
+        assert!(rendered.contains("rlm-tool-list"));
+        assert!(rendered.contains("tool calls"));
+        assert!(rendered.contains("lookup"));
+        assert!(rendered.contains("answer"));
+    }
+
+    #[test]
+    fn provider_system_prompts_use_prompt_filter_role() {
+        let session = LoadedSession {
+            meta: None,
+            chronological: Vec::new(),
+            trace_path: PathBuf::from("session.trace.jsonl"),
+            context_window_tokens: Some(100_000),
+            llm_prompts: vec![LlmPromptSnapshot {
+                iteration: Some(0),
+                llm_call_id: Some("root:0".to_string()),
+                timestamp: None,
+                model: Some("gpt-test".to_string()),
+                model_variant: None,
+                system_text: "You are lash.".to_string(),
+                system_chars: 13,
+                system_hash: "abc123".to_string(),
+                message_count: 2,
+                total_chars: 15,
+                request_messages: vec![RequestMessage {
+                    role: "user".to_string(),
+                    text: "hi".to_string(),
+                    chars: 2,
+                }],
+                request_chars: 2,
+                request_hash: "def456".to_string(),
+                usage: Some(LlmCallUsage {
+                    input_tokens: 10_000,
+                    output_tokens: 250,
+                    cached_input_tokens: 7_500,
+                    reasoning_tokens: 125,
+                    duration_ms: Some(3000),
+                }),
+            }],
+        };
+
+        let rendered = render(&session);
+        assert!(rendered.contains("data-role=\"prompt\""));
+        assert!(rendered.contains("data-kind=\"system_prompt\""));
+        assert!(rendered.contains(">prompt</button>"));
+        assert!(rendered.contains("usage-chart"));
+        assert!(rendered.contains("ctx 10.0%"));
+        assert!(rendered.contains("75.000%"));
     }
 }

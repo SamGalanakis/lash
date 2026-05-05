@@ -15,17 +15,17 @@
         <div>
           <div class="eyebrow">Architecture chapter 01</div>
           <h1>overview<span class="slash">/</span>map</h1>
-          <p>Lash is organized as a narrow protocol kernel plus an async host runtime. The CLI composes first-party providers, mode plugins, default tools, subagents, MCP tools, UI extensions, persistence, tracing, and the TUI.</p>
+          <p>Lash is organized as a narrow protocol kernel plus an async host runtime. The CLI and embedding facade compose first-party providers, mode plugins, default tools, subagents, LLM helper tools, MCP tools, UI extensions, persistence, tracing, and the TUI.</p>
         </div>
         <div class="hero-meta">
           <article class="card"><div class="micro-label">Kernel</div><strong><code>lash-sansio</code></strong><span>Pure turn machine, prompts, messages, mode preambles, effects, and model request contracts.</span></article>
           <article class="card"><div class="micro-label">Runtime</div><strong><code>lash</code></strong><span>Sessions, graph, stores, providers, plugins, tools, attachments, tracing, subagent host APIs, and turn execution.</span></article>
-          <article class="card"><div class="micro-label">Host</div><strong><code>lash-cli</code></strong><span>Interactive TUI, <code>--print</code>, bootstrap, setup, resume/fork, logs, trace wiring, and export entrypoints.</span></article>
+          <article class="card"><div class="micro-label">Hosts</div><strong><code>lash-cli</code>, <code>lash-embed</code></strong><span>Interactive TUI, <code>--print</code>, app-facing session API, setup, resume/fork, logs, trace wiring, and export entrypoints.</span></article>
         </div>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a class="active" href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a class="active" href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
       </nav>
 
       <section class="content">
@@ -40,15 +40,19 @@
 flowchart TD
   subgraph Host["Host applications"]
     CLI["lash-cli<br/>TUI, setup, resume/fork, --print"]
-    Export["lash-export<br/>HTML / JSON / markdown session export"]
+    Embed["lash-embed<br/>app-facing core/session/turn API"]
+    Export["lash-export<br/>HTML / JSON session export"]
     TraceViewer["lash-trace-viewer<br/>JSONL trace browser"]
+    Bench["benchmark runners<br/>CLBench, SWE-bench, LongCoT"]
   end
 
   subgraph Runtime["Async host runtime"]
     L["lash<br/>LashRuntime, Session, Store, PluginHost"]
+    Env["RuntimeEnvironment<br/>shared embedder infrastructure"]
     Graph["SessionGraph<br/>durable event graph"]
     Read["SessionReadView<br/>public read seam"]
     Tools["Tool dispatch<br/>dynamic tools, MCP, built-ins"]
+    Sqlite["lash-sqlite-store<br/>concrete SQLite persistence"]
   end
 
   subgraph Kernel["Pure protocol kernel"]
@@ -59,15 +63,20 @@ flowchart TD
   subgraph Extensions["Replaceable edges"]
     Modes["mode plugins<br/>standard + rlm"]
     Providers["provider crates<br/>OpenAI, Codex, Anthropic, Google"]
-    Plugins["tool/plugin crates<br/>subagents, plan, memory, context, UI activity"]
+    Plugins["tool/plugin crates<br/>subagents, llm_query, plan, memory, context, UI activity"]
   end
 
   CLI --> L
+  Embed --> L
+  Bench --> L
   Export --> Read
+  Export --> TraceViewer
   TraceViewer --> L
+  L --> Env
   L --> S
   L --> LL
   L --> Graph
+  L --> Sqlite
   Graph --> Read
   L --> Tools
   Modes --> L
@@ -83,9 +92,9 @@ flowchart TD
             <p>These figures are workspace-level and exclude generated build output.</p>
           </div>
           <div class="stats">
-            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">31</span><span class="stat-note">Runtime, app, provider, plugin, language, export, tracing, file-index, and benchmark crates.</span></article>
-            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">139,942 LOC</span><span class="stat-note">Measured with <code>tokei</code>; Rust dominates the workspace.</span></article>
-            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">277</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, benches, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">37</span><span class="stat-note">Runtime, embed API, CLI/TUI, providers, plugins, language, export, tracing, file-index, examples, and benchmark crates.</span></article>
+            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">143,668 LOC</span><span class="stat-note">Measured with <code>tokei</code>; Rust dominates the workspace.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">285</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, benches, examples, and trace/export utilities.</span></article>
             <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang.</span></article>
           </div>
         </div>
@@ -116,8 +125,8 @@ flowchart TD
             </li>
             <li>
               <div>
-                <h3>Runtime host capabilities are split.</h3>
-                <p><code>RuntimeSessionManager</code> delegates to focused capability modules — current session, managed sessions, background tasks, usage, prompt, and direct completion.</p>
+                <h3>Runtime host capabilities are trait-shaped.</h3>
+                <p><code>RuntimeSessionManager</code> implements focused plugin host traits for snapshots, tool catalogs, session lifecycle, background tasks, prompt state, usage, and direct completion.</p>
               </div>
             </li>
           </ol>

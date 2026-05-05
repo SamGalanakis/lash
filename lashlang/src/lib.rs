@@ -12,10 +12,15 @@ pub use parser::{ParseError, parse};
 pub use runtime::{
     CompileStats, CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats,
     ExecutionOutcome, ExecutionScratch, ImageValue, LASH_TYPE_KEY, ProfileReport, ProfileStat,
-    Record, RuntimeError, RuntimeFailure, Snapshot, State, ToolHost, ToolHostCall, ToolHostError,
-    Value, compile_program, compile_source, execute_compiled, execute_compiled_traced,
-    execute_compiled_traced_with_scratch, execute_compiled_with_scratch, execute_program, prewarm,
-    profile_compiled, profile_compiled_with_scratch, unwrap_type_value,
+    ProjectedBindings, ProjectedList, ProjectedValue, Record, RuntimeError, RuntimeFailure,
+    Snapshot, State, ToolHost, ToolHostCall, ToolHostError, Value, compile_program, compile_source,
+    execute_compiled, execute_compiled_traced, execute_compiled_traced_with_projected_bindings,
+    execute_compiled_traced_with_scratch,
+    execute_compiled_traced_with_scratch_and_projected_bindings,
+    execute_compiled_with_projected_bindings, execute_compiled_with_scratch,
+    execute_compiled_with_scratch_and_projected_bindings, execute_program, prewarm,
+    profile_compiled, profile_compiled_with_projected_bindings, profile_compiled_with_scratch,
+    profile_compiled_with_scratch_and_projected_bindings, unwrap_type_value,
 };
 
 pub async fn execute<H: ToolHost>(
@@ -42,6 +47,18 @@ pub async fn execute_with_diagnostics<H: ToolHost>(
                 message: format_runtime_diagnostic(source, &failure.error, failure.span),
             })
         })
+}
+
+pub async fn execute_with_projected_bindings<H: ToolHost>(
+    source: &str,
+    state: &mut State,
+    host: &H,
+    projected: &ProjectedBindings,
+) -> Result<ExecutionOutcome, ExecuteError> {
+    let compiled = compile_source(source)?;
+    execute_compiled_with_projected_bindings(&compiled, state, host, projected)
+        .await
+        .map_err(ExecuteError::Runtime)
 }
 
 pub fn format_runtime_diagnostic(source: &str, error: &RuntimeError, span: Option<Span>) -> String {

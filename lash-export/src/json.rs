@@ -18,6 +18,8 @@ pub fn render(session: &LoadedSession) -> String {
 
     let document = json!({
         "meta": meta,
+        "trace_path": session.trace_path.display().to_string(),
+        "context_window_tokens": session.context_window_tokens,
         "chronological": session.chronological,
         "llm_prompts": session.llm_prompts,
     });
@@ -29,6 +31,7 @@ pub fn render(session: &LoadedSession) -> String {
 mod tests {
     use super::*;
     use lash::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
+    use std::path::PathBuf;
 
     #[test]
     fn json_export_uses_chronological_entries() {
@@ -45,6 +48,8 @@ mod tests {
                     duration_ms: 4,
                 }),
             }],
+            trace_path: PathBuf::from("session.trace.jsonl"),
+            context_window_tokens: None,
             llm_prompts: Vec::new(),
         };
 

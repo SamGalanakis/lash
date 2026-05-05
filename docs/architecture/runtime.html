@@ -3,56 +3,116 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="canonical" href="modules.html">
-<title>Runtime — moved · lash Architecture</title>
+<title>Runtime - lash Architecture</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./styles.css">
-<style>
-  .redirect {
-    display: grid;
-    place-items: center;
-    min-height: 60vh;
-    padding: var(--space-3xl) var(--space-xl);
-    text-align: center;
-  }
-  .redirect h1 {
-    margin: 0 0 var(--space-sm);
-    font-size: clamp(2.4rem, 5vw, 3.6rem);
-  }
-  .redirect p {
-    margin: 0 auto;
-    max-width: 48ch;
-    font-size: 1.05rem;
-  }
-  .redirect a {
-    display: inline-block;
-    margin-top: var(--space-lg);
-    padding: var(--space-sm) var(--space-md);
-    border: 1px solid var(--sodium);
-    color: var(--sodium);
-    font-family: var(--font-ui);
-    font-size: 0.78rem;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-  }
-  .redirect a:hover {
-    background: var(--sodium);
-    color: var(--form-deep);
-    text-decoration: none;
-  }
-</style>
+<script src="./mermaid.js" defer></script>
 </head>
 <body>
   <div class="page">
     <main class="frame">
-      <div class="redirect">
+      <header class="hero">
         <div>
-          <div class="eyebrow">Page moved</div>
-          <h1>runtime<span class="slash">/</span>moved</h1>
-          <p>The runtime chapter consolidated into Modules.</p>
-          <a href="./modules.html">Continue to Modules →</a>
+          <div class="eyebrow">Architecture chapter 05</div>
+          <h1>runtime<span class="slash">/</span>host</h1>
+          <p>The async runtime is the host boundary around the pure turn machine. It owns residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and app embedding outside the core session model.</p>
         </div>
-      </div>
+        <div class="hero-meta">
+          <article class="card"><div class="micro-label">Host object</div><strong><code>LashRuntime</code></strong><span>Streams turns, owns live sessions, and satisfies protocol effects.</span></article>
+          <article class="card"><div class="micro-label">Store seam</div><strong><code>RuntimePersistence</code></strong><span>Runtime contract implemented by <code>lash-sqlite-store</code>.</span></article>
+          <article class="card"><div class="micro-label">Read seam</div><strong><code>SessionReadView</code></strong><span>Public state view for plugins, exports, UI projection, and history transforms.</span></article>
+        </div>
+      </header>
+
+      <nav class="nav" aria-label="Architecture pages">
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a class="active" href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+      </nav>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>Runtime Shape</h2>
+            <p><code>LashRuntime</code> holds the live session registry and delegates narrowly: sans-IO computes protocol effects, plugins contribute behavior, providers complete requests, and persistence records durable turn results.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Runtime composition</div>
+            <div class="mermaid">
+flowchart TD
+  Host["CLI / lash-embed / benchmark runner"] --> Runtime["LashRuntime"]
+  Runtime --> Env["RuntimeEnvironment<br/>providers, tools, tasks, traces"]
+  Runtime --> Manager["RuntimeSessionManager"]
+  Runtime --> Persistence["RuntimePersistence trait"]
+  Persistence --> Sqlite["lash-sqlite-store<br/>SQLite + blobs"]
+  Manager --> Session["Session"]
+  Session --> Machine["lash-sansio TurnMachine"]
+  Session --> Plugins["SessionPlugin hooks"]
+  Session --> ReadView["SessionReadView"]
+  Machine --> Effects["Effect<br/>LLM, tools, ExecCode, checkpoint"]
+  Effects --> Env
+  ReadView --> Projection["ChronologicalProjection<br/>RLM history / UI / export"]
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Residency And Sessions</h2>
+            <p>The runtime can be interactive, embedded, or benchmark-owned. The same session machinery supports active sessions, managed child sessions, parked runtimes, and resumable app hosts.</p>
+          </div>
+          <div class="mode-grid">
+            <article class="panel"><small>interactive</small><h3>CLI-owned runtime</h3><p><code>lash-cli</code> composes providers, plugins, MCP servers, traces, and terminal rendering around a live <code>LashRuntime</code>.</p></article>
+            <article class="panel"><small>embedded</small><h3>App-owned runtime</h3><p><code>lash-embed</code> exposes managed session creation, chat switching, <code>park()</code>, and <code>resume()</code> for long-lived host applications.</p></article>
+            <article class="panel"><small>evaluated</small><h3>Benchmark-owned runtime</h3><p>Benchmark runners embed the same runtime with controlled plugins, store paths, trace capture, and task-specific validation.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Host Capabilities</h2>
+            <p><code>RuntimeSessionManager</code> implements focused plugin host traits rather than one broad mutable runtime handle.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Trait</th><th>Runtime responsibility</th></tr></thead>
+              <tbody>
+                <tr><td><code>SessionSnapshotHost</code>, <code>ToolCatalogHost</code></td><td>Read current state and tool catalogs through stable projections.</td></tr>
+                <tr><td><code>SessionLifecycleHost</code>, <code>TurnHost</code></td><td>Create, fork, continue, and stream managed sessions.</td></tr>
+                <tr><td><code>TaskHost</code>, <code>MonitorHost</code></td><td>Register background tasks, monitors, async handles, wakeups, and cancellation.</td></tr>
+                <tr><td><code>PromptHost</code>, <code>TraceHost</code></td><td>Expose prompt state and trace sinks to hooks without exposing session internals.</td></tr>
+                <tr><td><code>DirectCompletionHost</code></td><td>Run one-shot completions for helper tools such as <code>llm_query</code> and account for their usage.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Persistence And Usage</h2>
+            <p>Persistence is turn-scoped. Commits update the session graph, checkpoint blobs, session heads, and usage ledger together so read views and benchmark cost reports agree.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Commit and accounting path</div>
+            <div class="mermaid">
+flowchart LR
+  Driver["RuntimeTurnDriver"] --> Pipeline["TurnCommitPipeline"]
+  Pipeline --> Delta["RuntimeCommit<br/>GraphCommitDelta"]
+  Delta --> Store["lash-sqlite-store"]
+  Store --> Head["session_head revision"]
+  Store --> Blobs["checkpoint + attachment blobs"]
+  Store --> Ledger["usage ledger<br/>source + model + tokens"]
+  Pipeline --> View["SessionReadView"]
+  Ledger --> Reports["SessionUsageReport<br/>diff_usage_reports"]
+            </div>
+          </div>
+        </div>
+
+        <div class="section-nav">
+          <a href="./execution.html"><span>Previous</span><strong>Execution</strong></a>
+          <a href="./abstractions.html"><span>Next</span><strong>Abstractions</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Runtime anchors: <code>lash/src/runtime/*</code>, <code>lash/src/session.rs</code>, <code>lash/src/plugin/mod.rs</code>, <code>lash-sqlite-store/src/lib.rs</code>, <code>lash-embed/src/lib.rs</code>.</footer>
     </main>
   </div>
 </body>

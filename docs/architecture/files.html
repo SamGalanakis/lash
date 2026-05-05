@@ -12,7 +12,7 @@
     <main class="frame">
       <header class="hero">
         <div>
-          <div class="eyebrow">Architecture chapter 07</div>
+          <div class="eyebrow">Architecture chapter 08</div>
           <h1>files<span class="slash">/</span>map</h1>
           <p>This is the maintenance map for the files most likely to matter when runtime, provider, plugin, UI projection, or Lashlang behavior changes.</p>
         </div>
@@ -24,7 +24,7 @@
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a class="active" href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a class="active" href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
       </nav>
 
       <section class="content">
@@ -47,7 +47,9 @@
                 <tr><td><code>lash/src/runtime/session_manager/*</code></td><td>Focused host-capability implementations for API traits, background tasks, current snapshots, direct completion, graph access, managed sessions, monitors, prompts, turns, and usage.</td></tr>
                 <tr><td><code>lash/src/session_graph.rs</code></td><td>Durable graph records, active path read model, append builders, message tree, and stable node IDs.</td></tr>
                 <tr><td><code>lash/src/chronological.rs</code></td><td>Derived semantic projection over active messages, tool calls, RLM steps, and image references.</td></tr>
-                <tr><td><code>lash/src/store.rs</code></td><td>SQLite persistence, graph commits, checkpoint blobs, session heads, usage ledger, tombstones, vacuum, and GC.</td></tr>
+                <tr><td><code>lash/src/store.rs</code></td><td><code>RuntimePersistence</code>, graph commit types, checkpoint/blob contracts, usage report types, tombstones, vacuum, and GC interfaces.</td></tr>
+                <tr><td><code>lash-sqlite-store/src/lib.rs</code></td><td>Concrete SQLite runtime store for graph nodes, session heads, blobs, checkpoints, usage ledger, tombstones, vacuum, and GC.</td></tr>
+                <tr><td><code>lash-embed/src/lib.rs</code></td><td>App-facing embedding API for managed chats, runtime construction, parking, resume, and session interaction.</td></tr>
               </tbody>
             </table>
           </div>
@@ -90,7 +92,9 @@
                 <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>RLM execution instructions and shared Lashlang language reference used by prompt tests.</td></tr>
                 <tr><td><code>lash-mode-rlm/src/driver.rs</code></td><td>RLM protocol driver, context projection, history rendering, image references, and final submission handling.</td></tr>
                 <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td><code>RlmExecutionState</code>, <code>HostBridge</code>, tool execution, snapshot/restore, and image conversion.</td></tr>
-                <tr><td><code>lash-subagents/src/rlm.rs</code></td><td>RLM-facing <code>spawn_agent</code>, <code>llm_query</code>, <code>continue_as</code>, and <code>list_async_handles</code> definitions.</td></tr>
+                <tr><td><code>lash-subagents/src/rlm.rs</code></td><td>RLM-facing <code>spawn_agent</code> definitions, subagent output contracts, capability prompt text, and submit-error handling.</td></tr>
+                <tr><td><code>lash-llm-tools/src/lib.rs</code></td><td><code>llm_query</code> plugin, direct completion request handling, output-schema parsing, and usage relay.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/control_tools.rs</code></td><td>RLM control tools, including <code>continue_as</code> and handoff/session continuation behavior.</td></tr>
                 <tr><td><code>lash-plugin-tool-discovery/src/lib.rs</code></td><td>Plugin registration and RLM tool-surface override for discovery/load tools.</td></tr>
                 <tr><td><code>lash-plugin-tool-discovery/src/catalog.rs</code></td><td><code>CatalogTool</code> parsing and compact tool contract projection.</td></tr>
                 <tr><td><code>lash-plugin-tool-discovery/src/provider.rs</code></td><td><code>ToolDiscoveryToolsProvider</code>, <code>search_tools</code>, <code>load_tools</code>, cache reuse, promotion, and host calls.</td></tr>
@@ -99,7 +103,12 @@
                 <tr><td><code>lash-cli/src/app/projection.rs</code></td><td><code>SessionReadView -> ChronologicalProjection -> UiTimeline</code> conversion and interrupted-turn projection.</td></tr>
                 <tr><td><code>lash-cli/src/render/mod.rs</code></td><td>Timeline item rendering dispatch into terminal lines and surfaces.</td></tr>
                 <tr><td><code>lash-export/src/lib.rs</code></td><td>Read-only store loading and chronological projection export entrypoint.</td></tr>
+                <tr><td><code>lash-export/src/trace.rs</code></td><td>Provider trace loading, prompt snapshot extraction, context-window usage, cached-token percentage, and LLM-call usage matching.</td></tr>
                 <tr><td><code>lash-trace/src/lib.rs</code></td><td>Trace schema version 2, JSONL records, trace context, and sinks.</td></tr>
+                <tr><td><code>bench/continual-learning-bench/runner/src/main.rs</code></td><td>Rust CLBench runner: embeds <code>LashRuntime</code>, registers the constrained RLM tool surface, validates submissions, and records cost deltas.</td></tr>
+                <tr><td><code>bench/continual-learning-bench/lash_system/system.py</code></td><td>Python CLBench adapter that shells into the Rust runner and preserves run/session artifacts.</td></tr>
+                <tr><td><code>lash-gepa/src/lib.rs</code></td><td>GEPA optimizer primitives used by experiment and evaluation workflows.</td></tr>
+                <tr><td><code>lash-autoresearch/src/runtime.rs</code></td><td>Autoresearch plugin/runtime extension with hidden tools and research-oriented UI integration.</td></tr>
               </tbody>
             </table>
           </div>

@@ -10,11 +10,10 @@
 use std::collections::HashSet;
 
 use lash::plugin::PluginError;
-use lash::session_model::{ModeEvent, SessionEventRecord};
 use lash::{
-    InputItem, ModeExtras, SessionAppendNode, SessionCreateRequest, SessionPluginMode,
-    SessionPolicy, SessionStartPoint, SessionToolAccess, ToolDefinition, ToolExecutionContext,
-    ToolExecutionMode, ToolProvider, ToolResult, ToolSurfaceContribution, TurnInput,
+    InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy,
+    SessionStartPoint, SessionToolAccess, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
+    ToolProvider, ToolResult, ToolSurfaceContribution, TurnInput,
 };
 use lash_rlm_types::RlmTermination;
 use serde_json::{Value, json};
@@ -47,6 +46,7 @@ pub(crate) fn fresh_child_request(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_session_policy(
     registry: &CapabilityRegistry,
     current_policy: &SessionPolicy,
@@ -174,91 +174,6 @@ pub(crate) fn unknown_capability_message(name: &str, registry: &CapabilityRegist
     }
 }
 
-pub(crate) fn parse_output_schema(value: Option<&Value>) -> Result<Option<Value>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let output = value.as_object().ok_or_else(|| {
-        "invalid `output`: expected a record describing the typed shape".to_string()
-    })?;
-    if output.is_empty() {
-        return Err("at least one output field is required".to_string());
-    }
-
-    // Fast path: lashlang `Type { ... }` literals are delivered wrapped with a
-    // single `$lash_type` key whose value is already a JSON Schema. Pass it
-    // through directly so richer types (enums, nested records, optional fields,
-    // `list[<composite>]`) are preserved end-to-end.
-    if output.len() == 1
-        && let Some(schema) = output.get(lashlang::LASH_TYPE_KEY)
-    {
-        validate_schema(schema)?;
-        return Ok(Some(schema.clone()));
-    }
-
-    let mut properties = serde_json::Map::new();
-    let mut required = Vec::new();
-    for (name, descriptor) in output {
-        let type_str = descriptor
-            .as_str()
-            .ok_or_else(|| format!("field `{name}`: type descriptor must be a string"))?;
-        properties.insert(name.clone(), type_descriptor_to_json_schema(type_str)?);
-        required.push(Value::String(name.clone()));
-    }
-    Ok(Some(json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })))
-}
-
-/// Lightweight sanity check for a JSON Schema handed to us by the runtime.
-/// We only reject shapes that would produce a useless prompt; the provider's
-/// structured-output path does the full enforcement.
-fn validate_schema(schema: &Value) -> Result<(), String> {
-    let object = schema
-        .as_object()
-        .ok_or_else(|| "Type schema must be a JSON object".to_string())?;
-    let kind = object
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Type schema missing `type` field".to_string())?;
-    match kind {
-        "object" | "array" | "string" | "integer" | "number" | "boolean" => Ok(()),
-        other => Err(format!("unsupported Type schema kind `{other}`")),
-    }
-}
-
-fn type_descriptor_to_json_schema(descriptor: &str) -> Result<Value, String> {
-    let scalar = |ty: &str| -> Result<Value, String> {
-        match ty {
-            "str" | "string" => Ok(json!({"type": "string"})),
-            "int" | "integer" => Ok(json!({"type": "integer"})),
-            "float" | "number" => Ok(json!({"type": "number"})),
-            "bool" | "boolean" => Ok(json!({"type": "boolean"})),
-            "record" | "dict" | "object" => {
-                Ok(json!({"type": "object", "additionalProperties": true}))
-            }
-            other => Err(format!("unknown scalar type `{other}`")),
-        }
-    };
-    let trimmed = descriptor.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix("list[")
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return Ok(json!({
-            "type": "array",
-            "items": scalar(inner.trim())?,
-        }));
-    }
-    scalar(trimmed)
-}
-
 pub(crate) fn render_task_prompt(task: &str, output_schema: Option<&Value>) -> String {
     let mut sections = vec![task.to_string()];
     if let Some(schema) = output_schema {
@@ -353,19 +268,6 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
     })
 }
 
-pub(crate) fn llm_query_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "task": { "type": "string" },
-            "inputs": {},
-            "output": { "type": "object", "additionalProperties": true }
-        },
-        "required": ["task"],
-        "additionalProperties": false
-    })
-}
-
 /// Tools that are inert in any subagent session because there is no
 /// human attached to the session: prompts return nothing, UI surfaces
 /// have no thread to render against. Hidden universally on top of
@@ -399,13 +301,9 @@ pub(crate) fn explore_tools(output_schema: Option<Value>) -> Vec<ToolDefinition>
         )
     });
     let _ = output_schema;
-    tools.push(llm_query_tool_definition());
-    tools.push(continue_as_tool_definition());
+    tools.push(lash_llm_tools::llm_query_tool_definition());
+    tools.push(lash_mode_rlm::continue_as_tool_definition());
     tools
-}
-
-pub(crate) fn cognition_tools() -> Vec<ToolDefinition> {
-    vec![llm_query_tool_definition(), continue_as_tool_definition()]
 }
 
 fn tools_for_surface(
@@ -415,20 +313,8 @@ fn tools_for_surface(
     match surface {
         CapabilityToolSurface::InheritParent => Vec::new(),
         CapabilityToolSurface::BuiltinExplore => explore_tools(output_schema),
-        CapabilityToolSurface::CognitionOnly => cognition_tools(),
         CapabilityToolSurface::Explicit(tools) => tools.clone(),
     }
-}
-
-pub(crate) fn llm_query_tool_definition() -> ToolDefinition {
-    tool_definition(
-        "llm_query",
-        "Run one lightweight LLM call and return its result. Use this for semantic extraction, summarization, classification, judging, or transforming data already available in variables. It does not create a child session, cannot use tools, and does not run a REPL loop. `inputs` can be any structured value. `output` is optional and defaults to a string; when present, it accepts the same record descriptors and `Type { ... }` literals as `spawn_agent`.",
-        llm_query_input_schema(),
-        Vec::new(),
-        ToolExecutionMode::Parallel,
-    )
-    .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
 }
 
 pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
@@ -453,37 +339,6 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
 
 pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {
     ToolResult::ok(args.clone())
-}
-
-pub(crate) fn continue_as_tool_definition() -> ToolDefinition {
-    tool_definition(
-        "continue_as",
-        "Tail-call: end this session and continue the work as a fresh successor with the same tools and a clean window. Use when the current trajectory is stale or context budget is tight; pack only what the successor needs into `task` and `seed`.",
-        continue_as_input_schema(),
-        vec![
-            r#"call continue_as { task: "continue the audit from the summarized findings", seed: { findings: findings } }"#.into(),
-        ],
-        ToolExecutionMode::Parallel,
-    )
-}
-
-pub(crate) fn continue_as_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "task": {
-                "type": "string",
-                "description": "Task for the successor session."
-            },
-            "seed": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "Optional record/dict of concrete state for the successor."
-            }
-        },
-        "required": ["task"],
-        "additionalProperties": false
-    })
 }
 
 pub(crate) fn hidden_tools_for_spec(spec: &CapabilitySpec, child_depth: u8) -> HashSet<String> {
@@ -513,25 +368,6 @@ pub(crate) fn subagent_surface_contribution(
         )],
         ..Default::default()
     })
-}
-
-/// Build a fresh `RlmGlobalsPatch` initial-node sequence for `continue_as`
-/// successors that need to seed RLM globals. Returned as a `Vec` so the
-/// caller can pass it straight into the create request.
-pub(crate) fn rlm_seed_initial_nodes(
-    seed: serde_json::Map<String, Value>,
-) -> Vec<SessionAppendNode> {
-    if seed.is_empty() {
-        return Vec::new();
-    }
-    vec![SessionAppendNode::event(SessionEventRecord::Mode(
-        ModeEvent::rlm(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(
-            lash_rlm_types::RlmGlobalsPatchPluginBody {
-                set: seed,
-                unset: Vec::new(),
-            },
-        )),
-    ))]
 }
 
 /// Wrap an `Ok`/`Err` result as a `ToolResult`. Used by both providers'

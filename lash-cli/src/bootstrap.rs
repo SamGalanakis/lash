@@ -5,6 +5,7 @@ use lash::*;
 use lash_default_tools::{
     DefaultToolBundle, DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
+use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_plugin_ui_activity::UiActivityPluginFactory;
@@ -95,6 +96,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         plugin_factories.push(Arc::new(
             lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
         ));
+        plugin_factories.push(Arc::new(LlmToolsPluginFactory));
         plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
             session_policy,
             Arc::new(capability_registry),
@@ -159,6 +161,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
     plugin_factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
+    plugin_factories.push(Arc::new(LlmToolsPluginFactory));
     plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy,
         capability_registry,

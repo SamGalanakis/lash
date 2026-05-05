@@ -13,7 +13,7 @@
     <main class="frame">
       <header class="hero">
         <div>
-          <div class="eyebrow">Architecture chapter 08</div>
+          <div class="eyebrow">Architecture chapter 09</div>
           <h1>lashlang<span class="slash">/</span>rlm</h1>
           <p>Lashlang is the agent-facing execution language for RLM mode. It lets the model run local programs against host tools, preserve state across turns, use async handles, and pass typed values through <code>print</code> and <code>submit</code>.</p>
         </div>
@@ -25,7 +25,7 @@
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a class="active" href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a class="active" href="./lashlang.html">Lashlang</a>
       </nav>
 
       <section class="content">
@@ -37,7 +37,7 @@
           <div class="module-grid">
             <article class="panel"><h3>Values</h3><p><code>null</code>, booleans, numbers, strings, lists, records, results, async handles, and immutable <code>Image</code> handles. Images expose <code>.id</code>, <code>.label</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>.</p></article>
             <article class="panel"><h3>Control flow</h3><p>Assignments, functions, loops, conditionals, <code>?</code> fail-fast unwrapping, <code>parallel</code>, <code>start call</code>, <code>await</code>, and <code>cancel</code>.</p></article>
-            <article class="panel"><h3>Tools</h3><p><code>call tool { ... }</code> returns a result wrapper; <code>(call tool { ... })?</code> unwraps success or stops the program with the tool error.</p></article>
+            <article class="panel"><h3>Tools</h3><p><code>call tool { ... }</code> returns a result wrapper; <code>(call tool { ... })?</code> unwraps success or stops the program with the tool error. RLM commonly sees <code>llm_query</code>, <code>spawn_agent</code>, <code>continue_as</code>, and <code>list_async_handles</code> when those plugins are registered.</p></article>
             <article class="panel"><h3>Output</h3><p><code>print</code> sends observations to the next model call. <code>submit</code> ends the turn with final text or JSON-compatible metadata.</p></article>
           </div>
         </div>
@@ -56,7 +56,7 @@ sequenceDiagram
   participant Runtime as RuntimeTurnDriver
   participant Executor as RlmExecutionState
   participant Host as HostBridge / ModeExecutionContext
-  participant Graph as SessionGraph
+  participant Commit as TurnCommitPipeline
 
   Model-->>Driver: prose + ```lashlang fence
   Driver-->>Runtime: DriverAction::StartExec(code)
@@ -64,7 +64,7 @@ sequenceDiagram
   Executor->>Host: call / start / await / cancel tool
   Host-->>Executor: ToolResult / handle / error
   Executor-->>Runtime: ExecResponse + observations + images
-  Runtime->>Graph: tool calls then RLM trajectory event
+  Runtime->>Commit: records tool calls + RLM trajectory in turn events
   Runtime-->>Driver: Response::ExecResult
             </div>
           </div>

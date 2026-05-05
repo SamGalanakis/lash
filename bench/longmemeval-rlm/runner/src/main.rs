@@ -23,6 +23,7 @@ use lash::{
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
+use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
@@ -771,6 +772,7 @@ fn build_plugin_session(
         ExecutionMode::standard(),
     ));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
+    factories.push(Arc::new(LlmToolsPluginFactory));
     factories.push(Arc::new(SubagentsPluginFactory::new(
         session_policy.clone(),
         registry,

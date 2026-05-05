@@ -14,11 +14,11 @@
         <div>
           <div class="eyebrow">Current workspace architecture</div>
           <h1>lash<span class="slash">/</span>system</h1>
-          <p><strong>lash</strong> is a Rust workspace for an embeddable terminal coding agent. The core is a layered agent runtime — a sans-IO turn machine wrapped by an async host runtime, with mode plugins, provider adapters, dynamic tools, durable session graph storage, and a CLI/TUI host on top.</p>
+          <p><strong>lash</strong> is a Rust workspace for embeddable coding agents. The core is a layered agent runtime — a sans-IO turn machine wrapped by an async host runtime, with mode plugins, provider adapters, dynamic tools, durable session graph storage, embedding APIs, benchmark runners, and a CLI/TUI host on top.</p>
         </div>
         <div class="hero-meta">
-          <article class="card"><div class="micro-label">Workspace</div><strong>31 Cargo members</strong><span>Runtime, CLI/TUI, providers, mode plugins, tool plugins, export, trace, file index, lashlang, and benchmark runners.</span></article>
-          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~140k LOC</strong><span>Measured with <code>tokei</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
+          <article class="card"><div class="micro-label">Workspace</div><strong>37 Cargo members</strong><span>Runtime, embed API, CLI/TUI, providers, mode plugins, tool plugins, export, trace, file index, lashlang, examples, and benchmark runners.</span></article>
+          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~144k LOC</strong><span>Measured with <code>tokei</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
           <article class="card"><div class="micro-label">Architecture root</div><strong><code>docs/architecture/</code></strong><span>Chaptered documentation matching the current runtime and projection seams.</span></article>
         </div>
       </header>
@@ -30,6 +30,7 @@
         <a href="./modules.html">Modules</a>
         <a href="./flow.html">Data Flow</a>
         <a href="./execution.html">Execution</a>
+        <a href="./runtime.html">Runtime</a>
         <a href="./abstractions.html">Abstractions</a>
         <a href="./deps.html">Dependencies</a>
         <a href="./files.html">Files</a>
@@ -77,15 +78,25 @@
               <a href="./execution.html">
                 <span class="chapter-num">04</span>
                 <div class="chapter-meta">
-                  <h3>Execution</h3>
-                  <p>Startup, Standard mode, RLM mode, subagents, monitors, async handles, export, and trace viewers.</p>
+                <h3>Execution</h3>
+                <p>Startup, Standard mode, RLM mode, subagents, monitors, async handles, export, and trace viewers.</p>
+                </div>
+                <span class="chapter-arrow">→</span>
+              </a>
+            </li>
+            <li>
+              <a href="./runtime.html">
+                <span class="chapter-num">05</span>
+                <div class="chapter-meta">
+                  <h3>Runtime</h3>
+                  <p>Runtime environment, residency, park/resume, persistence, managed sessions, direct completions, and usage ledgers.</p>
                 </div>
                 <span class="chapter-arrow">→</span>
               </a>
             </li>
             <li>
               <a href="./abstractions.html">
-                <span class="chapter-num">05</span>
+                <span class="chapter-num">06</span>
                 <div class="chapter-meta">
                   <h3>Abstractions</h3>
                   <p>Traits, handles, contracts, graph and read seams, tool output contracts, UI projection types.</p>
@@ -95,7 +106,7 @@
             </li>
             <li>
               <a href="./deps.html">
-                <span class="chapter-num">06</span>
+                <span class="chapter-num">07</span>
                 <div class="chapter-meta">
                   <h3>Dependencies</h3>
                   <p>LLM providers, OAuth, MCP, Tavily, models.dev, tracing, file indexing, storage.</p>
@@ -105,7 +116,7 @@
             </li>
             <li>
               <a href="./files.html">
-                <span class="chapter-num">07</span>
+                <span class="chapter-num">08</span>
                 <div class="chapter-meta">
                   <h3>Files</h3>
                   <p>High-signal file map — runtime, providers, tools, CLI/TUI, export, tracing, docs maintenance.</p>
@@ -115,7 +126,7 @@
             </li>
             <li>
               <a href="./lashlang.html">
-                <span class="chapter-num">08</span>
+                <span class="chapter-num">09</span>
                 <div class="chapter-meta">
                   <h3>Lashlang</h3>
                   <p>RLM language and runtime reference — async handles, image attachment behavior, persistent REPL state.</p>

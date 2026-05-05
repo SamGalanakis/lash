@@ -195,6 +195,20 @@ impl ChronologicalProjection {
         history
     }
 
+    pub fn rlm_history_len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn rlm_history_item(&self, index: usize) -> Option<RlmHistoryItem> {
+        self.entries
+            .get(index)
+            .and_then(|entry| match &entry.payload {
+                ChronologicalPayload::Message(message) => history_item_from_message(message),
+                ChronologicalPayload::ToolCall(record) => Some(history_item_from_tool_call(record)),
+                ChronologicalPayload::RlmStep(entry) => Some(history_item_from_rlm_step(entry)),
+            })
+    }
+
     pub fn rlm_history_value(&self) -> serde_json::Value {
         serde_json::to_value(self.rlm_history())
             .unwrap_or_else(|_| serde_json::Value::Array(vec![]))
@@ -202,20 +216,16 @@ impl ChronologicalProjection {
 }
 
 pub(crate) fn project_rlm_globals_from_events<'a>(
-    events: impl IntoIterator<Item = &'a SessionEventRecord> + Clone,
+    events: impl IntoIterator<Item = &'a SessionEventRecord>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut globals = serde_json::Map::new();
-    for event in events.clone() {
+    for event in events {
         if let SessionEventRecord::Mode(event) = event
             && let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = event.rlm_event()
         {
             lash_rlm_types::apply_globals_patch(&mut globals, &patch);
         }
     }
-    globals.insert(
-        "history".to_string(),
-        ChronologicalProjection::from_events(events).rlm_history_value(),
-    );
     globals
 }
 

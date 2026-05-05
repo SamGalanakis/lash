@@ -6,7 +6,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
 use lash::{ChronologicalEntry, SessionGraph, SessionMeta, SessionStateEnvelope};
@@ -41,37 +40,39 @@ impl ExportFormat {
 pub struct LoadedSession {
     pub meta: Option<SessionMeta>,
     pub chronological: Vec<ChronologicalEntry>,
-    /// One snapshot per `llm_call_started` event found in the sibling
-    /// `<basename>.trace.jsonl`, in trace order. Empty when the trace is
-    /// missing or unreadable — exporting must not require it.
+    pub trace_path: PathBuf,
+    pub context_window_tokens: Option<u64>,
+    /// One snapshot per `llm_call_started` event found in the required
+    /// provider trace, in trace order.
     pub llm_prompts: Vec<LlmPromptSnapshot>,
 }
 
-/// Load a session by its SQLite store path (the `.db` file).
-pub fn load_session_from_path(store_path: &Path) -> Result<LoadedSession> {
+/// Load a session by its SQLite store path and full provider trace path.
+pub fn load_session_from_paths(store_path: &Path, trace_path: &Path) -> Result<LoadedSession> {
     let store = Store::open_readonly(store_path)
         .with_context(|| format!("opening session store at {}", store_path.display()))?;
     let meta = store.load_session_meta();
-    let graph = load_graph(&store);
+    let head = store.load_session_head();
+    let context_window_tokens = head
+        .as_ref()
+        .map(|head| head.config.context_window)
+        .filter(|tokens| *tokens > 0);
+    let graph = head
+        .map(|head| head.graph)
+        .unwrap_or_else(|| load_graph(&store));
     let state = SessionStateEnvelope {
         session_graph: graph,
         ..SessionStateEnvelope::default()
     };
     let chronological = state.read_view().chronological_projection().into_entries();
-    let llm_prompts = trace::load_prompts_from_trace(&trace::trace_path_for_session_db(store_path));
+    let llm_prompts = trace::load_prompts_from_trace(trace_path)?;
     Ok(LoadedSession {
         meta,
         chronological,
+        trace_path: trace_path.to_path_buf(),
+        context_window_tokens,
         llm_prompts,
     })
-}
-
-/// Load a session by id — searches `sessions_dir` for a `.db` file
-/// whose metadata matches. Host decides where sessions live (lash-cli
-/// passes `crate::paths::lash_home().join("sessions")`).
-pub fn load_session_by_id(sessions_dir: &Path, session_id: &str) -> Result<LoadedSession> {
-    let path = resolve_session_path_by_id(sessions_dir, session_id)?;
-    load_session_from_path(&path)
 }
 
 /// Render a loaded session to a string in the requested format.
@@ -82,32 +83,22 @@ pub fn render(session: &LoadedSession, format: ExportFormat) -> String {
     }
 }
 
-/// End-to-end: load a session (by id or path) and write the rendered
-/// output to disk. If `out` is `None`, returns the rendered string
-/// instead of writing it. `sessions_dir` is consulted only for
-/// `SessionSelector::Id`; pass any `Path` when the selector is
-/// `Path(...)`.
+/// End-to-end: load a session DB plus full provider trace and write the
+/// rendered output to disk. If `out` is `None`, returns the rendered string
+/// instead of writing it.
 pub fn export(
-    selector: SessionSelector<'_>,
-    sessions_dir: &Path,
+    store_path: &Path,
+    trace_path: &Path,
     format: ExportFormat,
     out: Option<&Path>,
 ) -> Result<String> {
-    let session = match selector {
-        SessionSelector::Path(path) => load_session_from_path(path)?,
-        SessionSelector::Id(id) => load_session_by_id(sessions_dir, id)?,
-    };
+    let session = load_session_from_paths(store_path, trace_path)?;
     let rendered = render(&session, format);
     if let Some(path) = out {
         fs::write(path, &rendered)
             .with_context(|| format!("writing export to {}", path.display()))?;
     }
     Ok(rendered)
-}
-
-pub enum SessionSelector<'a> {
-    Id(&'a str),
-    Path(&'a Path),
 }
 
 fn load_graph(store: &Store) -> SessionGraph {
@@ -117,39 +108,4 @@ fn load_graph(store: &Store) -> SessionGraph {
     // No committed head but graph nodes may still have been appended —
     // read the raw node stream directly.
     store.load_session_graph()
-}
-
-fn resolve_session_path_by_id(sessions_dir: &Path, session_id: &str) -> Result<PathBuf> {
-    let entries = fs::read_dir(sessions_dir)
-        .with_context(|| format!("reading sessions dir {}", sessions_dir.display()))?;
-
-    let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("db") {
-            continue;
-        }
-        let modified = fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        candidates.push((path, modified));
-    }
-    candidates.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-
-    for (path, _) in candidates {
-        let Ok(store) = Store::open_readonly(&path) else {
-            continue;
-        };
-        let Some(meta) = store.load_session_meta() else {
-            continue;
-        };
-        if meta.session_id == session_id {
-            return Ok(path);
-        }
-    }
-
-    Err(anyhow!(
-        "no session with id `{session_id}` found under {}",
-        sessions_dir.display()
-    ))
 }

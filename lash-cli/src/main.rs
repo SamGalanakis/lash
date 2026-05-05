@@ -391,9 +391,13 @@ struct Args {
     #[arg(long, hide = true, default_value_t = 12)]
     runtime_perf_turns: usize,
 
-    /// Export a persisted session by id or `.db` path and exit
-    #[arg(long, value_name = "SESSION")]
+    /// Export a persisted session `.db` path and exit
+    #[arg(long, value_name = "DB")]
     export: Option<String>,
+
+    /// Full provider trace JSONL for --export.
+    #[arg(long = "export-trace", value_name = "TRACE")]
+    export_trace: Option<std::path::PathBuf>,
 
     /// Export format: `html` (default) or `json`. Only meaningful with --export.
     #[arg(long = "export-format", value_name = "FORMAT", default_value = "html")]
@@ -404,16 +408,14 @@ struct Args {
     export_out: Option<std::path::PathBuf>,
 }
 
-fn run_export(session: &str, format: &str, out: Option<&std::path::Path>) -> anyhow::Result<()> {
+fn run_export(
+    db: &str,
+    trace: &std::path::Path,
+    format: &str,
+    out: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let format = lash_export::ExportFormat::parse(format)?;
-    let selector_path = std::path::PathBuf::from(session);
-    let selector = if selector_path.is_file() {
-        lash_export::SessionSelector::Path(selector_path.as_path())
-    } else {
-        lash_export::SessionSelector::Id(session)
-    };
-    let sessions_dir = crate::paths::lash_home().join("sessions");
-    let rendered = lash_export::export(selector, &sessions_dir, format, out)?;
+    let rendered = lash_export::export(std::path::Path::new(db), trace, format, out)?;
     if out.is_none() {
         print!("{rendered}");
     }
@@ -471,7 +473,16 @@ async fn main() -> anyhow::Result<()> {
         .await;
     }
     if let Some(session) = args.export.as_deref() {
-        return run_export(session, &args.export_format, args.export_out.as_deref());
+        let trace = args
+            .export_trace
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--export-trace is required with --export"))?;
+        return run_export(
+            session,
+            trace,
+            &args.export_format,
+            args.export_out.as_deref(),
+        );
     }
     // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {

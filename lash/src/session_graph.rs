@@ -1472,10 +1472,7 @@ mod tests {
             read_model.rlm_globals.get("topic"),
             Some(&serde_json::json!("chronology"))
         );
-        assert_eq!(
-            read_model.rlm_globals.get("history"),
-            Some(&projection.rlm_history_value())
-        );
+        assert!(read_model.rlm_globals.get("history").is_none());
         assert!(!labels.iter().any(|label| label.contains("inactive")));
         assert!(!labels.iter().any(|label| label.contains("transient")));
     }
