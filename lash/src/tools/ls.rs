@@ -68,6 +68,10 @@ impl ToolProvider for Ls {
                 ),
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
+            .with_examples(vec![
+                r#"ls(path=".", depth=1, limit=100)"#.into(),
+                r#"ls(path="lash/src/tools", with_lines=true)"#.into(),
+            ])
             .with_discovery(crate::tools::discovery_metadata(
                 "filesystem",
                 &["list_files", "list_directory"],

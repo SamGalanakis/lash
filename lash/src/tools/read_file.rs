@@ -130,6 +130,10 @@ impl ToolProvider for ReadFile {
                 ),
                 serde_json::json!({ "type": "string" }),
             )
+            .with_examples(vec![
+                r#"read_file(path="Cargo.toml")"#.into(),
+                r#"read_file(path="src/main.rs", offset=1, limit=120)"#.into(),
+            ])
             .with_discovery(crate::tools::discovery_metadata("filesystem", &["cat", "view_file"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]

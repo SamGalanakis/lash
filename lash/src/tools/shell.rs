@@ -1259,6 +1259,10 @@ impl ToolProvider for StandardShell {
                 },
                 output_schema.clone(),
             )
+            .with_examples(vec![
+                r#"exec_command(cmd="cargo test -p lash-mode-rlm", timeout_ms=600000)"#.into(),
+                r#"exec_command(cmd="test -f Cargo.lock", allow_nonzero_exit=true)"#.into(),
+            ])
             .with_discovery(crate::tools::discovery_metadata("shell", &["shell", "bash"]))
             .with_execution_mode(ToolExecutionMode::Serial),
             ToolDefinition::new(
@@ -1276,6 +1280,9 @@ impl ToolProvider for StandardShell {
                 },
                 output_schema.clone(),
             )
+            .with_examples(vec![
+                r#"start_command(cmd="python -m http.server 8000", poll_ms=1000)"#.into(),
+            ])
             .with_discovery(crate::tools::discovery_metadata(
                 "shell",
                 &["long_running_command", "pty"],
@@ -1321,6 +1328,10 @@ impl ToolProvider for StandardShell {
                 ),
                 output_schema,
             )
+            .with_examples(vec![
+                r#"write_stdin(session_id=1, chars="status\n", poll_ms=1000)"#.into(),
+                r#"write_stdin(session_id=1, chars="", close_stdin=true)"#.into(),
+            ])
             .with_discovery(crate::tools::discovery_metadata(
                 "shell",
                 &["send_stdin", "poll_command"],

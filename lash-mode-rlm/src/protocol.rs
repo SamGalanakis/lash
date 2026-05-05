@@ -24,7 +24,7 @@ use lash::{
 use lash_rlm_types::{RlmDiagnosticEvent, RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
 
-pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Tools listed under **Showcased Tools** are invoked as `call tool_name { ... }` from inside a fenced `lashlang` block. Emit a block whenever you need to call a tool, read a file, run a command, search the repo, spawn a subagent, or compute a value. Plain prose is for direct conversational replies that need no action.
+pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Invoke documented tools as `call tool_name { ... }` from inside a fenced `lashlang` block. Start from tools listed under **Showcased Tools**; if a discovery tool is available, use it to find and load additional tools before calling them. Emit a block whenever you need to call an available tool or compute a value. Plain prose is for direct conversational replies that need no action.
 
 ### `print` vs `submit`
 
@@ -41,14 +41,14 @@ Never `submit` a raw tool-result dump. If you need to look at something, `print`
 - Keep prose around the block to one or two sentences of reasoning. Don't describe an action in prose instead of executing it.
 - After each result, decide: another block (more work), or finish.
 
-Example — inspect, then submit:
+Example — inspect with an available tool, then submit:
 
 ````
-Checking the bound version.
+Checking the available data.
 
 ```lashlang
-text = (call read_file { path: "Cargo.toml" })?
-print slice(text, 0, 200)
+result = (call tool_name { key: "value" })?
+print { summary: slice(to_string(result), 0, 200) }
 ```
 ````
 
@@ -65,11 +65,11 @@ submit "The bound version is 0.2.61."
 pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
 
 - Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
-- Images: image-producing tools such as `read_file` on a PNG/JPEG return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ "type": "image", "id": ..., "label": ..., "size": ..., "width": ..., "height": ... }`. `len(image)` is invalid; use `.size`.
-- Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for patches, scripts, JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.
+- Images: image-producing tools may return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ "type": "image", "id": ..., "label": ..., "size": ..., "width": ..., "height": ... }`. `len(image)` is invalid; use `.size`.
+- Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.
 - Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
-- Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). `call monitor { ... }` also returns a handle because monitors are long-lived background event sources. Resolve a handle with `await handle` when you want to wait for completion, or use `(await handle)?` for fail-fast unwrapping. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort). Use `list_async_handles` to rediscover live monitor, subagent, and tool handles.
+- Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Some documented tools may also return handles directly. Resolve a handle with `await handle` when you want to wait for completion, or use `(await handle)?` for fail-fast unwrapping. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
 - Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
 - Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
@@ -95,20 +95,20 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 
 ### Common patterns
 
-Expected shell failures are shell results, not lash tool failures. `allow_nonzero_exit` exists on shell tools only; with it, `?` unwraps the lash tool wrapper and you inspect `exit_code` yourself:
+Tool-level errors are different from successful tool results that contain domain errors. `?` unwraps the lash tool wrapper and aborts the block only when the tool call itself failed:
 
 ```lashlang
-probe = (call exec_command { cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?
-submit probe.exit_code == 0 ? "Cargo.lock exists" : "Cargo.lock is missing"
+probe = (call tool_name { key: "value" })?
+submit probe
 ```
 
 Build collections with explicit loops, not comprehensions:
 
 ```lashlang
 items = []
-for path in ["Cargo.toml", "README.md"] {
-  text = (call read_file { path: path })?
-  items = push(items, { path: path, chars: len(text) })
+for key in ["a", "b"] {
+  value = (call tool_name { key: key })?
+  items = push(items, { key: key, value: value })
 }
 submit items
 ```
@@ -116,25 +116,20 @@ submit items
 Print narrow observations. Keep large values in variables and print only keys, lengths, selected fields, or slices:
 
 ```lashlang
-text = (call read_file { path: "Cargo.toml" })?
+result = (call tool_name { key: "value" })?
+text = to_string(result)
 print { chars: len(text), head: slice(text, 0, 1200) }
 ```
 
-For non-trivial edits, patch first, then validate before submitting success:
+For multi-step work, inspect intermediate results before submitting success:
 
 ```lashlang
-patch = r"""*** Begin Patch
-*** Update File: src/lib.rs
-@@
--old
-+new
-*** End Patch"""
-(call apply_patch { input: patch })?
-check = (call exec_command { cmd: "cargo check --workspace --all-targets", allow_nonzero_exit: true })?
-if check.exit_code != 0 {
-  print slice(check.output, 0, 4000)
+first = (call tool_a { key: "value" })?
+second = (call tool_b { input: first })?
+if contains(to_string(second), "needs_more_work") {
+  print { first: first, second: second }
 } else {
-  submit "Edit applied and validation passed."
+  submit second
 }
 ```
 
@@ -159,27 +154,26 @@ Choose the lightest mechanism that preserves progress:
 | Situation | Use | Why |
 |---|---|---|
 | Small task, data already in current variables | Inline lashlang / direct reasoning | No extra model call or context needed |
-| Extract, classify, summarize, judge, or transform information already in variables | `llm_query` | One-shot prompt over supplied inputs, with optional structured output |
-| Need an isolated, multi-step investigation allowed by available subagent capabilities | `spawn_agent` | Child session can return focused facts |
-| Several independent investigations can run in parallel | `start call spawn_agent` + `await` / `parallel` | Fanout while keeping the parent trace small |
-| Current trace is bloated/stale, failed attempts dominate, or context is tight | `continue_as` | Tail-call to a clean successor with only packed state |
+| Extract, classify, summarize, judge, or transform information already in variables | An available helper tool, if one exists | Keep supplied inputs narrow and explicit |
+| Need an isolated, multi-step investigation | An available delegation tool, if one exists | Use only capabilities documented for that tool |
+| Several independent tool calls can run in parallel | `start call ...` + `await` / `parallel` | Fanout while keeping the parent trace small |
+| Current trace is bloated/stale, failed attempts dominate, or context is tight | An available continuation tool, if one exists | Pack only concrete state the successor needs |
 
 Mechanism boundaries:
 
-- `llm_query` builds one prompt from its `task` and `inputs`, sends exactly one LLM call, and returns either plain text or the optional structured `output` shape. It cannot gather more context after the call starts. Use it for extraction, classification, summarization, judging, or transformation over data you already supplied.
-- `spawn_agent` branches work and returns a result to the current session. Use it when the parent should keep its current state and collect a focused result.
-- `continue_as` transfers the whole task to a successor and ends the current session. Use it when the current session state is no longer worth preserving.
+- Tool-specific behavior, parameters, return shapes, and examples live under **Showcased Tools**. Do not infer that a tool exists from these generic Lashlang examples.
+- One-shot helper tools cannot gather more context after the call starts unless their showcased contract explicitly says otherwise. Use them for extraction, classification, summarization, judging, or transformation over data you already supplied.
+- Delegation and continuation tools, when showcased, have distinct lifecycle semantics. Follow the showcased tool description for whether they branch, block, return handles, or end the current session.
 
-Anti-patterns: don't spawn a subagent for a trivial check you can do inline; don't use `llm_query` to avoid reading required source material; don't use `continue_as` to delegate one subtask; don't pass bulky raw logs/search results into `continue_as.seed`.
+Anti-patterns: don't call a tool for a trivial check you can do inline; don't use helper tools to avoid gathering required source material; don't pass bulky raw logs or large raw values between steps when a compact summary is enough.
 
-Example fanout to two subagents (use `?` for fail-fast unwrapping):
+Example fanout to two available tools (use `?` for fail-fast unwrapping):
 
 ```lashlang
-a = start call spawn_agent { agent_name: "read_chunk_1", task: "Read chunk 1 and extract the key claim", capability: "explore", output: { claim: "str" } }
-b = start call spawn_agent { agent_name: "read_chunk_2", task: "Read chunk 2 and extract the key claim", capability: "explore", output: { claim: "str" } }
-handles = (call list_async_handles {})?
-results = parallel { one: (await handles.subagent.read_chunk_1)?, two: (await handles.subagent.read_chunk_2)? }
-submit [results.one.claim, results.two.claim]
+a = start call tool_a { key: "one" }
+b = start call tool_b { key: "two" }
+results = parallel { one: (await a)?, two: (await b)? }
+submit [results.one, results.two]
 ```"#;
 
 pub fn rlm_execution_section() -> String {
@@ -778,6 +772,26 @@ mod tests {
 
         assert!(!section.contains("capability: \"peer\""));
         assert!(!section.contains("`peer`"));
+    }
+
+    #[test]
+    fn execution_section_keeps_tool_specific_examples_out_of_core_prompt() {
+        let section = rlm_execution_section();
+
+        for tool_name in [
+            "read_file",
+            "exec_command",
+            "apply_patch",
+            "llm_query",
+            "spawn_agent",
+            "continue_as",
+            "list_async_handles",
+        ] {
+            assert!(
+                !section.contains(tool_name),
+                "core RLM prompt should not mention tool-specific example `{tool_name}`"
+            );
+        }
     }
 
     #[test]
