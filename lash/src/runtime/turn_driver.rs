@@ -158,20 +158,6 @@ impl RuntimeTurnDriver {
         );
     }
 
-    fn emit_rlm_exec_step(&self, iteration: usize, phase: &str, payload: serde_json::Value) {
-        let mut payload = payload;
-        if let Some(object) = payload.as_object_mut() {
-            object.insert("phase".to_string(), serde_json::json!(phase));
-        }
-        self.emit_trace(
-            iteration,
-            lash_trace::TraceEvent::ModeStep {
-                mode: "rlm".to_string(),
-                payload,
-            },
-        );
-    }
-
     async fn persist_progress_boundary(
         &mut self,
         messages: crate::MessageSequence,
@@ -205,17 +191,20 @@ impl RuntimeTurnDriver {
     }
 
     fn emit_mode_event_trace(&self, iteration: usize, event: &crate::SessionEventRecord) {
-        if !self.host.core.trace_level.is_extended() {
-            return;
-        }
         let crate::SessionEventRecord::Mode(mode_event) = event else {
             return;
         };
-        if let Some(lash_rlm_types::RlmModeEvent::RlmDiagnostic(diagnostic)) =
-            mode_event.rlm_event()
-        {
-            self.emit_rlm_exec_step(iteration, &diagnostic.phase, diagnostic.payload);
-        }
+        self.emit_trace(iteration, mode_step_trace_event(mode_event));
+    }
+
+    fn emit_rlm_diagnostic_trace(&self, iteration: usize, phase: &str, payload: serde_json::Value) {
+        let mode_event = crate::ModeEvent::rlm(lash_rlm_types::RlmModeEvent::RlmDiagnostic(
+            lash_rlm_types::RlmDiagnosticEvent {
+                phase: phase.to_string(),
+                payload,
+            },
+        ));
+        self.emit_trace(iteration, mode_step_trace_event(&mode_event));
     }
 
     fn mark_phase_end(&self, phase: RuntimeTurnPhase) {
@@ -375,7 +364,7 @@ impl RuntimeTurnDriver {
                     Effect::ExecCode { id, code } => {
                         let iteration = machine.iteration();
                         if self.host.core.trace_sink.is_some() {
-                            self.emit_rlm_exec_step(
+                            self.emit_rlm_diagnostic_trace(
                                 iteration,
                                 "exec_code_started",
                                 serde_json::json!({
@@ -390,7 +379,7 @@ impl RuntimeTurnDriver {
                             .await;
                         if let Ok(output) = &result {
                             if self.host.core.trace_sink.is_some() {
-                                self.emit_rlm_exec_step(
+                                self.emit_rlm_diagnostic_trace(
                                     iteration,
                                     "exec_code_completed",
                                     serde_json::json!({
@@ -429,7 +418,7 @@ impl RuntimeTurnDriver {
                                     cursor = completed_at;
                                 }
                                 if !output.observation_truncation.is_empty() {
-                                    self.emit_rlm_exec_step(
+                                    self.emit_rlm_diagnostic_trace(
                                         iteration,
                                         "observation_projection",
                                         serde_json::json!({
@@ -443,7 +432,7 @@ impl RuntimeTurnDriver {
                         } else if let Err(error) = &result
                             && self.host.core.trace_sink.is_some()
                         {
-                            self.emit_rlm_exec_step(
+                            self.emit_rlm_diagnostic_trace(
                                 iteration,
                                 "exec_code_failed",
                                 serde_json::json!({ "error": error }),
@@ -661,5 +650,54 @@ impl RuntimeTurnDriver {
             self.mode_turn_options.clone(),
             messages,
         )
+    }
+}
+
+fn mode_step_trace_event(mode_event: &crate::ModeEvent) -> lash_trace::TraceEvent {
+    lash_trace::TraceEvent::ModeStep {
+        mode: mode_event.mode_id.plugin_id().to_string(),
+        payload: mode_event.payload.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash_rlm_types::{RlmModeEvent, RlmTrajectoryEntry};
+
+    #[test]
+    fn mode_step_trace_event_preserves_rlm_trajectory_code() {
+        let mode_event =
+            crate::ModeEvent::rlm(RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
+                id: "rlm_step_7".to_string(),
+                iteration: 7,
+                reasoning: "inspect".to_string(),
+                code: "print \"hi\"".to_string(),
+                output: vec!["hi".to_string()],
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                error: None,
+                final_output: Some(serde_json::json!("done")),
+            }));
+
+        let lash_trace::TraceEvent::ModeStep { mode, payload } = mode_step_trace_event(&mode_event)
+        else {
+            panic!("expected mode step trace event");
+        };
+
+        assert_eq!(mode, "rlm");
+        assert_eq!(
+            payload
+                .get("RlmTrajectoryEntry")
+                .and_then(|entry| entry.get("code"))
+                .and_then(serde_json::Value::as_str),
+            Some("print \"hi\"")
+        );
+        assert_eq!(
+            payload
+                .get("RlmTrajectoryEntry")
+                .and_then(|entry| entry.get("final_output")),
+            Some(&serde_json::json!("done"))
+        );
     }
 }
