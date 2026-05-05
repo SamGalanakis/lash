@@ -776,6 +776,7 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         } else {
                             None
                         },
+                        cache_breakpoint: false,
                     });
                 }
             }

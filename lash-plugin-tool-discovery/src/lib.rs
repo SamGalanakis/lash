@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use lash::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
@@ -75,11 +75,18 @@ fn rlm_tool_surface(ctx: ToolSurfaceContext) -> Result<ToolSurfaceContribution, 
         return Ok(ToolSurfaceContribution::default());
     }
 
+    let has_catalogued_tools = has_catalogued_tools(&ctx);
     let overrides = ctx
         .tools
         .iter()
         .filter_map(|tool| {
             if tool.name == "load_tools" {
+                return Some(ToolSurfaceOverride {
+                    tool_name: tool.name.clone(),
+                    availability: Some(ToolAvailability::Hidden),
+                });
+            }
+            if tool.name == "search_tools" && !has_catalogued_tools {
                 return Some(ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
                     availability: Some(ToolAvailability::Hidden),
@@ -99,8 +106,83 @@ fn rlm_tool_surface(ctx: ToolSurfaceContext) -> Result<ToolSurfaceContribution, 
 
     Ok(ToolSurfaceContribution {
         overrides,
-        tool_list_notes: Vec::new(),
+        tool_list_notes: catalogue_notes(&ctx, has_catalogued_tools),
     })
+}
+
+fn has_catalogued_tools(ctx: &ToolSurfaceContext) -> bool {
+    ctx.tools.iter().any(|tool| {
+        !matches!(tool.name.as_str(), "search_tools" | "load_tools")
+            && tool.effective_availability(&ctx.mode).is_discoverable()
+            && !tool.effective_availability(&ctx.mode).is_documented()
+    })
+}
+
+const CATALOGUE_NAMESPACE_LIMIT: usize = 100;
+const CATALOGUE_TOOL_NAME_LIMIT: usize = 50;
+
+fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<String> {
+    if !has_catalogued_tools {
+        return Vec::new();
+    }
+
+    let mut by_namespace: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut omitted_tool_count = 0usize;
+    for tool in &ctx.tools {
+        if matches!(tool.name.as_str(), "search_tools" | "load_tools") {
+            continue;
+        }
+        let availability = tool.effective_availability(&ctx.mode);
+        if !availability.is_discoverable() || availability.is_documented() {
+            continue;
+        }
+        omitted_tool_count += 1;
+        let namespace = tool
+            .discovery
+            .namespace
+            .as_deref()
+            .filter(|namespace| !namespace.trim().is_empty())
+            .unwrap_or("default");
+        by_namespace
+            .entry(namespace)
+            .or_default()
+            .push(tool.name.as_str());
+    }
+    for names in by_namespace.values_mut() {
+        names.sort_unstable();
+    }
+
+    let mut rendered = format!(
+        "Catalogued tools: {omitted_tool_count} not showcased here; searchable with `search_tools`.\n\
+         When a task needs a tool not showcased here, run `search_tools(query=...)` and call the relevant result by name. \
+         Results use the same compact contract shape as showcased tools: signature, description, and capped examples."
+    );
+
+    if by_namespace.len() <= CATALOGUE_NAMESPACE_LIMIT {
+        rendered.push_str("\n\nNamespaces: ");
+        for (index, (namespace, names)) in by_namespace.iter().enumerate() {
+            if index > 0 {
+                rendered.push_str(", ");
+            }
+            let _ = write!(rendered, "{namespace}({})", names.len());
+        }
+    } else {
+        let _ = write!(
+            rendered,
+            "\n\nNamespaces: {} total; use `search_tools` to narrow them.",
+            by_namespace.len()
+        );
+    }
+
+    if omitted_tool_count <= CATALOGUE_TOOL_NAME_LIMIT {
+        rendered.push_str("\n\nCatalogued names:");
+        for (namespace, names) in by_namespace {
+            rendered.push('\n');
+            let _ = write!(rendered, "{namespace}: {}", names.join(", "));
+        }
+    }
+
+    vec![rendered]
 }
 
 #[cfg(test)]
@@ -128,7 +210,6 @@ mod tests {
                 "additionalProperties": true
             },
             "output_schema": {},
-            "returns": "any",
             "examples": [],
             "aliases": [],
             "availability": "discoverable",
@@ -1127,15 +1208,10 @@ mod tests {
         assert_eq!(
             results[0]["signature"],
             json!(
-                "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 20)\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 20` — Maximum number of results to return."
+                "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 20) -> record{error?: str, response: list[record{album_id: int | null, duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]}\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 20` — Maximum number of results to return.\nReturn fields:\n- `error?: str` — Error message when search fails.\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str`\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title."
             )
         );
-        assert_eq!(
-            results[0]["returns"],
-            json!(
-                "record{error?: str, response: list[record{album_id: int | null, duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]}\nReturn fields:\n- `error?: str` — Error message when search fails.\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str`\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title."
-            )
-        );
+        assert!(results[0].get("returns").is_none());
         assert!(results[0].get("params").is_none());
         assert!(results[0].get("parameters").is_none());
         assert!(results[0].get("return_fields").is_none());
@@ -1194,8 +1270,8 @@ mod tests {
         let results = result.result.as_array().expect("search result list");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["name"], json!("read_file"));
-        assert_eq!(results[0]["signature"], json!("read_file()"));
-        assert_eq!(results[0]["returns"], json!("any"));
+        assert_eq!(results[0]["signature"], json!("read_file() -> any"));
+        assert!(results[0].get("returns").is_none());
         assert_eq!(results[0]["description"], json!("Read file contents"));
         assert!(results[0].get("namespace").is_none());
         assert!(results[0].get("matched_fields").is_none());
@@ -1267,7 +1343,11 @@ mod tests {
         assert!(result.success, "{result:?}");
         let results = result.result.as_array().expect("spawn results");
         assert_eq!(results[0]["name"], json!("spawn_agent"));
-        assert_eq!(results[0]["returns"], json!("schema from `output`"));
+        assert_eq!(
+            results[0]["signature"],
+            json!("spawn_agent<T = any>(agent_name: str, task: str, output?: TypeSpec<T>) -> T\nParameters:\n- `agent_name: str`\n- `task: str`\n- `output?: TypeSpec<T>`")
+        );
+        assert!(results[0].get("returns").is_none());
 
         let result = provider
             .execute_streaming_with_context(
@@ -1281,9 +1361,10 @@ mod tests {
         let results = result.result.as_array().expect("llm results");
         assert_eq!(results[0]["name"], json!("llm_query"));
         assert_eq!(
-            results[0]["returns"],
-            json!("schema from `output`, default str")
+            results[0]["signature"],
+            json!("llm_query<T = str>(task: str, output?: TypeSpec<T>) -> T\nParameters:\n- `task: str`\n- `output?: TypeSpec<T>`")
         );
+        assert!(results[0].get("returns").is_none());
     }
 
     #[test]
@@ -1317,8 +1398,8 @@ mod tests {
     #[test]
     fn llm_rerank_request_uses_structured_name_enum_schema() {
         let candidates = vec![
-            json!({"name": "read_file", "signature": "read_file()", "returns": "str", "description": "Read file"}),
-            json!({"name": "search_web", "signature": "search_web(query: str)", "returns": "record", "description": "Search web"}),
+            json!({"name": "read_file", "signature": "read_file() -> str", "description": "Read file"}),
+            json!({"name": "search_web", "signature": "search_web(query: str) -> record", "description": "Search web"}),
         ];
 
         let request = llm_rerank_request(&json!({"query": "find docs"}), &candidates, 2);
@@ -1475,24 +1556,32 @@ mod tests {
         assert_eq!(definition.output_schema["type"], json!("array"));
         let item = &definition.output_schema["items"];
         assert_eq!(item["type"], json!("object"));
-        assert_eq!(item["required"], json!(["name", "signature", "returns"]));
+        assert_eq!(item["required"], json!(["name", "signature"]));
         let properties = item["properties"].as_object().expect("properties");
         assert!(properties.contains_key("description"));
         assert!(properties.contains_key("examples"));
+        assert!(!properties.contains_key("returns"));
 
-        let rendered_returns = definition.compact_contract().render_returns();
+        let rendered_signature = definition.compact_contract().render_signature();
         assert!(
-            rendered_returns.starts_with("list[record{"),
-            "{rendered_returns}"
-        );
-        assert!(rendered_returns.contains("name: str"), "{rendered_returns}");
-        assert!(
-            rendered_returns.contains("signature: str"),
-            "{rendered_returns}"
+            rendered_signature.starts_with("search_tools(query: str"),
+            "{rendered_signature}"
         );
         assert!(
-            rendered_returns.contains("returns: str"),
-            "{rendered_returns}"
+            rendered_signature.contains("-> list[record{"),
+            "{rendered_signature}"
+        );
+        assert!(
+            rendered_signature.contains("name: str"),
+            "{rendered_signature}"
+        );
+        assert!(
+            rendered_signature.contains("signature: str"),
+            "{rendered_signature}"
+        );
+        assert!(
+            !rendered_signature.contains("returns: str"),
+            "{rendered_signature}"
         );
     }
 
@@ -1531,8 +1620,45 @@ mod tests {
             Some(ToolAvailability::Hidden)
         );
         assert_eq!(
+            surface.tool_availability("search_tools"),
+            Some(ToolAvailability::Documented)
+        );
+        assert_eq!(
             surface.tool_availability("fetch_url"),
             Some(ToolAvailability::Callable)
         );
+        let docs = surface.prompt_tool_docs();
+        assert!(docs.contains("Catalogued tools: 1 not showcased here"));
+        assert!(docs.contains("default: fetch_url"));
+    }
+
+    #[test]
+    fn rlm_surface_hides_search_tools_when_there_is_no_catalogue() {
+        let tools = vec![search_tools_definition(), load_tools_definition()];
+        let mode = ExecutionMode::new("rlm");
+        let contribution = rlm_tool_surface(ToolSurfaceContext {
+            session_id: "session".to_string(),
+            mode: mode.clone(),
+            tools: tools.clone(),
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: None,
+        })
+        .unwrap();
+        let surface = build_tool_surface(ToolSurfaceBuildInput {
+            tools,
+            mode,
+            contributions: vec![contribution],
+        });
+
+        assert_eq!(
+            surface.tool_availability("search_tools"),
+            Some(ToolAvailability::Hidden)
+        );
+        assert_eq!(
+            surface.tool_availability("load_tools"),
+            Some(ToolAvailability::Hidden)
+        );
+        assert!(!surface.prompt_tool_docs().contains("search_tools"));
+        assert_eq!(surface.omitted_tool_count(), 0);
     }
 }

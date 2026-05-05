@@ -663,6 +663,7 @@ impl OpenAiGenericProvider {
                     LlmContentBlock::Text {
                         text,
                         response_meta,
+                        ..
                     } => {
                         if text.is_empty() {
                             continue;
@@ -961,6 +962,7 @@ impl OpenAiGenericProvider {
 
     fn chat_text_or_parts(mut parts: Vec<Value>) -> Value {
         if parts.len() == 1
+            && parts[0].get("__lash_cache_breakpoint").is_none()
             && let Some(text) = parts[0].get("text").and_then(Value::as_str)
         {
             return json!(text);
@@ -979,10 +981,18 @@ impl OpenAiGenericProvider {
             for block in msg.blocks.iter() {
                 match block {
                     LlmContentBlock::Text { text, .. } if !text.is_empty() => {
-                        text_parts.push(json!({
+                        let mut part = json!({
                             "type": "text",
                             "text": sanitize_surrogates(text),
-                        }));
+                        });
+                        if let LlmContentBlock::Text {
+                            cache_breakpoint: true,
+                            ..
+                        } = block
+                        {
+                            part["__lash_cache_breakpoint"] = json!(true);
+                        }
+                        text_parts.push(part);
                     }
                     LlmContentBlock::Image { attachment_idx }
                         if matches!(msg.role, LlmRole::User) =>
@@ -1103,6 +1113,39 @@ impl OpenAiGenericProvider {
         false
     }
 
+    fn add_cache_control_to_marked_text_content(
+        message: &mut Value,
+        cache_control: &Value,
+    ) -> bool {
+        let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            return false;
+        };
+        for part in parts.iter_mut().rev() {
+            let is_marked = part
+                .get("__lash_cache_breakpoint")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if is_marked && part.get("type").and_then(Value::as_str) == Some("text") {
+                part["cache_control"] = cache_control.clone();
+                part.as_object_mut()
+                    .map(|obj| obj.remove("__lash_cache_breakpoint"));
+                return true;
+            }
+        }
+        false
+    }
+
+    fn strip_internal_cache_markers(messages: &mut [Value]) {
+        for message in messages {
+            if let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) {
+                for part in parts {
+                    part.as_object_mut()
+                        .map(|obj| obj.remove("__lash_cache_breakpoint"));
+                }
+            }
+        }
+    }
+
     fn apply_anthropic_cache_control(
         &self,
         req: &LlmRequest,
@@ -1110,9 +1153,11 @@ impl OpenAiGenericProvider {
         tools: &mut [Value],
     ) {
         if !self.openrouter_claude_request(req) {
+            Self::strip_internal_cache_markers(messages);
             return;
         }
         let Some(cache_control) = self.chat_cache_control_value() else {
+            Self::strip_internal_cache_markers(messages);
             return;
         };
 
@@ -1128,15 +1173,29 @@ impl OpenAiGenericProvider {
         if let Some(last_tool) = tools.last_mut() {
             last_tool["cache_control"] = cache_control.clone();
         }
+        let mut applied_explicit_breakpoint = false;
         for message in messages.iter_mut().rev() {
             if matches!(
                 message.get("role").and_then(Value::as_str),
                 Some("user" | "assistant")
-            ) && Self::add_cache_control_to_text_content(message, &cache_control)
+            ) && Self::add_cache_control_to_marked_text_content(message, &cache_control)
             {
+                applied_explicit_breakpoint = true;
                 break;
             }
         }
+        if !applied_explicit_breakpoint {
+            for message in messages.iter_mut().rev() {
+                if matches!(
+                    message.get("role").and_then(Value::as_str),
+                    Some("user" | "assistant")
+                ) && Self::add_cache_control_to_text_content(message, &cache_control)
+                {
+                    break;
+                }
+            }
+        }
+        Self::strip_internal_cache_markers(messages);
     }
 
     fn build_chat_request_body(&self, req: &LlmRequest, stream: bool) -> Value {
@@ -2418,6 +2477,47 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_claude_chat_body_prefers_explicit_text_cache_breakpoint() {
+        let mut req = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            LlmMessage::new(
+                LlmRole::User,
+                vec![
+                    LlmContentBlock::Text {
+                        text: "stable history".into(),
+                        response_meta: None,
+                        cache_breakpoint: true,
+                    },
+                    LlmContentBlock::Text {
+                        text: "dynamic current iteration".into(),
+                        response_meta: None,
+                        cache_breakpoint: false,
+                    },
+                ],
+            ),
+        ]);
+        req.model = "anthropic/claude-sonnet-4.6".to_string();
+
+        let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .build_chat_request_body(&req, true);
+
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert!(
+            body["messages"][1]["content"][1]
+                .get("cache_control")
+                .is_none()
+        );
+        assert!(
+            body["messages"][1]["content"][0]
+                .get("__lash_cache_breakpoint")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn cache_retention_none_removes_chat_cache_markers() {
         let mut req = request(vec![
             LlmMessage::text(LlmRole::System, "stable system prompt"),
@@ -2477,6 +2577,7 @@ mod tests {
                     status: Some("completed".to_string()),
                     phase: Some(ResponseTextPhase::FinalAnswer),
                 }),
+                cache_breakpoint: false,
             }],
         )]);
         let body = provider.build_responses_request_body(&req, false);

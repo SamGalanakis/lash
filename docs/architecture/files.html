@@ -70,7 +70,7 @@
                 <tr><td><code>lash/src/session.rs</code></td><td>Per-session tool surface, mode preamble, prompt cache, <code>ModeExecutionContext</code>, async handles, and <code>list_async_handles</code>.</td></tr>
                 <tr><td><code>lash/src/tool_dispatch.rs</code></td><td>Tool validation, native mode tools, dynamic tools, execution context, images, and dispatch result conversion.</td></tr>
                 <tr><td><code>lash/src/provider.rs</code></td><td>Provider components, registry, persisted provider handles, model defaults, variants, readiness, and transport traits.</td></tr>
-                <tr><td><code>lash-provider-openai/src/lib.rs</code></td><td>OpenAI-compatible Responses/Chat Completions wire selection, provider-boundary schema/request shaping, cache marker placement, reasoning replay, and usage parsing.</td></tr>
+                <tr><td><code>lash-provider-openai/src/lib.rs</code></td><td>OpenAI-compatible Responses/Chat Completions wire selection, provider-boundary schema/request shaping, explicit text-block cache marker placement, reasoning replay, and usage parsing.</td></tr>
                 <tr><td><code>lash-provider-codex/src/lib.rs</code></td><td>Codex OAuth provider, ChatGPT backend Responses transport, stream assembly, and Codex request headers.</td></tr>
                 <tr><td><code>lash-provider-anthropic/src/lib.rs</code></td><td>Anthropic Messages provider and model/thinking variant policy.</td></tr>
                 <tr><td><code>lash-provider-google/src/lib.rs</code></td><td>Google OAuth / Code Assist Gemini transport and thinking-level policy.</td></tr>
@@ -90,7 +90,7 @@
               <tbody>
                 <tr><td><code>lash-mode-standard/src/lib.rs</code></td><td>Standard mode protocol driver, native tool-call handling, and Standard-only <code>batch</code> tool.</td></tr>
                 <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>RLM execution instructions and shared Lashlang language reference used by prompt tests.</td></tr>
-                <tr><td><code>lash-mode-rlm/src/driver.rs</code></td><td>RLM protocol driver, context projection, history rendering, image references, and final submission handling.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/driver.rs</code></td><td>RLM protocol driver, chat-shaped chronological context projection, rolling history cache breakpoints, image references, and final submission handling.</td></tr>
                 <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td><code>RlmExecutionState</code>, <code>HostBridge</code>, tool execution, snapshot/restore, and image conversion.</td></tr>
                 <tr><td><code>lash-subagents/src/rlm.rs</code></td><td>RLM-facing <code>spawn_agent</code> definitions, subagent output contracts, capability prompt text, and submit-error handling.</td></tr>
                 <tr><td><code>lash-llm-tools/src/lib.rs</code></td><td><code>llm_query</code> plugin, direct completion request handling, output-schema parsing, and usage relay.</td></tr>
@@ -103,7 +103,7 @@
                 <tr><td><code>lash-cli/src/app/projection.rs</code></td><td><code>SessionReadView -> ChronologicalProjection -> UiTimeline</code> conversion and interrupted-turn projection.</td></tr>
                 <tr><td><code>lash-cli/src/render/mod.rs</code></td><td>Timeline item rendering dispatch into terminal lines and surfaces.</td></tr>
                 <tr><td><code>lash-export/src/lib.rs</code></td><td>Read-only store loading and chronological projection export entrypoint.</td></tr>
-                <tr><td><code>lash-export/src/trace.rs</code></td><td>Provider trace loading, prompt snapshot extraction, context-window usage, cached-token percentage, and LLM-call usage matching.</td></tr>
+                <tr><td><code>lash-export/src/trace.rs</code></td><td>Provider trace loading, prompt snapshot extraction, cache-breakpoint visibility, context-window usage, cached-token percentage, and LLM-call usage matching.</td></tr>
                 <tr><td><code>lash-trace/src/lib.rs</code></td><td>Trace schema version 2, JSONL records, trace context, and sinks.</td></tr>
                 <tr><td><code>bench/continual-learning-bench/runner/src/main.rs</code></td><td>Rust CLBench runner: embeds <code>LashRuntime</code>, registers the constrained RLM tool surface, validates submissions, and records cost deltas.</td></tr>
                 <tr><td><code>bench/continual-learning-bench/lash_system/system.py</code></td><td>Python CLBench adapter that shells into the Rust runner and preserves run/session artifacts.</td></tr>

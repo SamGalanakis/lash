@@ -160,6 +160,7 @@ where
         .map(|entry| {
             let definition = entry.definition;
             let availability = entry.availability;
+            let signature = definition.compact_contract().render_signature();
             let loadable = matches!(definition.activation, crate::ToolActivation::Loadable);
             let activation_hint = if loadable && !availability.is_callable() {
                 format!(
@@ -173,6 +174,7 @@ where
             };
             let mut projected = serde_json::json!({
                 "name": definition.name,
+                "signature": signature,
                 "namespace": definition.discovery.namespace,
                 "description": definition.description,
                 "params": definition.parameter_metadata(),
@@ -426,6 +428,10 @@ mod tests {
         ]);
         assert_eq!(catalog.len(), 2);
         assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
+        assert_eq!(
+            catalog[0]["signature"],
+            serde_json::json!("read_file() -> any")
+        );
         assert_eq!(catalog[0]["documented"], serde_json::json!(true));
         assert_eq!(catalog[1]["callable"], serde_json::json!(true));
     }

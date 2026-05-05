@@ -94,7 +94,6 @@ fn llm_candidate_payload(candidate: &Value) -> Value {
     json!({
         "name": candidate.get("name").cloned().unwrap_or(Value::Null),
         "signature": candidate.get("signature").cloned().unwrap_or(Value::Null),
-        "returns": candidate.get("returns").cloned().unwrap_or(Value::Null),
         "description": candidate.get("description").cloned().unwrap_or(Value::Null),
         "examples": candidate.get("examples").cloned().unwrap_or(Value::Null),
     })

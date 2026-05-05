@@ -18,9 +18,12 @@ pub(crate) fn semantic_index_text(tool: &CatalogTool) -> String {
     let mut parts = vec![
         contract.name.clone(),
         contract.render_signature(),
-        contract.render_returns(),
         contract.description.clone(),
     ];
+    let return_details = contract.render_returns();
+    if !return_details.is_empty() {
+        parts.push(return_details);
+    }
     parts.extend(contract.examples.clone());
     parts
         .into_iter()
