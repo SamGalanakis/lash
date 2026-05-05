@@ -21,7 +21,8 @@ use lash::{
     StandardContextApproach, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput,
     TurnInputInjectionBridge, diff_usage_reports,
 };
-use lash_export::{ExportFormat, SessionSelector, export};
+use lash_export::{ExportFormat, export};
+use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
@@ -754,8 +755,8 @@ async fn run_question(
     // here should not take down the benchmark — traces are a debugging aid.
     let html_trace_path = question_dir.join("trace.html");
     if let Err(err) = export(
-        SessionSelector::Path(&store_path),
-        std::path::Path::new(""),
+        &store_path,
+        &trace_path,
         ExportFormat::Html,
         Some(&html_trace_path),
     ) {
@@ -766,9 +767,7 @@ async fn run_question(
     }
 
     // Project the actual outgoing system prompt out of the typed trace so you can
-    // see exactly what the model was told. `lash-export` doesn't include the
-    // on-the-fly rendered system prompt in the trace because it isn't stored
-    // in the session graph.
+    // see exactly what the model was told in a small sidecar file.
     if let Err(err) = write_system_prompt_snapshot(&trace_path, &question_dir) {
         eprintln!(
             "warn: failed to snapshot system prompt for {}: {err:#}",
@@ -859,6 +858,7 @@ fn build_plugin_session(
     factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
+    factories.push(Arc::new(LlmToolsPluginFactory));
     // Single capability `default` that inherits the root session's
     // model, variant, and execution mode. We deliberately drop the
     // standard `explore` / `peer` tiers: the benchmark should only use

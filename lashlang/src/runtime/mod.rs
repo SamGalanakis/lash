@@ -112,8 +112,7 @@ impl<'de> Deserialize<'de> for ImageValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug)]
 pub enum Value {
     Null,
     Bool(bool),
@@ -122,6 +121,7 @@ pub enum Value {
     Image(ImageValue),
     List(Arc<[Value]>),
     Record(Arc<Record>),
+    Projected(ProjectedValue),
 }
 
 impl Value {
@@ -133,6 +133,151 @@ impl Value {
     }
 }
 
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null) => true,
+            (Self::Bool(left), Self::Bool(right)) => left == right,
+            (Self::Number(left), Self::Number(right)) => left == right,
+            (Self::String(left), Self::String(right)) => left == right,
+            (Self::Image(left), Self::Image(right)) => left == right,
+            (Self::List(left), Self::List(right)) => left == right,
+            (Self::Record(left), Self::Record(right)) => left == right,
+            (Self::Projected(left), Self::Projected(right)) => left == right,
+            (Self::Projected(left), right) => left.materialize() == *right,
+            (left, Self::Projected(right)) => *left == right.materialize(),
+            _ => false,
+        }
+    }
+}
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        to_json(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        serde_json::Value::deserialize(deserializer).map(from_json)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ProjectedBindings {
+    bindings: FxHashMap<Symbol, ProjectedValue>,
+}
+
+impl ProjectedBindings {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, value: ProjectedValue) {
+        let name = name.into();
+        self.bindings.insert(intern_symbol(&name), value);
+    }
+
+    fn get_symbol(&self, symbol: Symbol) -> Option<ProjectedValue> {
+        self.bindings.get(&symbol).cloned()
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = String> + '_ {
+        self.bindings
+            .keys()
+            .map(|symbol| symbol_name(*symbol).to_string())
+    }
+}
+
+#[derive(Clone)]
+pub struct ProjectedValue {
+    name: Arc<str>,
+    kind: ProjectedKind,
+}
+
+#[derive(Clone)]
+enum ProjectedKind {
+    List(Arc<dyn ProjectedList>),
+}
+
+pub trait ProjectedList: Send + Sync {
+    fn len(&self) -> usize;
+    fn get(&self, index: usize) -> Option<Value>;
+}
+
+impl ProjectedValue {
+    pub fn list(name: impl Into<Arc<str>>, list: Arc<dyn ProjectedList>) -> Self {
+        Self {
+            name: name.into(),
+            kind: ProjectedKind::List(list),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn len(&self) -> usize {
+        match &self.kind {
+            ProjectedKind::List(list) => list.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn get_index(&self, index: &Value) -> Result<Value, RuntimeError> {
+        match &self.kind {
+            ProjectedKind::List(list) => {
+                let idx = resolve_index(index, list.len())?;
+                Ok(idx.and_then(|idx| list.get(idx)).unwrap_or(Value::Null))
+            }
+        }
+    }
+
+    pub fn materialize(&self) -> Value {
+        match &self.kind {
+            ProjectedKind::List(list) => Value::List(
+                (0..list.len())
+                    .filter_map(|index| list.get(index))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        }
+    }
+}
+
+impl fmt::Debug for ProjectedValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProjectedValue")
+            .field("name", &self.name)
+            .field("kind", &self.value_type_name())
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl PartialEq for ProjectedValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.materialize() == other.materialize()
+    }
+}
+
+impl ProjectedValue {
+    pub(crate) fn value_type_name(&self) -> &'static str {
+        match &self.kind {
+            ProjectedKind::List(_) => "list",
+        }
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -140,7 +285,7 @@ impl fmt::Display for Value {
             Self::Bool(value) => write!(f, "{value}"),
             Self::Number(value) => write_number(f, *value),
             Self::String(value) => write!(f, "{value}"),
-            Self::Image(_) | Self::List(_) | Self::Record(_) => {
+            Self::Image(_) | Self::List(_) | Self::Record(_) | Self::Projected(_) => {
                 write!(
                     f,
                     "{}",
@@ -252,11 +397,22 @@ pub async fn execute_compiled<H: ToolHost>(
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, RuntimeError> {
+    execute_compiled_with_projected_bindings(program, state, host, &ProjectedBindings::default())
+        .await
+}
+
+pub async fn execute_compiled_with_projected_bindings<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    projected: &ProjectedBindings,
+) -> Result<ExecutionOutcome, RuntimeError> {
     let mut vm = Vm::new(
         &program.chunk,
         SlotState::from_globals(
             std::mem::take(&mut state.globals),
             &program.chunk.slot_names,
+            projected,
         ),
         host,
         false,
@@ -272,10 +428,28 @@ pub async fn execute_compiled_with_scratch<H: ToolHost>(
     host: &H,
     scratch: &mut ExecutionScratch,
 ) -> Result<ExecutionOutcome, RuntimeError> {
+    execute_compiled_with_scratch_and_projected_bindings(
+        program,
+        state,
+        host,
+        scratch,
+        &ProjectedBindings::default(),
+    )
+    .await
+}
+
+pub async fn execute_compiled_with_scratch_and_projected_bindings<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    scratch: &mut ExecutionScratch,
+    projected: &ProjectedBindings,
+) -> Result<ExecutionOutcome, RuntimeError> {
     let slots = SlotState::from_globals_with_scratch(
         std::mem::take(&mut state.globals),
         &program.chunk.slot_names,
         scratch,
+        projected,
     );
     let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
     let result = vm.run().await;
@@ -288,11 +462,27 @@ pub async fn execute_compiled_traced<H: ToolHost>(
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, RuntimeFailure> {
+    execute_compiled_traced_with_projected_bindings(
+        program,
+        state,
+        host,
+        &ProjectedBindings::default(),
+    )
+    .await
+}
+
+pub async fn execute_compiled_traced_with_projected_bindings<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    projected: &ProjectedBindings,
+) -> Result<ExecutionOutcome, RuntimeFailure> {
     let mut vm = Vm::new(
         &program.chunk,
         SlotState::from_globals(
             std::mem::take(&mut state.globals),
             &program.chunk.slot_names,
+            projected,
         ),
         host,
         false,
@@ -308,10 +498,28 @@ pub async fn execute_compiled_traced_with_scratch<H: ToolHost>(
     host: &H,
     scratch: &mut ExecutionScratch,
 ) -> Result<ExecutionOutcome, RuntimeFailure> {
+    execute_compiled_traced_with_scratch_and_projected_bindings(
+        program,
+        state,
+        host,
+        scratch,
+        &ProjectedBindings::default(),
+    )
+    .await
+}
+
+pub async fn execute_compiled_traced_with_scratch_and_projected_bindings<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    scratch: &mut ExecutionScratch,
+    projected: &ProjectedBindings,
+) -> Result<ExecutionOutcome, RuntimeFailure> {
     let slots = SlotState::from_globals_with_scratch(
         std::mem::take(&mut state.globals),
         &program.chunk.slot_names,
         scratch,
+        projected,
     );
     let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
     let result = vm.run_traced().await;
@@ -324,11 +532,22 @@ pub async fn profile_compiled<H: ToolHost>(
     state: &mut State,
     host: &H,
 ) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
+    profile_compiled_with_projected_bindings(program, state, host, &ProjectedBindings::default())
+        .await
+}
+
+pub async fn profile_compiled_with_projected_bindings<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    projected: &ProjectedBindings,
+) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
     let mut vm = Vm::new(
         &program.chunk,
         SlotState::from_globals(
             std::mem::take(&mut state.globals),
             &program.chunk.slot_names,
+            projected,
         ),
         host,
         false,
@@ -347,10 +566,28 @@ pub async fn profile_compiled_with_scratch<H: ToolHost>(
     host: &H,
     scratch: &mut ExecutionScratch,
 ) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
+    profile_compiled_with_scratch_and_projected_bindings(
+        program,
+        state,
+        host,
+        scratch,
+        &ProjectedBindings::default(),
+    )
+    .await
+}
+
+pub async fn profile_compiled_with_scratch_and_projected_bindings<H: ToolHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    scratch: &mut ExecutionScratch,
+    projected: &ProjectedBindings,
+) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
     let slots = SlotState::from_globals_with_scratch(
         std::mem::take(&mut state.globals),
         &program.chunk.slot_names,
         scratch,
+        projected,
     );
     let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
     vm.enable_profile();
@@ -2097,17 +2334,31 @@ impl Compiler {
 #[derive(Clone)]
 struct SlotState {
     values: Vec<Option<Value>>,
+    projected: Vec<bool>,
     extras: Record,
 }
 
 impl SlotState {
-    fn from_globals(mut globals: Record, slot_names: &[Name]) -> Self {
+    fn from_globals(
+        mut globals: Record,
+        slot_names: &[Name],
+        projected_bindings: &ProjectedBindings,
+    ) -> Self {
         let mut values = Vec::with_capacity(slot_names.len());
+        let mut projected = Vec::with_capacity(slot_names.len());
         for name in slot_names {
-            values.push(globals.remove_symbol(name.symbol));
+            if let Some(value) = projected_bindings.get_symbol(name.symbol) {
+                globals.remove_symbol(name.symbol);
+                values.push(Some(Value::Projected(value)));
+                projected.push(true);
+            } else {
+                values.push(globals.remove_symbol(name.symbol));
+                projected.push(false);
+            }
         }
         Self {
             values,
+            projected,
             extras: globals,
         }
     }
@@ -2116,17 +2367,27 @@ impl SlotState {
         mut globals: Record,
         slot_names: &[Name],
         scratch: &mut ExecutionScratch,
+        projected_bindings: &ProjectedBindings,
     ) -> Self {
         let mut values = std::mem::take(&mut scratch.slot_values);
         values.clear();
         if values.capacity() < slot_names.len() {
             values.reserve(slot_names.len() - values.capacity());
         }
+        let mut projected = Vec::with_capacity(slot_names.len());
         for name in slot_names {
-            values.push(globals.remove_symbol(name.symbol));
+            if let Some(value) = projected_bindings.get_symbol(name.symbol) {
+                globals.remove_symbol(name.symbol);
+                values.push(Some(Value::Projected(value)));
+                projected.push(true);
+            } else {
+                values.push(globals.remove_symbol(name.symbol));
+                projected.push(false);
+            }
         }
         Self {
             values,
+            projected,
             extras: globals,
         }
     }
@@ -2139,8 +2400,27 @@ impl SlotState {
         self.values.get_mut(slot).and_then(Option::as_mut)
     }
 
-    fn assign(&mut self, slot: usize, value: Value) {
-        self.values[slot] = Some(value);
+    fn assign(
+        &mut self,
+        slot: usize,
+        value: Value,
+        slot_names: &[Name],
+    ) -> Result<(), RuntimeError> {
+        self.ensure_assignable(slot, slot_names)?;
+        self.values[slot] = Some(materialize_value(value));
+        Ok(())
+    }
+
+    fn ensure_assignable(&self, slot: usize, slot_names: &[Name]) -> Result<(), RuntimeError> {
+        if self.projected.get(slot).copied().unwrap_or(false) {
+            return Err(RuntimeError::TypeError {
+                message: format!(
+                    "`{}` is a read-only projected binding",
+                    slot_names[slot].text
+                ),
+            });
+        }
+        Ok(())
     }
 
     fn capture_temporary(&self, slot: usize) -> LoopRestore {
@@ -2155,10 +2435,18 @@ impl SlotState {
 
     fn into_globals(self, slot_names: &[Name]) -> Record {
         let mut extras = self.extras;
-        for (name, value) in slot_names.iter().zip(self.values) {
+        for ((name, value), projected) in slot_names.iter().zip(self.values).zip(self.projected) {
+            if projected {
+                extras.remove_symbol(name.symbol);
+                continue;
+            }
             match value {
                 Some(value) => {
-                    extras.insert_symbolized(name.symbol, name.text.clone(), value);
+                    extras.insert_symbolized(
+                        name.symbol,
+                        name.text.clone(),
+                        materialize_value(value),
+                    );
                 }
                 None => {
                     extras.remove_symbol(name.symbol);
@@ -2175,10 +2463,20 @@ impl SlotState {
     ) -> Record {
         let mut extras = self.extras;
         let mut values = self.values;
-        for (name, value) in slot_names.iter().zip(values.iter_mut()) {
+        for ((name, value), projected) in
+            slot_names.iter().zip(values.iter_mut()).zip(self.projected)
+        {
+            if projected {
+                extras.remove_symbol(name.symbol);
+                continue;
+            }
             match value.take() {
                 Some(value) => {
-                    extras.insert_symbolized(name.symbol, name.text.clone(), value);
+                    extras.insert_symbolized(
+                        name.symbol,
+                        name.text.clone(),
+                        materialize_value(value),
+                    );
                 }
                 None => {
                     extras.remove_symbol(name.symbol);
@@ -2338,13 +2636,15 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::StoreName(name) => {
                 let value = self.pop_stack()?;
-                self.slots.assign(name, value.clone());
+                self.slots
+                    .assign(name, value.clone(), &self.chunk.slot_names)?;
                 self.record_assignment(name);
                 self.last_value = Some(value);
             }
             Instruction::StoreConst { slot, constant } => {
                 let value = self.chunk.constants[constant].clone();
-                self.slots.assign(slot, value.clone());
+                self.slots
+                    .assign(slot, value.clone(), &self.chunk.slot_names)?;
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
@@ -2383,6 +2683,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let index_start = self.stack_drain_start(path.dynamic_index_count)?;
                 let indexes = &self.stack[index_start..];
                 let root_name = &self.chunk.slot_names[slot];
+                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
                 let root =
                     self.slots
                         .get_mut(slot)
@@ -2528,6 +2829,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::AddAssign(slot) => {
                 let right = self.pop_stack()?;
                 let slot_name = &self.chunk.slot_names[slot];
+                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
                 let value = {
                     let left = self.slots.get_mut(slot).ok_or_else(|| {
                         RuntimeError::UndefinedVariable {
@@ -2552,6 +2854,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::AppendAssign(slot) => {
                 let item = self.pop_stack()?;
                 let slot_name = &self.chunk.slot_names[slot];
+                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
                 let current = self.slots.get(slot).cloned().ok_or_else(|| {
                     RuntimeError::UndefinedVariable {
                         name: slot_name.text.to_string(),
@@ -2566,7 +2869,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     }
                     other => add_values(other, Value::List(vec![item].into()))?,
                 };
-                self.slots.assign(slot, value.clone());
+                self.slots
+                    .assign(slot, value.clone(), &self.chunk.slot_names)?;
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
@@ -2584,9 +2888,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::BeginIter(binding) => {
                 let iterable = self.pop_stack()?;
-                let Value::List(values) = iterable else {
-                    return Err(RuntimeError::NonListIteration);
-                };
+                let values = iterable_values(iterable)?;
                 self.iter_stack.push(IterState {
                     values,
                     index: 0,
@@ -2605,7 +2907,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 } else {
                     let value = iter_state.values[iter_state.index].clone();
                     iter_state.index += 1;
-                    self.slots.assign(iter_state.binding, value);
+                    self.slots
+                        .assign(iter_state.binding, value, &self.chunk.slot_names)?;
                 }
             }
             Instruction::EndIter => {
@@ -2940,7 +3243,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             1 => {
                 let call = self.prepare_parallel_call(&branches[0])?;
                 let result = Self::run_prepared_call(self.chunk, call, self.host).await?;
-                self.slots.assign(result.slot, result.output);
+                self.slots
+                    .assign(result.slot, result.output, &self.chunk.slot_names)?;
                 self.record_assignment(result.slot);
                 Ok(())
             }
@@ -2956,7 +3260,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let results =
                     Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host).await?;
                 for result in results {
-                    self.slots.assign(result.slot, result.output);
+                    self.slots
+                        .assign(result.slot, result.output, &self.chunk.slot_names)?;
                     self.record_assignment(result.slot);
                 }
                 Ok(())
@@ -2969,7 +3274,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.ensure_distinct_parallel_call_slots(&calls)?;
                 let results = Self::run_prepared_calls_batch(self.chunk, &calls, self.host).await?;
                 for result in results {
-                    self.slots.assign(result.slot, result.output);
+                    self.slots
+                        .assign(result.slot, result.output, &self.chunk.slot_names)?;
                     self.record_assignment(result.slot);
                 }
                 Ok(())
@@ -2988,7 +3294,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let call = self.prepare_parallel_call(&branches[0])?;
                 let result = Self::run_prepared_call(self.chunk, call, self.host).await?;
                 let output = result.output.clone();
-                self.slots.assign(result.slot, result.output);
+                self.slots
+                    .assign(result.slot, result.output, &self.chunk.slot_names)?;
                 self.record_assignment(result.slot);
                 Ok(Value::List(vec![output].into()))
             }
@@ -3006,7 +3313,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let mut outputs = Vec::with_capacity(2);
                 for result in results {
                     outputs.push(result.output.clone());
-                    self.slots.assign(result.slot, result.output);
+                    self.slots
+                        .assign(result.slot, result.output, &self.chunk.slot_names)?;
                     self.record_assignment(result.slot);
                 }
                 Ok(Value::List(outputs.into()))
@@ -3021,7 +3329,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let mut outputs = Vec::with_capacity(results.len());
                 for result in results {
                     outputs.push(result.output.clone());
-                    self.slots.assign(result.slot, result.output);
+                    self.slots
+                        .assign(result.slot, result.output, &self.chunk.slot_names)?;
                     self.record_assignment(result.slot);
                 }
                 Ok(Value::List(outputs.into()))
@@ -3361,7 +3670,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     name: self.chunk.slot_names[slot].text.to_string(),
                 });
             }
-            self.slots.assign(slot, value);
+            self.slots.assign(slot, value, &self.chunk.slot_names)?;
             self.record_assignment(slot);
         }
         Ok(())
@@ -3928,6 +4237,7 @@ fn execute_builtin(
                 Value::String(value) => Ok(Value::Bool(value.is_empty())),
                 Value::List(values) => Ok(Value::Bool(values.is_empty())),
                 Value::Record(record) => Ok(Value::Bool(record.is_empty())),
+                Value::Projected(value) => Ok(Value::Bool(value.is_empty())),
                 Value::Null => Ok(Value::Bool(true)),
                 _ => Err(RuntimeError::TypeError {
                     message: "`empty` requires a string, list, record, or null".to_string(),
@@ -3972,6 +4282,11 @@ fn execute_builtin(
                 (Value::Record(record), needle) => Ok(Value::Bool(
                     record.get(coerce_string(needle)?.as_ref()).is_some(),
                 )),
+                (Value::Projected(value), needle) => match &value.kind {
+                    ProjectedKind::List(list) => Ok(Value::Bool(
+                        (0..list.len()).any(|index| list.get(index).as_ref() == Some(needle)),
+                    )),
+                },
                 (Value::Null, _) => Ok(Value::Bool(false)),
                 _ => Err(RuntimeError::TypeError {
                     message:
@@ -4090,11 +4405,23 @@ fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
         Value::String(value) => Ok(Value::Number(value.chars().count() as f64)),
         Value::List(values) => Ok(Value::Number(values.len() as f64)),
         Value::Record(record) => Ok(Value::Number(record.len() as f64)),
+        Value::Projected(value) => Ok(Value::Number(value.len() as f64)),
         Value::Null => Ok(Value::Number(0.0)),
         _ => Err(RuntimeError::TypeError {
             message: "`len` requires a string, list, record, or null; use `.size` for images"
                 .to_string(),
         }),
+    }
+}
+
+fn iterable_values(value: Value) -> Result<Arc<[Value]>, RuntimeError> {
+    match value {
+        Value::List(values) => Ok(values),
+        Value::Projected(value) => match value.materialize() {
+            Value::List(values) => Ok(values),
+            _ => Err(RuntimeError::NonListIteration),
+        },
+        _ => Err(RuntimeError::NonListIteration),
     }
 }
 
@@ -4187,6 +4514,7 @@ fn read_field_ref(value: &Value, field: &Name) -> Result<Value, RuntimeError> {
             .cloned()
             .unwrap_or(Value::Null)),
         Value::Image(image) => read_image_field(image, field),
+        Value::Projected(value) => read_field(value.materialize(), field),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!(
@@ -4242,6 +4570,7 @@ fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
             .cloned()
             .unwrap_or(Value::Null)),
         Value::Image(image) => read_image_field(&image, field),
+        Value::Projected(value) => read_field(value.materialize(), field),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!(
@@ -4289,6 +4618,7 @@ fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
             .get(coerce_string(&index)?.as_ref())
             .cloned()
             .unwrap_or(Value::Null)),
+        Value::Projected(value) => value.get_index(&index),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!("can't index {}", value_type_name(&target)),
@@ -4496,9 +4826,11 @@ fn coerce_string(value: &Value) -> Result<Cow<'_, str>, RuntimeError> {
         Value::Null => Ok(Cow::Borrowed("null")),
         Value::Bool(value) => Ok(Cow::Owned(value.to_string())),
         Value::Number(value) => Ok(Cow::Owned(value.to_string())),
-        Value::Image(_) | Value::List(_) | Value::Record(_) => Err(RuntimeError::TypeError {
-            message: format!("expected text, got {}", value_type_name(value)),
-        }),
+        Value::Image(_) | Value::List(_) | Value::Record(_) | Value::Projected(_) => {
+            Err(RuntimeError::TypeError {
+                message: format!("expected text, got {}", value_type_name(value)),
+            })
+        }
     }
 }
 
@@ -4572,6 +4904,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Number(value) => *value != 0.0 && !value.is_nan(),
         Value::String(value) => !value.is_empty(),
         Value::Image(_) | Value::List(_) | Value::Record(_) => true,
+        Value::Projected(value) => !value.is_empty(),
     }
 }
 
@@ -4621,10 +4954,11 @@ fn append_stringified_value(output: &mut String, value: &Value) -> Result<(), Ru
         Value::Number(value) => {
             write_number(output, *value).expect("string writes should not fail")
         }
-        Value::Image(_) | Value::List(_) | Value::Record(_) => output.push_str(
-            &serde_json::to_string(&to_json(value))
-                .expect("value json serialization should succeed"),
-        ),
+        Value::Image(_) | Value::List(_) | Value::Record(_) | Value::Projected(_) => output
+            .push_str(
+                &serde_json::to_string(&to_json(value))
+                    .expect("value json serialization should succeed"),
+            ),
     }
     Ok(())
 }
@@ -4638,6 +4972,14 @@ fn value_type_name(value: &Value) -> &'static str {
         Value::Image(_) => "image",
         Value::List(_) => "list",
         Value::Record(_) => "record",
+        Value::Projected(value) => value.value_type_name(),
+    }
+}
+
+fn materialize_value(value: Value) -> Value {
+    match value {
+        Value::Projected(projected) => projected.materialize(),
+        other => other,
     }
 }
 
@@ -5030,6 +5372,7 @@ fn to_json(value: &Value) -> serde_json::Value {
                 .map(|(key, value)| (key.to_string(), to_json(value)))
                 .collect(),
         ),
+        Value::Projected(value) => to_json(&value.materialize()),
     }
 }
 

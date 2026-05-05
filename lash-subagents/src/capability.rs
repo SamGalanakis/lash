@@ -37,7 +37,6 @@ pub enum CapabilityOptionalField<T> {
 pub enum CapabilityToolSurface {
     InheritParent,
     BuiltinExplore,
-    CognitionOnly,
     Explicit(Vec<ToolDefinition>),
 }
 

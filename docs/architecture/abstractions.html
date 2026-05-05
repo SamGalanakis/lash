@@ -13,7 +13,7 @@
     <main class="frame">
       <header class="hero">
         <div>
-          <div class="eyebrow">Architecture chapter 05</div>
+          <div class="eyebrow">Architecture chapter 06</div>
           <h1>types<span class="slash">/</span>contracts</h1>
           <p>The important architecture lives in small contracts. Provider components, protocol drivers, tool definitions, output contracts, plugin hooks, store commits, read projections, and UI surfaces — each a named seam.</p>
         </div>
@@ -25,7 +25,7 @@
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a class="active" href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a class="active" href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
       </nav>
 
       <section class="content">
@@ -40,14 +40,17 @@
               <tbody>
                 <tr><td><code>TurnMachine</code>, <code>Effect</code>, <code>Response</code></td><td><code>lash-sansio</code></td><td>Pure turn state machine and host-effect protocol.</td></tr>
                 <tr><td><code>ModePreamble</code>, <code>ContextProjector</code>, <code>ProtocolDriverHandle</code></td><td><code>lash-sansio</code> + mode crates</td><td>Mode-specific prompt, request projection, and model-output interpretation.</td></tr>
-                <tr><td><code>LashRuntime</code>, <code>Session</code></td><td><code>lash</code></td><td>Live async runtime and per-session tool/mode/prompt execution surface.</td></tr>
-                <tr><td><code>CurrentSessionCapability</code>, <code>ManagedSessionCapability</code>, <code>BackgroundTaskCapability</code></td><td><code>lash/src/runtime/session_manager*</code></td><td>Focused runtime-host capability split behind <code>RuntimeSessionManager</code>.</td></tr>
+                <tr><td><code>LashRuntime</code>, <code>RuntimeEnvironment</code>, <code>Session</code></td><td><code>lash</code></td><td>Live async runtime, host services, and per-session tool/mode/prompt execution surface.</td></tr>
+                <tr><td><code>SessionSnapshotHost</code>, <code>ToolCatalogHost</code>, <code>SessionLifecycleHost</code>, <code>TaskHost</code>, <code>DirectCompletionHost</code></td><td><code>lash/src/plugin/mod.rs</code> + <code>lash/src/runtime/session_manager/*</code></td><td>Focused runtime-host trait split implemented by <code>RuntimeSessionManager</code>.</td></tr>
                 <tr><td><code>TurnCommitPipeline</code>, <code>TurnProgress</code>, <code>TurnGraphOverlay</code></td><td><code>lash/src/runtime</code></td><td>Turn-scoped graph, checkpoint, usage, and read-state commit policy.</td></tr>
                 <tr><td><code>SessionGraph</code>, <code>SessionReadView</code>, <code>ChronologicalProjection</code></td><td><code>lash</code></td><td>Durable event storage, public read seam, and semantic timeline projection.</td></tr>
-                <tr><td><code>RuntimePersistence</code>, <code>RuntimeCommit</code>, <code>GraphCommitDelta</code></td><td><code>lash/src/store.rs</code></td><td>SQLite-backed runtime persistence and optimistic head revision commits.</td></tr>
+                <tr><td><code>RuntimePersistence</code>, <code>RuntimeCommit</code>, <code>GraphCommitDelta</code></td><td><code>lash/src/store.rs</code></td><td>Runtime persistence contract and optimistic head revision commit shape.</td></tr>
+                <tr><td><code>Store</code></td><td><code>lash-sqlite-store</code></td><td>Concrete SQLite implementation for graph nodes, session heads, blobs, checkpoints, usage, tombstones, and vacuum metadata.</td></tr>
                 <tr><td><code>ProviderHandle</code>, <code>ProviderComponents</code></td><td><code>lash/src/provider.rs</code></td><td>Persisted provider handle split by state, auth, readiness, transport, and model policy.</td></tr>
                 <tr><td><code>ToolDefinition</code>, <code>ToolSurface</code>, <code>ToolOutputContract</code></td><td><code>lash-sansio</code></td><td>Tool visibility, model schema, examples, compact docs, and dynamic return contracts.</td></tr>
                 <tr><td><code>PluginFactory</code>, <code>SessionPlugin</code>, <code>PluginRegistrar</code></td><td><code>lash/src/plugin</code></td><td>Plugin lifecycle and hook registration for tools, prompts, modes, runtime events, and external ops.</td></tr>
+                <tr><td><code>LlmToolsPluginFactory</code>, <code>DirectCompletionHost</code></td><td><code>lash-llm-tools</code> + <code>lash</code></td><td><code>llm_query</code> tool registration, output-schema handling, direct completion, and usage relay.</td></tr>
+                <tr><td><code>RlmControlToolsProvider</code></td><td><code>lash-mode-rlm/src/control_tools.rs</code></td><td>Mode-owned RLM control tools such as <code>continue_as</code>.</td></tr>
                 <tr><td><code>ToolDiscoveryIndex</code>, <code>CatalogTool</code>, <code>llm_rerank_request</code></td><td><code>lash-plugin-tool-discovery/src/*</code></td><td>Search/load tool discovery pipeline split across catalog, provider, ranking, rerank, and schema-index modules.</td></tr>
                 <tr><td><code>UiTimeline</code>, <code>ActivityBlock</code>, <code>UiExtension</code></td><td><code>lash-cli</code> / <code>lash-ui</code></td><td>CLI render projection, tool activity display, and host-owned surface slots.</td></tr>
               </tbody>
@@ -114,7 +117,7 @@ flowchart LR
         </div>
 
         <div class="section-nav">
-          <a href="./execution.html"><span>Previous</span><strong>Execution</strong></a>
+          <a href="./runtime.html"><span>Previous</span><strong>Runtime</strong></a>
           <a href="./deps.html"><span>Next</span><strong>Dependencies</strong></a>
         </div>
       </section>

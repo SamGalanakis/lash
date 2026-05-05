@@ -25,7 +25,7 @@
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a class="active" href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a class="active" href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
       </nav>
 
       <section class="content">
@@ -39,8 +39,9 @@
             <div class="mermaid">
 flowchart TD
   Args["lash-cli Args<br/>--print, --export, trace flags, provider/model"] --> Main["main()"]
+  Embed["lash-embed host<br/>managed sessions"] --> Runtime
   Main --> Export{"--export?"}
-  Export -->|yes| ExportRun["lash-export"]
+  Export -->|yes| ExportRun["lash-export<br/>session DB + trace JSONL"]
   Export -->|no| Bootstrap["bootstrap::run"]
   Bootstrap --> SessionBootstrap["SessionBootstrap<br/>new/resume/fork"]
   Bootstrap --> Providers["lash-providers-builtin::register_all"]
@@ -61,7 +62,7 @@ flowchart TD
           </div>
           <div class="mode-grid">
             <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p><code>StandardDriver::handle_llm_success</code> interprets provider output. Tool calls become <code>StartTools</code>, then <code>RuntimeTurnDriver::run_tool_calls</code> dispatches native mode tools first and then registered <code>ToolProvider</code>s.</p></article>
-            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p><code>RlmDriver</code> extracts a closed <code>lashlang</code> fence, starts <code>ExecCode</code>, and <code>RlmModeSession::execute_code</code> runs the program through <code>RlmExecutionState</code> and <code>HostBridge</code>.</p></article>
+            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p><code>RlmDriver</code> extracts a closed <code>lashlang</code> fence, starts <code>ExecCode</code>, and <code>RlmModeSession::execute_code</code> runs the program through <code>RlmExecutionState</code> and <code>HostBridge</code>. Control tools such as <code>continue_as</code> are mode tools; <code>llm_query</code> is supplied by <code>lash-llm-tools</code>.</p></article>
             <article class="panel"><small>background</small><h3>Subagents and monitors</h3><p>Subagents, monitor tasks, and async tool calls share handle-shaped background work. RLM discovers live handles with <code>list_async_handles</code> and resolves them with <code>await</code>.</p></article>
           </div>
         </div>
@@ -94,17 +95,17 @@ flowchart LR
           </div>
           <div class="two-col">
             <article class="panel"><h3>Interactive TUI</h3><p><code>run_app</code> drives event handling. Completed turns reconcile with <code>finish_turn_from_read_view</code>; live markdown lanes and activity state bridge partial output until the final projection arrives.</p></article>
-            <article class="panel"><h3>Export and trace</h3><p><code>lash-export</code> reads store state and renders chronological projections. <code>lash-trace-viewer</code> reads JSONL traces and displays timeline, LLM calls, stream events, and raw records.</p></article>
+            <article class="panel"><h3>Export and trace</h3><p><code>lash-export</code> reads store state plus the full provider trace JSONL when available, then renders chronological projections, prompt snapshots, context percentages, cached-token percentages, and usage bars. <code>lash-trace-viewer</code> reads JSONL traces and displays timeline, LLM calls, stream events, and raw records.</p></article>
           </div>
         </div>
 
         <div class="section-nav">
           <a href="./flow.html"><span>Previous</span><strong>Data Flow</strong></a>
-          <a href="./abstractions.html"><span>Next</span><strong>Abstractions</strong></a>
+          <a href="./runtime.html"><span>Next</span><strong>Runtime</strong></a>
         </div>
       </section>
 
-      <footer class="footer">Execution anchors: <code>lash-cli/src/main.rs</code>, <code>bootstrap.rs</code>, <code>lash-mode-standard/src/lib.rs</code>, <code>lash-mode-rlm/src/*</code>, <code>lash-subagents/src/*</code>.</footer>
+      <footer class="footer">Execution anchors: <code>lash-cli/src/main.rs</code>, <code>bootstrap.rs</code>, <code>lash-mode-standard/src/lib.rs</code>, <code>lash-mode-rlm/src/*</code>, <code>lash-subagents/src/*</code>, <code>lash-llm-tools/src/lib.rs</code>.</footer>
     </main>
   </div>
 </body>

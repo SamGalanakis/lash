@@ -7,11 +7,50 @@
   const entries = $$('.entry');
   const ticks = $$('.spine-tick');
   const tickById = new Map(ticks.map((t) => [t.getAttribute('href').slice(1), t]));
+  const usageRows = $$('.usage-row');
+  const usageById = new Map(usageRows.map((r) => [r.getAttribute('href').slice(1), r]));
+  const usageOverviewBars = $$('.usage-overview-bar');
+  const overviewById = new Map();
+  const transcript = $('#transcript');
+  const usageChart = $('.usage-chart');
+
+  usageOverviewBars.forEach((bar, idx) => {
+    const row = usageRows[idx];
+    if (!row) return;
+    const href = row.getAttribute('href');
+    const id = href.slice(1);
+    bar.setAttribute('href', href);
+    bar.dataset.usageEntry = id;
+    overviewById.set(id, bar);
+  });
+
+  let layoutQueued = false;
+  function queueUsageLayout() {
+    if (layoutQueued) return;
+    layoutQueued = true;
+    requestAnimationFrame(() => {
+      layoutQueued = false;
+      layoutUsageRows();
+    });
+  }
+
+  function layoutUsageRows() {
+    if (!usageChart || !transcript || !usageRows.length) return;
+    const chartTop = usageChart.getBoundingClientRect().top + window.scrollY;
+    usageChart.style.height = `${transcript.offsetHeight}px`;
+    for (const row of usageRows) {
+      const id = row.getAttribute('href').slice(1);
+      const entry = document.getElementById(id);
+      if (!entry) continue;
+      const entryTop = entry.getBoundingClientRect().top + window.scrollY;
+      row.style.top = `${Math.max(0, entryTop - chartTop)}px`;
+    }
+  }
 
   // ─── filters ────────────────────────────────────────────────────────────
 
   const state = {
-    role: new Set(['user', 'assistant', 'tool', 'rlm', 'system']),
+    role: new Set(['user', 'assistant', 'tool', 'rlm', 'prompt', 'system']),
     tool: new Set(),
     toolKnown: new Set(),
     search: '',
@@ -49,6 +88,10 @@
       if (!hidden) visible++;
       const tick = tickById.get(entry.id);
       if (tick) tick.classList.toggle('is-hidden', hidden);
+      const usage = usageById.get(entry.id);
+      if (usage) usage.classList.toggle('is-hidden', hidden);
+      const overview = overviewById.get(entry.id);
+      if (overview) overview.classList.toggle('is-hidden', hidden);
     }
     const meta = $('#q-meta');
     if (meta) {
@@ -57,6 +100,7 @@
     }
     if (q) highlightMatches(q);
     else clearHighlights();
+    queueUsageLayout();
   }
 
   // ─── search highlight ──────────────────────────────────────────────────
@@ -149,6 +193,7 @@
     $$('details').forEach((d) => {
       d.open = open;
     });
+    queueUsageLayout();
   }
 
   // ─── search input ───────────────────────────────────────────────────────
@@ -208,12 +253,26 @@
   // ─── spine sync (current entry highlight) ──────────────────────────────
 
   let currentTick = null;
+  let currentUsage = null;
+  let currentOverview = null;
   const setCurrent = (id) => {
     if (currentTick) currentTick.classList.remove('is-current');
+    if (currentUsage) currentUsage.classList.remove('is-current');
+    if (currentOverview) currentOverview.classList.remove('is-current');
     const t = tickById.get(id);
     if (t) {
       t.classList.add('is-current');
       currentTick = t;
+    }
+    const u = usageById.get(id);
+    if (u) {
+      u.classList.add('is-current');
+      currentUsage = u;
+    }
+    const o = overviewById.get(id);
+    if (o) {
+      o.classList.add('is-current');
+      currentOverview = o;
     }
   };
 
@@ -249,6 +308,7 @@
     const det = el.querySelector(':scope > .entry-body > details');
     if (det && !det.open) det.open = true;
     el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    queueUsageLayout();
     setCurrent(el.id);
     flashEntry(el.id);
   }
@@ -264,6 +324,9 @@
     flashEntry(id);
   }
   window.addEventListener('hashchange', expandHashTarget);
+  window.addEventListener('resize', queueUsageLayout);
+  document.addEventListener('toggle', queueUsageLayout, true);
+  queueUsageLayout();
   if (location.hash) setTimeout(expandHashTarget, 0);
 
   document.addEventListener('keydown', (ev) => {

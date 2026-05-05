@@ -232,7 +232,8 @@ pub struct ModeExecutionContext {
     async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
-    rlm_projected_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
 }
 
 impl ModeExecutionContext {
@@ -248,8 +249,12 @@ impl ModeExecutionContext {
         Arc::clone(&self.attachment_store)
     }
 
-    pub fn rlm_projected_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
-        Arc::clone(&self.rlm_projected_globals)
+    pub fn rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
+        Arc::clone(&self.rlm_globals)
+    }
+
+    pub fn rlm_chronological_projection(&self) -> Arc<crate::ChronologicalProjection> {
+        Arc::clone(&self.rlm_chronological_projection)
     }
 
     pub async fn call_tool(
@@ -1122,7 +1127,8 @@ impl Session {
         session_id: &str,
         host: Arc<dyn RuntimeSessionHost>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
-        rlm_projected_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+        rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+        rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
     ) -> ModeExecutionContext {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
@@ -1141,7 +1147,8 @@ impl Session {
             async_tool_handles: Arc::clone(&self.async_tool_handles),
             message_tx: self.message_tx.clone(),
             attachment_store: Arc::clone(&self.services.attachment_store),
-            rlm_projected_globals,
+            rlm_globals,
+            rlm_chronological_projection,
         }
     }
 

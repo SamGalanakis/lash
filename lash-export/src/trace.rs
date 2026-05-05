@@ -1,20 +1,20 @@
-//! Read per-LLM-call system prompts from a session's sibling trace file.
+//! Read per-LLM-call system prompts from a full provider trace file.
 //!
 //! The session `.db` stores the durable conversation thread but not the
 //! fully-assembled system prompt sent to the provider on each call —
 //! that prompt is rendered just-in-time from the preamble + plugin
-//! contributions + chronological history. The trace JSONL written next
-//! to the `.db` (see `lash-cli/src/bootstrap.rs` `with_trace_jsonl_path`)
-//! captures every `llm_call_started` event with the full request,
-//! including the system block. We pull just the system text out so the
-//! HTML exporter can show what the model was actually told on each call.
+//! contributions + chronological history. The required trace JSONL captures
+//! every `llm_call_started` event with the full request, including the system
+//! block. We pull provider request snapshots out so the HTML exporter can show
+//! what the model was actually told on each call.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -39,6 +39,16 @@ pub struct LlmPromptSnapshot {
     pub request_messages: Vec<RequestMessage>,
     pub request_chars: usize,
     pub request_hash: String,
+    pub usage: Option<LlmCallUsage>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LlmCallUsage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -48,28 +58,14 @@ pub struct RequestMessage {
     pub chars: usize,
 }
 
-/// Derive the trace path from a session `.db` path. Returns the sibling
-/// `<basename>.trace.jsonl` whether or not it exists.
-pub fn trace_path_for_session_db(db_path: &Path) -> PathBuf {
-    let stem = db_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("session");
-    let mut path = db_path.to_path_buf();
-    path.set_file_name(format!("{stem}.trace.jsonl"));
-    path
-}
-
 /// Parse the trace and extract one snapshot per `llm_call_started` event,
-/// preserving file order. Returns an empty vec if the file is absent or
-/// unreadable — exporting must never fail because the trace is missing.
-pub fn load_prompts_from_trace(trace_path: &Path) -> Vec<LlmPromptSnapshot> {
-    let Ok(file) = File::open(trace_path) else {
-        return Vec::new();
-    };
+/// preserving file order.
+pub fn load_prompts_from_trace(trace_path: &Path) -> Result<Vec<LlmPromptSnapshot>> {
+    let file = File::open(trace_path)
+        .with_context(|| format!("opening provider trace at {}", trace_path.display()))?;
     let reader = BufReader::new(file);
     let mut snapshots = Vec::new();
-    for line in reader.lines().map_while(Result::ok) {
+    for line in reader.lines().map_while(std::result::Result::ok) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -77,14 +73,21 @@ pub fn load_prompts_from_trace(trace_path: &Path) -> Vec<LlmPromptSnapshot> {
         let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        if record.get("type").and_then(Value::as_str) != Some("llm_call_started") {
-            continue;
-        }
-        if let Some(snapshot) = snapshot_from_record(&record) {
-            snapshots.push(snapshot);
+        match record.get("type").and_then(Value::as_str) {
+            Some("llm_call_started") => {
+                if let Some(snapshot) = snapshot_from_record(&record) {
+                    snapshots.push(snapshot);
+                }
+            }
+            Some("llm_call_completed") => {
+                if let Some(usage) = usage_from_completed_record(&record) {
+                    attach_usage_to_latest_matching_snapshot(&mut snapshots, &record, usage);
+                }
+            }
+            _ => {}
         }
     }
-    snapshots
+    Ok(snapshots)
 }
 
 fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
@@ -134,7 +137,71 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
         request_messages,
         request_chars,
         request_hash,
+        usage: None,
     })
+}
+
+fn usage_from_completed_record(record: &Value) -> Option<LlmCallUsage> {
+    let usage = record.get("usage")?;
+    let parsed = LlmCallUsage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        cached_input_tokens: usage
+            .get("cached_input_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        reasoning_tokens: usage
+            .get("reasoning_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        duration_ms: record
+            .get("response")
+            .and_then(|response| response.get("duration_ms"))
+            .and_then(Value::as_u64),
+    };
+    if parsed.input_tokens == 0
+        && parsed.output_tokens == 0
+        && parsed.cached_input_tokens == 0
+        && parsed.reasoning_tokens == 0
+        && parsed.duration_ms.is_none()
+    {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+fn attach_usage_to_latest_matching_snapshot(
+    snapshots: &mut [LlmPromptSnapshot],
+    record: &Value,
+    usage: LlmCallUsage,
+) {
+    let context = record.get("context");
+    let call_id = context
+        .and_then(|c| c.get("llm_call_id"))
+        .and_then(Value::as_str);
+    let iteration = context
+        .and_then(|c| c.get("iteration"))
+        .and_then(Value::as_u64);
+
+    if let Some(snapshot) = snapshots.iter_mut().rev().find(|snapshot| {
+        snapshot.usage.is_none() && call_id.is_some() && snapshot.llm_call_id.as_deref() == call_id
+    }) {
+        snapshot.usage = Some(usage);
+        return;
+    }
+
+    if let Some(snapshot) = snapshots.iter_mut().rev().find(|snapshot| {
+        snapshot.usage.is_none() && iteration.is_some() && snapshot.iteration == iteration
+    }) {
+        snapshot.usage = Some(usage);
+    }
 }
 
 fn total_message_chars(messages: &[Value]) -> usize {
@@ -228,9 +295,14 @@ mod tests {
             r#"{{"type":"llm_call_started","timestamp":"2026-05-04T00:00:00Z","context":{{"iteration":0,"llm_call_id":"abc:0"}},"request":{{"model":"gpt-5.5","model_variant":"high","messages":[{{"role":"system","blocks":[{{"kind":"text","text":"You are lash."}}]}},{{"role":"user","blocks":[{{"kind":"text","text":"hi"}}]}}]}}}}"#
         )
         .unwrap();
+        writeln!(
+            tmp,
+            r#"{{"type":"llm_call_completed","context":{{"iteration":0,"llm_call_id":"abc:0"}},"response":{{"text":"ok","duration_ms":1234}},"usage":{{"input_tokens":100,"output_tokens":12,"cached_input_tokens":80,"reasoning_tokens":4}}}}"#
+        )
+        .unwrap();
         tmp.flush().unwrap();
 
-        let prompts = load_prompts_from_trace(tmp.path());
+        let prompts = load_prompts_from_trace(tmp.path()).unwrap();
         assert_eq!(prompts.len(), 1);
         let p = &prompts[0];
         assert_eq!(p.iteration, Some(0));
@@ -247,12 +319,22 @@ mod tests {
         assert_eq!(p.request_messages[0].text, "hi");
         assert_eq!(p.request_messages[0].chars, 2);
         assert_eq!(p.request_chars, 2);
+        let usage = p.usage.as_ref().expect("usage");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 12);
+        assert_eq!(usage.cached_input_tokens, 80);
+        assert_eq!(usage.reasoning_tokens, 4);
+        assert_eq!(usage.duration_ms, Some(1234));
     }
 
     #[test]
-    fn missing_trace_returns_empty() {
-        let prompts = load_prompts_from_trace(Path::new("/nonexistent/path.trace.jsonl"));
-        assert!(prompts.is_empty());
+    fn missing_trace_is_an_error() {
+        let err = load_prompts_from_trace(Path::new("/nonexistent/path.trace.jsonl"))
+            .expect_err("missing trace should fail");
+        assert!(
+            err.to_string().contains("opening provider trace"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
@@ -265,16 +347,30 @@ mod tests {
         .unwrap();
         tmp.flush().unwrap();
 
-        let prompts = load_prompts_from_trace(tmp.path());
+        let prompts = load_prompts_from_trace(tmp.path()).unwrap();
         assert!(prompts.is_empty());
     }
 
     #[test]
-    fn trace_path_swaps_extension() {
-        let path = trace_path_for_session_db(Path::new("/tmp/sessions/20260503_220413.db"));
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/sessions/20260503_220413.trace.jsonl")
-        );
+    fn repeated_llm_call_ids_attach_usage_in_trace_order() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+        for input in [11, 22] {
+            writeln!(
+                tmp,
+                r#"{{"type":"llm_call_started","context":{{"iteration":2,"llm_call_id":"root:2"}},"request":{{"messages":[{{"role":"system","blocks":[{{"text":"sys {input}"}}]}},{{"role":"user","blocks":[{{"text":"hi"}}]}}]}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                tmp,
+                r#"{{"type":"llm_call_completed","context":{{"iteration":2,"llm_call_id":"root:2"}},"response":{{"duration_ms":1,"text":"ok"}},"usage":{{"input_tokens":{input},"output_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0}}}}"#
+            )
+            .unwrap();
+        }
+        tmp.flush().unwrap();
+
+        let prompts = load_prompts_from_trace(tmp.path()).unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0].usage.as_ref().unwrap().input_tokens, 11);
+        assert_eq!(prompts[1].usage.as_ref().unwrap().input_tokens, 22);
     }
 }

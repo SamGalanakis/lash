@@ -13,7 +13,7 @@
     <main class="frame">
       <header class="hero">
         <div>
-          <div class="eyebrow">Architecture chapter 06</div>
+          <div class="eyebrow">Architecture chapter 07</div>
           <h1>deps<span class="slash">/</span>edges</h1>
           <p>Lash keeps external systems at explicit edges — LLM transports, OAuth flows, MCP stdio servers, Tavily search/extract, models.dev metadata, trace sinks, file watchers, and SQLite-backed session storage.</p>
         </div>
@@ -25,7 +25,7 @@
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a class="active" href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a class="active" href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
       </nav>
 
       <section class="content">
@@ -48,8 +48,10 @@ flowchart TD
   Config --> Tavily["Tavily search / extract"]
   Config --> Models["models.dev catalog<br/>file cache + bundled fallback"]
   CLI --> FileIndex["lash-file-index<br/>ignore + notify + nucleo"]
-  Runtime["LashRuntime"] --> Store["SQLite Store<br/>session graph + blobs + usage"]
-  Runtime --> Trace["JsonlTraceSink<br/>optional OTel"]
+  Runtime["LashRuntime"] --> StoreContract["RuntimePersistence<br/>lash/src/store.rs"]
+  StoreContract --> Store["lash-sqlite-store<br/>session graph + blobs + usage"]
+  Runtime --> Trace["lash-trace schema v2<br/>standard + extended JSONL"]
+  Runtime --> Export["lash-export<br/>DB + provider trace"]
   MCP --> Dynamic["DynamicToolProvider"]
   Tavily --> DefaultTools["lash-default-tools"]
   Dynamic --> Runtime
@@ -85,9 +87,10 @@ flowchart TD
             <article class="panel"><h3>MCP</h3><p><code>attach_mcp_servers</code> imports stdio MCP <code>tools/list</code> entries as <code>mcp__server__tool</code> dynamic tools, preserving input and output schemas where available.</p></article>
             <article class="panel"><h3>Tavily</h3><p>Web search and URL extraction register only when <code>LashConfig.auxiliary_secrets.tavily_api_key</code> is present.</p></article>
             <article class="panel"><h3>models.dev</h3><p><code>CachedModelCatalog</code> reads a file cache, can fetch <code>https://models.dev/api.json</code>, and has a bundled snapshot fallback.</p></article>
-            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Optional OTel maps turns, LLM calls, tools, and streams to spans/events.</p></article>
+            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Standard records cover turns, LLM starts/completions, tools, and summaries; extended records preserve provider/stream details. Optional OTel maps those events to spans.</p></article>
             <article class="panel"><h3>File index</h3><p><code>lash-file-index</code> combines <code>ignore</code> walking, <code>notify</code> watching, and <code>nucleo</code> matching for async <code>@</code> completion.</p></article>
-            <article class="panel"><h3>Store</h3><p>The local SQLite store commits session heads, graph nodes, and checkpoint blobs. It also tracks usage deltas, tombstones, and garbage-collection metadata.</p></article>
+            <article class="panel"><h3>Store</h3><p><code>lash/src/store.rs</code> defines the runtime persistence contract. <code>lash-sqlite-store</code> is the local implementation for session heads, graph nodes, checkpoint blobs, usage deltas, tombstones, and garbage-collection metadata.</p></article>
+            <article class="panel"><h3>Export</h3><p><code>lash-export</code> renders the SQLite session plus provider trace JSONL when present, so transcript views can include prompt snapshots, context percentage, cached-token percentage, and exact token counts.</p></article>
           </div>
         </div>
 
@@ -97,7 +100,7 @@ flowchart TD
         </div>
       </section>
 
-      <footer class="footer">Dependency anchors: <code>lash/src/provider.rs</code>, <code>lash/src/mcp.rs</code>, <code>lash/src/model_info.rs</code>, <code>lash-file-index/src/lib.rs</code>.</footer>
+      <footer class="footer">Dependency anchors: <code>lash/src/provider.rs</code>, <code>lash/src/mcp.rs</code>, <code>lash/src/model_info.rs</code>, <code>lash/src/store.rs</code>, <code>lash-sqlite-store/src/lib.rs</code>, <code>lash-file-index/src/lib.rs</code>.</footer>
     </main>
   </div>
 </body>

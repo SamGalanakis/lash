@@ -7,7 +7,7 @@ use lash::plugin::{
 };
 use lash::{
     CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, PromptContribution, SessionError,
-    ToolResultProjectionPluginConfig,
+    SessionToolAccess, ToolResultProjectionPluginConfig,
 };
 use lash_rlm_types::RlmCreateExtras;
 
@@ -71,6 +71,7 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
         Ok(Arc::new(RlmModePlugin {
             active: ctx.execution_mode == ExecutionMode::new("rlm"),
             config: self.config.clone(),
+            tool_access: ctx.tool_access.clone(),
         }))
     }
 }
@@ -78,6 +79,7 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
 struct RlmModePlugin {
     active: bool,
     config: RlmModePluginConfig,
+    tool_access: SessionToolAccess,
 }
 
 impl SessionPlugin for RlmModePlugin {
@@ -97,6 +99,8 @@ impl SessionPlugin for RlmModePlugin {
         reg.mode().protocol_driver(Arc::new(RlmProtocolDriver {
             config: self.config.clone(),
         }))?;
+        reg.tools()
+            .provider(Arc::new(crate::control_tools::RlmControlToolsProvider))?;
 
         let bound_vars_cache = Arc::new(BoundVariablesCache::new());
         let bound_vars_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
@@ -110,6 +114,13 @@ impl SessionPlugin for RlmModePlugin {
             Box::pin(async move { Ok(budget_prompt_contributions(&ctx, max_budget_tokens)) })
         });
         reg.prompt().contribute(budget_hook);
+
+        let control_contributions = crate::control_tools::prompt_contributions(&self.tool_access);
+        let control_hook: lash::plugin::PromptContributor = Arc::new(move |_ctx| {
+            let contributions = control_contributions.clone();
+            Box::pin(async move { Ok(contributions) })
+        });
+        reg.prompt().contribute(control_hook);
 
         let print_output_hook: lash::plugin::PromptContributor = Arc::new(move |_ctx| {
             Box::pin(async move { Ok(vec![print_output_prompt_contribution()]) })
@@ -265,12 +276,10 @@ impl ModeSessionPlugin for RlmModeSession {
         request: lash::ExecRequest,
     ) -> Result<lash::ExecResponse, SessionError> {
         let mut guard = self.execution.lock().await;
-        let mut state = guard
+        let state = guard
             .take()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
 
-        let projected_globals = ctx.rlm_projected_globals();
-        state.sync_projected_globals(projected_globals.as_ref())?;
         let result = execute_code(state, ctx, request).await;
         match result {
             Ok((state, response)) => {

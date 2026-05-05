@@ -9,8 +9,9 @@ use lash::{
     ToolResultProjectionPluginConfig,
 };
 use lashlang::{
-    CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ImageValue, Record as FlowRecord,
-    State as FlowState, ToolHost, ToolHostCall, ToolHostError, Value as FlowValue,
+    CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ImageValue, ProjectedBindings,
+    ProjectedList, ProjectedValue, Record as FlowRecord, State as FlowState, ToolHost,
+    ToolHostCall, ToolHostError, Value as FlowValue,
 };
 use serde_json::{Value, json};
 
@@ -80,6 +81,7 @@ impl RlmExecutionState {
             .to_string();
         self.rlm = restore_runtime(&vars_str)
             .map_err(|err| SessionError::Protocol(format!("executor restore failed: {err}")))?;
+        prune_reserved_projected_bindings(&mut self.rlm);
 
         if let Some(files_val) = parsed.get("files")
             && let Ok(files) = serde_json::from_value::<HashMap<String, String>>(files_val.clone())
@@ -100,24 +102,6 @@ impl RlmExecutionState {
         }
         patch_globals(&mut self.rlm, patch.set.clone(), patch.unset.clone())
             .map_err(SessionError::Protocol)?;
-        self.dirty = true;
-        Ok(())
-    }
-
-    pub fn sync_projected_globals(
-        &mut self,
-        globals: &serde_json::Map<String, Value>,
-    ) -> Result<(), SessionError> {
-        let Some(history) = globals.get("history") else {
-            return Ok(());
-        };
-
-        // Projection-owned globals must be refreshed for execution, but explicit
-        // globals such as `diary` are mutated by the executor and must not be
-        // replaced by the read model's last patch value.
-        let mut set = serde_json::Map::new();
-        set.insert("history".to_string(), history.clone());
-        patch_globals(&mut self.rlm, set, Vec::new()).map_err(SessionError::Protocol)?;
         self.dirty = true;
         Ok(())
     }
@@ -172,6 +156,7 @@ async fn execute_code_inner(
         }
     };
 
+    let projected = projected_bindings(&ctx);
     let host = HostBridge {
         ctx,
         observe_projection: state.observe_projection.clone(),
@@ -183,11 +168,12 @@ async fn execute_code_inner(
         next_tool_index: Mutex::new(0),
     };
 
-    let result = lashlang::execute_compiled_traced_with_scratch(
+    let result = lashlang::execute_compiled_traced_with_scratch_and_projected_bindings(
         &compiled,
         &mut state.rlm,
         &host,
         &mut state.scratch,
+        &projected,
     )
     .await;
     let terminal_finish = match result {
@@ -223,6 +209,37 @@ async fn execute_code_inner(
         error: None,
         duration_ms: start.elapsed().as_millis() as u64,
         terminal_finish,
+    }
+}
+
+fn projected_bindings(ctx: &ModeExecutionContext) -> ProjectedBindings {
+    let mut bindings = ProjectedBindings::new();
+    bindings.insert(
+        "history",
+        ProjectedValue::list(
+            "history",
+            Arc::new(HistoryProjectedList {
+                projection: ctx.rlm_chronological_projection(),
+            }),
+        ),
+    );
+    bindings
+}
+
+struct HistoryProjectedList {
+    projection: Arc<lash::ChronologicalProjection>,
+}
+
+impl ProjectedList for HistoryProjectedList {
+    fn len(&self) -> usize {
+        self.projection.rlm_history_len()
+    }
+
+    fn get(&self, index: usize) -> Option<FlowValue> {
+        self.projection
+            .rlm_history_item(index)
+            .and_then(|item| serde_json::to_value(item).ok())
+            .map(json_to_flow_value)
     }
 }
 
@@ -449,6 +466,9 @@ fn collect_printed_images_inner(
                 collect_printed_images_inner(value, attachment_store, seen, images)?;
             }
         }
+        FlowValue::Projected(value) => {
+            collect_printed_images_inner(&value.materialize(), attachment_store, seen, images)?;
+        }
         FlowValue::Null | FlowValue::Bool(_) | FlowValue::Number(_) | FlowValue::String(_) => {}
     }
     Ok(())
@@ -573,10 +593,24 @@ fn patch_globals(
         snapshot.globals.remove(&key);
     }
     for (key, value) in set {
+        if is_reserved_projected_binding(&key) {
+            snapshot.globals.remove(&key);
+            continue;
+        }
         snapshot.globals.insert(key, json_to_flow_value(value));
     }
     *rlm = FlowState::from_snapshot(snapshot);
     Ok(())
+}
+
+fn is_reserved_projected_binding(key: &str) -> bool {
+    key == "history"
+}
+
+fn prune_reserved_projected_bindings(rlm: &mut FlowState) {
+    let mut snapshot = rlm.snapshot();
+    snapshot.globals.remove("history");
+    *rlm = FlowState::from_snapshot(snapshot);
 }
 
 fn flow_to_json_value(value: &FlowValue) -> Value {
@@ -590,6 +624,7 @@ fn flow_to_json_value(value: &FlowValue) -> Value {
         }
         FlowValue::List(values) => Value::Array(values.iter().map(flow_to_json_value).collect()),
         FlowValue::Record(record) => flow_record_to_json_value(record),
+        FlowValue::Projected(value) => flow_to_json_value(&value.materialize()),
     }
 }
 
@@ -669,7 +704,10 @@ fn format_output_value(value: &FlowValue) -> String {
         FlowValue::String(text) => text.to_string(),
         FlowValue::Bool(value) => value.to_string(),
         FlowValue::Number(value) => value.to_string(),
-        FlowValue::Image(_) | FlowValue::List(_) | FlowValue::Record(_) => {
+        FlowValue::Image(_)
+        | FlowValue::List(_)
+        | FlowValue::Record(_)
+        | FlowValue::Projected(_) => {
             serde_json::to_string(&flow_to_json_value(value)).unwrap_or_else(|_| value.to_string())
         }
     }
@@ -786,6 +824,27 @@ mod tests {
             .block_on(future)
     }
 
+    struct TestProjectedList(Vec<FlowValue>);
+
+    impl ProjectedList for TestProjectedList {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn get(&self, index: usize) -> Option<FlowValue> {
+            self.0.get(index).cloned()
+        }
+    }
+
+    fn projected_history(values: Vec<FlowValue>) -> ProjectedBindings {
+        let mut projected = ProjectedBindings::new();
+        projected.insert(
+            "history",
+            ProjectedValue::list("history", Arc::new(TestProjectedList(values))),
+        );
+        projected
+    }
+
     #[test]
     fn projected_history_is_available_without_clobbering_executor_globals() {
         block_on(async {
@@ -793,6 +852,7 @@ mod tests {
                 RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
             let mut set = serde_json::Map::new();
             set.insert("diary".to_string(), serde_json::json!(["kept"]));
+            set.insert("history".to_string(), serde_json::json!(["ignored"]));
             state
                 .patch_globals(&lash_rlm_types::RlmGlobalsPatchPluginBody {
                     set,
@@ -800,20 +860,16 @@ mod tests {
                 })
                 .expect("patch diary");
 
-            let mut projected = serde_json::Map::new();
-            projected.insert("diary".to_string(), serde_json::json!([]));
-            projected.insert(
-                "history".to_string(),
-                serde_json::json!([{ "role": "user", "content": "hello" }]),
-            );
-            state
-                .sync_projected_globals(&projected)
-                .expect("sync history");
-
-            let outcome = lashlang::execute(
+            let projected = projected_history(vec![FlowValue::String("hello".into())]);
+            let compiled = lashlang::compile_source(
                 "submit { history_len: len(history), diary_len: len(diary) }",
+            )
+            .expect("compile");
+            let outcome = lashlang::execute_compiled_with_projected_bindings(
+                &compiled,
                 &mut state.rlm,
                 &NoopHost,
+                &projected,
             )
             .await
             .expect("execute");
@@ -822,6 +878,31 @@ mod tests {
             };
             assert_eq!(record["history_len"], FlowValue::Number(1.0));
             assert_eq!(record["diary_len"], FlowValue::Number(1.0));
+            assert!(state.rlm.snapshot().globals.get("history").is_none());
+        });
+    }
+
+    #[test]
+    fn projected_history_defaults_to_empty_list_when_missing() {
+        block_on(async {
+            let mut state =
+                RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+
+            let projected = projected_history(Vec::new());
+            let compiled =
+                lashlang::compile_source("submit { history_len: len(history) }").expect("compile");
+            let outcome = lashlang::execute_compiled_with_projected_bindings(
+                &compiled,
+                &mut state.rlm,
+                &NoopHost,
+                &projected,
+            )
+            .await
+            .expect("execute");
+            let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
+                panic!("expected submitted record");
+            };
+            assert_eq!(record["history_len"], FlowValue::Number(0.0));
         });
     }
 }

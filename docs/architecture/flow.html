@@ -25,7 +25,7 @@
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a class="active" href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a class="active" href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
       </nav>
 
       <section class="content">
@@ -86,13 +86,36 @@ sequenceDiagram
 flowchart LR
   Store["Store<br/>SQLite + blobs + session_head"] --> State["PersistedSessionState"]
   State --> Graph["SessionGraph<br/>nodes + leaf_node_id"]
-  Graph --> ReadModel["SessionReadModel<br/>active_events, messages, tool_calls"]
+  Graph --> ReadModel["internal SessionReadModel cache<br/>active_events, messages, tool_calls"]
   ReadModel --> View["SessionReadView"]
   View --> Chrono["ChronologicalProjection"]
   Chrono --> Timeline["lash-cli UiTimeline"]
   Chrono --> Export["lash-export HTML/JSON"]
   Chrono --> RlmHistory["RLM history projection"]
   Timeline --> Render["render_block_into<br/>lash-tui Frame"]
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Usage And Benchmark Flow</h2>
+            <p>Token accounting is part of the runtime data flow. Parent turns, subagents, and direct LLM helper calls all report usage into the session ledger, and benchmark harnesses read deltas from that ledger.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Usage, trace, and CLBench path</div>
+            <div class="mermaid">
+flowchart TD
+  Runner["Python CLBench adapter"] --> RustBench["bench-clbench-lash"]
+  RustBench --> Runtime["LashRuntime in RLM mode"]
+  Runtime --> Surface["restricted RLM tools<br/>llm_query, spawn_agent(explore), continue_as, list_async_handles"]
+  Surface --> Submit["submit JSON schema validation"]
+  Runtime --> Usage["SessionUsageReport<br/>ledger by source + model"]
+  Usage --> Deltas["diff_usage_reports<br/>benchmark cost deltas"]
+  Runtime --> Trace["provider JSONL trace<br/>LLM started/completed"]
+  Runtime --> Store["SQLite session DB"]
+  Trace --> Export["lash-export prompt snapshots<br/>context %, cached %, token bars"]
+  Store --> Export
             </div>
           </div>
         </div>
@@ -125,6 +148,12 @@ flowchart LR
               <div>
                 <h3>UI vocabulary stays in CLI crates.</h3>
                 <p><code>UiTimeline</code>, activity blocks, render blocks, and chrome surfaces do not belong in <code>lash</code>.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Usage is a ledger, not an exporter-only calculation.</h3>
+                <p>Runtime usage events carry source/model/token deltas; exporters add trace-derived prompt context detail when the JSONL trace is available.</p>
               </div>
             </li>
           </ol>

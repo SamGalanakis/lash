@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use clap::Parser;
-use lash::plugin::PluginFactory;
+use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::provider::LashConfig;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
@@ -12,10 +13,11 @@ use lash::{
     PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot,
     PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
     RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy, SessionUsageReport,
-    StandardContextApproach, TokioSessionTaskExecutor, TurnFinish, TurnInjectionBridge, TurnInput,
-    TurnInputInjectionBridge, TurnOutcome, diff_usage_reports,
+    StandardContextApproach, TokioSessionTaskExecutor, ToolDefinition, ToolExecutionMode,
+    ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
+    TurnOutcome, diff_usage_reports,
 };
-use lash_plugin_rolling_history::RollingHistoryPluginFactory;
+use lash_llm_tools::LlmToolsPluginFactory;
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination};
 use lash_sqlite_store::Store;
 use lash_subagents::{
@@ -208,10 +210,15 @@ fn build_plugin_session(
     execution_mode: ExecutionMode,
     policy: &SessionPolicy,
 ) -> Result<Arc<lash::PluginSession>> {
+    let clbench_tools = clbench_tool_definitions();
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(RollingHistoryPluginFactory::default()),
         Arc::new(lash_mode_rlm::BuiltinRlmModePluginFactory::default()),
+        Arc::new(LlmToolsPluginFactory),
+        Arc::new(StaticPluginFactory::new(
+            "clbench_async_handles",
+            PluginSpec::new().with_tool_provider(Arc::new(ClbenchAsyncHandlesTool)),
+        )),
         Arc::new(SubagentsPluginFactory::new(
             policy.clone(),
             Arc::new(
@@ -221,8 +228,8 @@ fn build_plugin_session(
                         model: CapabilityField::Inherit,
                         model_variant: CapabilityOptionalField::Inherit,
                         execution_mode: CapabilityField::Inherit,
-                        tool_surface: CapabilityToolSurface::CognitionOnly,
-                        recursion: CapabilityRecursion::Disabled,
+                        tool_surface: CapabilityToolSurface::Explicit(clbench_tools.clone()),
+                        recursion: CapabilityRecursion::Inherit,
                     },
                 ))),
             ),
@@ -237,6 +244,50 @@ fn build_plugin_session(
             None,
         )
         .context("build plugin session")
+}
+
+struct ClbenchAsyncHandlesTool;
+
+#[async_trait]
+impl ToolProvider for ClbenchAsyncHandlesTool {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![list_async_handles_tool_definition()]
+    }
+
+    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
+        ToolResult::err_fmt(format_args!(
+            "`{name}` is handled by the RLM session runtime and cannot run directly"
+        ))
+    }
+}
+
+fn clbench_tool_definitions() -> Vec<ToolDefinition> {
+    let capabilities = vec!["explore".to_string()];
+    vec![
+        lash_llm_tools::llm_query_tool_definition(),
+        lash_mode_rlm::continue_as_tool_definition(),
+        list_async_handles_tool_definition(),
+        lash_subagents::spawn_agent_tool_definition(&capabilities),
+    ]
+}
+
+fn list_async_handles_tool_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "list_async_handles",
+        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted.",
+        ToolDefinition::default_input_schema(),
+        json!({
+            "type": "object",
+            "properties": {
+                "monitor": { "type": "object" },
+                "subagent": { "type": "object" },
+                "tool": { "type": "object" }
+            },
+            "required": ["monitor", "subagent", "tool"]
+        }),
+    )
+    .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])
+    .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 fn clbench_prompt_template() -> PromptTemplate {
@@ -297,7 +348,7 @@ diary = push(diary, {
 submit { action: "..." }
 ```
 
-Keep entries short, factual, and reusable. Do not duplicate old lessons; incorporate feedback and revise strategy in later entries. Use only the available cognition tools: `llm_query`, `spawn_agent` with `capability: "explore"`, `continue_as`, and async-handle helpers if needed. Do not use local shell, file, search, edit, web, or external tools.
+Keep entries short, factual, and reusable. Do not duplicate old lessons; incorporate feedback and revise strategy in later entries. Use only the available tools: `llm_query`, `spawn_agent` with `capability: "explore"`, `continue_as`, and `list_async_handles` when you need to rediscover live async handles. Do not use local shell, file, search, edit, web, monitor, or external tools.
 
 Return the benchmark action by calling `submit <value>` from a fenced `lashlang` block. The submitted value must match the current response schema exactly."#;
 
@@ -383,5 +434,83 @@ fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
         TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
         TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
         TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clbench_rlm_tool_surface_exposes_explicit_limited_tools() {
+        let mode = ExecutionMode::new("rlm");
+        let policy = SessionPolicy {
+            execution_mode: mode.clone(),
+            ..SessionPolicy::default()
+        };
+        let session = build_plugin_session(mode.clone(), &policy).expect("plugin session");
+        let surface = session.tool_surface("root", mode);
+
+        let mut names = surface.tool_names();
+        names.sort();
+        let mut child_names = clbench_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        child_names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "continue_as",
+                "list_async_handles",
+                "llm_query",
+                "spawn_agent"
+            ]
+        );
+        assert_eq!(
+            child_names, names,
+            "CLBench subagents use the same tools as the root agent"
+        );
+
+        for denied in [
+            "exec_command",
+            "read_file",
+            "grep",
+            "search_web",
+            "fetch_url",
+            "apply_patch",
+            "monitor",
+        ] {
+            assert!(
+                !surface.has_callable_tool(denied),
+                "{denied} must not be callable in CLBench"
+            );
+        }
+
+        let docs = surface.prompt_tool_docs();
+        for expected in [
+            "llm_query",
+            "spawn_agent",
+            "continue_as",
+            "list_async_handles",
+        ] {
+            assert!(
+                docs.contains(expected),
+                "{expected} must be documented in the RLM prompt"
+            );
+        }
+        assert!(
+            !docs.contains("peer"),
+            "CLBench prompt must not advertise unavailable peer capability"
+        );
+
+        let spawn_agent = surface
+            .callable_tools_iter()
+            .find(|tool| tool.name == "spawn_agent")
+            .expect("spawn_agent tool");
+        assert_eq!(
+            spawn_agent.input_schema["properties"]["capability"]["enum"],
+            json!(["explore"])
+        );
     }
 }

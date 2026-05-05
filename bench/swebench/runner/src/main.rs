@@ -24,6 +24,7 @@ use lash::{
     diff_usage_reports,
 };
 use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
+use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_sqlite_store::Store;
@@ -988,6 +989,7 @@ fn build_plugin_session(
         TierExecutionMode::Inherit,
     ))));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
+    factories.push(Arc::new(LlmToolsPluginFactory));
     factories.push(Arc::new(SubagentsPluginFactory::new(
         policy.clone(),
         registry,

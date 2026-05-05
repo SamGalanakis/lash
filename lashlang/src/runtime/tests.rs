@@ -1020,6 +1020,97 @@ async fn exec_with_global(name: &str, value: Value, source: &str) -> Result<Valu
     }
 }
 
+struct TestProjectedList {
+    values: Vec<Value>,
+    get_count: AtomicUsize,
+}
+
+impl TestProjectedList {
+    fn new(values: Vec<Value>) -> Arc<Self> {
+        Arc::new(Self {
+            values,
+            get_count: AtomicUsize::new(0),
+        })
+    }
+}
+
+impl ProjectedList for TestProjectedList {
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn get(&self, index: usize) -> Option<Value> {
+        self.get_count.fetch_add(1, Ordering::SeqCst);
+        self.values.get(index).cloned()
+    }
+}
+
+fn projected_list_bindings(name: &str, list: Arc<TestProjectedList>) -> ProjectedBindings {
+    let mut projected = ProjectedBindings::new();
+    projected.insert(name, ProjectedValue::list(name.to_string(), list));
+    projected
+}
+
+async fn exec_with_projected(
+    source: &str,
+    projected: &ProjectedBindings,
+) -> Result<(Value, State), RuntimeError> {
+    let program = crate::parse(source).expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_compiled_with_projected_bindings(
+        &compile_program(&program),
+        &mut state,
+        &Host,
+        projected,
+    )
+    .await?;
+    match outcome {
+        ExecutionOutcome::Finished(value) => Ok((value, state)),
+        ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projected_list_len_and_index_are_lazy() {
+    let list = TestProjectedList::new(vec![Value::String("first".into()), Value::Number(2.0)]);
+    let projected = projected_list_bindings("history", Arc::clone(&list));
+
+    let (value, _) = exec_with_projected(
+        "submit { n: len(history), first: history[0], missing: history[9] }",
+        &projected,
+    )
+    .await
+    .expect("projected read");
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(record["n"], Value::Number(2.0));
+    assert_eq!(record["first"], Value::String("first".into()));
+    assert_eq!(record["missing"], Value::Null);
+    assert_eq!(list.get_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projected_bindings_are_read_only_and_not_snapshotted() {
+    let list = TestProjectedList::new(vec![Value::String("entry".into())]);
+    let projected = projected_list_bindings("history", Arc::clone(&list));
+
+    let err = exec_with_projected("history = []\nsubmit history", &projected)
+        .await
+        .expect_err("projected root assignment should fail");
+    assert!(err.to_string().contains("read-only projected binding"));
+
+    let (_, state) = exec_with_projected("alias = history\nsubmit alias[0]", &projected)
+        .await
+        .expect("alias should materialize");
+    assert!(state.snapshot().globals.get("history").is_none());
+    assert!(matches!(
+        state.snapshot().globals.get("alias"),
+        Some(Value::List(_))
+    ));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn image_values_expose_read_only_metadata_fields() {
     let value = exec_with_global(

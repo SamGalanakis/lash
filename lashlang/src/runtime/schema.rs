@@ -431,7 +431,7 @@ fn matches_schema_type(value: &Value, expected: &str) -> bool {
             matches!(value, Value::Number(number) if number.is_finite() && number.fract() == 0.0)
         }
         "boolean" => matches!(value, Value::Bool(_)),
-        "array" => matches!(value, Value::List(_)),
+        "array" => matches!(value, Value::List(_) | Value::Projected(_)),
         "object" => matches!(value, Value::Record(_) | Value::Image(_)),
         "null" => matches!(value, Value::Null),
         _ => true,
@@ -447,6 +447,10 @@ fn schema_value_type_name(value: &Value) -> &'static str {
         Value::Image(_) => "object",
         Value::List(_) => "array",
         Value::Record(_) => "object",
+        Value::Projected(value) => match value.value_type_name() {
+            "list" => "array",
+            _ => "object",
+        },
     }
 }
 
