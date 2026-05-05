@@ -308,17 +308,7 @@ fn clbench_prompt_template() -> PromptTemplate {
         ),
         PromptTemplateSection::titled(
             "Guidance",
-            vec![
-                PromptTemplateEntry::slot(PromptSlot::ProjectInstructions),
-                PromptTemplateEntry::slot(PromptSlot::Guidance),
-            ],
-        ),
-        PromptTemplateSection::titled(
-            "Environment",
-            vec![
-                PromptTemplateEntry::slot(PromptSlot::RuntimeContext),
-                PromptTemplateEntry::slot(PromptSlot::Environment),
-            ],
+            vec![PromptTemplateEntry::slot(PromptSlot::ProjectInstructions)],
         ),
     ])
 }

@@ -60,7 +60,7 @@ PID_PATH="${STATE_DIR}/run-all-background.pid"
 STATUS_PATH="${STATE_DIR}/run-all-background.env"
 
 mkdir -p "${LOG_DIR}"
-nohup "${VENV_DIR}/bin/clbench" run-all "${ARGS[@]}" >"${LOG_PATH}" 2>&1 &
+setsid "${VENV_DIR}/bin/clbench" run-all "${ARGS[@]}" </dev/null >"${LOG_PATH}" 2>&1 &
 PID="$!"
 
 cat >"${PID_PATH}" <<EOF

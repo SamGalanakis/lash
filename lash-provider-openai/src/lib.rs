@@ -90,7 +90,27 @@ pub struct OpenAiGenericProvider {
     pub api_key: String,
     pub base_url: String,
     pub options: ProviderOptions,
+    pub wire_api: OpenAiWireApi,
+    pub cache_retention: OpenAiCacheRetention,
     client: reqwest::Client,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenAiWireApi {
+    #[default]
+    Auto,
+    Responses,
+    ChatCompletions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenAiCacheRetention {
+    None,
+    #[default]
+    Short,
+    Long,
 }
 
 #[derive(Clone, Debug)]
@@ -362,18 +382,165 @@ impl ResponsesStreamState {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct ChatStreamingToolCall {
+    call_id: String,
+    tool_name: String,
+    input_json: String,
+    signature: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ChatStreamState {
+    full_text: String,
+    deltas: Vec<String>,
+    reasoning_text: String,
+    reasoning_deltas: Vec<String>,
+    usage: LlmUsage,
+    provider_usage: Option<Value>,
+    tool_calls: HashMap<usize, ChatStreamingToolCall>,
+    final_response: Option<Value>,
+}
+
+impl ChatStreamState {
+    fn push_text_delta(&mut self, piece: &str) {
+        if piece.is_empty() {
+            return;
+        }
+        self.full_text.push_str(piece);
+        self.deltas.push(piece.to_string());
+    }
+
+    fn push_reasoning_delta(&mut self, piece: &str) {
+        if piece.is_empty() {
+            return;
+        }
+        self.reasoning_text.push_str(piece);
+        self.reasoning_deltas.push(piece.to_string());
+    }
+
+    fn update_tool_call_delta(&mut self, value: &Value) {
+        let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let tool_call = self.tool_calls.entry(index).or_default();
+        if let Some(id) = value.get("id").and_then(Value::as_str)
+            && !id.is_empty()
+        {
+            tool_call.call_id = id.to_string();
+        }
+        if let Some(function) = value.get("function") {
+            if let Some(name) = function.get("name").and_then(Value::as_str)
+                && !name.is_empty()
+            {
+                tool_call.tool_name = name.to_string();
+            }
+            if let Some(arguments) = function.get("arguments").and_then(Value::as_str)
+                && !arguments.is_empty()
+            {
+                tool_call.input_json.push_str(arguments);
+            }
+        }
+    }
+
+    fn apply_reasoning_details(&mut self, details: &Value) {
+        let Some(details) = details.as_array() else {
+            return;
+        };
+        for detail in details {
+            if detail.get("type").and_then(Value::as_str) != Some("reasoning.encrypted") {
+                continue;
+            }
+            let Some(id) = detail.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if detail.get("data").and_then(Value::as_str).is_none() {
+                continue;
+            }
+            for tool_call in self.tool_calls.values_mut() {
+                if tool_call.call_id == id {
+                    tool_call.signature = Some(detail.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    fn take_reasoning_deltas(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.reasoning_deltas)
+    }
+
+    fn parts(&self) -> Vec<LlmOutputPart> {
+        let mut parts = Vec::new();
+        if !self.reasoning_text.trim().is_empty() {
+            parts.push(LlmOutputPart::Reasoning {
+                text: self.reasoning_text.clone(),
+                signature: None,
+                redacted: false,
+                item_id: None,
+                encrypted_content: None,
+                summary: Vec::new(),
+            });
+        }
+        if !self.full_text.is_empty() {
+            parts.push(LlmOutputPart::Text {
+                text: self.full_text.clone(),
+                response_meta: None,
+            });
+        }
+        let mut tool_calls = self.tool_calls.iter().collect::<Vec<_>>();
+        tool_calls.sort_by_key(|(index, _)| **index);
+        for (_, tool_call) in tool_calls {
+            if tool_call.tool_name.is_empty() {
+                continue;
+            }
+            parts.push(LlmOutputPart::ToolCall {
+                call_id: if tool_call.call_id.is_empty() {
+                    uuid::Uuid::new_v4().to_string()
+                } else {
+                    tool_call.call_id.clone()
+                },
+                tool_name: tool_call.tool_name.clone(),
+                input_json: if tool_call.input_json.is_empty() {
+                    "{}".to_string()
+                } else {
+                    tool_call.input_json.clone()
+                },
+                item_id: None,
+                signature: tool_call.signature.clone(),
+            });
+        }
+        if parts.is_empty()
+            && let Some(final_response) = &self.final_response
+        {
+            parts = OpenAiGenericProvider::chat_response_parts_from_value(final_response);
+        }
+        parts
+    }
+}
+
 impl OpenAiGenericProvider {
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
             base_url: base_url.into(),
             options: ProviderOptions::default(),
+            wire_api: OpenAiWireApi::Auto,
+            cache_retention: OpenAiCacheRetention::Short,
             client: DEFAULT_HTTP_CLIENT.clone(),
         }
     }
 
     pub fn with_options(mut self, options: ProviderOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    pub fn with_wire_api(mut self, wire_api: OpenAiWireApi) -> Self {
+        self.wire_api = wire_api;
+        self
+    }
+
+    pub fn with_cache_retention(mut self, retention: OpenAiCacheRetention) -> Self {
+        self.cache_retention = retention;
         self
     }
 
@@ -687,6 +854,33 @@ impl OpenAiGenericProvider {
             .unwrap_or(32768)
     }
 
+    fn model_is_anthropic_claude(model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        model.contains("claude") || model.contains("anthropic/")
+    }
+
+    fn openrouter_claude_request(&self, req: &LlmRequest) -> bool {
+        base_url_is_openrouter(&self.base_url) && Self::model_is_anthropic_claude(&req.model)
+    }
+
+    fn resolved_wire_api(&self, req: &LlmRequest) -> OpenAiWireApi {
+        match self.wire_api {
+            OpenAiWireApi::Auto if self.openrouter_claude_request(req) => {
+                OpenAiWireApi::ChatCompletions
+            }
+            OpenAiWireApi::Auto => OpenAiWireApi::Responses,
+            forced => forced,
+        }
+    }
+
+    fn chat_cache_control_value(&self) -> Option<Value> {
+        match self.cache_retention {
+            OpenAiCacheRetention::None => None,
+            OpenAiCacheRetention::Short => Some(json!({ "type": "ephemeral" })),
+            OpenAiCacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
+        }
+    }
+
     fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
         let id = model_id(model).to_ascii_lowercase();
         if (id.starts_with("gpt-5.2") || id.starts_with("gpt-5.3") || id.starts_with("gpt-5.4"))
@@ -697,7 +891,7 @@ impl OpenAiGenericProvider {
         effort.to_string()
     }
 
-    fn build_request_body(&self, req: &LlmRequest, stream: bool) -> Value {
+    fn build_responses_request_body(&self, req: &LlmRequest, stream: bool) -> Value {
         let tools = Self::build_tools(req);
         let (instructions, input) = Self::build_input(req);
         let mut body = json!({
@@ -742,6 +936,250 @@ impl OpenAiGenericProvider {
             }
             body["text"]["format"] = format;
         }
+        if self.cache_retention != OpenAiCacheRetention::None
+            && let Some(session_id) = req.session_id.as_deref()
+        {
+            body["prompt_cache_key"] = json!(session_id);
+        }
+        if self.cache_retention == OpenAiCacheRetention::Long
+            && Self::supports_openai_request_fields(&self.base_url)
+        {
+            body["prompt_cache_retention"] = json!("24h");
+        }
+        body
+    }
+
+    fn chat_image_part(att: &LlmAttachment) -> Value {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+        json!({
+            "type": "image_url",
+            "image_url": {
+                "url": format!("data:{};base64,{}", att.mime, b64),
+            },
+        })
+    }
+
+    fn chat_text_or_parts(mut parts: Vec<Value>) -> Value {
+        if parts.len() == 1
+            && let Some(text) = parts[0].get("text").and_then(Value::as_str)
+        {
+            return json!(text);
+        }
+        Value::Array(std::mem::take(&mut parts))
+    }
+
+    fn build_chat_messages(req: &LlmRequest) -> Vec<Value> {
+        let mut messages = Vec::new();
+        for msg in &req.messages {
+            let role = Self::role_name(&msg.role);
+            let mut text_parts = Vec::new();
+            let mut tool_calls = Vec::new();
+            let mut reasoning_details = Vec::new();
+
+            for block in msg.blocks.iter() {
+                match block {
+                    LlmContentBlock::Text { text, .. } if !text.is_empty() => {
+                        text_parts.push(json!({
+                            "type": "text",
+                            "text": sanitize_surrogates(text),
+                        }));
+                    }
+                    LlmContentBlock::Image { attachment_idx }
+                        if matches!(msg.role, LlmRole::User) =>
+                    {
+                        if let Some(att) = req.attachments.get(*attachment_idx) {
+                            text_parts.push(Self::chat_image_part(att));
+                        }
+                    }
+                    LlmContentBlock::ToolCall {
+                        call_id,
+                        tool_name,
+                        input_json,
+                        signature,
+                        ..
+                    } if matches!(msg.role, LlmRole::Assistant) => {
+                        tool_calls.push(json!({
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": input_json,
+                            },
+                        }));
+                        if let Some(signature) = signature.as_deref()
+                            && let Ok(detail) = serde_json::from_str::<Value>(signature)
+                            && detail.get("type").and_then(Value::as_str)
+                                == Some("reasoning.encrypted")
+                        {
+                            reasoning_details.push(detail);
+                        }
+                    }
+                    LlmContentBlock::ToolResult {
+                        call_id,
+                        content,
+                        tool_name,
+                    } => {
+                        let mut tool_message = json!({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": sanitize_surrogates(content),
+                        });
+                        if let Some(name) = tool_name.as_deref()
+                            && !name.is_empty()
+                        {
+                            tool_message["name"] = json!(name);
+                        }
+                        messages.push(tool_message);
+                    }
+                    LlmContentBlock::Reasoning { .. } | LlmContentBlock::Image { .. } => {}
+                    LlmContentBlock::Text { .. } | LlmContentBlock::ToolCall { .. } => {}
+                }
+            }
+
+            if matches!(
+                msg.role,
+                LlmRole::System | LlmRole::User | LlmRole::Assistant
+            ) && (!text_parts.is_empty() || !tool_calls.is_empty())
+            {
+                let mut wire_message = json!({ "role": role });
+                if !text_parts.is_empty() {
+                    wire_message["content"] = Self::chat_text_or_parts(text_parts);
+                } else if matches!(msg.role, LlmRole::Assistant) {
+                    wire_message["content"] = Value::Null;
+                }
+                if !tool_calls.is_empty() {
+                    wire_message["tool_calls"] = Value::Array(tool_calls);
+                }
+                if !reasoning_details.is_empty() {
+                    wire_message["reasoning_details"] = Value::Array(reasoning_details);
+                }
+                messages.push(wire_message);
+            }
+        }
+        messages
+    }
+
+    fn build_chat_tools(req: &LlmRequest) -> Vec<Value> {
+        req.tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                        "strict": false,
+                    },
+                })
+            })
+            .collect()
+    }
+
+    fn add_cache_control_to_text_content(message: &mut Value, cache_control: &Value) -> bool {
+        let Some(content) = message.get_mut("content") else {
+            return false;
+        };
+        if let Some(text) = content.as_str() {
+            if text.is_empty() {
+                return false;
+            }
+            *content = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": cache_control,
+            }]);
+            return true;
+        }
+        let Some(parts) = content.as_array_mut() else {
+            return false;
+        };
+        for part in parts.iter_mut().rev() {
+            if part.get("type").and_then(Value::as_str) == Some("text") {
+                part["cache_control"] = cache_control.clone();
+                return true;
+            }
+        }
+        false
+    }
+
+    fn apply_anthropic_cache_control(
+        &self,
+        req: &LlmRequest,
+        messages: &mut [Value],
+        tools: &mut [Value],
+    ) {
+        if !self.openrouter_claude_request(req) {
+            return;
+        }
+        let Some(cache_control) = self.chat_cache_control_value() else {
+            return;
+        };
+
+        for message in messages.iter_mut() {
+            if matches!(
+                message.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            ) {
+                Self::add_cache_control_to_text_content(message, &cache_control);
+                break;
+            }
+        }
+        if let Some(last_tool) = tools.last_mut() {
+            last_tool["cache_control"] = cache_control.clone();
+        }
+        for message in messages.iter_mut().rev() {
+            if matches!(
+                message.get("role").and_then(Value::as_str),
+                Some("user" | "assistant")
+            ) && Self::add_cache_control_to_text_content(message, &cache_control)
+            {
+                break;
+            }
+        }
+    }
+
+    fn build_chat_request_body(&self, req: &LlmRequest, stream: bool) -> Value {
+        let mut messages = Self::build_chat_messages(req);
+        let mut tools = Self::build_chat_tools(req);
+        self.apply_anthropic_cache_control(req, &mut messages, &mut tools);
+        let mut body = json!({
+            "model": req.model,
+            "messages": messages,
+            "stream": stream,
+            "max_tokens": Self::max_output_tokens(),
+        });
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools);
+            body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));
+            body["parallel_tool_calls"] = json!(true);
+        }
+        if stream {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+        if let Some(variant) = req.model_variant.as_deref()
+            && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
+                OpenAiModelPolicy::new(self.base_url.clone())
+                    .request_variant_config(&req.model, variant)
+            && effort != "none"
+        {
+            body["reasoning"] = json!({
+                "effort": Self::clamp_reasoning_effort(&req.model, &effort),
+            });
+        }
+        if let Some(output_spec) = &req.output_spec {
+            body["response_format"] = match output_spec {
+                LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
+                LlmOutputSpec::JsonSchema(schema) => json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema.name,
+                        "schema": schema.schema,
+                        "strict": schema.strict,
+                    },
+                }),
+            };
+        }
         body
     }
 
@@ -755,6 +1193,27 @@ impl OpenAiGenericProvider {
 
     fn usage_from_response_value(value: &Value) -> LlmUsage {
         let usage = value.get("usage").unwrap_or(&Value::Null);
+        let cached_tokens = Self::parse_i64(
+            usage
+                .get("input_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .or_else(|| {
+                    usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                })
+                .or_else(|| usage.get("prompt_cache_hit_tokens")),
+        );
+        let cache_write_tokens = Self::parse_i64(
+            usage
+                .get("input_tokens_details")
+                .and_then(|d| d.get("cache_write_tokens"))
+                .or_else(|| {
+                    usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cache_write_tokens"))
+                }),
+        );
         LlmUsage {
             input_tokens: Self::parse_i64(
                 usage
@@ -766,16 +1225,11 @@ impl OpenAiGenericProvider {
                     .get("output_tokens")
                     .or_else(|| usage.get("completion_tokens")),
             ),
-            cached_input_tokens: Self::parse_i64(
-                usage
-                    .get("input_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-                    .or_else(|| {
-                        usage
-                            .get("prompt_tokens_details")
-                            .and_then(|d| d.get("cached_tokens"))
-                    }),
-            ),
+            cached_input_tokens: if cache_write_tokens > 0 {
+                cached_tokens.saturating_sub(cache_write_tokens).max(0)
+            } else {
+                cached_tokens
+            },
             reasoning_tokens: Self::parse_i64(
                 usage
                     .get("output_tokens_details")
@@ -882,6 +1336,107 @@ impl OpenAiGenericProvider {
                 text: text.to_string(),
                 response_meta: None,
             });
+        }
+        parts
+    }
+
+    fn chat_message_text(message: &Value) -> String {
+        match message.get("content") {
+            Some(Value::String(text)) => text.clone(),
+            Some(Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+                    Some("text") => part.get("text").and_then(Value::as_str),
+                    _ => None,
+                })
+                .collect::<String>(),
+            _ => String::new(),
+        }
+    }
+
+    fn chat_response_parts_from_value(value: &Value) -> Vec<LlmOutputPart> {
+        let mut parts = Vec::new();
+        let Some(choice) = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+        else {
+            return parts;
+        };
+        let Some(message) = choice.get("message") else {
+            return parts;
+        };
+        for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+            if let Some(reasoning) = message.get(field).and_then(Value::as_str)
+                && !reasoning.trim().is_empty()
+            {
+                parts.push(LlmOutputPart::Reasoning {
+                    text: reasoning.to_string(),
+                    signature: None,
+                    redacted: false,
+                    item_id: None,
+                    encrypted_content: None,
+                    summary: Vec::new(),
+                });
+                break;
+            }
+        }
+        let text = Self::chat_message_text(message);
+        if !text.is_empty() {
+            parts.push(LlmOutputPart::Text {
+                text,
+                response_meta: None,
+            });
+        }
+        let reasoning_details = message
+            .get("reasoning_details")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|detail| {
+                detail.get("type").and_then(Value::as_str) == Some("reasoning.encrypted")
+                    && detail.get("id").and_then(Value::as_str).is_some()
+                    && detail.get("data").and_then(Value::as_str).is_some()
+            })
+            .map(|detail| {
+                (
+                    detail
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    detail.to_string(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for tool_call in tool_calls {
+                let Some(function) = tool_call.get("function") else {
+                    continue;
+                };
+                let Some(name) = function.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let arguments = function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}")
+                    .to_string();
+                parts.push(LlmOutputPart::ToolCall {
+                    call_id: tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    signature: tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| reasoning_details.get(id).cloned()),
+                    tool_name: name.to_string(),
+                    input_json: arguments,
+                    item_id: None,
+                });
+            }
         }
         parts
     }
@@ -1048,6 +1603,78 @@ impl OpenAiGenericProvider {
         Ok(())
     }
 
+    fn process_chat_sse_event(
+        raw: &str,
+        state: &mut ChatStreamState,
+    ) -> Result<(), LlmTransportError> {
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "[DONE]" {
+            return Ok(());
+        }
+        let event: Value = serde_json::from_str(raw).map_err(|e| {
+            LlmTransportError::new(format!("Invalid Chat Completions SSE payload: {e}"))
+                .with_raw(raw)
+        })?;
+        if event.get("error").is_some() {
+            let retryable = event
+                .get("error")
+                .map(Self::responses_error_is_retryable)
+                .unwrap_or(false);
+            let message = event
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("OpenAI-compatible chat stream error");
+            return Err(LlmTransportError::new(message)
+                .retryable(retryable)
+                .with_raw(event.to_string()));
+        }
+        if let Some(usage) = event.get("usage")
+            && !usage.is_null()
+        {
+            state.provider_usage = Some(usage.clone());
+            Self::merge_usage(&mut state.usage, &Self::usage_from_response_value(&event));
+        }
+        state.final_response = Some(event.clone());
+        let Some(choices) = event.get("choices").and_then(Value::as_array) else {
+            return Ok(());
+        };
+        for choice in choices {
+            if let Some(usage) = choice.get("usage")
+                && !usage.is_null()
+            {
+                state.provider_usage = Some(usage.clone());
+                Self::merge_usage(
+                    &mut state.usage,
+                    &Self::usage_from_response_value(&json!({ "usage": usage })),
+                );
+            }
+            let Some(delta) = choice.get("delta") else {
+                continue;
+            };
+            if let Some(content) = delta.get("content").and_then(Value::as_str) {
+                state.push_text_delta(content);
+            }
+            for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+                if let Some(reasoning) = delta.get(field).and_then(Value::as_str)
+                    && !reasoning.is_empty()
+                {
+                    state.push_reasoning_delta(reasoning);
+                    break;
+                }
+            }
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                for tool_call in tool_calls {
+                    state.update_tool_call_delta(tool_call);
+                }
+            }
+            if let Some(details) = delta.get("reasoning_details") {
+                state.apply_reasoning_details(details);
+            }
+        }
+        Ok(())
+    }
+
     fn parse_sse_payload(
         payload: &str,
         state: &mut ResponsesStreamState,
@@ -1076,128 +1703,44 @@ impl OpenAiGenericProvider {
         }
         Ok(())
     }
-}
 
-impl OpenAiGenericProvider {
-    pub fn into_components(self) -> ProviderComponents {
-        let model_policy = std::sync::Arc::new(OpenAiModelPolicy::new(self.base_url.clone()));
-        ProviderComponents::new(
-            Box::new(self.clone()),
-            Box::new(NoopProviderAuth),
-            Box::new(NoopProviderReadiness::new()),
-            Box::new(self),
-            model_policy,
-        )
-    }
-}
-
-impl ProviderState for OpenAiGenericProvider {
-    fn kind(&self) -> &'static str {
-        "openai-compatible"
-    }
-
-    fn options(&self) -> ProviderOptions {
-        self.options.clone()
-    }
-
-    fn set_options(&mut self, options: ProviderOptions) {
-        self.options = options;
-    }
-
-    fn serialize_config(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "api_key".to_string(),
-            serde_json::Value::String(self.api_key.clone()),
-        );
-        map.insert(
-            "base_url".to_string(),
-            serde_json::Value::String(self.base_url.clone()),
-        );
-        if !self.options.is_default() {
-            map.insert(
-                "options".to_string(),
-                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
-            );
+    fn parse_chat_sse_payload(
+        payload: &str,
+        state: &mut ChatStreamState,
+    ) -> Result<(), LlmTransportError> {
+        let mut event_lines = Vec::new();
+        for mut line in payload.lines().map(str::to_string) {
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            if let Some(data) = line.strip_prefix("data:") {
+                event_lines.push(data.trim().to_string());
+                continue;
+            }
+            if line.starts_with("event:") {
+                continue;
+            }
+            if line.trim().is_empty() && !event_lines.is_empty() {
+                let raw = event_lines.join("\n");
+                Self::process_chat_sse_event(&raw, state)?;
+                event_lines.clear();
+            }
         }
-        serde_json::Value::Object(map)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-impl ProviderModelPolicy for OpenAiModelPolicy {
-    fn default_model(&self) -> &str {
-        "anthropic/claude-sonnet-4.6"
-    }
-
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        if !base_url_is_openrouter(&self.base_url) {
-            return &[];
+        if !event_lines.is_empty() {
+            let raw = event_lines.join("\n");
+            Self::process_chat_sse_event(&raw, state)?;
         }
-        let lower = model.to_ascii_lowercase();
-        if lower.contains("gpt") || lower.contains("claude") || lower.contains("gemini-3") {
-            OPENROUTER_REASONING_VARIANTS
-        } else {
-            &[]
-        }
+        Ok(())
     }
 
-    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
-        let variants = self.supported_variants(model);
-        if variants.is_empty() {
-            return None;
-        }
-        if model.to_ascii_lowercase().contains("gpt") {
-            Some("medium")
-        } else {
-            Some("high")
-        }
-    }
-
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        if !self.supported_variants(model).contains(&variant) {
-            return None;
-        }
-        Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
-    }
-
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        match tier {
-            "low" => Some(AgentModelSelection {
-                model: "minimax/minimax-m2.5".to_string(),
-                variant: None,
-            }),
-            "medium" => Some(AgentModelSelection {
-                model: "z-ai/glm-5".to_string(),
-                variant: None,
-            }),
-            "high" => Some(AgentModelSelection {
-                model: "anthropic/claude-sonnet-4.6".to_string(),
-                variant: Some("high".to_string()),
-            }),
-            _ => None,
-        }
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        if model.starts_with("openrouter/") {
-            model.to_string()
-        } else {
-            format!("openrouter/{model}")
-        }
-    }
-}
-
-#[async_trait]
-impl ProviderTransport for OpenAiGenericProvider {
-    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+    async fn complete_responses(
+        &mut self,
+        req: LlmRequest,
+    ) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
         let timeouts = self.options.llm_timeouts();
-        let body = self.build_request_body(&req, stream_events.is_some());
+        let body = self.build_responses_request_body(&req, stream_events.is_some());
         let body_bytes = serde_json::to_vec(&body).map_err(|e| {
             LlmTransportError::new(format!("Failed to serialize Responses body: {e}"))
         })?;
@@ -1370,6 +1913,340 @@ impl ProviderTransport for OpenAiGenericProvider {
         })
     }
 
+    async fn complete_chat_completions(
+        &mut self,
+        req: LlmRequest,
+    ) -> Result<LlmResponse, LlmTransportError> {
+        let stream_events = req.stream_events.clone();
+        let provider_trace = req.provider_trace.clone();
+        let timeouts = self.options.llm_timeouts();
+        let body = self.build_chat_request_body(&req, stream_events.is_some());
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| {
+            LlmTransportError::new(format!("Failed to serialize Chat Completions body: {e}"))
+        })?;
+        let request_body = request_body_snapshot_bytes(body_bytes);
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let request = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .body(request_body.clone());
+        let resp = send_request(
+            request,
+            Some(request_body.clone()),
+            response_start_timeout(
+                timeouts.request_timeout,
+                timeouts.chunk_timeout,
+                stream_events.is_some(),
+            ),
+            "OpenAI-compatible chat response start timed out",
+        )
+        .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = read_response_text(
+                resp,
+                timeouts.request_timeout,
+                "OpenAI-compatible chat response body timed out",
+            )
+            .await
+            .unwrap_or_default();
+            let detail = extract_error_detail(&text);
+            let message = detail
+                .map(|detail| {
+                    format!(
+                        "OpenAI-compatible chat request failed with {}: {}",
+                        status.as_u16(),
+                        detail
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "OpenAI-compatible chat request failed with {}",
+                        status.as_u16()
+                    )
+                });
+            return Err(LlmTransportError {
+                message,
+                retryable: status.as_u16() == 429 || status.as_u16() >= 500,
+                raw: Some(text),
+                code: Some(status.as_u16().to_string()),
+                request_body: Some(String::from_utf8_lossy(&request_body).into_owned()),
+            });
+        }
+        drop(request_body);
+
+        let is_sse = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.contains("text/event-stream"))
+            .unwrap_or(false);
+
+        if !is_sse {
+            let text = read_response_text(
+                resp,
+                timeouts.request_timeout,
+                "OpenAI-compatible chat response body timed out",
+            )
+            .await?;
+            emit_provider_trace(provider_trace.as_ref(), "openai_compatible", &text);
+            let mut state = ChatStreamState::default();
+            let mut parsed_parts = None;
+            if text.trim_start().starts_with("data:") || text.contains("\ndata:") {
+                Self::parse_chat_sse_payload(&text, &mut state)?;
+            } else {
+                let value: Value = serde_json::from_str(&text).map_err(|e| {
+                    LlmTransportError::new(format!("Invalid Chat Completions JSON: {e}"))
+                        .with_raw(text.clone())
+                })?;
+                state.provider_usage = value.get("usage").cloned();
+                state.usage = Self::usage_from_response_value(&value);
+                let parts = Self::chat_response_parts_from_value(&value);
+                state.full_text = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                parsed_parts = Some(parts);
+                state.final_response = Some(value);
+            }
+            let parts = parsed_parts.unwrap_or_else(|| state.parts());
+            if !Self::has_response_content(&parts) {
+                return Err(Self::empty_response_error(text));
+            }
+            if let Some(tx) = &stream_events {
+                if state.usage != LlmUsage::default() {
+                    tx.send(LlmStreamEvent::Usage(state.usage.clone()));
+                }
+                if !state.full_text.is_empty() {
+                    tx.send(LlmStreamEvent::Delta(state.full_text.clone()));
+                }
+                for part in parts
+                    .iter()
+                    .filter(|part| matches!(part, LlmOutputPart::Reasoning { .. }))
+                {
+                    tx.send(LlmStreamEvent::Part(part.clone()));
+                }
+                for part in parts
+                    .iter()
+                    .filter(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+                {
+                    tx.send(LlmStreamEvent::Part(part.clone()));
+                }
+            }
+            return Ok(LlmResponse {
+                deltas: (!state.full_text.is_empty())
+                    .then_some(state.full_text.clone())
+                    .into_iter()
+                    .collect(),
+                full_text: state.full_text,
+                parts,
+                usage: state.usage,
+                provider_usage: state.provider_usage,
+                request_body: None,
+                http_summary: Some(format!("HTTP POST {}", url)),
+            });
+        }
+
+        let mut state = ChatStreamState::default();
+        drive_sse_response(
+            resp,
+            timeouts.chunk_timeout,
+            "OpenAI-compatible chat stream chunk timed out",
+            |raw| {
+                emit_provider_trace(provider_trace.as_ref(), "openai_compatible", raw);
+                let prev_len = state.deltas.len();
+                let prev_usage = state.usage.clone();
+                Self::process_chat_sse_event(raw, &mut state)?;
+                emit_progress(
+                    stream_events.as_ref(),
+                    &state.deltas,
+                    prev_len,
+                    &state.usage,
+                    &prev_usage,
+                );
+                if let Some(tx) = &stream_events {
+                    for delta in state.take_reasoning_deltas() {
+                        tx.send(LlmStreamEvent::ReasoningDelta(delta));
+                    }
+                } else {
+                    state.take_reasoning_deltas();
+                }
+                Ok(())
+            },
+        )
+        .await?;
+
+        let parts = state.parts();
+        if !Self::has_response_content(&parts) {
+            return Err(Self::empty_response_error(
+                state
+                    .final_response
+                    .as_ref()
+                    .map(Value::to_string)
+                    .unwrap_or_default(),
+            ));
+        }
+        if let Some(tx) = &stream_events {
+            for part in parts
+                .iter()
+                .filter(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+            {
+                tx.send(LlmStreamEvent::Part(part.clone()));
+            }
+        }
+        Ok(LlmResponse {
+            deltas: state.deltas,
+            full_text: state.full_text,
+            parts,
+            usage: state.usage,
+            provider_usage: state.provider_usage,
+            request_body: None,
+            http_summary: Some(format!("HTTP POST {} (stream)", url)),
+        })
+    }
+}
+
+impl OpenAiGenericProvider {
+    pub fn into_components(self) -> ProviderComponents {
+        let model_policy = std::sync::Arc::new(OpenAiModelPolicy::new(self.base_url.clone()));
+        ProviderComponents::new(
+            Box::new(self.clone()),
+            Box::new(NoopProviderAuth),
+            Box::new(NoopProviderReadiness::new()),
+            Box::new(self),
+            model_policy,
+        )
+    }
+}
+
+impl ProviderState for OpenAiGenericProvider {
+    fn kind(&self) -> &'static str {
+        "openai-compatible"
+    }
+
+    fn options(&self) -> ProviderOptions {
+        self.options.clone()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.options = options;
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "api_key".to_string(),
+            serde_json::Value::String(self.api_key.clone()),
+        );
+        map.insert(
+            "base_url".to_string(),
+            serde_json::Value::String(self.base_url.clone()),
+        );
+        if !self.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if self.wire_api != OpenAiWireApi::Auto {
+            map.insert(
+                "wire_api".to_string(),
+                serde_json::to_value(self.wire_api).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if self.cache_retention != OpenAiCacheRetention::Short {
+            map.insert(
+                "cache_retention".to_string(),
+                serde_json::to_value(self.cache_retention).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+impl ProviderModelPolicy for OpenAiModelPolicy {
+    fn default_model(&self) -> &str {
+        "anthropic/claude-sonnet-4.6"
+    }
+
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        if !base_url_is_openrouter(&self.base_url) {
+            return &[];
+        }
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("gpt") || lower.contains("claude") || lower.contains("gemini-3") {
+            OPENROUTER_REASONING_VARIANTS
+        } else {
+            &[]
+        }
+    }
+
+    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
+        let variants = self.supported_variants(model);
+        if variants.is_empty() {
+            return None;
+        }
+        if model.to_ascii_lowercase().contains("gpt") {
+            Some("medium")
+        } else {
+            Some("high")
+        }
+    }
+
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
+        if !self.supported_variants(model).contains(&variant) {
+            return None;
+        }
+        Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
+    }
+
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
+        match tier {
+            "low" => Some(AgentModelSelection {
+                model: "minimax/minimax-m2.5".to_string(),
+                variant: None,
+            }),
+            "medium" => Some(AgentModelSelection {
+                model: "z-ai/glm-5".to_string(),
+                variant: None,
+            }),
+            "high" => Some(AgentModelSelection {
+                model: "anthropic/claude-sonnet-4.6".to_string(),
+                variant: Some("high".to_string()),
+            }),
+            _ => None,
+        }
+    }
+
+    fn context_lookup_model(&self, model: &str) -> String {
+        if model.starts_with("openrouter/") {
+            model.to_string()
+        } else {
+            format!("openrouter/{model}")
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderTransport for OpenAiGenericProvider {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        match self.resolved_wire_api(&req) {
+            OpenAiWireApi::Responses | OpenAiWireApi::Auto => self.complete_responses(req).await,
+            OpenAiWireApi::ChatCompletions => self.complete_chat_completions(req).await,
+        }
+    }
+
     fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
         Box::new(self.clone())
     }
@@ -1382,6 +2259,10 @@ struct OpenAiProviderConfig {
     base_url: String,
     #[serde(default)]
     options: ProviderOptions,
+    #[serde(default)]
+    wire_api: OpenAiWireApi,
+    #[serde(default)]
+    cache_retention: OpenAiCacheRetention,
 }
 
 pub struct OpenAiGenericProviderFactory;
@@ -1403,7 +2284,7 @@ impl ProviderFactory for OpenAiGenericProviderFactory {
         "OpenAI-compatible"
     }
     fn setup_description(&self) -> &'static str {
-        "Any OpenAI-compatible Responses API endpoint"
+        "Any OpenAI-compatible API endpoint"
     }
     fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: OpenAiProviderConfig =
@@ -1412,6 +2293,8 @@ impl ProviderFactory for OpenAiGenericProviderFactory {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             options: cfg.options,
+            wire_api: cfg.wire_api,
+            cache_retention: cfg.cache_retention,
             client: build_http_client(),
         }
         .into_components())
@@ -1446,13 +2329,140 @@ mod tests {
             LlmMessage::text(LlmRole::System, "system prompt"),
             LlmMessage::text(LlmRole::User, "hello"),
         ]);
-        let body = provider.build_request_body(&req, true);
+        let body = provider.build_responses_request_body(&req, true);
         assert_eq!(body["instructions"], "system prompt");
         assert_eq!(body["stream"], true);
         assert!(body.get("messages").is_none());
+        assert!(body.get("cache_control").is_none());
+        assert_eq!(body["prompt_cache_key"], "session-1");
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn wire_api_auto_routes_only_openrouter_claude_to_chat_completions() {
+        let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
+        let mut claude = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        claude.model = "anthropic/claude-sonnet-4.6".to_string();
+        assert_eq!(
+            provider.resolved_wire_api(&claude),
+            OpenAiWireApi::ChatCompletions
+        );
+
+        let mut gpt = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        gpt.model = "openai/gpt-5.4".to_string();
+        assert_eq!(provider.resolved_wire_api(&gpt), OpenAiWireApi::Responses);
+
+        let local = OpenAiGenericProvider::new("key", "http://localhost:11434/v1");
+        assert_eq!(local.resolved_wire_api(&claude), OpenAiWireApi::Responses);
+
+        let forced = local.with_wire_api(OpenAiWireApi::ChatCompletions);
+        assert_eq!(
+            forced.resolved_wire_api(&gpt),
+            OpenAiWireApi::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn chat_body_uses_messages_and_not_responses_input() {
+        let mut req = request(vec![
+            LlmMessage::text(LlmRole::System, "system prompt"),
+            LlmMessage::text(LlmRole::User, "hello"),
+        ]);
+        req.model = "anthropic/claude-sonnet-4.6".to_string();
+        req.model_variant = Some("high".to_string());
+        req.output_spec = Some(LlmOutputSpec::JsonObject);
+
+        let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .build_chat_request_body(&req, true);
+
+        assert!(body.get("input").is_none());
+        assert!(body.get("instructions").is_none());
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["stream_options"], json!({ "include_usage": true }));
+        assert_eq!(body["reasoning"], json!({ "effort": "high" }));
+        assert_eq!(body["response_format"], json!({ "type": "json_object" }));
+    }
+
+    #[test]
+    fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
+        let mut req = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            LlmMessage::text(LlmRole::User, "dynamic tail"),
+        ]);
+        req.model = "anthropic/claude-sonnet-4.6".to_string();
+        req.tools = Arc::new(vec![LlmToolSpec {
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({}),
+        }]);
+
+        let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .build_chat_request_body(&req, true);
+
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+    }
+
+    #[test]
+    fn cache_retention_none_removes_chat_cache_markers() {
+        let mut req = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            LlmMessage::text(LlmRole::User, "dynamic tail"),
+        ]);
+        req.model = "anthropic/claude-sonnet-4.6".to_string();
+
+        let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .with_cache_retention(OpenAiCacheRetention::None)
+            .build_chat_request_body(&req, true);
+
+        assert!(body["messages"][0]["content"].is_string());
+        assert!(body["messages"][1]["content"].is_string());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn cache_retention_long_uses_anthropic_ttl_on_chat_cache_markers() {
+        let mut req = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            LlmMessage::text(LlmRole::User, "dynamic tail"),
+        ]);
+        req.model = "anthropic/claude-sonnet-4.6".to_string();
+
+        let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .with_cache_retention(OpenAiCacheRetention::Long)
+            .build_chat_request_body(&req, true);
+
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+    }
+
+    #[test]
+    fn responses_long_cache_retention_emits_openai_retention() {
+        let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .with_cache_retention(OpenAiCacheRetention::Long);
+        let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+        let body = provider.build_responses_request_body(&req, true);
+
+        assert_eq!(body["prompt_cache_key"], "session-1");
+        assert_eq!(body["prompt_cache_retention"], "24h");
+        assert!(body.get("cache_control").is_none());
     }
 
     #[test]
@@ -1469,7 +2479,7 @@ mod tests {
                 }),
             }],
         )]);
-        let body = provider.build_request_body(&req, false);
+        let body = provider.build_responses_request_body(&req, false);
         assert_eq!(body["input"][0]["type"], "message");
         assert_eq!(body["input"][0]["id"], "msg_1");
         assert_eq!(body["input"][0]["phase"], "final_answer");
@@ -1479,7 +2489,7 @@ mod tests {
     fn legacy_assistant_text_gets_deterministic_id() {
         let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
         let req = request(vec![LlmMessage::text(LlmRole::Assistant, "legacy")]);
-        let body = provider.build_request_body(&req, false);
+        let body = provider.build_responses_request_body(&req, false);
         assert_eq!(body["input"][0]["id"], "msg_lash_0_0");
         assert_eq!(body["input"][0]["status"], "completed");
         assert!(body["input"][0].get("phase").is_none());
@@ -1489,7 +2499,7 @@ mod tests {
     fn local_base_url_omits_openai_only_fields() {
         let provider = OpenAiGenericProvider::new("key", "http://localhost:11434/v1");
         let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-        let body = provider.build_request_body(&req, true);
+        let body = provider.build_responses_request_body(&req, true);
         assert!(body.get("include").is_none());
         assert!(body.get("store").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
@@ -1516,7 +2526,7 @@ mod tests {
             "usage": {
                 "prompt_tokens": 13,
                 "completion_tokens": 17,
-                "prompt_tokens_details": { "cached_tokens": 2 },
+                "prompt_tokens_details": { "cached_tokens": 7, "cache_write_tokens": 5 },
                 "completion_tokens_details": { "reasoning_tokens": 4 }
             }
         }));
@@ -1524,6 +2534,160 @@ mod tests {
         assert_eq!(chat_usage.output_tokens, 17);
         assert_eq!(chat_usage.cached_input_tokens, 2);
         assert_eq!(chat_usage.reasoning_tokens, 4);
+
+        let write_only_usage =
+            OpenAiGenericProvider::usage_from_response_value(&serde_json::json!({
+                "usage": {
+                    "prompt_tokens": 5353,
+                    "completion_tokens": 433,
+                    "prompt_tokens_details": { "cached_tokens": 3, "cache_write_tokens": 5353 }
+                }
+            }));
+        assert_eq!(write_only_usage.cached_input_tokens, 0);
+    }
+
+    #[test]
+    fn chat_body_replays_openrouter_reasoning_details_on_tool_calls() {
+        let req = request(vec![LlmMessage::new(
+            LlmRole::Assistant,
+            vec![LlmContentBlock::ToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "lookup".to_string(),
+                input_json: "{\"q\":\"x\"}".to_string(),
+                item_id: None,
+                signature: Some(
+                    json!({
+                        "type": "reasoning.encrypted",
+                        "id": "call_1",
+                        "data": "encrypted"
+                    })
+                    .to_string(),
+                ),
+            }],
+        )]);
+
+        let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .build_chat_request_body(&req, false);
+
+        assert_eq!(
+            body["messages"][0]["reasoning_details"][0],
+            json!({
+                "type": "reasoning.encrypted",
+                "id": "call_1",
+                "data": "encrypted"
+            })
+        );
+    }
+
+    #[test]
+    fn non_streaming_chat_parser_captures_text_tool_and_usage() {
+        let value = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "think",
+                    "content": "hello",
+                    "reasoning_details": [{
+                        "type": "reasoning.encrypted",
+                        "id": "call_1",
+                        "data": "encrypted"
+                    }],
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "{\"q\":\"x\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 13,
+                "completion_tokens": 17,
+                "prompt_tokens_details": { "cached_tokens": 2 }
+            }
+        });
+
+        let parts = OpenAiGenericProvider::chat_response_parts_from_value(&value);
+        let usage = OpenAiGenericProvider::usage_from_response_value(&value);
+
+        assert!(matches!(&parts[0], LlmOutputPart::Reasoning { text, .. } if text == "think"));
+        assert!(matches!(&parts[1], LlmOutputPart::Text { text, .. } if text == "hello"));
+        assert!(matches!(
+            &parts[2],
+            LlmOutputPart::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                signature,
+                ..
+            } if call_id == "call_1"
+                && tool_name == "lookup"
+                && input_json == "{\"q\":\"x\"}"
+                && signature.as_deref().is_some_and(|value| value.contains("encrypted"))
+        ));
+        assert_eq!(usage.input_tokens, 13);
+        assert_eq!(usage.output_tokens, 17);
+        assert_eq!(usage.cached_input_tokens, 2);
+    }
+
+    #[test]
+    fn chat_stream_parser_captures_text_tool_done_and_usage() {
+        let mut state = ChatStreamState::default();
+        OpenAiGenericProvider::process_chat_sse_event(
+            r#"{"choices":[{"delta":{"content":"Hi"}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+        OpenAiGenericProvider::process_chat_sse_event(
+            r#"{"choices":[{"delta":{"reasoning_content":"Think"}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+        OpenAiGenericProvider::process_chat_sse_event(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+        OpenAiGenericProvider::process_chat_sse_event(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+        OpenAiGenericProvider::process_chat_sse_event(
+            r#"{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","id":"call_1","data":"encrypted"}]}}],"usage":{"prompt_tokens":9,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}"#,
+            &mut state,
+        )
+        .unwrap();
+        OpenAiGenericProvider::process_chat_sse_event(
+            r#"{"choices":[{"usage":{"prompt_tokens":11,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":2}}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+        OpenAiGenericProvider::process_chat_sse_event("[DONE]", &mut state).unwrap();
+
+        assert_eq!(state.full_text, "Hi");
+        assert_eq!(state.reasoning_text, "Think");
+        let parts = state.parts();
+        assert!(matches!(&parts[0], LlmOutputPart::Reasoning { text, .. } if text == "Think"));
+        assert!(matches!(&parts[1], LlmOutputPart::Text { text, .. } if text == "Hi"));
+        assert!(matches!(
+            &parts[2],
+            LlmOutputPart::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                signature,
+                ..
+            } if call_id == "call_1"
+                && tool_name == "lookup"
+                && input_json == "{\"q\":\"x\"}"
+                && signature.as_deref().is_some_and(|value| value.contains("encrypted"))
+        ));
+        assert_eq!(state.usage.input_tokens, 11);
+        assert_eq!(state.usage.output_tokens, 5);
+        assert_eq!(state.usage.cached_input_tokens, 2);
     }
 
     #[test]
