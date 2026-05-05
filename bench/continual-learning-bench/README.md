@@ -42,11 +42,23 @@ bench/continual-learning-bench/run.sh exploitable_poker --schedule quick_test --
 bench/continual-learning-bench/run.sh sales_prediction --schedule lifecycle --system lash --system.provider-id openai-compatible --system.model gpt-5.4 --system.variant high
 bench/continual-learning-bench/run.sh --config .benchmarks/continual-learning-bench/vendor/continual-learning-bench/configs/exploitable_poker/exploitable_poker_icl.json --system lash --system.provider-id codex --system.model gpt-5.5 --system.variant high
 bench/continual-learning-bench/run.sh exploitable_poker --task.schedule quick_test --system lash --runs 3 --max-concurrency 3
+bench/continual-learning-bench/run_all.sh --name lash-full --system lash --task-parallelism 3 --per-task-parallelism 4 --skip-baseline --system.provider-id openai-compatible --system.model anthropic/claude-sonnet-4.6 --system.variant high
+bench/continual-learning-bench/run_all.sh --background --name lash-full --system lash --task-parallelism 3 --per-task-parallelism 4 --skip-baseline --system.provider-id openai-compatible --system.model anthropic/claude-sonnet-4.6 --system.variant high
 ```
 
 The Lash adapter keeps one Lash session across CLBench instances until CLBench
 calls `reset()`. That preserves online-learning state during rollout runs while
 letting CLBench reset the system for baseline instances.
+
+Use `--skip-baseline` (or `LASH_CLBENCH_SKIP_BASELINE=1`) to report rollout
+reward without running the stateless baseline comparison. Gain metrics are not
+available in that mode.
+
+Use `run_all.sh --background` to detach the full-suite run while keeping the
+live dashboard server in the benchmark process. The wrapper prints the PID,
+log path, and dashboard URL when available; it also writes
+`.benchmarks/continual-learning-bench/run-all-background.pid` and
+`.benchmarks/continual-learning-bench/run-all-background.env`.
 
 The Rust runner registers an explicit RLM tool surface for benchmark hygiene:
 

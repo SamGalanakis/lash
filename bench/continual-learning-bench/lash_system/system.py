@@ -24,11 +24,18 @@ from ...registry import register_system
 from ...usage import build_usage_event
 
 
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @register_system("lash")
 class LashSystem(ContinualLearningSystem):
     """Run Lash once per CLBench query, resuming one local Lash session."""
 
-    supports_baseline = True
+    supports_baseline = not _env_flag("LASH_CLBENCH_SKIP_BASELINE")
     parallel_safe = True
 
     def __init__(
