@@ -31,15 +31,167 @@
       <section class="content">
         <div class="section">
           <div class="section-header">
-            <h2>Language Surface</h2>
-            <p>The prompt-facing language is intentionally Python-shaped while staying typed enough for tool contracts and structured output.</p>
+            <h2>Language Reference</h2>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. It keeps syntax close to Python where that helps agents, but routes effects through explicit host calls, typed values, and persistent runtime state.</p>
           </div>
           <div class="module-grid">
-            <article class="panel"><h3>Values</h3><p><code>null</code>, booleans, numbers, strings, lists, records, results, async handles, and immutable <code>Image</code> handles. Images expose <code>.id</code>, <code>.label</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>.</p></article>
-            <article class="panel"><h3>Control flow</h3><p>Assignments, functions, loops, conditionals, <code>?</code> fail-fast unwrapping, <code>parallel</code>, <code>start call</code>, <code>await</code>, and <code>cancel</code>.</p></article>
-            <article class="panel"><h3>Tools</h3><p><code>call tool { ... }</code> returns a result wrapper; <code>(call tool { ... })?</code> unwraps success or stops the program with the tool error. RLM commonly sees <code>llm_query</code>, <code>spawn_agent</code>, <code>continue_as</code>, and <code>list_async_handles</code> when those plugins are registered.</p></article>
-            <article class="panel"><h3>Output</h3><p><code>print</code> sends observations to the next model call. <code>submit</code> ends the turn with final text or JSON-compatible metadata.</p></article>
+            <article class="panel"><h3>Values</h3><p><code>null</code>, booleans, numbers, strings, lists, records, projected host values, result wrappers, async handles, and immutable <code>Image</code> handles. Lists and records are value-shaped and copy-on-write at mutation roots.</p></article>
+            <article class="panel"><h3>Statements</h3><p>Simple and path assignment, bare expression statements, <code>call</code>, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>parallel</code>, <code>cancel</code>, and <code>submit</code>.</p></article>
+            <article class="panel"><h3>Expressions</h3><p>Literals, variables, builtin calls, tool calls, <code>start call</code>, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</p></article>
+            <article class="panel"><h3>Effects</h3><p>All external work crosses <code>ToolHost</code>. Synchronous calls return wrapper records, background starts return handles, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations.</p></article>
           </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Program Form</h2>
+            <p>RLM mode extracts the first closed <code>```lashlang</code> fence from model output. Anything after that block is ignored by the driver, so the block must contain the next action or final <code>submit</code>.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel"><h3>REPL state</h3><p>Variables persist across fenced blocks in the active RLM execution state. Bound variables projected by the host are already in scope and should be used directly instead of reconstructed from prompt prose.</p></article>
+            <article class="panel"><h3>Completion</h3><p><code>submit</code> ends the program and turn. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</p></article>
+          </div>
+          <pre><code>```lashlang
+text = (call read_file { path: "Cargo.toml" })?
+print { chars: len(text), head: slice(text, 0, 1200) }
+```</code></pre>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Syntax And Values</h2>
+            <p>The language accepts newline-separated statements. Commas are accepted in lists, records, type fields, and parallel branch lists where they make generated code easier to read.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3>Literals</h3><p>Use <code>null</code>, <code>true</code>, <code>false</code>, numbers, strings, lists like <code>[a, b]</code>, and records like <code>{ name: "lash", "with space": 1 }</code>. Record insertion order is preserved for display and serialization.</p></article>
+            <article class="panel"><h3>Strings</h3><p><code>"..."</code> supports <code>\n</code>, <code>\r</code>, <code>\t</code>, <code>\"</code>, and <code>\\</code>. <code>"""..."""</code> is multiline with escapes. <code>r"""..."""</code> and <code>r'''...'''</code> preserve content exactly for patches, JSON, scripts, Markdown, and heredocs.</p></article>
+            <article class="panel"><h3>Fields And Indexes</h3><p><code>value.field</code> reads record and image fields. <code>value[index]</code> reads lists and records; record indexes are string-coerced and missing keys read as <code>null</code>. List indexes support negative offsets for reads and slices.</p></article>
+            <article class="panel"><h3>Images</h3><p><code>Image</code> values expose <code>.id</code>, <code>.label</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>. Image fields are immutable. <code>len(image)</code> is invalid; use <code>image.size</code>.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Expressions</h2>
+            <p>Expressions are deliberately small but cover the operations agents need for filtering, shaping, validation, and tool orchestration.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Form</th><th>Meaning</th></tr></thead>
+              <tbody>
+                <tr><td><code>a + b</code>, <code>a - b</code>, <code>a * b</code>, <code>a / b</code>, <code>a % b</code></td><td>Numeric arithmetic. <code>+</code> also concatenates strings and lists where supported by runtime value semantics.</td></tr>
+                <tr><td><code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code></td><td>Comparison operators used in conditionals and filters.</td></tr>
+                <tr><td><code>a and b</code>, <code>a or b</code>, <code>!a</code>, <code>not a</code></td><td>Boolean composition and negation.</td></tr>
+                <tr><td><code>cond ? yes : no</code></td><td>Expression ternary. There is no expression-form <code>if</code>.</td></tr>
+                <tr><td><code>name(args...)</code></td><td>Builtin function call. User-defined functions are not part of the language surface.</td></tr>
+                <tr><td><code>(call tool { ... })?</code>, <code>(await handle)?</code></td><td>Fail-fast unwrap of a result wrapper: return <code>.value</code> on success or abort the block with the wrapper error.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Assignment And Mutation</h2>
+            <p>Assignments are rooted at named variables. Path assignment mutates the variable's current value through copy-on-write root updates, not through Python-style alias mutation.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel"><h3>Supported targets</h3><p><code>name = expr</code>, <code>record.field = value</code>, <code>record[key] = value</code>, <code>list[i] = value</code>, and nested forms like <code>state.groups[g].count = count + 1</code>.</p></article>
+            <article class="panel"><h3>Rules</h3><p>Record field/index assignment inserts or replaces fields. List assignment replaces an existing integer index only. Assigning through a missing nested record key or image field is an error.</p></article>
+          </div>
+          <pre><code>counts = {}
+for group in groups {
+  current = counts[group]
+  counts[group] = (current == null ? 0 : current) + 1
+}
+submit counts</code></pre>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Control Flow</h2>
+            <p>Control flow is statement-oriented. Loop cleanup is part of the runtime path, so loop escapes are explicit statements rather than arbitrary jumps.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3><code>if</code> / <code>else</code></h3><p>Conditionals use statement blocks. <code>else if</code> parses as an <code>else</code> block containing another <code>if</code>.</p></article>
+            <article class="panel"><h3><code>for</code></h3><p><code>for item in iterable { ... }</code> iterates lists. Non-list iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</p></article>
+            <article class="panel"><h3><code>break</code> / <code>continue</code></h3><p><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops and cannot cross <code>parallel</code> branch boundaries.</p></article>
+            <article class="panel"><h3><code>submit</code></h3><p><code>submit value</code> ends the whole program or turn. <code>submit</code> inside a loop is not a loop control statement, and <code>submit</code> inside <code>parallel</code> is rejected.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Tool Calls And Async Handles</h2>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ToolHost</code>.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3><code>call</code></h3><p><code>call tool { arg: expr }</code> returns <code>{ ok: true, value: ... }</code> or <code>{ ok: false, error: "..." }</code>. Use <code>?</code> for ordinary happy-path calls and keep the wrapper for retries or expected failures.</p></article>
+            <article class="panel"><h3><code>start call</code></h3><p><code>start call tool { ... }</code> returns a handle directly. Monitors and subagents are long-lived handle-producing tools; generic async tool starts use the same shape.</p></article>
+            <article class="panel"><h3><code>await</code></h3><p><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order. <code>(await handle)?</code> unwraps the resolved result.</p></article>
+            <article class="panel"><h3><code>cancel</code></h3><p><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_async_handles</code>.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Parallel Blocks</h2>
+            <p><code>parallel</code> is for independent work. Branches must not depend on each other's output, and branch-local assignments are merged only when unambiguous.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel"><h3>Named branches</h3><p><code>parallel { first: call ... second: call ... }</code> returns a record when used as an expression. Named branches are preferred because results can be read as <code>results.first</code>.</p></article>
+            <article class="panel"><h3>Positional branches</h3><p><code>parallel { call ...; call ... }</code> returns a list when used as an expression. Bare expressions inside a parallel block contribute values to that list.</p></article>
+          </div>
+          <pre><code>a = start call spawn_agent { agent_name: "one", task: "Read file A", capability: "explore" }
+b = start call spawn_agent { agent_name: "two", task: "Read file B", capability: "explore" }
+results = parallel { one: (await a)?, two: (await b)? }
+submit { a: results.one, b: results.two }</code></pre>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Builtins</h2>
+            <p>Builtins are pure value helpers except for validation errors. They are called as ordinary functions and are optimized by the compiler where static type literals allow it.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Builtin</th><th>Behavior</th></tr></thead>
+              <tbody>
+                <tr><td><code>len(x)</code>, <code>empty(x)</code></td><td>Length/emptiness for strings, lists, records, and projected lists. <code>len(null)</code> is <code>0</code>.</td></tr>
+                <tr><td><code>slice(x, start, end)</code></td><td>Substring or sublist. <code>null</code> bounds mean start/end; negative bounds count from the end.</td></tr>
+                <tr><td><code>range(end)</code>, <code>range(start, end)</code></td><td>Integer lists with an exclusive end bound.</td></tr>
+                <tr><td><code>push(list, item)</code></td><td>Returns a new list with <code>item</code> appended.</td></tr>
+                <tr><td><code>split</code>, <code>join</code>, <code>trim</code></td><td>Common string shaping helpers.</td></tr>
+                <tr><td><code>starts_with</code>, <code>ends_with</code>, <code>contains</code></td><td>Prefix/suffix checks plus membership for strings, lists, projected lists, and record keys.</td></tr>
+                <tr><td><code>keys(record)</code>, <code>values(record)</code></td><td>Record key and value extraction in record order.</td></tr>
+                <tr><td><code>to_string</code>, <code>to_int</code>, <code>to_float</code></td><td>Conversion helpers. <code>to_string(image)</code> emits metadata, not binary image data.</td></tr>
+                <tr><td><code>json_parse(s)</code></td><td>Parses JSON into Lashlang values.</td></tr>
+                <tr><td><code>format(template, ...args)</code></td><td>Positional interpolation with <code>{}</code>, explicit slots like <code>{0}</code>, and escaped braces via <code>{{</code>/<code>}}</code>.</td></tr>
+                <tr><td><code>validate(value, Type { ... })</code></td><td>Returns <code>value</code> unchanged when it matches the type literal; aborts with a validation error otherwise.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Type Literals</h2>
+            <p><code>Type { ... }</code> values describe structured records for validation and dynamic tool output contracts. They are runtime values, not a static type checker for all code.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3>Shapes</h3><p>Scalars: <code>str</code>, <code>int</code>, <code>float</code>, <code>bool</code>, <code>dict</code>, <code>any</code>, <code>null</code>. Collections: <code>list[shape]</code>, <code>enum["a", "b"]</code>, nested <code>Type { ... }</code>, named refs, and unions with <code>|</code>.</p></article>
+            <article class="panel"><h3>Optional vs nullable</h3><p><code>email: str?</code> means the field may be absent, but if present it must be a string. <code>email: str | null</code> means the field is required and may be <code>null</code>.</p></article>
+            <article class="panel"><h3>Nested objects</h3><p>Nested record shapes must use the <code>Type</code> keyword: <code>profile: Type { name: str }</code>. A bare <code>{ name: str }</code> is a record value form and is rejected in type positions.</p></article>
+            <article class="panel"><h3>Contract boundary</h3><p>Tools such as <code>llm_query</code> and <code>spawn_agent</code> can expose output schemas derived from these shapes, but Lashlang v1 keeps this as contract truthfulness rather than model-authored generics.</p></article>
+          </div>
+          <pre><code>Payload = Type {
+  id: str,
+  score: float | null,
+  tags: list[str],
+  status: enum["new", "done"],
+  note: str?
+}
+validated = validate(candidate, Payload)</code></pre>
         </div>
 
         <div class="section">
@@ -78,6 +230,19 @@ sequenceDiagram
           <div class="two-col">
             <article class="panel"><h3><code>print(image)</code></h3><p>Collects image values recursively, registers their attachment refs, and sends provider-visible <code>LlmContentBlock::Image</code> content alongside descriptor text.</p></article>
             <article class="panel"><h3><code>submit(image)</code></h3><p>Serializes metadata only, using a JSON-compatible descriptor with id, label, size, width, and height. It does not embed base64 data.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Runtime Internals</h2>
+            <p>The implementation compiles AST to a compact VM instruction stream, then executes async host effects without blocking the RLM runtime.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3>Parser</h3><p><code>lexer.rs</code> tokenizes strings, comments, operators, and keywords. <code>parser.rs</code> builds <code>Program</code>, <code>Stmt</code>, <code>Expr</code>, assignment targets, parallel branches, and type expressions.</p></article>
+            <article class="panel"><h3>Compiler</h3><p><code>runtime/mod.rs</code> folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls, and optimized parallel call sets.</p></article>
+            <article class="panel"><h3>VM</h3><p>The VM stores globals in <code>State</code>, records assignment conflicts inside parallel branches, executes host effects through <code>ToolHost</code>, and snapshots values for later RLM blocks.</p></article>
+            <article class="panel"><h3>Profiling</h3><p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> cover whole-language performance sweeps, including compiler and builtin hot paths.</p></article>
           </div>
         </div>
 

@@ -69,6 +69,50 @@ flowchart TD
 
         <div class="section">
           <div class="section-header">
+            <h2>Embedded API</h2>
+            <p><code>lash-embed</code> is the higher-level app-facing API used by the examples. It hides CLI bootstrap details while leaving providers, app persistence, HTTP protocols, auth, and frontend streaming under the host application's ownership.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">App embedding facade</div>
+            <div class="mermaid">
+flowchart LR
+  App["host app<br/>HTTP / DB / auth / UI"] --> Core["LashCore<br/>shared runtime environment"]
+  Core --> Builder["LashCoreBuilder<br/>provider, model, modes, tools, plugins"]
+  Builder --> Env["RuntimeEnvironment<br/>PluginHost + stores + tracing"]
+  App --> Session["core.session(id)<br/>SessionBuilder"]
+  Session --> Runtime["LashRuntime<br/>per chat/session"]
+  Runtime --> Turn["turn(Input).events(...).run()"]
+  Turn --> Result["TurnResult<br/>text, messages, tool calls, usage, errors"]
+  Turn --> Events["TurnEventSink<br/>text, reasoning, tools, usage, done"]
+            </div>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3><code>LashCore</code></h3><p>Cloneable shared core that owns the runtime environment, default session policy, installed mode presets, optional store factory, tool providers, plugin factories, attachment store, trace sink, residency, sanitizer, and termination policy.</p></article>
+            <article class="panel"><h3><code>ModePreset</code></h3><p>Installs semantic modes such as <code>ModePreset::standard()</code> and <code>ModePreset::rlm()</code>. Hosts can install both and choose a default with <code>default_mode</code>, then override per session with <code>.standard()</code>, <code>.rlm()</code>, or <code>.mode(...)</code>.</p></article>
+            <article class="panel"><h3><code>LashSession</code></h3><p>Represents one app conversation. It wraps a mutexed <code>LashRuntime</code>, exposes <code>run(Input)</code>, <code>turn(Input)</code>, and <code>read_view()</code>, and can carry a parent session id for app-level parent/child relationships.</p></article>
+            <article class="panel"><h3><code>TurnBuilder</code></h3><p>Lets apps attach a <code>TurnEventSink</code>, cancellation token, and per-turn mode options before running. The final <code>TurnResult</code> contains final text, outcome, messages, tool calls, token usage, and turn issues.</p></article>
+          </div>
+          <pre><code>let core = LashCore::standard()
+    .provider(provider)
+    .model("anthropic/claude-sonnet-4.6")
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .build()?;
+
+let session = core.session(chat_id).standard().open().await?;
+let result = session
+    .turn(Input::text(user_text))
+    .events(&events)
+    .run()
+    .await?;</code></pre>
+          <div class="two-col">
+            <article class="panel"><h3>Example shape</h3><p><code>examples/mock-chat-service</code> keeps a map of <code>LashSession</code>s keyed by conversation id and records projected <code>TurnEvent</code>s. <code>examples/openrouter-chat-ui</code> adds an app database, a <code>SessionStoreFactory</code>, Axum routes, and SSE-style browser streaming.</p></article>
+            <article class="panel"><h3>Boundary rule</h3><p>The embed API is intentionally above <code>LashRuntime</code> but below an app framework. It should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP and frontend protocols.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
             <h2>Background Work</h2>
             <p>Subagents are sessions, not special messages. Monitors are background tasks that wake future turns from stdout lines. Generic async tool calls are tracked inside the session.</p>
           </div>
