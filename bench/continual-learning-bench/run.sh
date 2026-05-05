@@ -19,6 +19,14 @@ export LASH_CLBENCH_STATE_ROOT="${STATE_DIR}"
 ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --skip-baseline|--no-baseline)
+      export LASH_CLBENCH_SKIP_BASELINE=1
+      shift
+      ;;
+    --skip-baseline=*|--no-baseline=*)
+      export LASH_CLBENCH_SKIP_BASELINE="${1#*=}"
+      shift
+      ;;
     --max-concurrency|--n-concurrent)
       ARGS+=(--max-workers "${2:?missing value for $1}")
       shift 2
