@@ -35,6 +35,7 @@ Thumbs.db
 .playwright-mcp/
 /.agents/lash/
 /.lash/
+/.openrouter-chat-ui/
 /.claude/
 /.tmp/
 /tmp/

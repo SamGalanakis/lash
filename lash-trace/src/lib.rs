@@ -216,6 +216,8 @@ pub struct TraceLlmMessage {
 pub enum TraceContentBlock {
     Text {
         text: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        cache_breakpoint: bool,
     },
     Image {
         attachment_idx: usize,
@@ -239,6 +241,10 @@ pub enum TraceContentBlock {
         has_encrypted: bool,
         redacted: bool,
     },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

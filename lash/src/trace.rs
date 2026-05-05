@@ -121,8 +121,13 @@ fn trace_llm_message(message: &LlmMessage) -> TraceLlmMessage {
 
 fn trace_content_block(block: &LlmContentBlock) -> TraceContentBlock {
     match block {
-        LlmContentBlock::Text { text, .. } => TraceContentBlock::Text {
+        LlmContentBlock::Text {
+            text,
+            cache_breakpoint,
+            ..
+        } => TraceContentBlock::Text {
             text: text.to_string(),
+            cache_breakpoint: *cache_breakpoint,
         },
         LlmContentBlock::Image { attachment_idx } => TraceContentBlock::Image {
             attachment_idx: *attachment_idx,

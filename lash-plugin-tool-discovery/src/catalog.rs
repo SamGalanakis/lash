@@ -60,7 +60,6 @@ impl CatalogTool {
         let mut out = serde_json::Map::new();
         out.insert("name".to_string(), json!(contract.name));
         out.insert("signature".to_string(), json!(contract.render_signature()));
-        out.insert("returns".to_string(), json!(contract.render_returns()));
         if !contract.description.is_empty() {
             out.insert("description".to_string(), json!(contract.description));
         }

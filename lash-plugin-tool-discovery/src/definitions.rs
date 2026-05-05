@@ -47,11 +47,7 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
                     "name": { "type": "string" },
                     "signature": {
                         "type": "string",
-                        "description": "Callable signature plus compact parameter details."
-                    },
-                    "returns": {
-                        "type": "string",
-                        "description": "Compact return signature plus return-field details."
+                        "description": "Callable signature with successful return type plus compact parameter and return-field details."
                     },
                     "description": { "type": "string" },
                     "examples": {
@@ -59,7 +55,7 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
                         "items": { "type": "string" }
                     }
                 },
-                "required": ["name", "signature", "returns"],
+                "required": ["name", "signature"],
                 "additionalProperties": false
             }
         }),

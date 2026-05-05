@@ -96,6 +96,7 @@ pub enum LlmContentBlock {
     Text {
         text: Arc<str>,
         response_meta: Option<ResponseTextMeta>,
+        cache_breakpoint: bool,
     },
     /// Index into the enclosing `LlmRequest.attachments` vector. User-role
     /// messages may embed images; adapters drop them for providers that
@@ -160,6 +161,7 @@ impl LlmMessage {
             blocks: Arc::new(vec![LlmContentBlock::Text {
                 text: text.into(),
                 response_meta: None,
+                cache_breakpoint: false,
             }]),
         }
     }

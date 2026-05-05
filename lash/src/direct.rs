@@ -278,6 +278,7 @@ pub(crate) fn build_llm_request(
                         blocks.push(LlmContentBlock::Text {
                             text: text.into(),
                             response_meta: None,
+                            cache_breakpoint: false,
                         });
                     }
                 }

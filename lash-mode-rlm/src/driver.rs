@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
+use std::{fmt::Write as _, sync::Arc};
 
 use lash::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
 use lash::sansio::ContextProjector;
@@ -24,19 +24,13 @@ impl Default for RlmProjectorConfig {
 }
 
 pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> ModePreamble {
-    let tool_surface = rlm_prompt_tool_surface((*input.tool_surface).clone());
+    let tool_surface = (*input.tool_surface).clone();
     let omitted_tool_count = tool_surface.omitted_tool_count();
     let mut prompt_contributions = Vec::new();
 
     let tool_docs = tool_surface.prompt_tool_docs();
     if !tool_docs.trim().is_empty() {
         prompt_contributions.push(PromptContribution::execution("Showcased Tools", tool_docs));
-    }
-    if let Some(catalogue_prompt) = tool_catalogue_prompt(&tool_surface) {
-        prompt_contributions.push(PromptContribution::guidance(
-            "Tool Catalogue",
-            catalogue_prompt,
-        ));
     }
     prompt_contributions.extend(input.extra_prompt_contributions);
 
@@ -56,96 +50,12 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
     }
 }
 
-fn rlm_prompt_tool_surface(mut surface: lash::ToolSurface) -> lash::ToolSurface {
-    let has_omitted_tools = surface.omitted_tool_count() > 0;
-    if !has_omitted_tools {
-        for entry in &mut surface.tools {
-            if entry.definition.name == "search_tools" {
-                entry.availability = lash::ToolAvailability::Hidden;
-            }
-        }
-    }
-    for entry in &mut surface.tools {
-        if entry.definition.name == "load_tools" {
-            entry.availability = lash::ToolAvailability::Hidden;
-        }
-    }
-    surface
-}
-
-const CATALOGUE_NAMESPACE_LIMIT: usize = 100;
-const CATALOGUE_TOOL_NAME_LIMIT: usize = 50;
-
-fn tool_catalogue_prompt(surface: &lash::ToolSurface) -> Option<String> {
-    let omitted_tool_count = surface.omitted_tool_count();
-    if omitted_tool_count == 0 {
-        return None;
-    }
-
-    let mut by_namespace: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for tool in surface.omitted_tools_iter() {
-        let namespace = tool
-            .definition
-            .discovery
-            .namespace
-            .as_deref()
-            .filter(|namespace| !namespace.trim().is_empty())
-            .unwrap_or("default");
-        by_namespace
-            .entry(namespace)
-            .or_default()
-            .push(tool.definition.name.as_str());
-    }
-    for names in by_namespace.values_mut() {
-        names.sort_unstable();
-    }
-
-    let mut rendered = format!(
-        "Catalogued tools: {omitted_tool_count} not showcased here; searchable with `search_tools`.\n\
-         When a task needs a tool not showcased here, run `search_tools(query=...)` and call the relevant result by name. \
-         Results use the same compact contract shape as showcased tools: signature, returns, description, and capped examples."
-    );
-
-    if by_namespace.len() <= CATALOGUE_NAMESPACE_LIMIT {
-        rendered.push_str("\n\nNamespaces: ");
-        for (index, (namespace, names)) in by_namespace.iter().enumerate() {
-            if index > 0 {
-                rendered.push_str(", ");
-            }
-            let _ = write!(rendered, "{namespace}({})", names.len());
-        }
-    } else {
-        let _ = write!(
-            rendered,
-            "\n\nNamespaces: {} total; use `search_tools` to narrow them.",
-            by_namespace.len()
-        );
-    }
-
-    if omitted_tool_count <= CATALOGUE_TOOL_NAME_LIMIT {
-        rendered.push_str("\n\nCatalogued names:");
-        for (namespace, names) in by_namespace {
-            rendered.push('\n');
-            let _ = write!(rendered, "{namespace}: {}", names.join(", "));
-        }
-    }
-
-    Some(rendered)
-}
-
 #[cfg(test)]
 mod catalogue_tests {
     use super::*;
-    use lash::{
-        ExecutionMode, ToolActivation, ToolAvailability, ToolAvailabilityConfig,
-        ToolDiscoveryMetadata, ToolExecutionMode, build_tool_surface,
-    };
+    use lash::{ExecutionMode, ToolActivation, ToolAvailabilityConfig, ToolExecutionMode};
 
-    fn tool(
-        name: &str,
-        availability: ToolAvailability,
-        namespace: Option<&str>,
-    ) -> lash::ToolDefinition {
+    fn tool(name: &str) -> lash::ToolDefinition {
         lash::ToolDefinition::new(
             name,
             format!("Tool {name}"),
@@ -156,84 +66,17 @@ mod catalogue_tests {
             }),
             serde_json::json!({ "type": "string" }),
         )
-        .with_availability(ToolAvailabilityConfig::same(availability))
+        .with_availability(ToolAvailabilityConfig::documented())
         .with_activation(ToolActivation::Always)
-        .with_discovery(ToolDiscoveryMetadata {
-            namespace: namespace.map(str::to_string),
-            aliases: Vec::new(),
-        })
         .with_execution_mode(ToolExecutionMode::Parallel)
     }
 
     #[test]
-    fn catalogue_prompt_lists_namespace_counts_and_small_catalogue_names() {
-        let surface = build_tool_surface(lash::ToolSurfaceBuildInput {
-            tools: vec![
-                tool(
-                    "search_tools",
-                    ToolAvailability::Documented,
-                    Some("runtime"),
-                ),
-                tool("grep", ToolAvailability::Callable, Some("filesystem")),
-                tool("read_file", ToolAvailability::Callable, Some("filesystem")),
-                tool(
-                    "spotify_search_songs",
-                    ToolAvailability::Callable,
-                    Some("appworld"),
-                ),
-            ],
-            mode: ExecutionMode::new("test"),
-            contributions: Vec::new(),
-        });
-
-        let prompt = tool_catalogue_prompt(&surface).expect("catalogue prompt");
-        assert!(prompt.contains("Catalogued tools: 3 not showcased here"));
-        assert!(prompt.contains("appworld(1)"));
-        assert!(prompt.contains("filesystem(2)"));
-        assert!(prompt.contains("filesystem: grep, read_file"));
-        assert!(prompt.contains("appworld: spotify_search_songs"));
-    }
-
-    #[test]
-    fn catalogue_prompt_omits_names_for_large_catalogues() {
-        let mut tools = vec![tool(
-            "search_tools",
-            ToolAvailability::Documented,
-            Some("runtime"),
-        )];
-        for index in 0..=CATALOGUE_TOOL_NAME_LIMIT {
-            tools.push(tool(
-                &format!("tool_{index}"),
-                ToolAvailability::Callable,
-                Some("bulk"),
-            ));
-        }
-        let surface = build_tool_surface(lash::ToolSurfaceBuildInput {
-            tools,
-            mode: ExecutionMode::new("test"),
-            contributions: Vec::new(),
-        });
-
-        let prompt = tool_catalogue_prompt(&surface).expect("catalogue prompt");
-        assert!(prompt.contains("bulk(51)"));
-        assert!(!prompt.contains("Catalogued names:"));
-    }
-
-    #[test]
-    fn rlm_preamble_hides_catalogue_tools_when_everything_is_showcased() {
-        let surface = build_tool_surface(lash::ToolSurfaceBuildInput {
-            tools: vec![
-                tool(
-                    "search_tools",
-                    ToolAvailability::Documented,
-                    Some("runtime"),
-                ),
-                tool("load_tools", ToolAvailability::Documented, Some("runtime")),
-                tool("grep", ToolAvailability::Documented, Some("filesystem")),
-            ],
-            mode: ExecutionMode::new("test"),
-            contributions: Vec::new(),
-        });
+    fn rlm_preamble_uses_resolved_tool_surface_without_search_tool_special_cases() {
+        let surface = lash::ToolSurface::from_tools(
+            vec![tool("search_tools"), tool("grep")],
+            ExecutionMode::new("test"),
+        );
 
         let preamble = build_rlm_preamble(
             lash::ModeBuildInput {
@@ -245,46 +88,7 @@ mod catalogue_tests {
         );
 
         assert_eq!(preamble.omitted_tool_count, 0);
-        assert_eq!(preamble.tool_names, vec!["grep".to_string()]);
-        let prompt = preamble
-            .prompt_contributions
-            .iter()
-            .map(|contribution| contribution.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!prompt.contains("search_tools"));
-        assert!(!prompt.contains("load_tools"));
-        assert!(!prompt.contains("Tool Catalogue"));
-    }
-
-    #[test]
-    fn rlm_preamble_keeps_search_tools_but_hides_load_tools_when_catalogue_has_omitted_tools() {
-        let surface = build_tool_surface(lash::ToolSurfaceBuildInput {
-            tools: vec![
-                tool(
-                    "search_tools",
-                    ToolAvailability::Documented,
-                    Some("runtime"),
-                ),
-                tool("load_tools", ToolAvailability::Documented, Some("runtime")),
-                tool("grep", ToolAvailability::Callable, Some("filesystem")),
-            ],
-            mode: ExecutionMode::new("test"),
-            contributions: Vec::new(),
-        });
-
-        let preamble = build_rlm_preamble(
-            lash::ModeBuildInput {
-                mode: ExecutionMode::new("test"),
-                tool_surface: Arc::new(surface),
-                extra_prompt_contributions: Vec::new(),
-            },
-            RlmProjectorConfig::default(),
-        );
-
-        assert_eq!(preamble.omitted_tool_count, 1);
-        assert!(preamble.tool_names.contains(&"search_tools".to_string()));
-        assert!(!preamble.tool_names.contains(&"load_tools".to_string()));
+        assert_eq!(preamble.tool_names, vec!["search_tools", "grep"]);
         let prompt = preamble
             .prompt_contributions
             .iter()
@@ -292,8 +96,7 @@ mod catalogue_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(prompt.contains("search_tools"));
-        assert!(!prompt.contains("load_tools"));
-        assert!(prompt.contains("Catalogued tools: 1 not showcased here"));
+        assert!(prompt.contains("grep"));
     }
 
     #[test]
@@ -333,13 +136,8 @@ fn rlm_termination(options: &lash::ModeTurnOptions) -> RlmTermination {
 impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
     fn project(&self, ctx: ProjectorContext<'_>) -> LlmRequest {
         let projection = projection_from_projector_context(&ctx);
-        let history = self.format_history(&projection);
         let termination = rlm_termination(&ctx.config.termination);
         let finalization = rlm_finalization_prompt(&termination);
-        let user_prompt = format!(
-            "=== HISTORY ===\n\n{history}\n\n\n=== CURRENT ITERATION: {} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
-            ctx.iteration + 1
-        );
 
         let mut messages = Vec::new();
         if !ctx.config.system_prompt.trim().is_empty() {
@@ -349,12 +147,13 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
             ));
         }
         let mut attachments = Vec::new();
-        let mut user_blocks = vec![LlmContentBlock::Text {
-            text: user_prompt.into(),
-            response_meta: None,
-        }];
-        append_history_image_blocks(&projection, &mut attachments, &mut user_blocks);
-        messages.push(LlmMessage::new(LlmRole::User, user_blocks));
+        messages.extend(build_rlm_history_messages(
+            &projection,
+            self.max_output_chars,
+            ctx.iteration + 1,
+            finalization,
+            &mut attachments,
+        ));
 
         LlmRequest {
             model: ctx.config.model.clone(),
@@ -367,6 +166,88 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
             output_spec: None,
             stream_events: None,
             provider_trace: None,
+        }
+    }
+}
+
+fn build_rlm_history_messages(
+    projection: &lash::ChronologicalProjection,
+    max_output_chars: usize,
+    iteration: usize,
+    finalization: &str,
+    attachments: &mut Vec<LlmAttachment>,
+) -> Vec<LlmMessage> {
+    let history = projection.rlm_history();
+    let mut messages = Vec::new();
+
+    if history.is_empty() {
+        messages.push(LlmMessage::new(
+            LlmRole::User,
+            vec![text_block(
+                "=== HISTORY ===\n\nNo chronological history is available.",
+                false,
+            )],
+        ));
+    } else {
+        for (index, item) in history.iter().enumerate() {
+            let mut blocks = vec![text_block(
+                render_history_item(index, item, max_output_chars),
+                false,
+            )];
+            if let Some(entry) = projection.entries().get(index) {
+                append_entry_image_blocks(entry, attachments, &mut blocks);
+            }
+            messages.push(LlmMessage::new(history_item_llm_role(item), blocks));
+        }
+        mark_last_history_text_cache_breakpoint(&mut messages);
+    }
+
+    let current_prompt = format!(
+        "\n\n\n=== CURRENT ITERATION: {iteration} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
+    );
+    messages.push(LlmMessage::new(
+        LlmRole::User,
+        vec![text_block(current_prompt, false)],
+    ));
+    messages
+}
+
+fn text_block(text: impl Into<Arc<str>>, cache_breakpoint: bool) -> LlmContentBlock {
+    LlmContentBlock::Text {
+        text: text.into(),
+        response_meta: None,
+        cache_breakpoint,
+    }
+}
+
+fn history_item_llm_role(item: &RlmHistoryItem) -> LlmRole {
+    match item {
+        RlmHistoryItem::Message { role, .. } => match role {
+            RlmHistoryRole::User => LlmRole::User,
+            RlmHistoryRole::Assistant => LlmRole::Assistant,
+            RlmHistoryRole::System => LlmRole::System,
+        },
+        RlmHistoryItem::ToolCall { .. } => LlmRole::User,
+        RlmHistoryItem::RlmStep { .. } => LlmRole::Assistant,
+    }
+}
+
+fn mark_last_history_text_cache_breakpoint(messages: &mut [LlmMessage]) {
+    for message in messages.iter_mut().rev() {
+        let Some(blocks) = Arc::get_mut(&mut message.blocks) else {
+            continue;
+        };
+        for block in blocks.iter_mut().rev() {
+            if let LlmContentBlock::Text {
+                text,
+                cache_breakpoint,
+                ..
+            } = block
+                && !text.trim().is_empty()
+            {
+                *cache_breakpoint = true;
+                return;
+            }
         }
     }
 }
@@ -389,6 +270,7 @@ fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
 }
 
 impl RlmContextProjector {
+    #[cfg(test)]
     fn format_history(&self, projection: &lash::ChronologicalProjection) -> String {
         render_history_prompt(&projection.rlm_history(), self.max_output_chars)
     }
@@ -415,6 +297,7 @@ fn projection_from_events(events: &[lash::SessionEventRecord]) -> lash::Chronolo
     read_view.chronological_projection()
 }
 
+#[cfg(test)]
 fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) -> String {
     if history.is_empty() {
         return "No chronological history is available.".to_string();
@@ -424,64 +307,70 @@ fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) ->
         if !rendered.is_empty() {
             rendered.push_str("\n\n");
         }
-        match item {
-            RlmHistoryItem::Message {
-                id: _,
-                role,
-                content,
-                attachments,
-            } => append_history_message(
-                &mut rendered,
+        rendered.push_str(&render_history_item(index, item, max_output_chars));
+    }
+    rendered
+}
+
+fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: usize) -> String {
+    let mut rendered = String::new();
+    match item {
+        RlmHistoryItem::Message {
+            id: _,
+            role,
+            content,
+            attachments,
+        } => append_history_message(
+            &mut rendered,
+            index,
+            role,
+            content,
+            attachments,
+            max_output_chars,
+        ),
+        RlmHistoryItem::ToolCall {
+            id: _,
+            tool,
+            args,
+            result,
+            success,
+            duration_ms,
+        } => append_history_tool_call(
+            &mut rendered,
+            HistoryToolCallRender {
                 index,
-                role,
-                content,
-                attachments,
-                max_output_chars,
-            ),
-            RlmHistoryItem::ToolCall {
-                id: _,
                 tool,
                 args,
                 result,
-                success,
-                duration_ms,
-            } => append_history_tool_call(
-                &mut rendered,
-                HistoryToolCallRender {
-                    index,
-                    tool,
-                    args,
-                    result,
-                    success: *success,
-                    duration_ms: *duration_ms,
-                    max_output_chars,
-                },
-            ),
-            RlmHistoryItem::RlmStep {
-                id: _,
-                iteration,
+                success: *success,
+                duration_ms: *duration_ms,
+                max_output_chars,
+            },
+        ),
+        RlmHistoryItem::RlmStep {
+            id: _,
+            iteration,
+            reasoning,
+            code,
+            output,
+            tool_calls: _,
+            images,
+            error,
+            final_output,
+        } => append_repl_step(
+            &mut rendered,
+            ReplStepRender {
+                index,
+                iteration: *iteration,
                 reasoning,
                 code,
                 output,
-                tool_calls: _,
                 images,
-                error,
-                final_output,
-            } => append_repl_step(
-                &mut rendered,
-                ReplStepRender {
-                    index,
-                    iteration: *iteration,
-                    reasoning,
-                    code,
-                    output,
-                    images,
-                    error: error.as_deref(),
-                    final_output: final_output.as_ref(),
-                    max_output_chars,
-                },
-            ),
-        }
+                error: error.as_deref(),
+                final_output: final_output.as_ref(),
+                max_output_chars,
+            },
+        ),
     }
     rendered
 }
@@ -527,32 +416,30 @@ fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
     );
 }
 
-fn append_history_image_blocks(
-    projection: &lash::ChronologicalProjection,
+fn append_entry_image_blocks(
+    entry: &lash::ChronologicalEntry,
     attachments: &mut Vec<LlmAttachment>,
     blocks: &mut Vec<LlmContentBlock>,
 ) {
-    for entry in projection.entries() {
-        match &entry.payload {
-            lash::ChronologicalPayload::Message(message) => {
-                for part in message.parts.iter() {
-                    let Some(attachment) = part.attachment.as_ref() else {
-                        continue;
-                    };
-                    let attachment_idx = attachments.len();
-                    attachments.push(LlmAttachment::reference(attachment.reference.clone()));
-                    blocks.push(LlmContentBlock::Image { attachment_idx });
-                }
+    match &entry.payload {
+        lash::ChronologicalPayload::Message(message) => {
+            for part in message.parts.iter() {
+                let Some(attachment) = part.attachment.as_ref() else {
+                    continue;
+                };
+                let attachment_idx = attachments.len();
+                attachments.push(LlmAttachment::reference(attachment.reference.clone()));
+                blocks.push(LlmContentBlock::Image { attachment_idx });
             }
-            lash::ChronologicalPayload::RlmStep(entry) => {
-                for image in &entry.images {
-                    let attachment_idx = attachments.len();
-                    attachments.push(LlmAttachment::reference(image.clone()));
-                    blocks.push(LlmContentBlock::Image { attachment_idx });
-                }
-            }
-            lash::ChronologicalPayload::ToolCall(_) => {}
         }
+        lash::ChronologicalPayload::RlmStep(entry) => {
+            for image in &entry.images {
+                let attachment_idx = attachments.len();
+                attachments.push(LlmAttachment::reference(image.clone()));
+                blocks.push(LlmContentBlock::Image { attachment_idx });
+            }
+        }
+        lash::ChronologicalPayload::ToolCall(_) => {}
     }
 }
 
@@ -927,7 +814,11 @@ mod tests {
         let mut blocks = Vec::new();
 
         let projection = projection_from_events(&[event]);
-        append_history_image_blocks(&projection, &mut attachments, &mut blocks);
+        append_entry_image_blocks(
+            projection.entries().first().expect("entry"),
+            &mut attachments,
+            &mut blocks,
+        );
 
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].mime, "image/png");
@@ -942,6 +833,50 @@ mod tests {
         assert!(matches!(
             blocks.as_slice(),
             [LlmContentBlock::Image { attachment_idx: 0 }]
+        ));
+    }
+
+    #[test]
+    fn rlm_prompt_projects_history_as_chat_messages_with_rolling_cache_breakpoint() {
+        let projection =
+            projection_from_events(&[user_event("u1", "first"), step_event(0, "print 1", "1")]);
+        let mut attachments = Vec::new();
+
+        let messages = build_rlm_history_messages(
+            &projection,
+            1000,
+            2,
+            rlm_finalization_prompt(&RlmTermination::default()),
+            &mut attachments,
+        );
+
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0].role, LlmRole::User));
+        assert!(matches!(messages[1].role, LlmRole::Assistant));
+        assert!(matches!(messages[2].role, LlmRole::User));
+        assert!(matches!(
+            messages[0].blocks.first(),
+            Some(LlmContentBlock::Text {
+                text,
+                cache_breakpoint: false,
+                ..
+            }) if text.starts_with("--- history[0] · user message")
+        ));
+        assert!(matches!(
+            messages[1].blocks.first(),
+            Some(LlmContentBlock::Text {
+                text,
+                cache_breakpoint: true,
+                ..
+            }) if text.starts_with("--- history[1] · rlm step")
+        ));
+        assert!(matches!(
+            messages[2].blocks.first(),
+            Some(LlmContentBlock::Text {
+                text,
+                cache_breakpoint: false,
+                ..
+            }) if text.contains("=== CURRENT ITERATION: 2 ===")
         ));
     }
 

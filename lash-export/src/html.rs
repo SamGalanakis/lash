@@ -387,7 +387,10 @@ fn write_usage_overview(out: &mut String, session: &LoadedSession) {
         let _ = writeln!(
             out,
             "    <a class=\"usage-overview-bar{level_class}\" href=\"#\" data-usage-index=\"{idx}\" title=\"{title}\"><span style=\"--usage-width: {width:.3}%\"></span></a>",
-            title = escape_attr(&format!("{id} · {}", usage_title(Some(usage), session.context_window_tokens))),
+            title = escape_attr(&format!(
+                "{id} · {}",
+                usage_title(Some(usage), session.context_window_tokens)
+            )),
         );
     }
     out.push_str("  </div>\n");

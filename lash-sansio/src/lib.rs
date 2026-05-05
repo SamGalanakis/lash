@@ -270,20 +270,42 @@ impl ToolOutputContract {
         matches!(self, Self::Static)
     }
 
-    fn render_returns(&self, static_schema: &serde_json::Value) -> String {
+    fn return_type_label(&self, static_schema: &serde_json::Value) -> String {
         match self {
             Self::Static => compact_schema_label(static_schema),
-            Self::FromInputSchema {
-                input_field,
-                default_schema,
-            } => {
-                let mut out = format!("schema from `{input_field}`");
-                if let Some(default_schema) = default_schema {
-                    out.push_str(", default ");
-                    out.push_str(&compact_schema_label(default_schema));
-                }
-                out
+            Self::FromInputSchema { .. } => "T".to_string(),
+        }
+    }
+
+    fn type_parameter_suffix(&self) -> Option<String> {
+        match self {
+            Self::Static => None,
+            Self::FromInputSchema { default_schema, .. } => {
+                let default = default_schema
+                    .as_ref()
+                    .map(compact_schema_label)
+                    .unwrap_or_else(|| "any".to_string());
+                Some(format!("<T = {default}>"))
             }
+        }
+    }
+
+    fn apply_type_witness_parameter(&self, params: &mut [ParameterDoc]) {
+        let Self::FromInputSchema { input_field, .. } = self else {
+            return;
+        };
+        if let Some(param) = params.iter_mut().find(|param| param.name == *input_field) {
+            param.type_label = "TypeSpec<T>".to_string();
+            param.nullable = false;
+            param.default_value = None;
+            param.enum_values.clear();
+            param.minimum = None;
+            param.maximum = None;
+            param.min_length = None;
+            param.max_length = None;
+            param.min_items = None;
+            param.max_items = None;
+            param.item_type = None;
         }
     }
 
@@ -353,8 +375,12 @@ pub struct CompactToolContract {
 }
 
 impl CompactToolContract {
+    pub fn render_signature_head(&self) -> String {
+        format!("{} -> {}", self.signature.trim(), self.returns.trim())
+    }
+
     pub fn render_signature(&self) -> String {
-        let mut sections = vec![self.signature.trim().to_string()];
+        let mut sections = vec![self.render_signature_head()];
         let parameter_lines = self
             .parameters
             .iter()
@@ -362,14 +388,6 @@ impl CompactToolContract {
             .collect::<Vec<_>>();
         if !parameter_lines.is_empty() {
             sections.push(format!("Parameters:\n{}", parameter_lines.join("\n")));
-        }
-        sections.join("\n")
-    }
-
-    pub fn render_returns(&self) -> String {
-        let mut sections = Vec::new();
-        if !self.returns.trim().is_empty() {
-            sections.push(self.returns.trim().to_string());
         }
         let return_field_lines = self
             .return_fields
@@ -382,11 +400,21 @@ impl CompactToolContract {
         sections.join("\n")
     }
 
-    pub fn render_markdown(&self) -> String {
-        let mut sections = vec![format!("### `{}`", self.signature)];
-        if !self.returns.trim().is_empty() {
-            sections.push(format!("Returns: {}", self.returns.trim()));
+    pub fn render_returns(&self) -> String {
+        let mut sections = Vec::new();
+        let return_field_lines = self
+            .return_fields
+            .iter()
+            .filter_map(compact_doc_line)
+            .collect::<Vec<_>>();
+        if !return_field_lines.is_empty() {
+            sections.push(format!("Return fields:\n{}", return_field_lines.join("\n")));
         }
+        sections.join("\n")
+    }
+
+    pub fn render_markdown(&self) -> String {
+        let mut sections = vec![format!("### {}", self.render_signature_head())];
         if !self.description.trim().is_empty() {
             sections.push(self.description.trim().to_string());
         }
@@ -517,15 +545,21 @@ impl ToolDefinition {
     }
 
     pub fn input_signature(&self) -> String {
-        let params = schema_parameter_docs(&self.input_schema)
+        let params = self
+            .parameter_docs()
             .into_iter()
             .map(|p| p.signature_fragment())
             .collect::<Vec<_>>();
-        format!("{}({})", self.name, params.join(", "))
+        format!(
+            "{}{}({})",
+            self.name,
+            self.output_contract.type_parameter_suffix().unwrap_or_default(),
+            params.join(", ")
+        )
     }
 
     pub fn output_summary(&self) -> String {
-        self.output_contract.render_returns(&self.output_schema)
+        self.output_contract.return_type_label(&self.output_schema)
     }
 
     pub fn signature(&self) -> String {
@@ -577,10 +611,16 @@ impl ToolDefinition {
     }
 
     pub fn parameter_metadata(&self) -> Vec<serde_json::Value> {
-        schema_parameter_docs(&self.input_schema)
+        self.parameter_docs()
             .into_iter()
             .map(|param| param.into_value())
             .collect()
+    }
+
+    fn parameter_docs(&self) -> Vec<ParameterDoc> {
+        let mut params = schema_parameter_docs(&self.input_schema);
+        self.output_contract.apply_type_witness_parameter(&mut params);
+        params
     }
 }
 
@@ -807,12 +847,16 @@ impl FieldDoc {
 }
 
 fn schema_parameter_docs(schema: &serde_json::Value) -> Vec<ParameterDoc> {
-    let required = schema
+    let required_order = schema
         .get("required")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    let required = required_order
+        .iter()
+        .copied()
         .collect::<std::collections::BTreeSet<_>>();
     let Some(properties) = schema
         .get("properties")
@@ -820,10 +864,26 @@ fn schema_parameter_docs(schema: &serde_json::Value) -> Vec<ParameterDoc> {
     else {
         return Vec::new();
     };
-    properties
+    let mut params = properties
         .iter()
         .map(|(name, schema)| parameter_doc(name, schema, required.contains(name.as_str())))
-        .collect()
+        .collect::<Vec<_>>();
+    params.sort_by(|left, right| {
+        match (
+            required_order
+                .iter()
+                .position(|name| *name == left.name.as_str()),
+            required_order
+                .iter()
+                .position(|name| *name == right.name.as_str()),
+        ) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.name.cmp(&right.name),
+        }
+    });
+    params
 }
 
 fn return_field_metadata(schema: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -1270,7 +1330,7 @@ mod tests {
         let contract = tool.compact_contract();
         assert_eq!(
             contract.signature,
-            "search_docs(limit?: int <= 10 = 5, query: str)"
+            "search_docs(query: str, limit?: int <= 10 = 5)"
         );
         assert_eq!(
             contract.returns,
@@ -1280,6 +1340,12 @@ mod tests {
             contract.parameters,
             vec![
                 serde_json::json!({
+                    "name": "query",
+                    "type": "str",
+                    "required": true,
+                    "signature": "query: str"
+                }),
+                serde_json::json!({
                     "name": "limit",
                     "type": "int",
                     "required": false,
@@ -1287,20 +1353,16 @@ mod tests {
                     "maximum": 10,
                     "signature": "limit?: int <= 10 = 5"
                 }),
-                serde_json::json!({
-                    "name": "query",
-                    "type": "str",
-                    "required": true,
-                    "signature": "query: str"
-                }),
             ]
         );
         assert_eq!(contract.examples.len(), 2);
 
         let docs = ToolDefinition::format_tool_docs(&[tool]);
-        assert!(docs.contains("### `search_docs(limit?: int <= 10 = 5, query: str)`"));
-        assert!(docs.contains("Returns: record{matches: list[str], next_page?: str | null}"));
-        assert!(docs.contains("Parameters:\n- `limit?: int <= 10 = 5`\n- `query: str`"));
+        assert!(docs.contains(
+            "### search_docs(query: str, limit?: int <= 10 = 5) -> record{matches: list[str], next_page?: str | null}"
+        ));
+        assert!(!docs.contains("Returns:"));
+        assert!(docs.contains("Parameters:\n- `query: str`\n- `limit?: int <= 10 = 5`"));
         assert!(docs.contains(
             "Examples: search_docs(query=\"rust\"); search_docs(query=\"rust\", limit=3)"
         ));
@@ -1346,12 +1408,13 @@ mod tests {
         .with_output_from_input_schema("output", None);
 
         let contract = tool.compact_contract();
-        assert_eq!(contract.returns, "schema from `output`");
+        assert_eq!(contract.signature, "spawn_agent<T = any>(output?: TypeSpec<T>)");
+        assert_eq!(contract.returns, "T");
         assert!(contract.return_fields.is_empty());
-        assert_eq!(contract.render_returns(), "schema from `output`");
+        assert_eq!(contract.render_returns(), "");
         assert_eq!(
             ToolDefinition::format_tool_docs(&[tool]),
-            "### `spawn_agent(output?: record)`\nReturns: schema from `output`\nRun a subagent\nParameters:\n- `output?: record`"
+            "### spawn_agent<T = any>(output?: TypeSpec<T>) -> T\nRun a subagent\nParameters:\n- `output?: TypeSpec<T>`"
         );
     }
 
@@ -1373,12 +1436,10 @@ mod tests {
         .with_output_from_input_schema("output", Some(serde_json::json!({ "type": "string" })));
 
         let contract = tool.compact_contract();
-        assert_eq!(contract.returns, "schema from `output`, default str");
+        assert_eq!(contract.signature, "llm_query<T = str>(task: str, output?: TypeSpec<T>)");
+        assert_eq!(contract.returns, "T");
         assert!(contract.return_fields.is_empty());
-        assert_eq!(
-            contract.render_returns(),
-            "schema from `output`, default str"
-        );
+        assert_eq!(contract.render_returns(), "");
     }
 
     #[test]
@@ -1651,15 +1712,15 @@ mod tests {
 
         assert_eq!(
             contract.render_markdown(),
-            "### `mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null)`\nReturns: record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\n[MCP appworld] Search for songs with a query.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message.\nExamples: search songs by genre"
+            "### mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null) -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\n[MCP appworld] Search for songs with a query.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message.\nExamples: search songs by genre"
         );
         assert_eq!(
             contract.render_signature(),
-            "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null)\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order."
+            "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null) -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message."
         );
         assert_eq!(
             contract.render_returns(),
-            "record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message."
+            "Return fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message."
         );
     }
 
@@ -1839,7 +1900,7 @@ mod tests {
         );
         assert_eq!(
             contract.render_markdown(),
-            "### `mcp__appworld__spotify_show_album_library(access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5)`\nReturns: record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}\n[MCP appworld] Search or show a list of albums in your album library.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `page_index?: int >= 0 = 0` — The index of the page to return.\n- `page_limit?: int >= 1 <= 20 = 5` — The maximum number of results to return per page.\nReturn fields:\n- `response: list[record]` — Albums in the user's library.\n- `response[].added_at: str | null` — When the album was added to the library.\n- `response[].album_id: int`\n- `response[].genre: str min_len 1` — Album genre.\n- `response[].song_ids[]: int`\n- `response[].title: str min_len 1`\n- `response.message: str` — Failure or status message.\nExamples: show album library"
+            "### mcp__appworld__spotify_show_album_library(access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5) -> record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}\n[MCP appworld] Search or show a list of albums in your album library.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `page_index?: int >= 0 = 0` — The index of the page to return.\n- `page_limit?: int >= 1 <= 20 = 5` — The maximum number of results to return per page.\nReturn fields:\n- `response: list[record]` — Albums in the user's library.\n- `response[].added_at: str | null` — When the album was added to the library.\n- `response[].album_id: int`\n- `response[].genre: str min_len 1` — Album genre.\n- `response[].song_ids[]: int`\n- `response[].title: str min_len 1`\n- `response.message: str` — Failure or status message.\nExamples: show album library"
         );
     }
 

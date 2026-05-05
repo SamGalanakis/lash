@@ -135,11 +135,15 @@ impl AnthropicProvider {
         }))
     }
 
-    fn text_block_value(text: &str) -> Value {
-        json!({
+    fn text_block_value(text: &str, cache_breakpoint: bool) -> Value {
+        let mut block = json!({
             "type": "text",
             "text": sanitize_surrogates(text),
-        })
+        });
+        if cache_breakpoint {
+            block["__lash_cache_breakpoint"] = json!(true);
+        }
+        block
     }
 
     /// Translate one `LlmContentBlock` into the Anthropic wire shape.
@@ -147,15 +151,19 @@ impl AnthropicProvider {
     /// empty text block — Anthropic 400s on those).
     fn content_block_value(req: &LlmRequest, block: &LlmContentBlock) -> Option<Value> {
         match block {
-            LlmContentBlock::Text { text, .. } => {
+            LlmContentBlock::Text {
+                text,
+                cache_breakpoint,
+                ..
+            } => {
                 if text.trim().is_empty() {
                     return None;
                 }
-                Some(Self::text_block_value(text))
+                Some(Self::text_block_value(text, *cache_breakpoint))
             }
             LlmContentBlock::Image { attachment_idx } => Some(
                 Self::image_block_value(req, *attachment_idx)
-                    .unwrap_or_else(|| Self::text_block_value("[Image attached]")),
+                    .unwrap_or_else(|| Self::text_block_value("[Image attached]", false)),
             ),
             LlmContentBlock::ToolCall {
                 call_id,
@@ -193,7 +201,7 @@ impl AnthropicProvider {
                     if text.trim().is_empty() {
                         return None;
                     }
-                    return Some(Self::text_block_value(text));
+                    return Some(Self::text_block_value(text, false));
                 };
                 if *redacted {
                     return Some(json!({
@@ -317,7 +325,38 @@ impl AnthropicProvider {
             last["cache_control"] = ctrl.clone();
         }
 
-        if let Some(last_msg) = messages.last_mut()
+        let mut applied_explicit_breakpoint = false;
+        for msg in messages.iter_mut().rev() {
+            if !matches!(
+                msg.get("role").and_then(Value::as_str),
+                Some("user" | "assistant")
+            ) {
+                continue;
+            }
+            let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for block in content.iter_mut().rev() {
+                let is_marked = block
+                    .get("__lash_cache_breakpoint")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if is_marked && block.is_object() {
+                    block["cache_control"] = ctrl.clone();
+                    block
+                        .as_object_mut()
+                        .map(|obj| obj.remove("__lash_cache_breakpoint"));
+                    applied_explicit_breakpoint = true;
+                    break;
+                }
+            }
+            if applied_explicit_breakpoint {
+                break;
+            }
+        }
+
+        if !applied_explicit_breakpoint
+            && let Some(last_msg) = messages.last_mut()
             && last_msg.get("role").and_then(|v| v.as_str()) == Some("user")
             && let Some(content) = last_msg.get_mut("content").and_then(|c| c.as_array_mut())
             && let Some(last_block) = content.last_mut()
@@ -330,6 +369,16 @@ impl AnthropicProvider {
             && last_tool.is_object()
         {
             last_tool["cache_control"] = ctrl;
+        }
+
+        for msg in messages {
+            if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                for block in content {
+                    block
+                        .as_object_mut()
+                        .map(|obj| obj.remove("__lash_cache_breakpoint"));
+                }
+            }
         }
     }
 
@@ -1134,7 +1183,7 @@ impl ProviderFactory for AnthropicProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+    use lash::llm::types::{LlmContentBlock, LlmJsonSchema, LlmMessage, LlmToolSpec};
     use std::sync::Arc;
 
     fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -1212,6 +1261,43 @@ mod tests {
                     "additionalProperties": true,
                 }
             })
+        );
+    }
+
+    #[test]
+    fn explicit_text_cache_breakpoint_beats_last_user_block() {
+        let provider = AnthropicProvider::new("key");
+        let req = request(vec![LlmMessage::new(
+            LlmRole::User,
+            vec![
+                LlmContentBlock::Text {
+                    text: "stable history".into(),
+                    response_meta: None,
+                    cache_breakpoint: true,
+                },
+                LlmContentBlock::Text {
+                    text: "dynamic current iteration".into(),
+                    response_meta: None,
+                    cache_breakpoint: false,
+                },
+            ],
+        )]);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert!(
+            body["messages"][0]["content"][1]
+                .get("cache_control")
+                .is_none()
+        );
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("__lash_cache_breakpoint")
+                .is_none()
         );
     }
 }
