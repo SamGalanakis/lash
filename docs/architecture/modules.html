@@ -11,15 +11,31 @@
 <body>
   <div class="page">
     <main class="frame">
+      <aside class="sidebar" aria-label="Architecture navigation">
+        <a class="sidebar__exit" href="../index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Architecture</span>
+            <span class="sidebar__current">Modules</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./overview.html">Overview</a></li>
+            <li><a class="active" href="./modules.html">Modules</a></li>
+            <li><a href="./flow.html">Data Flow</a></li>
+            <li><a href="./execution.html">Execution</a></li>
+            <li><a href="./runtime.html">Runtime</a></li>
+            <li><a href="./abstractions.html">Abstractions</a></li>
+            <li><a href="./deps.html">Dependencies</a></li>
+            <li><a href="./lashlang.html">Lashlang</a></li>
+            <li><a href="./html-exporter.html">HTML Exporter</a></li>
+          </ol>
+        </details>
+      </aside>
       <header class="hero">
         <div class="eyebrow">Architecture chapter 02</div>
         <h1>modules<span class="slash">/</span>crates</h1>
         <p>The workspace is split by responsibility: pure protocol, async runtime, mode drivers, provider transports, plugin/tool surfaces, host UI, trace/export utilities, and benchmark runners.</p>
       </header>
-
-      <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a class="active" href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./lashlang.html">Lashlang</a><a href="./html-exporter.html">HTML Exporter</a>
-      </nav>
 
       <section class="content">
         <div class="section">

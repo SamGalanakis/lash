@@ -394,19 +394,27 @@
 <body>
   <div class="page">
     <main class="frame">
-      <header class="hero">
-        <div class="eyebrow">Architecture chapter 09</div>
-        <h1>html<span class="slash">/</span>exporter</h1>
-        <p>The trace exporter renders one persisted lash session — or a tree of sessions joined by <code>continue_as</code> handoffs and <code>spawn_agent</code> subagents — into a single self-contained HTML document. The visual language matches the rest of the docs (warm-iron / fast-amber). The forensic affordance is two-edge-aware: handoffs are linear seams in the same view; subagents are drill-in cards into their own full view.</p>
-      </header>
-
-      <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./lashlang.html">Lashlang</a><a class="active" href="./html-exporter.html">HTML Exporter</a>
-      </nav>
-
-      <section class="content content--with-toc">
-        <aside class="toc-rail" aria-label="On this page">
-          <div class="toc-rail__label">On this page</div>
+      <aside class="sidebar" aria-label="Architecture navigation">
+        <a class="sidebar__exit" href="../index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Architecture</span>
+            <span class="sidebar__current">HTML Exporter</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./overview.html">Overview</a></li>
+            <li><a href="./modules.html">Modules</a></li>
+            <li><a href="./flow.html">Data Flow</a></li>
+            <li><a href="./execution.html">Execution</a></li>
+            <li><a href="./runtime.html">Runtime</a></li>
+            <li><a href="./abstractions.html">Abstractions</a></li>
+            <li><a href="./deps.html">Dependencies</a></li>
+            <li><a href="./lashlang.html">Lashlang</a></li>
+            <li><a class="active" href="./html-exporter.html">HTML Exporter</a></li>
+          </ol>
+        </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
           <ol>
             <li><a href="#two-edge-model">The two-edge model</a></li>
             <li><a href="#inline-handoff-seam">Inline handoff seam</a></li>
@@ -416,8 +424,15 @@
             <li><a href="#implementation-map">Implementation map</a></li>
             <li><a href="#source-map">Source map</a></li>
           </ol>
-        </aside>
+        </nav>
+      </aside>
+      <header class="hero">
+        <div class="eyebrow">Architecture chapter 09</div>
+        <h1>html<span class="slash">/</span>exporter</h1>
+        <p>The trace exporter renders one persisted lash session — or a tree of sessions joined by <code>continue_as</code> handoffs and <code>spawn_agent</code> subagents — into a single self-contained HTML document. The visual language matches the rest of the docs (warm-iron / fast-amber). The forensic affordance is two-edge-aware: handoffs are linear seams in the same view; subagents are drill-in cards into their own full view.</p>
+      </header>
 
+      <section class="content">
         <div class="section" id="two-edge-model">
           <div class="section-header">
             <h2>The two-edge model</h2>

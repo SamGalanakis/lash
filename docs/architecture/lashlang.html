@@ -11,19 +11,27 @@
 <body>
   <div class="page">
     <main class="frame">
-      <header class="hero">
-        <div class="eyebrow">Architecture chapter 08</div>
-        <h1>lashlang<span class="slash">/</span>rlm</h1>
-        <p>Lashlang is the agent-facing execution language for RLM mode. It lets the model run local programs against host tools, preserve state across turns, use async handles, and pass typed values through <code>print</code> and <code>submit</code>.</p>
-      </header>
-
-      <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a class="active" href="./lashlang.html">Lashlang</a><a href="./html-exporter.html">HTML Exporter</a>
-      </nav>
-
-      <section class="content content--with-toc">
-        <aside class="toc-rail" aria-label="On this page">
-          <div class="toc-rail__label">On this page</div>
+      <aside class="sidebar" aria-label="Architecture navigation">
+        <a class="sidebar__exit" href="../index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Architecture</span>
+            <span class="sidebar__current">Lashlang</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./overview.html">Overview</a></li>
+            <li><a href="./modules.html">Modules</a></li>
+            <li><a href="./flow.html">Data Flow</a></li>
+            <li><a href="./execution.html">Execution</a></li>
+            <li><a href="./runtime.html">Runtime</a></li>
+            <li><a href="./abstractions.html">Abstractions</a></li>
+            <li><a href="./deps.html">Dependencies</a></li>
+            <li><a class="active" href="./lashlang.html">Lashlang</a></li>
+            <li><a href="./html-exporter.html">HTML Exporter</a></li>
+          </ol>
+        </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
           <ol>
             <li><a href="#language-reference">Language Reference</a></li>
             <li><a href="#program-form">Program Form</a></li>
@@ -41,7 +49,15 @@
             <li><a href="#runtime-internals">Runtime Internals</a></li>
             <li><a href="#important-files">Important Files</a></li>
           </ol>
-        </aside>
+        </nav>
+      </aside>
+      <header class="hero">
+        <div class="eyebrow">Architecture chapter 08</div>
+        <h1>lashlang<span class="slash">/</span>rlm</h1>
+        <p>Lashlang is the agent-facing execution language for RLM mode. It lets the model run local programs against host tools, preserve state across turns, use async handles, and pass typed values through <code>print</code> and <code>submit</code>.</p>
+      </header>
+
+      <section class="content">
         <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
@@ -204,12 +220,16 @@ submit { a: results.one, b: results.two }</code></pre>
             <h2>Type Literals</h2>
             <p><code>Type { ... }</code> values describe structured records for validation and dynamic tool output contracts. They are runtime values, not a static type checker for all code.</p>
           </div>
-          <div class="module-grid">
-            <article class="panel"><h3>Shapes</h3><p>Scalars: <code>str</code>, <code>int</code>, <code>float</code>, <code>bool</code>, <code>dict</code>, <code>any</code>, <code>null</code>. Collections: <code>list[shape]</code>, <code>enum["a", "b"]</code>, nested <code>Type { ... }</code>, named refs, and unions with <code>|</code>.</p></article>
-            <article class="panel"><h3>Optional vs nullable</h3><p><code>email: str?</code> means the field may be absent, but if present it must be a string. <code>email: str | null</code> means the field is required and may be <code>null</code>.</p></article>
-            <article class="panel"><h3>Nested objects</h3><p>Nested record shapes must use the <code>Type</code> keyword: <code>profile: Type { name: str }</code>. A bare <code>{ name: str }</code> is a record value form and is rejected in type positions.</p></article>
-            <article class="panel"><h3>Contract boundary</h3><p>Tools such as <code>llm_query</code> and <code>spawn_agent</code> can expose output schemas derived from these shapes, but Lashlang v1 keeps this as contract truthfulness rather than model-authored generics.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt>Shapes</dt>
+            <dd>Scalars: <code>str</code>, <code>int</code>, <code>float</code>, <code>bool</code>, <code>dict</code>, <code>any</code>, <code>null</code>. Collections: <code>list[shape]</code>, <code>enum["a", "b"]</code>, nested <code>Type { ... }</code>, named refs, and unions with <code>|</code>.</dd>
+            <dt>Optional vs nullable</dt>
+            <dd><code>email: str?</code> means the field may be absent, but if present it must be a string. <code>email: str | null</code> means the field is required and may be <code>null</code>.</dd>
+            <dt>Nested objects</dt>
+            <dd>Nested record shapes must use the <code>Type</code> keyword: <code>profile: Type { name: str }</code>. A bare <code>{ name: str }</code> is a record value form and is rejected in type positions.</dd>
+            <dt>Contract boundary</dt>
+            <dd>Tools such as <code>llm_query</code> and <code>spawn_agent</code> can expose output schemas derived from these shapes, but Lashlang v1 keeps this as contract truthfulness rather than model-authored generics.</dd>
+          </dl>
           <pre><code>Payload = Type {
   id: str,
   score: float | null,
