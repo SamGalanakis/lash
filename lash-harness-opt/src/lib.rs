@@ -1104,11 +1104,9 @@ where
             }
 
             let mut evidence_parent = parent.clone();
-            evidence_parent.mutable_components = evidence_parent
+            evidence_parent
                 .mutable_components
-                .into_iter()
-                .filter(|(id, _)| selected_components.contains(id))
-                .collect();
+                .retain(|id, _| selected_components.contains(id));
             let request = StrategyRequest {
                 run_id: run.run_id.clone(),
                 experiment_id: run.experiment_id.clone(),
@@ -1496,7 +1494,7 @@ fn select_parent<'a>(
         CandidateSelection::CurrentBest => best_state(states),
         CandidateSelection::Pareto => select_pareto_parent(states, iteration),
         CandidateSelection::EpsilonGreedy => {
-            if iteration % 10 == 0 {
+            if iteration.is_multiple_of(10) {
                 states.get(iteration % states.len().max(1))
             } else {
                 select_pareto_parent(states, iteration)
@@ -1837,24 +1835,12 @@ pub mod clbench {
 - `diary: list` — persistent across iterations; each entry is `{ history_index: int, summary: str, learnings: str }`
 - `history` — auto-bound read-only projection of past turn entries; index into it via `entry.history_index`
 
-The shape your `submit` value must take is shown in the **Required output** block at the end of the user turn — consult it before building the action.
+The current query and previous feedback are visible in the user turn and are also bound as `current_query` and `current_feedback` for exact access from lashlang. The shape your `submit` value must take is shown in the **Required output** block at the end of the user turn — consult it before building the action.
 
 At the start of each turn:
 
-- If `diary` is small, `print` it and read it directly.
-- If `diary` is large, fan out parallel `llm_query` calls to find entries relevant to `current_query` and `current_feedback`:
-
-```lashlang
-half = len(diary) / 2
-relevant = parallel {
-  early: (call llm_query { task: "Return diary indices relevant to the current query and feedback", inputs: { query: current_query, feedback: current_feedback, entries: slice(diary, 0, half) }, output: { picks: "list[int]" } })?,
-  late:  (call llm_query { task: "Return diary indices relevant to the current query and feedback", inputs: { query: current_query, feedback: current_feedback, entries: slice(diary, half, len(diary)) }, output: { picks: "list[int]" } })?
-}
-```
-
+- Use the visible current query and feedback first. Inspect `diary` only when you need details not already visible.
 - Pull the matching `history[entry.history_index]` when an entry's `summary` is too compressed to act on.
-- Use `spawn_agent` with `capability: "explore"` to delegate focused analysis of one entry or a small selected group; the child should return lessons, not raw dumps.
-- If the in-turn trace gets bloated, hand off via `continue_as` to a fresh successor, seeding it with the lessons you've already extracted. `list_async_handles` rediscovers live handles after that handoff.
 - Apply prior learnings before choosing the benchmark action.
 
 Before every `submit`, append exactly one diary record and submit a value matching the **Required output** shape:
@@ -1870,7 +1856,7 @@ submit answer
 
 `answer` must match the **Required output** block exactly — the shape varies per task and per step, so build the value to fit the announced contract rather than assuming a fixed wrapper. Keep diary entries short, factual, and reusable; do not duplicate old lessons; incorporate feedback and revise strategy in later entries."#;
 
-    pub const DEFAULT_USER_DIRECTIVE: &str = "Choose the next benchmark action and `submit` a value matching `benchmark_response_schema`.";
+    pub const DEFAULT_USER_DIRECTIVE: &str = "Choose the next benchmark action.";
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct ClbenchConfig {
@@ -2092,7 +2078,7 @@ submit answer
                 trace
                     .records
                     .iter()
-                    .map(|record| serde_json::to_string(record))
+                    .map(serde_json::to_string)
                     .collect::<std::result::Result<Vec<_>, _>>()?
                     .join("\n"),
             )
@@ -2136,7 +2122,10 @@ submit answer
             ),
             PromptTemplateSection::titled(
                 "Guidance",
-                vec![PromptTemplateEntry::slot(PromptSlot::ProjectInstructions)],
+                vec![
+                    PromptTemplateEntry::slot(PromptSlot::Guidance),
+                    PromptTemplateEntry::slot(PromptSlot::ProjectInstructions),
+                ],
             ),
         ])
     }

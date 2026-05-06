@@ -203,6 +203,7 @@ pub struct ProjectedValue {
 
 #[derive(Clone)]
 enum ProjectedKind {
+    Value(Arc<Value>),
     List(Arc<dyn ProjectedList>),
 }
 
@@ -215,6 +216,13 @@ pub trait ProjectedList: Send + Sync {
 }
 
 impl ProjectedValue {
+    pub fn value(name: impl Into<Arc<str>>, value: Value) -> Self {
+        Self {
+            name: name.into(),
+            kind: ProjectedKind::Value(Arc::new(value)),
+        }
+    }
+
     pub fn list(name: impl Into<Arc<str>>, list: Arc<dyn ProjectedList>) -> Self {
         Self {
             name: name.into(),
@@ -228,6 +236,7 @@ impl ProjectedValue {
 
     fn len(&self) -> usize {
         match &self.kind {
+            ProjectedKind::Value(value) => value_len(value).unwrap_or(0),
             ProjectedKind::List(list) => list.len(),
         }
     }
@@ -238,6 +247,7 @@ impl ProjectedValue {
 
     fn get_index(&self, index: &Value) -> Result<Value, RuntimeError> {
         match &self.kind {
+            ProjectedKind::Value(value) => read_index((**value).clone(), index.clone()),
             ProjectedKind::List(list) => {
                 let idx = resolve_index(index, list.len())?;
                 Ok(idx.and_then(|idx| list.get(idx)).unwrap_or(Value::Null))
@@ -247,6 +257,7 @@ impl ProjectedValue {
 
     pub fn materialize(&self) -> Value {
         match &self.kind {
+            ProjectedKind::Value(value) => (**value).clone(),
             ProjectedKind::List(list) => Value::List(
                 (0..list.len())
                     .filter_map(|index| list.get(index))
@@ -276,6 +287,7 @@ impl PartialEq for ProjectedValue {
 impl ProjectedValue {
     pub(crate) fn value_type_name(&self) -> &'static str {
         match &self.kind {
+            ProjectedKind::Value(value) => value_type_name(value),
             ProjectedKind::List(_) => "list",
         }
     }
@@ -4277,26 +4289,7 @@ fn execute_builtin(
         }
         Builtin::Contains => {
             expect_arg_count("contains", values, 2)?;
-            match (&values[0], &values[1]) {
-                (Value::String(haystack), needle) => Ok(Value::Bool(
-                    haystack.contains(coerce_string(needle)?.as_ref()),
-                )),
-                (Value::List(items), needle) => Ok(Value::Bool(items.contains(needle))),
-                (Value::Record(record), needle) => Ok(Value::Bool(
-                    record.get(coerce_string(needle)?.as_ref()).is_some(),
-                )),
-                (Value::Projected(value), needle) => match &value.kind {
-                    ProjectedKind::List(list) => Ok(Value::Bool(
-                        (0..list.len()).any(|index| list.get(index).as_ref() == Some(needle)),
-                    )),
-                },
-                (Value::Null, _) => Ok(Value::Bool(false)),
-                _ => Err(RuntimeError::TypeError {
-                    message:
-                        "`contains` requires a string/string, list/value, record/key, or null/value pair"
-                            .to_string(),
-                }),
-            }
+            execute_contains_builtin(&values[0], &values[1])
         }
         Builtin::StartsWith => {
             expect_arg_count("starts_with", values, 2)?;
@@ -4404,16 +4397,51 @@ fn execute_builtin(
 }
 
 fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
-    match value {
-        Value::String(value) => Ok(Value::Number(value.chars().count() as f64)),
-        Value::List(values) => Ok(Value::Number(values.len() as f64)),
-        Value::Record(record) => Ok(Value::Number(record.len() as f64)),
-        Value::Projected(value) => Ok(Value::Number(value.len() as f64)),
-        Value::Null => Ok(Value::Number(0.0)),
-        _ => Err(RuntimeError::TypeError {
+    if let Value::Projected(value) = value {
+        return match &value.kind {
+            ProjectedKind::Value(value) => execute_len_builtin(value),
+            ProjectedKind::List(list) => Ok(Value::Number(list.len() as f64)),
+        };
+    }
+    value_len(value)
+        .map(|len| Value::Number(len as f64))
+        .ok_or_else(|| RuntimeError::TypeError {
             message: "`len` requires a string, list, record, or null; use `.size` for images"
                 .to_string(),
+        })
+}
+
+fn execute_contains_builtin(haystack: &Value, needle: &Value) -> Result<Value, RuntimeError> {
+    match (haystack, needle) {
+        (Value::String(haystack), needle) => Ok(Value::Bool(
+            haystack.contains(coerce_string(needle)?.as_ref()),
+        )),
+        (Value::List(items), needle) => Ok(Value::Bool(items.contains(needle))),
+        (Value::Record(record), needle) => Ok(Value::Bool(
+            record.get(coerce_string(needle)?.as_ref()).is_some(),
+        )),
+        (Value::Projected(value), needle) => match &value.kind {
+            ProjectedKind::Value(value) => execute_contains_builtin(value, needle),
+            ProjectedKind::List(list) => Ok(Value::Bool(
+                (0..list.len()).any(|index| list.get(index).as_ref() == Some(needle)),
+            )),
+        },
+        (Value::Null, _) => Ok(Value::Bool(false)),
+        _ => Err(RuntimeError::TypeError {
+            message:
+                "`contains` requires a string/string, list/value, record/key, or null/value pair"
+                    .to_string(),
         }),
+    }
+}
+
+fn value_len(value: &Value) -> Option<usize> {
+    match value {
+        Value::String(value) => Some(value.chars().count()),
+        Value::List(values) => Some(values.len()),
+        Value::Record(record) => Some(record.len()),
+        Value::Null => Some(0),
+        _ => None,
     }
 }
 

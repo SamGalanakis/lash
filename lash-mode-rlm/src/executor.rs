@@ -93,14 +93,26 @@ impl RlmExecutionState {
         Ok(())
     }
 
+    pub fn prune_projected_globals(
+        &mut self,
+        projected_globals: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        prune_projected_bindings(&mut self.rlm, projected_globals);
+    }
+
+    pub fn prune_projected_names<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
+        prune_projected_binding_names(&mut self.rlm, names);
+    }
+
     pub fn patch_globals(
         &mut self,
         patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
+        projected_globals: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), SessionError> {
         if patch.is_empty() {
             return Ok(());
         }
-        patch_globals(&mut self.rlm, patch.set.clone(), patch.unset.clone())
+        apply_global_defaults(&mut self.rlm, patch, projected_globals)
             .map_err(SessionError::Protocol)?;
         self.dirty = true;
         Ok(())
@@ -157,6 +169,7 @@ async fn execute_code_inner(
     };
 
     let projected = projected_bindings(&ctx);
+    prune_projected_bindings(&mut state.rlm, ctx.rlm_globals().as_ref());
     let host = HostBridge {
         ctx,
         observe_projection: state.observe_projection.clone(),
@@ -214,6 +227,12 @@ async fn execute_code_inner(
 
 fn projected_bindings(ctx: &ModeExecutionContext) -> ProjectedBindings {
     let mut bindings = ProjectedBindings::new();
+    for (name, value) in ctx.rlm_globals().iter() {
+        bindings.insert(
+            name.clone(),
+            ProjectedValue::value(name.clone(), json_to_flow_value(value.clone())),
+        );
+    }
     bindings.insert(
         "history",
         ProjectedValue::list(
@@ -583,21 +602,30 @@ fn restore_runtime(data: &str) -> Result<FlowState, String> {
     Ok(FlowState::from_snapshot(snapshot))
 }
 
-fn patch_globals(
+fn apply_global_defaults(
     rlm: &mut FlowState,
-    set: serde_json::Map<String, Value>,
-    unset: Vec<String>,
+    patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
+    projected_globals: &serde_json::Map<String, Value>,
 ) -> Result<(), String> {
-    let mut snapshot = rlm.snapshot();
-    for key in unset {
-        snapshot.globals.remove(&key);
+    if patch.set_default.is_empty() {
+        return Ok(());
     }
-    for (key, value) in set {
-        if is_reserved_projected_binding(&key) {
-            snapshot.globals.remove(&key);
-            continue;
+    let mut snapshot = rlm.snapshot();
+    for (key, value) in &patch.set_default {
+        if is_reserved_projected_binding(key)
+            || projected_globals.contains_key(key)
+            || patch.set.contains_key(key)
+            || patch.unset.iter().any(|unset| unset == key)
+        {
+            return Err(format!(
+                "`{key}` is a read-only projected host binding; use `set` for host-projected values or choose a different Lashlang variable name for `set_default`"
+            ));
         }
-        snapshot.globals.insert(key, json_to_flow_value(value));
+        if snapshot.globals.get(key).is_none() {
+            snapshot
+                .globals
+                .insert(key.clone(), json_to_flow_value(value.clone()));
+        }
     }
     *rlm = FlowState::from_snapshot(snapshot);
     Ok(())
@@ -608,8 +636,27 @@ fn is_reserved_projected_binding(key: &str) -> bool {
 }
 
 fn prune_reserved_projected_bindings(rlm: &mut FlowState) {
+    prune_projected_bindings(rlm, &serde_json::Map::new());
+}
+
+fn prune_projected_bindings(
+    rlm: &mut FlowState,
+    projected_globals: &serde_json::Map<String, serde_json::Value>,
+) {
+    prune_projected_binding_names(
+        rlm,
+        std::iter::once("history").chain(projected_globals.keys().map(String::as_str)),
+    );
+}
+
+fn prune_projected_binding_names<'a>(
+    rlm: &mut FlowState,
+    names: impl IntoIterator<Item = &'a str>,
+) {
     let mut snapshot = rlm.snapshot();
-    snapshot.globals.remove("history");
+    for key in names {
+        snapshot.globals.remove(key);
+    }
     *rlm = FlowState::from_snapshot(snapshot);
 }
 
@@ -850,14 +897,17 @@ mod tests {
         block_on(async {
             let mut state =
                 RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
-            let mut set = serde_json::Map::new();
-            set.insert("diary".to_string(), serde_json::json!(["kept"]));
-            set.insert("history".to_string(), serde_json::json!(["ignored"]));
+            let mut set_default = serde_json::Map::new();
+            set_default.insert("diary".to_string(), serde_json::json!(["kept"]));
             state
-                .patch_globals(&lash_rlm_types::RlmGlobalsPatchPluginBody {
-                    set,
-                    unset: Vec::new(),
-                })
+                .patch_globals(
+                    &lash_rlm_types::RlmGlobalsPatchPluginBody {
+                        set: serde_json::Map::new(),
+                        set_default,
+                        unset: Vec::new(),
+                    },
+                    &serde_json::Map::new(),
+                )
                 .expect("patch diary");
 
             let projected = projected_history(vec![FlowValue::String("hello".into())]);
@@ -903,6 +953,145 @@ mod tests {
                 panic!("expected submitted record");
             };
             assert_eq!(record["history_len"], FlowValue::Number(0.0));
+        });
+    }
+
+    #[test]
+    fn set_default_initializes_once_and_set_does_not_mutate_executor_globals() {
+        let mut state =
+            RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+        let mut projected = serde_json::Map::new();
+        projected.insert("current_query".to_string(), serde_json::json!("host"));
+
+        state
+            .patch_globals(
+                &lash_rlm_types::RlmGlobalsPatchPluginBody {
+                    set: serde_json::Map::from_iter([(
+                        "current_query".to_string(),
+                        serde_json::json!("projected"),
+                    )]),
+                    set_default: serde_json::Map::from_iter([(
+                        "diary".to_string(),
+                        serde_json::json!(["initial"]),
+                    )]),
+                    unset: Vec::new(),
+                },
+                &projected,
+            )
+            .expect("apply defaults");
+        assert_eq!(
+            state.rlm.snapshot().globals.get("diary"),
+            Some(&FlowValue::List(
+                vec![FlowValue::String("initial".into())].into()
+            ))
+        );
+        assert!(state.rlm.snapshot().globals.get("current_query").is_none());
+
+        state
+            .patch_globals(
+                &lash_rlm_types::RlmGlobalsPatchPluginBody {
+                    set: serde_json::Map::new(),
+                    set_default: serde_json::Map::from_iter([(
+                        "diary".to_string(),
+                        serde_json::json!(["clobber"]),
+                    )]),
+                    unset: Vec::new(),
+                },
+                &projected,
+            )
+            .expect("reapply defaults");
+        assert_eq!(
+            state.rlm.snapshot().globals.get("diary"),
+            Some(&FlowValue::List(
+                vec![FlowValue::String("initial".into())].into()
+            ))
+        );
+    }
+
+    #[test]
+    fn set_default_rejects_projected_host_bindings() {
+        let mut state =
+            RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+        let projected =
+            serde_json::Map::from_iter([("current_query".to_string(), serde_json::json!("host"))]);
+
+        let err = state
+            .patch_globals(
+                &lash_rlm_types::RlmGlobalsPatchPluginBody {
+                    set: serde_json::Map::new(),
+                    set_default: serde_json::Map::from_iter([(
+                        "current_query".to_string(),
+                        serde_json::json!("bad"),
+                    )]),
+                    unset: Vec::new(),
+                },
+                &projected,
+            )
+            .expect_err("projected default should fail");
+        assert!(err.to_string().contains("read-only projected host binding"));
+
+        let err = state
+            .patch_globals(
+                &lash_rlm_types::RlmGlobalsPatchPluginBody {
+                    set: serde_json::Map::new(),
+                    set_default: serde_json::Map::from_iter([(
+                        "history".to_string(),
+                        serde_json::json!([]),
+                    )]),
+                    unset: Vec::new(),
+                },
+                &serde_json::Map::new(),
+            )
+            .expect_err("history default should fail");
+        assert!(err.to_string().contains("read-only projected host binding"));
+    }
+
+    #[test]
+    fn projected_scalar_bindings_are_read_only_and_not_snapshotted() {
+        block_on(async {
+            let mut state =
+                RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+            let mut projected = ProjectedBindings::new();
+            projected.insert(
+                "current_query",
+                ProjectedValue::value("current_query", FlowValue::String("host".into())),
+            );
+
+            let compiled = lashlang::compile_source(
+                "submit { chars: len(current_query), value: current_query }",
+            )
+            .expect("compile read");
+            let outcome = lashlang::execute_compiled_with_projected_bindings(
+                &compiled,
+                &mut state.rlm,
+                &NoopHost,
+                &projected,
+            )
+            .await
+            .expect("execute read");
+            let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
+                panic!("expected submitted record");
+            };
+            assert_eq!(record["chars"], FlowValue::Number(4.0));
+            assert_eq!(record["value"], FlowValue::String("host".into()));
+            assert!(state.rlm.snapshot().globals.get("current_query").is_none());
+
+            let compiled =
+                lashlang::compile_source("current_query = \"local\"").expect("compile write");
+            let failure = lashlang::execute_compiled_traced_with_projected_bindings(
+                &compiled,
+                &mut state.rlm,
+                &NoopHost,
+                &projected,
+            )
+            .await
+            .expect_err("projected write should fail");
+            assert!(
+                failure
+                    .error
+                    .to_string()
+                    .contains("read-only projected binding")
+            );
         });
     }
 }

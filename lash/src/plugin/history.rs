@@ -464,6 +464,7 @@ mod tests {
                         "answer".to_string(),
                         serde_json::json!(42),
                     )]),
+                    set_default: serde_json::Map::new(),
                     unset: Vec::new(),
                 }),
             )));

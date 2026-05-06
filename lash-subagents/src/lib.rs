@@ -16,7 +16,7 @@ pub use capability::{
 };
 
 use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
-use lash::{PluginSpec, PluginSpecFactory, PromptContribution, SessionPolicy, ToolProvider};
+use lash::{PluginSpec, PluginSpecFactory, SessionPolicy, ToolProvider};
 
 pub use host::{
     AgentMetadata, CloseAgentRequest, CloseAgentResponse, LocalSubagentHost, SpawnAgentRequest,
@@ -72,22 +72,11 @@ impl PluginFactory for SubagentsPluginFactory {
             None
         };
 
-        let prompt_contributions = if is_rlm {
-            rlm::rlm_subagent_prompt_contributions(&registry.names())
-        } else {
-            Vec::new()
-        };
         PluginSpecFactory::new(
             "subagents",
-            Arc::new(move |ctx| {
-                let contributions =
-                    subagent_prompt_contributions_for_context(ctx, &prompt_contributions);
-                let mut spec = PluginSpec::new()
-                    .with_prompt_contributor(Arc::new(move |_ctx| {
-                        let contributions = contributions.clone();
-                        Box::pin(async move { Ok(contributions) })
-                    }))
-                    .with_tool_surface_contributor(Arc::new(move |ctx| {
+            Arc::new(move |_ctx| {
+                let mut spec =
+                    PluginSpec::new().with_tool_surface_contributor(Arc::new(move |ctx| {
                         shared::subagent_surface_contribution(ctx)
                     }));
                 if let Some(provider) = provider.as_ref() {
@@ -100,28 +89,10 @@ impl PluginFactory for SubagentsPluginFactory {
     }
 }
 
-fn subagent_prompt_contributions_for_context(
-    ctx: &lash::plugin::PluginSessionContext,
-    full: &[PromptContribution],
-) -> Vec<PromptContribution> {
-    if tool_callable_from_authority(&ctx.tool_access, "spawn_agent") {
-        full.to_vec()
-    } else {
-        Vec::new()
-    }
-}
-
-fn tool_callable_from_authority(access: &lash::SessionToolAccess, name: &str) -> bool {
-    if access.hides(name) {
-        return false;
-    }
-    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name == name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     use crate::shared::{build_session_policy, build_spawn_create_request};
     use async_trait::async_trait;
@@ -410,86 +381,6 @@ mod tests {
             ToolDefinition::default_input_schema(),
             json!({ "type": "null" }),
         )
-    }
-
-    fn plugin_session_context_with_access(access: lash::SessionToolAccess) -> PluginSessionContext {
-        PluginSessionContext {
-            session_id: "child".to_string(),
-            execution_mode: lash::ExecutionMode::new("rlm"),
-            standard_context_approach: None,
-            tool_access: access,
-            subagent: None,
-            parent_session_id: Some("parent".to_string()),
-        }
-    }
-
-    #[test]
-    fn rlm_prompt_omits_guidance_when_spawn_is_unavailable() {
-        let mut hidden_tools = BTreeSet::new();
-        hidden_tools.insert("spawn_agent".to_string());
-        let ctx = plugin_session_context_with_access(lash::SessionToolAccess {
-            tools: vec![dummy_tool("read_file"), dummy_tool("continue_as")],
-            hidden_tools,
-        });
-
-        let contributions = subagent_prompt_contributions_for_context(
-            &ctx,
-            &rlm::rlm_subagent_prompt_contributions(&["explore".to_string()]),
-        );
-
-        assert!(contributions.is_empty());
-    }
-
-    #[test]
-    fn rlm_prompt_uses_full_subagent_guidance_when_spawn_is_available() {
-        let ctx = plugin_session_context_with_access(lash::SessionToolAccess {
-            tools: vec![dummy_tool("spawn_agent"), dummy_tool("continue_as")],
-            hidden_tools: BTreeSet::new(),
-        });
-
-        let contributions = subagent_prompt_contributions_for_context(
-            &ctx,
-            &rlm::rlm_subagent_prompt_contributions(&["explore".to_string(), "peer".to_string()]),
-        );
-
-        assert_eq!(contributions.len(), 1);
-        assert_eq!(contributions[0].title.as_deref(), Some("Subagents"));
-        assert!(!contributions[0].content.contains("llm_query"));
-        assert!(!contributions[0].content.contains("`continue_as`"));
-        assert!(contributions[0].content.contains("spawn_agent"));
-        assert!(contributions[0].content.contains("`explore` or `peer`"));
-        assert!(!contributions[0].content.contains("wait_agent"));
-    }
-
-    #[test]
-    fn rlm_prompt_only_mentions_registered_subagent_capabilities() {
-        let contributions = rlm::rlm_subagent_prompt_contributions(&["explore".to_string()]);
-
-        assert_eq!(contributions.len(), 1);
-        assert!(
-            contributions[0]
-                .content
-                .contains("Available subagent capability: `explore`")
-        );
-        assert!(!contributions[0].content.contains("peer"));
-    }
-
-    #[test]
-    fn rlm_prompt_omits_subagent_guidance_when_spawn_and_continue_are_unavailable() {
-        let mut hidden_tools = BTreeSet::new();
-        hidden_tools.insert("spawn_agent".to_string());
-        hidden_tools.insert("continue_as".to_string());
-        let ctx = plugin_session_context_with_access(lash::SessionToolAccess {
-            tools: vec![dummy_tool("read_file")],
-            hidden_tools,
-        });
-
-        let contributions = subagent_prompt_contributions_for_context(
-            &ctx,
-            &rlm::rlm_subagent_prompt_contributions(&["explore".to_string()]),
-        );
-
-        assert!(contributions.is_empty());
     }
 
     #[test]

@@ -8,6 +8,8 @@
 //! Split out of `plugin/mod.rs` for file size; `pub use` there keeps
 //! the outer module path.
 
+use std::sync::Arc;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -94,17 +96,36 @@ pub trait ModeSessionPlugin: Send + Sync {
 /// internals.
 pub struct ModeSessionContext<'a> {
     session_id: &'a str,
+    projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl<'a> ModeSessionContext<'a> {
     pub(crate) fn new(_session: &'a mut crate::Session, session_id: &'a str) -> Self {
-        Self { session_id }
+        Self {
+            session_id,
+            projected_rlm_globals: Arc::new(serde_json::Map::new()),
+        }
+    }
+
+    pub(crate) fn with_projected_rlm_globals(
+        _session: &'a mut crate::Session,
+        session_id: &'a str,
+        projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    ) -> Self {
+        Self {
+            session_id,
+            projected_rlm_globals,
+        }
     }
 
     /// ID of the session being initialized/restored. Equivalent to the
     /// `session_id` previously passed as a separate argument.
     pub fn session_id(&self) -> &str {
         self.session_id
+    }
+
+    pub fn projected_rlm_globals(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.projected_rlm_globals
     }
 }
 

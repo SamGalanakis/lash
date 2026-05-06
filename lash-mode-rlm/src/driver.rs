@@ -23,6 +23,7 @@ pub struct RlmProjectorConfig {
     pub max_output_chars: usize,
     pub max_budget_tokens: Option<usize>,
     pub last_prompt_usage: SharedPromptUsage,
+    pub prompt_features: crate::protocol::RlmPromptFeatures,
 }
 
 impl Default for RlmProjectorConfig {
@@ -31,6 +32,7 @@ impl Default for RlmProjectorConfig {
             max_output_chars: 10_000,
             max_budget_tokens: None,
             last_prompt_usage: Arc::new(RwLock::new(None)),
+            prompt_features: crate::protocol::RlmPromptFeatures::default(),
         }
     }
 }
@@ -59,7 +61,9 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
         tool_specs: Arc::new(Vec::new()),
         tool_names: tool_surface.tool_names(),
         omitted_tool_count,
-        execution_prompt: crate::protocol::rlm_execution_section(),
+        execution_prompt: crate::protocol::rlm_execution_section_with_features(
+            config.prompt_features,
+        ),
         prompt_contributions,
     }
 }

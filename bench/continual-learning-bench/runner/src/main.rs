@@ -16,7 +16,7 @@ use lash::{
     ToolExecutionMode, ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge, TurnInput,
     TurnInputInjectionBridge, TurnOutcome, diff_usage_reports,
 };
-use lash_harness_opt::clbench::{CLBENCH_MEMORY_GUIDANCE, DEFAULT_USER_DIRECTIVE};
+use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination};
 use lash_sqlite_store::Store;
@@ -159,7 +159,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         .stream_turn(
             TurnInput {
                 items: vec![InputItem::Text {
-                    text: DEFAULT_USER_DIRECTIVE.to_string(),
+                    text: clbench_turn_text(&request),
                 }],
                 image_blobs: Default::default(),
                 user_input: None,
@@ -208,6 +208,18 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
     })
 }
 
+fn clbench_turn_text(request: &RunnerRequest) -> String {
+    let mut text = String::from("Choose the next benchmark action.");
+    text.push_str("\n\n=== CURRENT QUERY ===\n\n");
+    text.push_str(&request.prompt);
+    text.push_str("\n\n=== CURRENT FEEDBACK ===\n\n");
+    match request.feedback.as_deref() {
+        Some(feedback) if !feedback.trim().is_empty() => text.push_str(feedback),
+        _ => text.push_str("null"),
+    }
+    text
+}
+
 fn build_plugin_session(
     execution_mode: ExecutionMode,
     policy: &SessionPolicy,
@@ -215,7 +227,15 @@ fn build_plugin_session(
     let clbench_tools = clbench_tool_definitions();
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(lash_mode_rlm::BuiltinRlmModePluginFactory::default()),
+        Arc::new(lash_mode_rlm::BuiltinRlmModePluginFactory::new(
+            lash_mode_rlm::RlmModePluginConfig {
+                prompt_features: lash_mode_rlm::RlmPromptFeatures {
+                    images: false,
+                    ..lash_mode_rlm::RlmPromptFeatures::default()
+                },
+                ..lash_mode_rlm::RlmModePluginConfig::default()
+            },
+        )),
         Arc::new(LlmToolsPluginFactory),
         Arc::new(StaticPluginFactory::new(
             "clbench_async_handles",
@@ -268,15 +288,19 @@ fn clbench_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         lash_llm_tools::llm_query_tool_definition(),
         lash_mode_rlm::continue_as_tool_definition(),
-        list_async_handles_tool_definition(),
+        clbench_list_async_handles_tool_definition(),
         lash_subagents::spawn_agent_tool_definition(&capabilities),
     ]
 }
 
 fn list_async_handles_tool_definition() -> ToolDefinition {
+    clbench_list_async_handles_tool_definition()
+}
+
+fn clbench_list_async_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
         "list_async_handles",
-        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted.",
+        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. In CLBench, use this to rediscover live `start call` handles after a handoff or long-running fan-out.",
         ToolDefinition::default_input_schema(),
         json!({
             "type": "object",
@@ -294,8 +318,9 @@ fn list_async_handles_tool_definition() -> ToolDefinition {
 
 fn build_globals_patch(request: &RunnerRequest) -> RlmGlobalsPatchPluginBody {
     let mut set = serde_json::Map::new();
+    let mut set_default = serde_json::Map::new();
     if request.init_diary {
-        set.insert("diary".to_string(), Value::Array(Vec::new()));
+        set_default.insert("diary".to_string(), Value::Array(Vec::new()));
     }
     set.insert("iteration".to_string(), json!(request.iteration));
     set.insert("current_query".to_string(), json!(request.prompt));
@@ -309,6 +334,7 @@ fn build_globals_patch(request: &RunnerRequest) -> RlmGlobalsPatchPluginBody {
     );
     RlmGlobalsPatchPluginBody {
         set,
+        set_default,
         unset: Vec::new(),
     }
 }

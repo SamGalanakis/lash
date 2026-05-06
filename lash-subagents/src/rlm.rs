@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash::{
-    ProgressSender, PromptContribution, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
-    ToolProvider, ToolResult,
+    ProgressSender, ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider,
+    ToolResult,
 };
 use serde_json::Value;
 
@@ -148,18 +148,6 @@ impl ToolProvider for RlmSubagentToolsProvider {
     }
 }
 
-pub(crate) fn rlm_subagent_prompt_contributions(
-    capability_names: &[String],
-) -> Vec<PromptContribution> {
-    let capability_guidance = capability_guidance_for_prompt(capability_names);
-    vec![PromptContribution::guidance(
-        "Subagents",
-        format!(
-            "Use `spawn_agent` when the subproblem needs an isolated context, multi-step exploration, cancellation, or fan-out within the capabilities available in this session. `spawn_agent` branches work and returns a result to the current session; use it when the parent should keep its current state and collect a focused result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes and returns the child result. `start call spawn_agent {{ ... }}` returns a generic lashlang async handle; resolve with `await` and cancel a live child subtree with `cancel handle`.\n\n{capability_guidance}\n\nAnti-patterns: don't spawn a subagent for a trivial check you can do inline; don't request capabilities not listed for `spawn_agent`.\n\n`output` defines the typed return shape. Pass either a record of scalar type descriptors (`{{ line: \"str\", length: \"int\" }}`) or a `Type {{ ... }}` literal. With `output` set the subagent ends with `submit <expr>` and the value flows straight into your bound variable. A child can fail terminally with `call submit_error {{ reason: \"...\" }}`; parent `spawn_agent` returns an error so `?` short-circuits naturally.\n\nIn user-facing prose, call them subagents, not delegates or child agents."
-        ),
-    )]
-}
-
 pub(crate) fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<ToolDefinition> {
     vec![spawn_agent_tool_definition(capability_names)]
 }
@@ -208,18 +196,6 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
         ToolExecutionMode::Serial,
     )
     .with_output_from_input_schema("output", None)
-}
-
-fn capability_guidance_for_prompt(capability_names: &[String]) -> String {
-    let cap_list = capability_list_for_description(capability_names);
-    if capability_names.len() == 1 {
-        return format!(
-            "Available subagent capability: {cap_list}. Use only this capability; unavailable capability names are rejected by the `spawn_agent` schema."
-        );
-    }
-    format!(
-        "Available subagent capabilities: {cap_list}. Choose from this list only; unavailable capability names are rejected by the `spawn_agent` schema."
-    )
 }
 
 fn capability_detail_for_tool_description(capability_names: &[String]) -> String {

@@ -47,9 +47,14 @@ impl LashRuntime {
         if let Some(session) = self.session.as_mut() {
             let mode_session = Arc::clone(session.plugins().mode_session());
             let session_id = self.state.session_id.clone();
+            let projected_rlm_globals = self.state.read_view().shared_rlm_globals();
             mode_session
                 .append_session_nodes(
-                    crate::plugin::ModeSessionContext::new(session, &session_id),
+                    crate::plugin::ModeSessionContext::with_projected_rlm_globals(
+                        session,
+                        &session_id,
+                        projected_rlm_globals,
+                    ),
                     &request.nodes,
                 )
                 .await?;

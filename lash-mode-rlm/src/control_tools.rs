@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use lash::session_model::{ModeEvent, SessionEventRecord};
 use lash::{
-    MessageRole, ModeExtras, PluginMessage, ProgressSender, PromptContribution, SessionAppendNode,
-    SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionStartPoint, SessionToolAccess,
-    ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    MessageRole, ModeExtras, PluginMessage, ProgressSender, SessionAppendNode,
+    SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionStartPoint, ToolDefinition,
+    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -118,16 +118,6 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
-pub(crate) fn prompt_contributions(tool_access: &SessionToolAccess) -> Vec<PromptContribution> {
-    if !tool_callable_from_authority(tool_access, "continue_as") {
-        return Vec::new();
-    }
-    vec![PromptContribution::guidance(
-        "RLM control",
-        "Use `continue_as` when context is tight or the current trajectory has gone stale. Pack `task` and `seed` with the concrete goal, constraints, paths, facts already learned, partial results, and next steps; leave failed attempts and bulky raw output behind.",
-    )]
-}
-
 fn continue_as_input_schema() -> Value {
     json!({
         "type": "object",
@@ -161,7 +151,7 @@ fn fresh_successor_request(
         plugin_mode: SessionPluginMode::Fresh,
         initial_nodes: Vec::new(),
         first_turn_input: None,
-        tool_access: SessionToolAccess::default(),
+        tool_access: lash::SessionToolAccess::default(),
         subagent: None,
         context_surface: lash::SessionContextSurface::default(),
         mode_extras,
@@ -176,7 +166,8 @@ fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<SessionAp
     vec![SessionAppendNode::event(SessionEventRecord::Mode(
         ModeEvent::rlm(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(
             lash_rlm_types::RlmGlobalsPatchPluginBody {
-                set: seed,
+                set: serde_json::Map::new(),
+                set_default: seed,
                 unset: Vec::new(),
             },
         )),
@@ -196,13 +187,6 @@ fn required_string(args: &Value, key: &str) -> Result<String, String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("missing required parameter: {key}"))
-}
-
-fn tool_callable_from_authority(access: &SessionToolAccess, name: &str) -> bool {
-    if access.hides(name) {
-        return false;
-    }
-    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name == name)
 }
 
 fn finalise_tool_result(result: Result<Value, String>) -> ToolResult {
@@ -398,8 +382,8 @@ mod tests {
         let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = mode_event.rlm_event() else {
             panic!("expected RlmGlobalsPatch");
         };
-        assert_eq!(seed.set["x"], json!(1));
-        assert_eq!(seed.set["query"], json!("original"));
+        assert_eq!(seed.set_default["x"], json!(1));
+        assert_eq!(seed.set_default["query"], json!("original"));
         let extras = request
             .mode_extras
             .decode::<RlmCreateExtras>(&lash::ExecutionMode::new("rlm"))
