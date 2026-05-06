@@ -933,7 +933,7 @@ print result
 
 fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
     match args.provider_id.as_str() {
-        "openai-compatible" | "openai-generic" => {
+        "openai-compatible" => {
             let api_key = resolve_api_key(args).ok_or_else(|| {
                 anyhow::anyhow!(
                     "missing API key for LongMemEval runner; set OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY in .env, or pass --api-key"
