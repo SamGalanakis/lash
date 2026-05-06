@@ -1,3 +1,14 @@
+//! Lashlang runtime: bytecode `Compiler`, executor `Vm`, value system,
+//! plus the long tail of free helpers (ops/format/json/access).
+//!
+//! `mod.rs` only owns the cross-cutting types (`RuntimeError`,
+//! `RuntimeFailure`, `ExecutionScratch`, `ExecutionOutcome`,
+//! `CompiledProgram`, `ProfileReport` + friends) and the `pub use` /
+//! `pub(crate) use` wiring that re-exports each focused submodule's items
+//! both publicly (for `lashlang::lib.rs`) and crate-internally (so
+//! sibling submodules can write `use super::*` without caring which
+//! file an item lives in).
+
 use crate::lexer::Span;
 use thiserror::Error;
 
@@ -212,10 +223,6 @@ impl ProfileStat {
         }
     }
 }
-
-
-
-
 /// Unwrap a `Value::Record` that carries the `$lash_type` marker back into the
 /// inner JSON-Schema value. Returns `None` when the value is not a wrapped
 /// Type literal.
@@ -226,9 +233,6 @@ pub fn unwrap_type_value(value: &Value) -> Option<&Value> {
     }
     record.get(LASH_TYPE_KEY)
 }
-
-
-
 
 
 
