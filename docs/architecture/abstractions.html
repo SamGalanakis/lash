@@ -39,8 +39,10 @@
               <thead><tr><th>Abstraction</th><th>Owner</th><th>Role</th></tr></thead>
               <tbody>
                 <tr><td><code>TurnMachine</code>, <code>Effect</code>, <code>Response</code></td><td><code>lash-sansio</code></td><td>Pure turn state machine and host-effect protocol.</td></tr>
+                <tr><td><code>TurnOutcome</code>, <code>TurnFinish</code>, <code>TurnStop</code></td><td><code>lash-sansio</code></td><td>Three-class turn result: <code>Finished{AssistantMessage|Submission}</code>, <code>Handoff{session_id}</code>, <code>Stopped{Cancelled|InvalidInput|MaxTurns|ToolFailure|ProviderError|PluginAbort|RuntimeError|SubmittedError{...}}</code>.</td></tr>
                 <tr><td><code>ModePreamble</code>, <code>ContextProjector</code>, <code>ProtocolDriverHandle</code></td><td><code>lash-sansio</code> + mode crates</td><td>Mode-specific prompt, request projection, and model-output interpretation.</td></tr>
                 <tr><td><code>LashRuntime</code>, <code>RuntimeEnvironment</code>, <code>Session</code></td><td><code>lash</code></td><td>Live async runtime, host services, and per-session tool/mode/prompt execution surface.</td></tr>
+                <tr><td><code>FollowedTurn</code>, <code>stream_turn_following_handoffs</code></td><td><code>lash/src/runtime</code></td><td>Drives a logical host turn through any <code>continue_as</code> handoffs and returns the chain of <code>AssembledTurn</code>s plus a convenient <code>final_turn()</code>.</td></tr>
                 <tr><td><code>SessionSnapshotHost</code>, <code>ToolCatalogHost</code>, <code>SessionLifecycleHost</code>, <code>TaskHost</code>, <code>DirectCompletionHost</code></td><td><code>lash/src/plugin/mod.rs</code> + <code>lash/src/runtime/session_manager/*</code></td><td>Focused runtime-host trait split implemented by <code>RuntimeSessionManager</code>.</td></tr>
                 <tr><td><code>TurnCommitPipeline</code>, <code>TurnProgress</code>, <code>TurnGraphOverlay</code></td><td><code>lash/src/runtime</code></td><td>Turn-scoped graph, checkpoint, usage, and read-state commit policy.</td></tr>
                 <tr><td><code>SessionGraph</code>, <code>SessionReadView</code>, <code>ChronologicalProjection</code></td><td><code>lash</code></td><td>Durable event storage, public read seam, and semantic timeline projection.</td></tr>
@@ -50,7 +52,9 @@
                 <tr><td><code>ToolDefinition</code>, <code>ToolSurface</code>, <code>ToolOutputContract</code></td><td><code>lash-sansio</code></td><td>Tool visibility, model schema, examples, compact docs, and dynamic return contracts.</td></tr>
                 <tr><td><code>PluginFactory</code>, <code>SessionPlugin</code>, <code>PluginRegistrar</code></td><td><code>lash/src/plugin</code></td><td>Plugin lifecycle and hook registration for tools, prompts, modes, runtime events, and external ops.</td></tr>
                 <tr><td><code>LlmToolsPluginFactory</code>, <code>DirectCompletionHost</code></td><td><code>lash-llm-tools</code> + <code>lash</code></td><td><code>llm_query</code> tool registration, output-schema handling, direct completion, and usage relay.</td></tr>
-                <tr><td><code>RlmControlToolsProvider</code></td><td><code>lash-mode-rlm/src/control_tools.rs</code></td><td>Mode-owned RLM control tools such as <code>continue_as</code>.</td></tr>
+                <tr><td><code>RlmControlToolsProvider</code></td><td><code>lash-mode-rlm/src/control_tools.rs</code></td><td>Mode-owned RLM control tools such as <code>continue_as</code>, which produces a <code>TurnOutcome::Handoff</code>.</td></tr>
+                <tr><td><code>ProjectedBindings</code>, <code>ProjectedValue</code>, <code>ProjectedHostValue</code>, <code>ProjectedRead</code></td><td><code>lashlang/src/runtime/mod.rs</code></td><td>Read-only bindings injected from the host into Lashlang scope. RLM uses this to expose <code>history</code> and other projected globals without copying them into VM <code>State</code>; <code>set</code>/<code>set_default</code> over a projected name is rejected at runtime.</td></tr>
+                <tr><td><code>ToolResultProjectionHook</code>, <code>BuiltinToolResultProjectionPluginFactory</code>, <code>ToolResultProjectionPluginConfig</code></td><td><code>lash/src/plugin/tool_result_projection_builtin.rs</code></td><td>Three-stage tool-result projector — <code>BeforeState</code>, <code>BeforeModel</code>, <code>BeforeHistory</code> — with <code>ToolResultProjectionMode::{Bytes, Tokens}</code> limits (defaults: 16 KiB, 400 lines).</td></tr>
                 <tr><td><code>ToolDiscoveryIndex</code>, <code>CatalogTool</code>, <code>llm_rerank_request</code></td><td><code>lash-plugin-tool-discovery/src/*</code></td><td>Search/load tool discovery pipeline split across catalog, provider, ranking, rerank, and schema-index modules.</td></tr>
                 <tr><td><code>UiTimeline</code>, <code>ActivityBlock</code>, <code>UiExtension</code></td><td><code>lash-cli</code> / <code>lash-ui</code></td><td>CLI render projection, tool activity display, and host-owned surface slots.</td></tr>
               </tbody>
@@ -111,6 +115,12 @@ flowchart LR
               <div>
                 <h3>Background work is handle-shaped.</h3>
                 <p>Monitors, subagents, and async tool calls are rediscovered through <code>list_async_handles</code>.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Host bindings are projected, not copied.</h3>
+                <p>RLM exposes <code>history</code> and any host globals to Lashlang via <code>ProjectedBindings</code>. They behave like ordinary names but cannot be reassigned, and the runtime prunes reserved projected names on snapshot restore so successor sessions never inherit a stale copy.</p>
               </div>
             </li>
           </ol>

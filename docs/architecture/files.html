@@ -40,7 +40,7 @@
                 <tr><td><code>lash/src/runtime/mod.rs</code></td><td><code>LashRuntime</code>, public runtime types, stream event contracts, and runtime module exports.</td></tr>
                 <tr><td><code>lash/src/runtime/builder.rs</code></td><td><code>EmbeddedRuntimeBuilder</code>; resolves store or initial state and constructs runtime services.</td></tr>
                 <tr><td><code>lash/src/runtime/lifecycle.rs</code></td><td>Runtime hydration, graph normalization, session creation, restore hooks, and parked/background runtime setup.</td></tr>
-                <tr><td><code>lash/src/runtime/turn_loop.rs</code></td><td>Host turn entrypoint: input normalization, plugin preparation, event stream, finalization, and commit handoff.</td></tr>
+                <tr><td><code>lash/src/runtime/turn_loop.rs</code></td><td>Host turn entrypoint: input normalization, plugin preparation, event stream, finalization, commit handoff, and the <code>stream_turn_following_handoffs</code> chain driver.</td></tr>
                 <tr><td><code>lash/src/runtime/turn_driver.rs</code></td><td>Effect loop: provider calls, native tools, Lashlang execution, checkpoints, progress, streaming, and final output assembly.</td></tr>
                 <tr><td><code>lash/src/runtime/turn_commit_pipeline.rs</code></td><td>Turn-scoped persistence policy, checkpoint boundaries, graph deltas, read view generation, and final commit.</td></tr>
                 <tr><td><code>lash/src/runtime/session_manager.rs</code></td><td><code>RuntimeSessionManager</code> capability bundle: current session, managed sessions, background tasks, usage, prompt, and direct completion.</td></tr>
@@ -49,6 +49,8 @@
                 <tr><td><code>lash/src/chronological.rs</code></td><td>Derived semantic projection over active messages, tool calls, RLM steps, and image references.</td></tr>
                 <tr><td><code>lash/src/store.rs</code></td><td><code>RuntimePersistence</code>, graph commit types, checkpoint/blob contracts, usage report types, tombstones, vacuum, and GC interfaces.</td></tr>
                 <tr><td><code>lash-sqlite-store/src/lib.rs</code></td><td>Concrete SQLite runtime store for graph nodes, session heads, blobs, checkpoints, usage ledger, tombstones, vacuum, and GC.</td></tr>
+                <tr><td><code>lash/src/plugin/mod.rs</code></td><td>Plugin lifecycle traits, focused host capabilities (snapshot, lifecycle, turn, task, monitor, prompt, trace, direct completion), and the tool-result projection contract.</td></tr>
+                <tr><td><code>lash/src/plugin/tool_result_projection_builtin.rs</code></td><td>Built-in tool-result projector: <code>BeforeState</code>/<code>BeforeModel</code>/<code>BeforeHistory</code> hook registration plus byte/token budgets and head/tail line trimming.</td></tr>
                 <tr><td><code>lash-embed/src/lib.rs</code></td><td>App-facing embedding API for managed chats, runtime construction, parking, resume, and session interaction.</td></tr>
               </tbody>
             </table>
@@ -89,9 +91,10 @@
               <thead><tr><th>Path</th><th>Responsibility</th></tr></thead>
               <tbody>
                 <tr><td><code>lash-mode-standard/src/lib.rs</code></td><td>Standard mode protocol driver, native tool-call handling, and Standard-only <code>batch</code> tool.</td></tr>
-                <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>RLM execution instructions and shared Lashlang language reference used by prompt tests.</td></tr>
-                <tr><td><code>lash-mode-rlm/src/driver.rs</code></td><td>RLM protocol driver, chat-shaped chronological context projection, rolling history cache breakpoints, image references, and final submission handling.</td></tr>
-                <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td><code>RlmExecutionState</code>, <code>HostBridge</code>, tool execution, snapshot/restore, and image conversion.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>RLM execution instructions, <code>RlmPromptFeatures</code>, shared Lashlang language reference, and chat-shaped context projection used by prompt tests.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/driver.rs</code></td><td><code>build_rlm_preamble</code>, <code>RlmProjectorConfig</code>, rolling history cache breakpoints, image references, and final submission handling.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td><code>RlmExecutionState</code>, projected host bindings (including <code>history</code>), <code>HostBridge</code>, tool execution, snapshot/restore, and image conversion.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/stream_mask.rs</code></td><td>Plugin that masks the still-streaming <code>lashlang</code> fence from live UI projection until execution finalizes.</td></tr>
                 <tr><td><code>lash-subagents/src/rlm.rs</code></td><td>RLM-facing <code>spawn_agent</code> definitions, subagent output contracts, capability prompt text, and submit-error handling.</td></tr>
                 <tr><td><code>lash-llm-tools/src/lib.rs</code></td><td><code>llm_query</code> plugin, direct completion request handling, output-schema parsing, and usage relay.</td></tr>
                 <tr><td><code>lash-mode-rlm/src/control_tools.rs</code></td><td>RLM control tools, including <code>continue_as</code> and handoff/session continuation behavior.</td></tr>
@@ -107,8 +110,10 @@
                 <tr><td><code>lash-trace/src/lib.rs</code></td><td>Trace schema version 2, JSONL records, trace context, and sinks.</td></tr>
                 <tr><td><code>bench/continual-learning-bench/runner/src/main.rs</code></td><td>Rust CLBench runner: embeds <code>LashRuntime</code>, registers the constrained RLM tool surface, validates submissions, and records cost deltas.</td></tr>
                 <tr><td><code>bench/continual-learning-bench/lash_system/system.py</code></td><td>Python CLBench adapter that shells into the Rust runner and preserves run/session artifacts.</td></tr>
-                <tr><td><code>lash-harness-opt/src/lib.rs</code></td><td>General harness optimization primitives and the reflective GEPA strategy used by experiment and evaluation workflows.</td></tr>
-                <tr><td><code>lash-autoresearch/src/runtime.rs</code></td><td>Autoresearch plugin/runtime extension with hidden tools and research-oriented UI integration.</td></tr>
+                <tr><td><code>lash-harness-opt/src/lib.rs</code></td><td>General harness optimization primitives (<code>Candidate</code>, <code>HarnessProject</code>, <code>HarnessRunner</code>, <code>HarnessOptimizer</code>, <code>SqliteHarnessStore</code>), the <code>strategies::gepa</code> reflective strategy, and the <code>clbench</code> project binding.</td></tr>
+                <tr><td><code>lash-harness-opt/src/main.rs</code></td><td><code>lash-harness-opt</code> CLI: <code>optimize</code>, <code>check</code>, and <code>stats</code> subcommands per project.</td></tr>
+                <tr><td><code>lash-autoresearch/src/runtime.rs</code></td><td>Autoresearch plugin factory with hidden research tools.</td></tr>
+                <tr><td><code>lash-autoresearch/src/ui.rs</code></td><td>Autoresearch UI extension exposing research-oriented surfaces in the CLI.</td></tr>
               </tbody>
             </table>
           </div>

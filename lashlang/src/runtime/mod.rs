@@ -286,7 +286,7 @@ impl ProjectedValue {
 
     async fn get_index(&self, index: &Value) -> Result<Value, RuntimeError> {
         match &self.kind {
-            ProjectedKind::Scalar(value) => read_index_direct((**value).clone(), index.clone()),
+            ProjectedKind::Scalar(value) => read_index_ref_direct(value, index),
             ProjectedKind::Custom(value) => match value.get_index(index.clone()).await {
                 ProjectedRead::Missing => Ok(Value::Null),
                 ProjectedRead::Value(value) => Ok(value),
@@ -296,7 +296,7 @@ impl ProjectedValue {
 
     async fn get_field(&self, field: &Name) -> Result<Value, RuntimeError> {
         match &self.kind {
-            ProjectedKind::Scalar(value) => read_field_direct((**value).clone(), field),
+            ProjectedKind::Scalar(value) => read_field_ref_direct(value, field),
             ProjectedKind::Custom(value) => match value.get_field(field.text.clone()).await {
                 ProjectedRead::Missing => Ok(Value::Null),
                 ProjectedRead::Value(value) => Ok(value),
@@ -925,6 +925,10 @@ enum Instruction {
     Submit,
     Pop,
     BeginIter(usize),
+    BeginRangeIter {
+        binding: usize,
+        argc: usize,
+    },
     IterNext {
         jump_to: usize,
     },
@@ -1018,7 +1022,9 @@ impl Instruction {
             Instruction::Print => InstructionProfileTag::Print,
             Instruction::Submit => InstructionProfileTag::Submit,
             Instruction::Pop => InstructionProfileTag::Pop,
-            Instruction::BeginIter(_) => InstructionProfileTag::BeginIter,
+            Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. } => {
+                InstructionProfileTag::BeginIter
+            }
             Instruction::IterNext { .. } => InstructionProfileTag::IterNext,
             Instruction::EndIter => InstructionProfileTag::EndIter,
             Instruction::ParallelCalls(_) => InstructionProfileTag::Parallel,
@@ -1739,33 +1745,28 @@ impl Compiler {
                 iterable,
                 body,
             } => {
-                self.compile_expr(iterable);
                 let binding = self.push_slot(binding);
+                if let Expr::BuiltinCall { name, args } = iterable
+                    && name.as_str() == "range"
+                {
+                    for arg in args {
+                        self.compile_expr(arg);
+                    }
+                    self.clear_const_slots();
+                    self.set_const_slot(binding, None);
+                    self.code.push(Instruction::BeginRangeIter {
+                        binding,
+                        argc: args.len(),
+                    });
+                    self.compile_for_loop_body(body);
+                    return;
+                }
+
+                self.compile_expr(iterable);
                 self.clear_const_slots();
                 self.set_const_slot(binding, None);
                 self.code.push(Instruction::BeginIter(binding));
-                let loop_start = self.code.len();
-                let iter_next = self.code.len();
-                self.code.push(Instruction::IterNext {
-                    jump_to: usize::MAX,
-                });
-                self.loop_contexts.push(LoopContext {
-                    continue_target: loop_start,
-                    break_jumps: SmallVec::new(),
-                });
-                self.compile_block(body);
-                let loop_context = self
-                    .loop_contexts
-                    .pop()
-                    .expect("loop context should exist while compiling `for`");
-                self.code.push(Instruction::Jump(loop_start));
-                let loop_end = self.code.len();
-                self.code.push(Instruction::EndIter);
-                self.patch_jump(iter_next, loop_end);
-                for break_jump in loop_context.break_jumps {
-                    self.patch_jump(break_jump, loop_end);
-                }
-                self.clear_const_slots();
+                self.compile_for_loop_body(body);
             }
             Stmt::Break => {
                 let jump = self.emit_jump();
@@ -1798,6 +1799,31 @@ impl Compiler {
                 self.code.push(Instruction::Submit);
             }
         }
+    }
+
+    fn compile_for_loop_body(&mut self, body: &[Stmt]) {
+        let loop_start = self.code.len();
+        let iter_next = self.code.len();
+        self.code.push(Instruction::IterNext {
+            jump_to: usize::MAX,
+        });
+        self.loop_contexts.push(LoopContext {
+            continue_target: loop_start,
+            break_jumps: SmallVec::new(),
+        });
+        self.compile_block(body);
+        let loop_context = self
+            .loop_contexts
+            .pop()
+            .expect("loop context should exist while compiling `for`");
+        self.code.push(Instruction::Jump(loop_start));
+        let loop_end = self.code.len();
+        self.code.push(Instruction::EndIter);
+        self.patch_jump(iter_next, loop_end);
+        for break_jump in loop_context.break_jumps {
+            self.patch_jump(break_jump, loop_end);
+        }
+        self.clear_const_slots();
     }
 
     fn compile_parallel_calls(&mut self, branches: &[Stmt]) -> Option<Vec<ParallelCallBranch>> {
@@ -2032,8 +2058,13 @@ impl Compiler {
                     "push" => Builtin::Push,
                     _ => return None,
                 };
-                let _ = (builtin, values);
-                None
+                match builtin {
+                    Builtin::Range => execute_range_builtin(&values).ok(),
+                    _ => {
+                        let _ = values;
+                        None
+                    }
+                }
             }
             Expr::Field { target, field } => {
                 let target = self.fold_compile_time_expr(target)?;
@@ -3298,8 +3329,17 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let iterable = self.pop_stack()?;
                 let values = iterable_values(iterable).await?;
                 self.iter_stack.push(IterState {
-                    values,
-                    index: 0,
+                    cursor: IterCursor::List { values, index: 0 },
+                    binding,
+                    restore: self.slots.capture_temporary(binding),
+                });
+            }
+            Instruction::BeginRangeIter { binding, argc } => {
+                let start_index = self.stack_drain_start(argc)?;
+                let (start, end) = range_bounds(&self.stack[start_index..])?;
+                self.stack.truncate(start_index);
+                self.iter_stack.push(IterState {
+                    cursor: IterCursor::Range { next: start, end },
                     binding,
                     restore: self.slots.capture_temporary(binding),
                 });
@@ -3310,14 +3350,12 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                         message: "missing loop state".to_string(),
                     });
                 };
-                if iter_state.index >= iter_state.values.len() {
+                let Some(value) = iter_state.cursor.next_value() else {
                     self.ip = jump_to;
-                } else {
-                    let value = iter_state.values[iter_state.index].clone();
-                    iter_state.index += 1;
-                    self.slots
-                        .assign(iter_state.binding, value, &self.chunk.slot_names)?;
-                }
+                    return Ok(VmStep::Continue);
+                };
+                self.slots
+                    .assign(iter_state.binding, value, &self.chunk.slot_names)?;
             }
             Instruction::EndIter => {
                 if let Some(iter_state) = self.iter_stack.pop() {
@@ -4297,10 +4335,34 @@ type HostBatchItemResult = Result<Value, ToolHostError>;
 type HostBatchResults<const N: usize> = SmallVec<[HostBatchItemResult; N]>;
 
 struct IterState {
-    values: Arc<[Value]>,
-    index: usize,
+    cursor: IterCursor,
     binding: usize,
     restore: LoopRestore,
+}
+
+enum IterCursor {
+    List { values: Arc<[Value]>, index: usize },
+    Range { next: i64, end: i64 },
+}
+
+impl IterCursor {
+    fn next_value(&mut self) -> Option<Value> {
+        match self {
+            Self::List { values, index } => {
+                let value = values.get(*index)?.clone();
+                *index += 1;
+                Some(value)
+            }
+            Self::Range { next, end } => {
+                if *next >= *end {
+                    return None;
+                }
+                let value = *next;
+                *next += 1;
+                Some(Value::Number(value as f64))
+            }
+        }
+    }
 }
 
 struct LoopRestore {
@@ -4750,9 +4812,12 @@ async fn execute_builtin(
         }
         Builtin::ToString => {
             expect_arg_count("to_string", values, 1)?;
-            Ok(Value::String(
-                stringify_value_async(&values[0]).await?.into(),
-            ))
+            let value = if value_contains_projected(&values[0]) {
+                stringify_value_async(&values[0]).await?
+            } else {
+                stringify_value_direct(&values[0])?
+            };
+            Ok(Value::String(value.into()))
         }
         Builtin::ToInt => {
             expect_arg_count("to_int", values, 1)?;
@@ -4900,6 +4965,11 @@ fn execute_join_builtin(items: &Value, sep: &Value) -> Result<Value, RuntimeErro
 }
 
 fn execute_range_builtin(values: &[Value]) -> Result<Value, RuntimeError> {
+    let (start, end) = range_bounds(values)?;
+    build_range(start, end)
+}
+
+fn range_bounds(values: &[Value]) -> Result<(i64, i64), RuntimeError> {
     let (start, end) = match values {
         [end] => (0, as_range_bound(end)?),
         [start, end] => (as_range_bound(start)?, as_range_bound(end)?),
@@ -4909,7 +4979,8 @@ fn execute_range_builtin(values: &[Value]) -> Result<Value, RuntimeError> {
             });
         }
     };
-    build_range(start, end)
+    validate_range_len(start, end)?;
+    Ok((start, end))
 }
 
 fn execute_push_builtin(list: &Value, item: Value) -> Result<Value, RuntimeError> {
@@ -4946,15 +5017,8 @@ fn as_range_bound(value: &Value) -> Result<i64, RuntimeError> {
 }
 
 fn build_range(start: i64, end: i64) -> Result<Value, RuntimeError> {
-    const MAX_RANGE_ITEMS: i64 = 1_000_000;
     if start >= end {
         return Ok(Value::List(Vec::new().into()));
-    }
-    let len = end as i128 - start as i128;
-    if len > MAX_RANGE_ITEMS as i128 {
-        return Err(RuntimeError::ValueError {
-            message: format!("`range` would create more than {MAX_RANGE_ITEMS} items"),
-        });
     }
     Ok(Value::List(
         (start..end)
@@ -4962,6 +5026,20 @@ fn build_range(start: i64, end: i64) -> Result<Value, RuntimeError> {
             .collect::<Vec<_>>()
             .into(),
     ))
+}
+
+fn validate_range_len(start: i64, end: i64) -> Result<(), RuntimeError> {
+    const MAX_RANGE_ITEMS: i64 = 1_000_000;
+    if start >= end {
+        return Ok(());
+    }
+    let len = end as i128 - start as i128;
+    if len > MAX_RANGE_ITEMS as i128 {
+        return Err(RuntimeError::ValueError {
+            message: format!("`range` would create more than {MAX_RANGE_ITEMS} items"),
+        });
+    }
+    Ok(())
 }
 
 fn read_field_ref_direct(value: &Value, field: &Name) -> Result<Value, RuntimeError> {
@@ -5073,27 +5151,31 @@ async fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> 
 }
 
 fn read_index_direct(target: Value, index: Value) -> Result<Value, RuntimeError> {
+    read_index_ref_direct(&target, &index)
+}
+
+fn read_index_ref_direct(target: &Value, index: &Value) -> Result<Value, RuntimeError> {
     match target {
         Value::List(values) => {
-            let idx = resolve_index(&index, values.len())?;
+            let idx = resolve_index(index, values.len())?;
             Ok(idx
                 .and_then(|idx| values.get(idx).cloned())
                 .unwrap_or(Value::Null))
         }
         Value::String(value) => {
-            let idx = resolve_index(&index, value.chars().count())?;
+            let idx = resolve_index(index, value.chars().count())?;
             Ok(idx
                 .and_then(|idx| value.chars().nth(idx))
                 .map(|ch| Value::String(ch.to_string().into()))
                 .unwrap_or(Value::Null))
         }
         Value::Record(record) => Ok(record
-            .get(coerce_string(&index)?.as_ref())
+            .get(coerce_string(index)?.as_ref())
             .cloned()
             .unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
-            message: format!("can't index {}", value_type_name(&target)),
+            message: format!("can't index {}", value_type_name(target)),
         }),
     }
 }
@@ -5605,11 +5687,21 @@ async fn stringify_value_async(value: &Value) -> Result<String, RuntimeError> {
 }
 
 fn stringify_value(value: &Value) -> Result<String, RuntimeError> {
-    futures_executor::block_on(stringify_value_async(value))
+    if value_contains_projected(value) {
+        futures_executor::block_on(stringify_value_async(value))
+    } else {
+        stringify_value_direct(value)
+    }
 }
 
 fn stringify_value_blocking(value: &Value) -> Result<String, RuntimeError> {
     stringify_value(value)
+}
+
+fn stringify_value_direct(value: &Value) -> Result<String, RuntimeError> {
+    let mut output = String::new();
+    append_stringified_value_direct(&mut output, value)?;
+    Ok(output)
 }
 
 fn append_stringified_value_direct(output: &mut String, value: &Value) -> Result<(), RuntimeError> {
@@ -5622,7 +5714,7 @@ fn append_stringified_value_direct(output: &mut String, value: &Value) -> Result
         }
         Value::Projected(_) => unreachable!("projected values require async stringification"),
         Value::Image(_) | Value::List(_) | Value::Record(_) => output.push_str(
-            &serde_json::to_string(&to_json_blocking(value))
+            &serde_json::to_string(&to_json_direct(value))
                 .expect("value json serialization should succeed"),
         ),
     }
@@ -5666,6 +5758,17 @@ fn value_type_name(value: &Value) -> &'static str {
         Value::List(_) => "list",
         Value::Record(_) => "record",
         Value::Projected(value) => value.value_type_name(),
+    }
+}
+
+fn value_contains_projected(value: &Value) -> bool {
+    match value {
+        Value::Projected(_) => true,
+        Value::List(values) => values.iter().any(value_contains_projected),
+        Value::Record(record) => record.values().any(value_contains_projected),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Image(_) => {
+            false
+        }
     }
 }
 
@@ -6123,11 +6226,38 @@ fn to_json_async<'a>(value: &'a Value) -> ProjectedFuture<'a, serde_json::Value>
 }
 
 fn to_json(value: &Value) -> serde_json::Value {
-    futures_executor::block_on(to_json_async(value))
+    if value_contains_projected(value) {
+        futures_executor::block_on(to_json_async(value))
+    } else {
+        to_json_direct(value)
+    }
 }
 
 fn to_json_blocking(value: &Value) -> serde_json::Value {
     to_json(value)
+}
+
+fn to_json_direct(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(value) => serde_json::Value::Bool(*value),
+        Value::Number(value) => json_number(*value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::String(value) => serde_json::Value::String(value.to_string()),
+        Value::Image(image) => image_to_json(image),
+        Value::List(values) => {
+            serde_json::Value::Array(values.iter().map(to_json_direct).collect())
+        }
+        Value::Record(record) => {
+            let mut object = serde_json::Map::with_capacity(record.len());
+            for (key, value) in record.iter() {
+                object.insert(key.to_string(), to_json_direct(value));
+            }
+            serde_json::Value::Object(object)
+        }
+        Value::Projected(_) => unreachable!("projected values require async json conversion"),
+    }
 }
 
 fn image_to_json(image: &ImageValue) -> serde_json::Value {

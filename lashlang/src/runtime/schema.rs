@@ -1,4 +1,8 @@
-use super::{RuntimeError, Value, unwrap_type_value};
+use super::{
+    RuntimeError, Value,
+    record::{Symbol, intern_symbol},
+    unwrap_type_value,
+};
 use smallvec::SmallVec;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -25,6 +29,7 @@ enum CompiledSchemaKind {
 
 #[derive(Clone)]
 struct CompiledSchemaField {
+    symbol: Symbol,
     name: Arc<str>,
     schema: CompiledSchema,
 }
@@ -118,6 +123,7 @@ pub(super) fn compile_schema_value(schema: &Value) -> CompiledSchema {
                     .iter()
                     .filter_map(|field| match field {
                         Value::String(name) => Some(CompiledSchemaField {
+                            symbol: intern_symbol(name.as_str()),
                             name: Arc::<str>::from(name.as_str()),
                             schema: CompiledSchema {
                                 kind: CompiledSchemaKind::Any,
@@ -134,6 +140,7 @@ pub(super) fn compile_schema_value(schema: &Value) -> CompiledSchema {
                     .entries
                     .iter()
                     .map(|entry| CompiledSchemaField {
+                        symbol: entry.symbol,
                         name: entry.name.clone(),
                         schema: compile_schema_value(&entry.value),
                     })
@@ -286,8 +293,11 @@ fn validate_compiled_schema_node<'a>(
             properties,
         } => {
             validate_compiled_schema_type(value, SchemaType::Object, path)?;
+            let Value::Record(record) = value else {
+                return Ok(());
+            };
             for field in required.iter() {
-                if schema_record_field(value, field.name.as_ref()).is_none() {
+                if record.get_symbol(field.symbol).is_none() {
                     return Err(format!(
                         "{}: missing required field `{}`",
                         format_schema_path(path),
@@ -296,9 +306,9 @@ fn validate_compiled_schema_node<'a>(
                 }
             }
             for field in properties.iter() {
-                if let Some(field_value) = schema_record_field(value, field.name.as_ref()) {
+                if let Some(field_value) = record.get_symbol(field.symbol) {
                     path.push(PathSegment::Field(field.name.as_ref()));
-                    validate_compiled_schema_node(&field_value, &field.schema, path)?;
+                    validate_compiled_schema_node(field_value, &field.schema, path)?;
                     path.pop();
                 }
             }

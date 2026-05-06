@@ -32,7 +32,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Runtime Shape</h2>
-            <p><code>LashRuntime</code> holds the live session registry and delegates narrowly: sans-IO computes protocol effects, plugins contribute behavior, providers complete requests, and persistence records durable turn results.</p>
+            <p><code>LashRuntime</code> holds the live session registry, the managed-sessions map, the active handoff continuation table, the pending first-turn input queue, and a usage ledger. Sans-IO computes protocol effects, plugins contribute behavior, providers complete requests, and persistence records durable turn results.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Runtime composition</div>
@@ -83,6 +83,43 @@ flowchart TD
               </tbody>
             </table>
           </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Turn Outcomes And Handoffs</h2>
+            <p>A turn finishes as one of three outcomes. Hosts that just want the final answer call <code>stream_turn_following_handoffs</code> and read <code>FollowedTurn::final_turn()</code>; hosts that need the full intermediate trajectory call <code>stream_turn</code> and observe each <code>TurnOutcome</code>.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Outcome</th><th>Shape</th><th>Meaning</th></tr></thead>
+              <tbody>
+                <tr><td><code>TurnOutcome::Finished</code></td><td><code>TurnFinish::AssistantMessage { text }</code> or <code>TurnFinish::Submission { channel_id, value }</code></td><td>The turn produced a final answer, either as plain assistant text or as a typed schema submission.</td></tr>
+                <tr><td><code>TurnOutcome::Handoff</code></td><td><code>{ session_id }</code></td><td>RLM <code>continue_as</code> opened a successor session with a fresh window. The runtime queues the packed <code>{ task, seed }</code> as that session's first turn input.</td></tr>
+                <tr><td><code>TurnOutcome::Stopped</code></td><td><code>TurnStop::{Cancelled, InvalidInput, MaxTurns, ToolFailure, ProviderError, PluginAbort, RuntimeError, SubmittedError{...}}</code></td><td>The turn ended without a clean answer. <code>SubmittedError</code> carries the validator-rejected value so hosts can surface it.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Tool Result Projection</h2>
+            <p>The built-in projector enforces budgeted views of tool output across three hook sites so the durable graph, the live model prompt, and rolled-up history each see consistent, bounded content.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Tool result projection hooks</div>
+            <div class="mermaid">
+flowchart LR
+  Tools["Tool dispatch ToolResult"] --> BeforeState["BeforeState projector"]
+  BeforeState --> Graph["SessionGraph storage"]
+  Tools --> BeforeModel["BeforeModel projector"]
+  BeforeModel --> Provider["next LlmRequest"]
+  Tools --> BeforeHistory["BeforeHistory projector"]
+  BeforeHistory --> History["chronological / rolling history"]
+            </div>
+          </div>
+          <p>Defaults: <code>ToolResultProjectionMode::Bytes</code> at 16 KiB and 400 lines, configurable via <code>ToolResultProjectionPluginConfig</code>. RLM piggybacks on the same projector for its <code>print</code> observations.</p>
         </div>
 
         <div class="section">
