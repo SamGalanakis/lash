@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HTML Exporter - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<style>
+  /* Inline samples of the exporter's two edge treatments. Tokens come from
+     architecture/styles.css; only layout/composition rules live here. */
+
+  .sample-frame {
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--form-raised), var(--form-deep));
+    padding: var(--space-xl);
+    margin-top: var(--space-md);
+    overflow: hidden;
+  }
+
+  /* ── handoff sample ── */
+  .sample-handoff {
+    position: relative;
+    padding: var(--space-lg) 0 var(--space-xl);
+  }
+  .sample-handoff::before,
+  .sample-handoff::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--line-strong) 12%, var(--line-strong) 88%, transparent);
+  }
+  .sample-handoff::before { top: 0; }
+  .sample-handoff::after { bottom: 0; }
+  .sample-banner {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+    align-items: center;
+    margin-bottom: var(--space-sm);
+    gap: 0;
+  }
+  .sample-glyph {
+    text-align: right;
+    padding-right: var(--space-sm);
+    font-family: var(--font-display);
+    font-size: 22px;
+    line-height: 1;
+    color: var(--sodium);
+    border-right: 1px solid var(--line);
+    align-self: stretch;
+    display: grid;
+    align-content: center;
+  }
+  .sample-title {
+    padding-left: var(--space-sm);
+    display: grid;
+    gap: 2px;
+  }
+  .sample-eyebrow {
+    font-family: var(--font-ui);
+    text-transform: uppercase;
+    letter-spacing: 0.28em;
+    font-size: 10px;
+    color: var(--sodium);
+    font-weight: 700;
+  }
+  .sample-summary {
+    font-family: var(--font-display);
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--chalk);
+    line-height: 1.15;
+  }
+  .sample-route {
+    display: grid;
+    grid-auto-flow: column;
+    gap: var(--space-xs);
+    align-items: baseline;
+    font-family: var(--font-ui);
+    font-size: 11px;
+    color: var(--ash-text);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .sample-route .id { color: var(--chalk-mid); letter-spacing: 0.04em; }
+  .sample-route .id-cur { color: var(--sodium); letter-spacing: 0.04em; }
+  .sample-route .arrow { color: var(--sodium); }
+  .sample-body {
+    margin-left: 56px;
+    padding-left: var(--space-sm);
+    border-left: 1px solid var(--line);
+    display: grid;
+    gap: var(--space-md);
+  }
+  .sample-task {
+    font-family: var(--font-body);
+    font-size: 1rem;
+    line-height: 1.6;
+    color: var(--chalk);
+    margin: 0;
+    padding: var(--space-sm) 0 0;
+    max-width: 70ch;
+  }
+  .sample-task::before {
+    content: "task";
+    display: block;
+    font-family: var(--font-ui);
+    text-transform: uppercase;
+    letter-spacing: 0.24em;
+    font-size: 10px;
+    color: var(--ash-text);
+    margin-bottom: var(--space-2xs);
+  }
+  .sample-seed-label {
+    font-family: var(--font-ui);
+    text-transform: uppercase;
+    letter-spacing: 0.24em;
+    font-size: 10px;
+    color: var(--ash-text);
+  }
+  .sample-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2xs);
+    margin-top: var(--space-2xs);
+  }
+  .sample-pill {
+    display: inline-grid;
+    grid-auto-flow: column;
+    gap: 6px;
+    align-items: baseline;
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    background: var(--form);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--chalk-mid);
+    letter-spacing: 0.04em;
+  }
+  .sample-pill .name { color: var(--chalk); font-weight: 600; }
+  .sample-pill .kind {
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 9px;
+    color: var(--ash-text);
+  }
+  .sample-pill[data-kind="projected"] { border-color: oklch(0.74 0.155 65 / 0.32); }
+  .sample-pill[data-kind="projected"] .kind { color: var(--sodium); }
+  .sample-pill[data-kind="global"] .kind { color: var(--lichen); }
+  .sample-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+    font-family: var(--font-ui);
+    font-size: 12px;
+    color: var(--chalk-mid);
+    padding-top: var(--space-2xs);
+    border-top: 1px solid var(--line);
+  }
+  .sample-stat {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--space-2xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .sample-stat + .sample-stat::before {
+    content: "·";
+    color: var(--ash-mid);
+    margin-right: var(--space-md);
+    margin-left: calc(-1 * var(--space-md));
+  }
+  .sample-stat .key {
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 10px;
+    color: var(--ash-text);
+  }
+  .sample-stat .val {
+    color: var(--chalk);
+    font-weight: 600;
+  }
+
+  /* ── drill-in card sample ── */
+  .sample-drill {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-md);
+    align-items: stretch;
+    padding: var(--space-md) var(--space-md) var(--space-md) 0;
+    background: var(--form);
+    border: 1px solid var(--line);
+    color: inherit;
+    font-family: inherit;
+    width: 100%;
+    text-align: left;
+    cursor: default;
+  }
+  .sample-drill-left {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr);
+    gap: 0;
+    min-width: 0;
+  }
+  .sample-drill-rail {
+    text-align: right;
+    padding-right: var(--space-sm);
+    border-right: 1px solid var(--line);
+    font-family: var(--font-ui);
+    font-size: 16px;
+    color: var(--lichen);
+    align-self: stretch;
+    display: grid;
+    align-content: center;
+  }
+  .sample-drill-content {
+    padding-left: var(--space-sm);
+    display: grid;
+    gap: var(--space-2xs);
+    min-width: 0;
+  }
+  .sample-drill-eyebrow {
+    font-family: var(--font-ui);
+    text-transform: uppercase;
+    letter-spacing: 0.28em;
+    font-size: 10px;
+    color: var(--lichen);
+    font-weight: 700;
+  }
+  .sample-drill-title {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--chalk);
+    line-height: 1.18;
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--space-xs);
+  }
+  .sample-drill-title .cap {
+    color: var(--chalk-mid);
+    font-weight: 500;
+  }
+  .sample-drill-title::after {
+    content: "→";
+    color: var(--lichen);
+    font-weight: 500;
+  }
+  .sample-drill-task {
+    font-family: var(--font-body);
+    font-size: 0.96rem;
+    line-height: 1.5;
+    color: var(--chalk-mid);
+    margin: 0;
+    max-width: 64ch;
+  }
+  .sample-drill-pills {
+    display: flex;
+    gap: var(--space-2xs);
+    flex-wrap: wrap;
+    margin-top: var(--space-2xs);
+  }
+  .sample-drill-pill {
+    font-family: var(--font-ui);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ash-text);
+    border: 1px solid var(--line);
+    padding: 2px 8px;
+    background: var(--form-deep);
+  }
+  .sample-drill-pill[data-kind="status"] { color: var(--lichen); }
+  .sample-drill-pill .pk { color: var(--ash-text); margin-right: 6px; }
+  .sample-drill-pill .pv { color: var(--chalk-mid); letter-spacing: 0.04em; text-transform: none; }
+  .sample-drill-right {
+    display: grid;
+    grid-template-rows: auto auto;
+    gap: var(--space-2xs);
+    align-items: end;
+    padding-left: var(--space-md);
+    border-left: 1px solid var(--line);
+    text-align: right;
+  }
+  .sample-drill-route {
+    font-family: var(--font-ui);
+    font-size: 13px;
+    color: var(--chalk);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .sample-drill-route .arrow { color: var(--ash-text); margin-right: 4px; font-weight: 400; }
+  .sample-drill-duration {
+    font-family: var(--font-ui);
+    font-size: 10px;
+    color: var(--ash-text);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── breadcrumb sample ── */
+  .sample-crumb {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2xs);
+    flex-wrap: wrap;
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--line);
+    background: var(--form);
+    font-family: var(--font-ui);
+    font-size: 12px;
+    color: var(--chalk-dim);
+    letter-spacing: 0.04em;
+  }
+  .sample-crumb-eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.28em;
+    font-size: 10px;
+    color: var(--ash-text);
+    margin-right: var(--space-xs);
+  }
+  .sample-crumb-eyebrow .slash { color: var(--sodium); margin: 0 var(--space-2xs); }
+  .sample-crumb-step {
+    color: var(--chalk-mid);
+    padding: 2px 4px;
+  }
+  .sample-crumb-step.is-current {
+    color: var(--chalk);
+    font-weight: 600;
+  }
+  .sample-crumb-step .id {
+    color: var(--ash-text);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    margin-left: 6px;
+  }
+  .sample-crumb-sep {
+    color: var(--ash-mid);
+    padding: 0 2px;
+  }
+
+  /* ── live demo iframe ── */
+  .demo-frame {
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    min-height: 720px;
+    border: 1px solid var(--line);
+    background: var(--form-deep);
+    display: block;
+    margin-top: var(--space-md);
+  }
+  .demo-meta {
+    display: flex;
+    gap: var(--space-md);
+    align-items: baseline;
+    font-family: var(--font-ui);
+    font-size: 11px;
+    color: var(--ash-text);
+    margin-top: var(--space-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+  }
+  .demo-meta a {
+    color: var(--sodium);
+    text-decoration: none;
+    border-bottom: 1px dashed transparent;
+  }
+  .demo-meta a:hover { border-bottom-color: var(--sodium); }
+
+  /* ── two-up edge comparison ── */
+  .edge-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-md);
+  }
+  @media (max-width: 1040px) {
+    .edge-grid { grid-template-columns: 1fr; }
+    .sample-drill { grid-template-columns: 1fr; }
+    .sample-drill-right {
+      border-left: none;
+      border-top: 1px solid var(--line);
+      padding: var(--space-sm) 0 0 0;
+      text-align: left;
+      grid-template-rows: auto auto;
+    }
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <aside class="sidebar" aria-label="Architecture navigation">
+        <a class="sidebar__exit" href="../index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Architecture</span>
+            <span class="sidebar__current">HTML Exporter</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./overview.html">Overview</a></li>
+            <li><a href="./modules.html">Modules</a></li>
+            <li><a href="./flow.html">Data Flow</a></li>
+            <li><a href="./execution.html">Execution</a></li>
+            <li><a href="./runtime.html">Runtime</a></li>
+            <li><a href="./abstractions.html">Abstractions</a></li>
+            <li><a href="./deps.html">Dependencies</a></li>
+            <li><a href="./lashlang.html">Lashlang</a></li>
+            <li><a class="active" href="./html-exporter.html">HTML Exporter</a></li>
+          </ol>
+        </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
+          <ol>
+            <li><a href="#two-edge-model">The two-edge model</a></li>
+            <li><a href="#inline-handoff-seam">Inline handoff seam</a></li>
+            <li><a href="#subagent-drill-in-card">Subagent drill-in card</a></li>
+            <li><a href="#breadcrumb-and-lineage">Breadcrumb &amp; lineage</a></li>
+            <li><a href="#live-demo">Live demo</a></li>
+            <li><a href="#implementation-map">Implementation map</a></li>
+            <li><a href="#source-map">Source map</a></li>
+          </ol>
+        </nav>
+      </aside>
+      <header class="hero">
+        <div class="eyebrow">Architecture chapter 09</div>
+        <h1>html<span class="slash">/</span>exporter</h1>
+        <p>The trace exporter renders one persisted lash session — or a tree of sessions joined by <code>continue_as</code> handoffs and <code>spawn_agent</code> subagents — into a single self-contained HTML document. The visual language matches the rest of the docs (warm-iron / fast-amber). The forensic affordance is two-edge-aware: handoffs are linear seams in the same view; subagents are drill-in cards into their own full view.</p>
+      </header>
+
+      <section class="content">
+        <div class="section" id="two-edge-model">
+          <div class="section-header">
+            <h2>The two-edge model</h2>
+            <p>Both <code>continue_as</code> and <code>spawn_agent</code> create new sessions on disk with <code>parent_session_id</code> set, but they are semantically and visually different — flattening them under one shape is what made the previous exporter feel wrong. Lash's runtime distinguishes them as <code>SessionRelation::Handoff</code> and <code>SessionRelation::Child</code>; the exporter mirrors that distinction in the rendered surface.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Edge</th>
+                  <th>Tool</th>
+                  <th>Cardinality</th>
+                  <th>Lifecycle</th>
+                  <th>Visual treatment</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Handoff</strong></td>
+                  <td><code>continue_as</code></td>
+                  <td>1 → 1 terminal</td>
+                  <td>Parent ends; successor takes over with <code>seed</code> and <code>task</code>.</td>
+                  <td><strong>Inline divider.</strong> The successor's entries continue in the same view, behind a sodium-bracketed seam that names the seam.</td>
+                </tr>
+                <tr>
+                  <td><strong>Subagent</strong></td>
+                  <td><code>spawn_agent</code></td>
+                  <td>1 → N blocking</td>
+                  <td>Parent waits for the child to submit, then resumes.</td>
+                  <td><strong>Drill-in card.</strong> Click into the subagent's own full view (same hero, same controls). Breadcrumb tracks the path back.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section" id="inline-handoff-seam">
+          <div class="section-header">
+            <h2>Inline handoff seam</h2>
+            <p>Continue_as is linear, so the natural reading is one transcript that crosses session boundaries. The seam is a full-width band with sodium hairlines top and bottom, the task in display type, the seed broken into <em>projected</em> vs <em>global</em> entries, and a hairline-divided stat strip — the four pieces of state the reader needs to understand what was carried forward and what was left behind.</p>
+          </div>
+          <div class="sample-frame">
+            <div class="sample-handoff">
+              <div class="sample-banner">
+                <div class="sample-glyph">↪</div>
+                <div class="sample-title">
+                  <span class="sample-eyebrow">↪ continued as</span>
+                  <span class="sample-summary">Synthesise the audit into a ranked compliance plan.</span>
+                </div>
+                <div class="sample-route">
+                  <span class="id">s1·a47e</span>
+                  <span class="arrow">→</span>
+                  <span class="id-cur">s4·e51a</span>
+                </div>
+              </div>
+              <div class="sample-body">
+                <p class="sample-task">Take the auth-file inventory and the migration summary; produce a single ranked list of compliance touchpoints. Each item gets a one-line rationale and an effort estimate. Stop when the list is &lt; 12 items.</p>
+                <div>
+                  <span class="sample-seed-label">seed · 4 entries</span>
+                  <div class="sample-pills">
+                    <span class="sample-pill" data-kind="projected"><span class="name">problem</span><span class="kind">projected</span></span>
+                    <span class="sample-pill" data-kind="global"><span class="name">auth_files</span><span class="kind">global · 4 paths</span></span>
+                    <span class="sample-pill" data-kind="global"><span class="name">migration_summary</span><span class="kind">global · 1.4k</span></span>
+                    <span class="sample-pill" data-kind="global"><span class="name">findings</span><span class="kind">global · 12 entries</span></span>
+                  </div>
+                </div>
+                <div class="sample-stats">
+                  <span class="sample-stat"><span class="key">parent ctx</span><span class="val">78%</span></span>
+                  <span class="sample-stat"><span class="key">seed</span><span class="val">2.8 kb</span></span>
+                  <span class="sample-stat"><span class="key">turns</span><span class="val">8</span></span>
+                  <span class="sample-stat"><span class="key">reason</span><span class="val">continue_as</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section" id="subagent-drill-in-card">
+          <div class="section-header">
+            <h2>Subagent drill-in card</h2>
+            <p>Spawn_agent is blocking but its result is a separate unit of work. Inlining the child transcript inside the parent's tool entry would force a width-cascade and lose the subagent's full hero / controls / minimap. Instead, the exporter renders the spawn_agent call as a click-through card and gives the subagent its own view. The lichen accent keeps the child visually subordinate to the sodium handoff seam.</p>
+          </div>
+          <div class="sample-frame">
+            <div class="sample-drill">
+              <div class="sample-drill-left">
+                <div class="sample-drill-rail">▾</div>
+                <div class="sample-drill-content">
+                  <span class="sample-drill-eyebrow">▾ subagent · spawn_agent</span>
+                  <span class="sample-drill-title">db_migrations <span class="cap">· explore</span></span>
+                  <p class="sample-drill-task">Summarise <code>migrations/</code> schema changes since v3. Flag any change that touches identity, session, or token columns.</p>
+                  <div class="sample-drill-pills">
+                    <span class="sample-drill-pill" data-kind="status">ok</span>
+                    <span class="sample-drill-pill"><span class="pk">turns</span><span class="pv">5</span></span>
+                    <span class="sample-drill-pill"><span class="pk">spawned</span><span class="pv">1 · migration_v5</span></span>
+                    <span class="sample-drill-pill"><span class="pk">tokens</span><span class="pv">7.8k</span></span>
+                  </div>
+                </div>
+              </div>
+              <div class="sample-drill-right">
+                <span class="sample-drill-route"><span class="arrow">→</span>s3·d23f</span>
+                <span class="sample-drill-duration">22.7s</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section" id="breadcrumb-and-lineage">
+          <div class="section-header">
+            <h2>Breadcrumb &amp; lineage</h2>
+            <p>The breadcrumb is the primary "where am I" affordance — sticky at the top of the viewport so navigation context never scrolls away. It shows the lineage from root through any subagents the reader has drilled into. The separator is a quiet ash <code>›</code>; sodium-tinted arrows are reserved for the lineage strip's actual edge glyphs (<code>↪</code>, <code>▾</code>) one row down, so the two bars don't compete for the same accent.</p>
+          </div>
+          <div class="sample-frame">
+            <div class="sample-crumb">
+              <span class="sample-crumb-eyebrow">lash <span class="slash">/</span> trace</span>
+              <span class="sample-crumb-step">root <span class="id">s1·a47e</span></span>
+              <span class="sample-crumb-sep">›</span>
+              <span class="sample-crumb-step">db_migrations <span class="id">s3·d23f</span></span>
+              <span class="sample-crumb-sep">›</span>
+              <span class="sample-crumb-step is-current">migration_v5 <span class="id">s3a·772b</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section" id="live-demo">
+          <div class="section-header">
+            <h2>Live demo</h2>
+            <p>An end-to-end mockup with three views (<code>root</code> → <code>db_migrations</code> → <code>migration_v5</code>) backed by synthetic but realistic content. Click any drill-in card or breadcrumb step to navigate. Browser <em>back</em> works through <code>history.pushState</code>. Resize the iframe to see responsive behavior.</p>
+          </div>
+          <iframe class="demo-frame"
+                  src="../trace-export-edges.html"
+                  title="lash trace exporter — live demo"
+                  loading="lazy"></iframe>
+          <div class="demo-meta">
+            <span>open</span>
+            <a href="../trace-export-edges.html" target="_blank" rel="noopener">trace-export-edges.html ↗</a>
+            <span>·</span>
+            <span>scroll inside the frame to see the inlined handoff successor</span>
+          </div>
+        </div>
+
+        <div class="section" id="implementation-map">
+          <div class="section-header">
+            <h2>Implementation map</h2>
+            <p>The renderer is additive — single-session export still works as it always did. Multi-session detection is automatic.</p>
+          </div>
+          <ol class="principle-list">
+            <li>
+              <h3>Tree discovery</h3>
+              <p>Given a root <code>.db</code> path and a trace JSONL, <code>tree::load_tree_from_paths</code> scans the sessions directory, keeps every store reachable through <code>parent_session_id</code> chains, partitions <code>LlmPromptSnapshot</code>s by <code>context.session_id</code>, and classifies each child by inspecting the parent's chronological for the matching tool call: <code>spawn_agent</code> ⇒ <code>NodeRelation::Subagent</code>, <code>continue_as</code> ⇒ <code>NodeRelation::Handoff</code>, otherwise fall back to <code>Subagent</code> (handoff is rare and <code>continue_as</code> always emits the successor's session id). No schema change to the on-disk store.</p>
+            </li>
+            <li>
+              <h3>View topology</h3>
+              <p>A <strong>view</strong> is a chain of sessions joined by handoffs; the root and every subagent are heads of their own views. <code>html::write_view</code> walks the chain and writes one <code>&lt;section class="view"&gt;</code> per head, with successor entries inlined behind handoff dividers and <code>spawn_agent</code> calls converted into drill-in cards that target the subagent's view.</p>
+            </li>
+            <li>
+              <h3>View switching</h3>
+              <p>Each view is rendered up-front and toggled by a tiny IIFE that reads <code>window.__lashTraceTree</code> (a serialized list of <code>{id, label, sid, parent}</code>, one entry per view head — root and each subagent — not one per session; <code>id</code> and <code>parent</code> are view IDs, <code>sid</code> is the head session's short id). Click handlers on <code>[data-go]</code> elements (drill-in cards, breadcrumb segments, lineage pills) call <code>history.pushState</code> and swap the active <code>.view</code>. The browser back button does the right thing through <code>popstate</code>.</p>
+            </li>
+            <li>
+              <h3>Visual discipline</h3>
+              <p>Sodium is reserved for the active edge — handoff seams, the breadcrumb's current step, the user's intent. Lichen marks the subagent affordance — drill rails, drill arrows, child status pills. Filter chips read as quiet chalk by default and gain a sodium strikethrough only when the user has actively filtered something off, so the controls strip never floods the page with accent. Ash structural lines do everything else.</p>
+            </li>
+          </ol>
+        </div>
+
+        <div class="section" id="source-map">
+          <div class="section-header">
+            <h2>Source map</h2>
+            <p>Single self-contained HTML; tokens, fonts, CSS, and JS all inlined.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3><code>lash-export/src/tree.rs</code></h3><p>Tree discovery and edge classification. Returns a <code>LoadedSessionTree</code> with one <code>LoadedSessionNode</code> per discovered session; each carries its own chronological projection, partitioned LLM prompts, and the list of subagent edges anchored by parent <code>call_id</code>.</p></article>
+            <article class="panel"><h3><code>lash-export/src/html.rs</code></h3><p><code>render_tree</code> is the multi-view entry point. <code>write_view</code>, <code>write_view_hero</code>, <code>write_lineage</code>, <code>render_handoff_divider</code>, and <code>render_drill_card</code> own the new visual elements; the existing message/tool/RLM-step renderers are reused unchanged.</p></article>
+            <article class="panel"><h3><code>lash-export/src/html_assets/style.css</code></h3><p>Tokens are appended at the bottom under "multi-view: breadcrumb, lineage, drill, handoff". The base trace stylesheet stays intact for single-session exports; multi-view rules only activate when the page contains <code>.view</code> sections.</p></article>
+            <article class="panel"><h3><code>lash-export/src/html_assets/script.js</code></h3><p>The view-switcher IIFE at the bottom reads <code>window.__lashTraceTree</code>, wires <code>[data-go]</code> click handlers, renders the breadcrumb, and listens for <code>popstate</code>. It exits cleanly if the tree global is absent (single-session export).</p></article>
+          </div>
+        </div>
+
+        <nav class="section-nav" aria-label="Chapter navigation">
+          <a href="./lashlang.html"><span>Previous chapter</span><strong>08 · Lashlang</strong></a>
+          <a href="./index.html"><span>Index</span><strong>Architecture chapters</strong></a>
+        </nav>
+      </section>
+
+      <footer class="footer">Trace export render path for cross-session edges.</footer>
+    </main>
+  </div>
+</body>
+</html>

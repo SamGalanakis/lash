@@ -28,7 +28,7 @@ repos:
       - id: cargo-clippy-lash
         name: cargo clippy (lash)
         language: system
-        entry: cargo clippy --fix --allow-dirty --allow-staged --manifest-path lash/Cargo.toml -- -D warnings
+        entry: cargo clippy --manifest-path lash/Cargo.toml -- -D warnings
         files: '^lash/.*\.rs$'
         pass_filenames: false
 
@@ -36,7 +36,7 @@ repos:
       - id: cargo-clippy-cli
         name: cargo clippy (lash-cli)
         language: system
-        entry: cargo clippy --fix --allow-dirty --allow-staged --manifest-path lash-cli/Cargo.toml -- -D warnings
+        entry: cargo clippy --manifest-path lash-cli/Cargo.toml -- -D warnings
         files: '^lash-cli/.*\.rs$'
         pass_filenames: false
 

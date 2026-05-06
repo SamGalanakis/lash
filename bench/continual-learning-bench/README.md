@@ -71,6 +71,11 @@ Each turn passes CLBench's current `response_schema` into RLM as the required
 `submit` schema, so the model receives runtime feedback if `submit <value>` does
 not match the benchmark step.
 
+`spawn_agent` and `continue_as` both accept a `seed:` channel — each entry is
+routed by lashlang source kind: projected sources land as host-projected
+bindings on the child, regular vars land as RLM globals, computed values
+default to global. See `bench/longcot/README.md` for examples.
+
 ## Requirements
 
 - `uv`

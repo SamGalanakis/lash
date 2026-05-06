@@ -10,12 +10,13 @@
 use std::collections::HashSet;
 
 use lash::plugin::PluginError;
+use lash::tools::unwrap_projected_arg;
 use lash::{
     InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy,
     SessionStartPoint, SessionToolAccess, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
     ToolProvider, ToolResult, ToolSurfaceContribution, TurnInput,
 };
-use lash_rlm_types::RlmTermination;
+use lash_rlm_types::{ClassifiedSeed, RlmTermination};
 use serde_json::{Value, json};
 
 use crate::capability::{
@@ -113,6 +114,7 @@ pub(crate) async fn build_spawn_create_request(
     context: &ToolExecutionContext,
     capability_name: &str,
     output_schema: Option<Value>,
+    seed: ClassifiedSeed,
 ) -> Result<SessionCreateRequest, String> {
     let current_snapshot = context
         .host
@@ -126,6 +128,12 @@ pub(crate) async fn build_spawn_create_request(
     {
         policy.execution_mode = lash::ExecutionMode::new("rlm");
     }
+    if !seed.projected.is_empty() && policy.execution_mode != lash::ExecutionMode::new("rlm") {
+        return Err(format!(
+            "projected seed is RLM-only; child capability `{capability_name}` runs in `{}` mode",
+            policy.execution_mode.plugin_id()
+        ));
+    }
     let mut mode_extras = ModeExtras::default();
     if policy.execution_mode == lash::ExecutionMode::new("rlm") {
         let termination = match output_schema.clone() {
@@ -135,9 +143,17 @@ pub(crate) async fn build_spawn_create_request(
             },
             None => RlmTermination::default(),
         };
+        let projected_seed = if seed.projected.is_empty() {
+            None
+        } else {
+            Some(seed.projected.clone())
+        };
         mode_extras = ModeExtras::typed(
             lash::ExecutionMode::new("rlm"),
-            lash_rlm_types::RlmCreateExtras { termination },
+            lash_rlm_types::RlmCreateExtras {
+                termination,
+                projected_seed,
+            },
         )
         .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
     }
@@ -155,6 +171,9 @@ pub(crate) async fn build_spawn_create_request(
         tools: tools_for_surface(&spec.tool_surface, output_schema),
         hidden_tools: hidden_tools.into_iter().collect(),
     };
+    if !seed.globals.is_empty() {
+        request.initial_nodes = lash_mode_rlm::rlm_seed_initial_nodes(seed.globals);
+    }
     Ok(request)
 }
 
@@ -188,6 +207,7 @@ pub(crate) fn render_task_prompt(task: &str, output_schema: Option<&Value>) -> S
 
 pub(crate) fn required_string(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
+        .map(unwrap_projected_arg)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -263,7 +283,12 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
             "agent_name": { "type": "string" },
             "task": { "type": "string" },
             "capability": { "type": "string", "enum": enum_values },
-            "output": { "type": "object", "additionalProperties": true }
+            "output": { "type": "object", "additionalProperties": true },
+            "seed": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Optional record of state to seed into the child. Each entry's kind is preserved automatically: if its lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), the child receives it as a read-only projected binding; otherwise it lands as a regular RLM global. Computed values default to global. Children inherit nothing else from the parent — pass everything they need explicitly."
+            }
         },
         "required": ["agent_name", "task", "capability"],
         "additionalProperties": false

@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub(super) struct CompiledSchema {
+pub(crate) struct CompiledSchema {
     kind: CompiledSchemaKind,
 }
 
@@ -45,7 +45,7 @@ enum SchemaType {
     Null,
 }
 
-pub(super) fn execute_validate_builtin(
+pub(crate) fn execute_validate_builtin(
     value: Value,
     schema: &Value,
 ) -> Result<Value, RuntimeError> {
@@ -62,7 +62,7 @@ fn execute_validate_schema(value: Value, schema: &Value) -> Result<Value, Runtim
     Ok(value)
 }
 
-pub(super) fn execute_compiled_validate(
+pub(crate) fn execute_compiled_validate(
     value: Value,
     schema: &CompiledSchema,
 ) -> Result<Value, RuntimeError> {
@@ -75,7 +75,7 @@ pub(super) fn execute_compiled_validate(
     Ok(value)
 }
 
-pub(super) fn compile_schema_value(schema: &Value) -> CompiledSchema {
+pub(crate) fn compile_schema_value(schema: &Value) -> CompiledSchema {
     let Some(schema_obj) = schema.as_record() else {
         return CompiledSchema {
             kind: CompiledSchemaKind::Any,

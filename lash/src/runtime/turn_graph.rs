@@ -669,12 +669,12 @@ mod tests {
             read_model
                 .active_events
                 .iter()
-                .map(|event| std::mem::discriminant(event))
+                .map(std::mem::discriminant)
                 .collect::<Vec<_>>(),
             materialized
                 .active_events
                 .iter()
-                .map(|event| std::mem::discriminant(event))
+                .map(std::mem::discriminant)
                 .collect::<Vec<_>>()
         );
         assert_eq!(

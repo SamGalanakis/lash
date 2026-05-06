@@ -203,6 +203,83 @@ fn is_true(value: &bool) -> bool {
 pub struct RlmCreateExtras {
     #[serde(default)]
     pub termination: RlmTermination,
+    /// Optional projected-binding seed for the new session. Each entry becomes
+    /// a host-projected (read-only) binding visible in the child's RLM
+    /// system-prompt under `Host Projected Variables`. Used by `spawn_agent`
+    /// and `continue_as` when the parent passes a projected source via `seed:`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_seed: Option<RlmProjectedSeedSnapshot>,
+}
+
+/// Wire-format snapshot of a set of projected bindings. Pairs of
+/// `(name, json_value)` that get re-projected as host bindings on the child
+/// session at creation time. This is the serializable form of
+/// `lash_mode_rlm::RlmProjectedBindings`; lash-rlm-types stays free of any
+/// runtime dependency on lashlang itself.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct RlmProjectedSeedSnapshot {
+    pub entries: Vec<(String, serde_json::Value)>,
+}
+
+impl RlmProjectedSeedSnapshot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, name: impl Into<String>, value: serde_json::Value) {
+        self.entries.push((name.into(), value));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Classified `seed:` argument: each entry has been routed to either the
+/// projected-bindings snapshot (if its lashlang source was a projected
+/// binding, encoded as a single-key `{"__projected__": <inner>}` object) or
+/// the regular RLM-globals patch.
+#[derive(Default, Debug, Clone)]
+pub struct ClassifiedSeed {
+    pub projected: RlmProjectedSeedSnapshot,
+    pub globals: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Reserved JSON key used as the canonical wire encoding for
+/// `lashlang::Value::Projected` across the lashlang→host bridge. When the
+/// model passes a projected source as a tool argument, lashlang serializes it
+/// as `{"__projected__": <inner>}`.
+pub const PROJECTED_JSON_TAG: &str = "__projected__";
+
+/// Returns the inner JSON value if `value` is the canonical projection wrapper
+/// (a single-key object whose key is [`PROJECTED_JSON_TAG`]), else `None`.
+pub fn projection_inner(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    let obj = value.as_object()?;
+    if obj.len() != 1 {
+        return None;
+    }
+    obj.get(PROJECTED_JSON_TAG)
+}
+
+/// Walk a `seed:` JSON object and split each entry by lashlang-source kind.
+/// Projected sources (encoded `{"__projected__": <inner>}`) land in the
+/// snapshot; everything else lands in the globals map. Returns an empty
+/// classification when no seed is provided. Errors on a non-object value.
+pub fn classify_seed(args: &serde_json::Value) -> Result<ClassifiedSeed, String> {
+    let raw = match args.get("seed") {
+        None | Some(serde_json::Value::Null) => return Ok(ClassifiedSeed::default()),
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => return Err("`seed` must be a record/dict".to_string()),
+    };
+    let mut out = ClassifiedSeed::default();
+    for (name, value) in raw.iter() {
+        if let Some(inner) = projection_inner(value) {
+            out.projected.push(name.clone(), inner.clone());
+        } else {
+            out.globals.insert(name.clone(), value.clone());
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Debug)]

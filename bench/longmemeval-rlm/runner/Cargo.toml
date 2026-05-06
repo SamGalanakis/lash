@@ -11,7 +11,6 @@ path = "src/main.rs"
 [dependencies]
 lash = { path = "../../../lash", default-features = false, features = ["full"] }
 lash-mode-rlm = { path = "../../../lash-mode-rlm" }
-lash-rlm-types = { path = "../../../lash-rlm-types" }
 lash-sqlite-store = { path = "../../../lash-sqlite-store" }
 lash-llm-tools = { path = "../../../lash-llm-tools" }
 lash-plugin-observational-memory = { path = "../../../lash-plugin-observational-memory" }

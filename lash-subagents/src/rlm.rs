@@ -40,11 +40,13 @@ impl RlmSubagentToolsProvider {
             return Err(unknown_capability_message(&capability_name, &self.registry));
         }
         let output_schema = lash_llm_tools::parse_output_schema(args.get("output"))?;
+        let seed = lash_rlm_types::classify_seed(args)?;
         let create_request = build_spawn_create_request(
             &self.registry,
             context,
             &capability_name,
             output_schema.clone(),
+            seed,
         )
         .await?;
         let turn_input = turn_input_for_task(render_task_prompt(&task, output_schema.as_ref()));
@@ -174,6 +176,11 @@ pub fn spawn_agent_tool_definition(capability_names: &[String]) -> ToolDefinitio
                 r#"b = start call spawn_agent {{ agent_name: "db_migrations", task: "Summarise migrations/ schema changes since v3", capability: "{example_capability}", output: {{ summary: "str" }} }}"#
             ),
             r#"results = parallel { auth: (await a)?, db: (await b)? }"#.into(),
+            // seed: pass projected source through to the child as a projected
+            // binding; pass plain values as RLM globals on the child.
+            format!(
+                r#"answer = (call spawn_agent {{ agent_name: "extract", task: "Solve sub-problem 3 using the bound problem text and the running findings.", capability: "{example_capability}", seed: {{ problem: input.prompt, findings: findings }}, output: {{ value: "int" }} }})?"#
+            ),
             // Untyped is fine for free-form prose results.
             format!(
                 r#"prose = call spawn_agent {{ agent_name: "audit_endpoints", task: "Skim the routes in api/ and flag any missing auth checks", capability: "{example_capability}" }}"#
@@ -186,7 +193,9 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     let cap_list = capability_list_for_description(capability_names);
     let capability_detail = capability_detail_for_tool_description(capability_names);
     let description = format!(
-        "Run a subagent and return its final result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes. Use `start call spawn_agent {{ ... }}` for fan-out; it returns a generic lashlang async handle immediately. Pick `capability` from {cap_list}. {capability_detail} `output` defines the typed return shape. A child can fail terminally with `call submit_error {{ reason: \"...\" }}`; this tool returns an error with that reason. `agent_name` is auto-normalized."
+        "Run a subagent and return its final result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes. Use `start call spawn_agent {{ ... }}` for fan-out; it returns a generic lashlang async handle immediately. Pick `capability` from {cap_list}. {capability_detail} `output` defines the typed return shape. \
+        \n\nThe child starts with **no** inherited state — globals, projected bindings, message history are all blank. Hand it specific data via `seed: {{ name: value, ... }}`. Each entry's kind is preserved automatically: if `value`'s lashlang source root is a host-projected binding (e.g. `seed: {{ problem: input.prompt }}`) the child receives `problem` as a read-only projected binding, identical to how it appeared on the parent. Otherwise it lands as a regular RLM global. Computed expressions default to global. Projected seed entries require an RLM child; passing one to a non-RLM capability is an error.\
+        \n\nA child can fail terminally with `call submit_error {{ reason: \"...\" }}`; this tool returns an error with that reason. `agent_name` is auto-normalized."
     );
     tool_definition(
         "spawn_agent",

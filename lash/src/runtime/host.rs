@@ -415,7 +415,6 @@ pub struct RuntimeCoreConfig {
     pub trace_context: TraceContext,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
-    pub retry_policy: lash_sansio::RetryPolicy,
     /// Host-owned destination for refreshed OAuth credentials. When
     /// `Some`, lash writes refreshed provider tokens here so they
     /// persist across runs. When `None`, token refresh succeeds but
@@ -437,7 +436,6 @@ impl Default for RuntimeCoreConfig {
             trace_context: TraceContext::default(),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
-            retry_policy: lash_sansio::RetryPolicy::default(),
             credential_store_path: None,
         }
     }
@@ -503,11 +501,6 @@ impl RuntimeCoreConfig {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.termination = termination;
-        self
-    }
-
-    pub fn with_retry_policy(mut self, policy: lash_sansio::RetryPolicy) -> Self {
-        self.retry_policy = policy;
         self
     }
 

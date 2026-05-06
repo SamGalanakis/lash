@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use async_trait::async_trait;
 use base64::Engine;
 use serde::Deserialize;
@@ -5,21 +7,25 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use lash::SchemaProjectionOverride;
 use lash::llm::streaming::{drive_sse_response, emit_progress};
 use lash::llm::timeouts::{
     build_http_client, read_response_text, request_body_snapshot_bytes, response_start_timeout,
     send_request,
 };
-use lash::llm::transport::LlmTransportError;
+use lash::llm::transport::{LlmTransportError, ProviderFailureKind};
 use lash::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
-    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta,
-    ResponseTextPhase,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse,
+    LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
 };
 use lash::provider::{
     AgentModelSelection, NoopProviderAuth, NoopProviderReadiness, ProviderComponents,
     ProviderFactory, ProviderModelPolicy, ProviderOptions, ProviderState, ProviderTransport,
     VariantRequestConfig,
+};
+use lash_openai_schema::{
+    OpenAiSchemaProfile, SchemaProjectionError, project_schema, project_structured_output,
+    project_tool_parameters,
 };
 
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -27,42 +33,12 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_REASONING_VARIANTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh"];
 
-fn emit_provider_trace(
-    tx: Option<&lash::llm::types::LlmProviderTraceSender>,
-    provider: &'static str,
-    raw: &str,
-) {
-    let Some(tx) = tx else {
-        return;
-    };
-    let event_name = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .or_else(|| value.get("event"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "provider_event".to_string());
-    tx.send(LlmProviderTraceEvent {
-        provider,
-        event_name,
-        raw: raw.to_string(),
-    });
-}
+use lash_openai_schema::{emit_provider_trace, model_id};
 
 static DEFAULT_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
 
 fn base_url_is_openrouter(base_url: &str) -> bool {
     base_url.trim_end_matches('/') == OPENROUTER_BASE_URL
-}
-
-fn model_id(model: &str) -> &str {
-    model
-        .rsplit_once('/')
-        .map(|(_, tail)| tail)
-        .unwrap_or(model)
 }
 
 fn sanitize_surrogates(s: &str) -> &str {
@@ -812,17 +788,63 @@ impl OpenAiGenericProvider {
         (instructions.join("\n\n"), input)
     }
 
-    fn build_tools(req: &LlmRequest) -> Vec<Value> {
+    fn projection_error(err: SchemaProjectionError) -> LlmTransportError {
+        LlmTransportError::new(format!(
+            "OpenAI schema projection failed: {}",
+            err.first_diagnostic()
+        ))
+        .with_kind(ProviderFailureKind::Validation)
+        .with_raw(
+            json!({
+                "profile": format!("{:?}", err.profile),
+                "diagnostics": err.diagnostics,
+            })
+            .to_string(),
+        )
+    }
+
+    fn projected_schema(
+        canonical: &Value,
+        overrides: &[SchemaProjectionOverride],
+        profile: OpenAiSchemaProfile,
+    ) -> Result<Value, LlmTransportError> {
+        if let Some(override_schema) = overrides
+            .iter()
+            .find(|projection| projection.profile == profile.projection_id())
+            .map(|projection| projection.schema.clone())
+        {
+            return Ok(override_schema);
+        }
+        match profile {
+            OpenAiSchemaProfile::ToolParameters => {
+                project_tool_parameters(canonical).map(|projection| projection.schema)
+            }
+            OpenAiSchemaProfile::StructuredOutput => {
+                project_structured_output(canonical).map(|projection| projection.schema)
+            }
+            OpenAiSchemaProfile::StrictToolParameters => {
+                project_schema(canonical, profile).map(|projection| projection.schema)
+            }
+        }
+        .map_err(Self::projection_error)
+    }
+
+    fn build_tools(req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
         req.tools
             .iter()
             .map(|tool| {
-                json!({
+                let parameters = Self::projected_schema(
+                    &tool.input_schema,
+                    &tool.input_schema_projections,
+                    OpenAiSchemaProfile::ToolParameters,
+                )?;
+                Ok(json!({
                     "type": "function",
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.input_schema,
+                    "parameters": parameters,
                     "strict": false,
-                })
+                }))
             })
             .collect()
     }
@@ -892,8 +914,12 @@ impl OpenAiGenericProvider {
         effort.to_string()
     }
 
-    fn build_responses_request_body(&self, req: &LlmRequest, stream: bool) -> Value {
-        let tools = Self::build_tools(req);
+    fn build_responses_request_body(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<Value, LlmTransportError> {
+        let tools = Self::build_tools(req)?;
         let (instructions, input) = Self::build_input(req);
         let mut body = json!({
             "model": req.model,
@@ -925,12 +951,19 @@ impl OpenAiGenericProvider {
         if let Some(output_spec) = &req.output_spec {
             let format = match output_spec {
                 LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
-                LlmOutputSpec::JsonSchema(schema) => json!({
-                    "type": "json_schema",
-                    "name": schema.name,
-                    "schema": schema.schema,
-                    "strict": schema.strict,
-                }),
+                LlmOutputSpec::JsonSchema(schema) => {
+                    let projected = Self::projected_schema(
+                        &schema.schema,
+                        &[],
+                        OpenAiSchemaProfile::StructuredOutput,
+                    )?;
+                    json!({
+                        "type": "json_schema",
+                        "name": schema.name,
+                        "schema": projected,
+                        "strict": schema.strict,
+                    })
+                }
             };
             if body.get("text").is_none() {
                 body["text"] = json!({});
@@ -947,7 +980,7 @@ impl OpenAiGenericProvider {
         {
             body["prompt_cache_retention"] = json!("24h");
         }
-        body
+        Ok(body)
     }
 
     fn chat_image_part(att: &LlmAttachment) -> Value {
@@ -1069,19 +1102,24 @@ impl OpenAiGenericProvider {
         messages
     }
 
-    fn build_chat_tools(req: &LlmRequest) -> Vec<Value> {
+    fn build_chat_tools(req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
         req.tools
             .iter()
             .map(|tool| {
-                json!({
+                let parameters = Self::projected_schema(
+                    &tool.input_schema,
+                    &tool.input_schema_projections,
+                    OpenAiSchemaProfile::ToolParameters,
+                )?;
+                Ok(json!({
                     "type": "function",
                     "function": {
                         "name": tool.name,
                         "description": tool.description,
-                        "parameters": tool.input_schema,
+                        "parameters": parameters,
                         "strict": false,
                     },
-                })
+                }))
             })
             .collect()
     }
@@ -1198,9 +1236,13 @@ impl OpenAiGenericProvider {
         Self::strip_internal_cache_markers(messages);
     }
 
-    fn build_chat_request_body(&self, req: &LlmRequest, stream: bool) -> Value {
+    fn build_chat_request_body(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<Value, LlmTransportError> {
         let mut messages = Self::build_chat_messages(req);
-        let mut tools = Self::build_chat_tools(req);
+        let mut tools = Self::build_chat_tools(req)?;
         self.apply_anthropic_cache_control(req, &mut messages, &mut tools);
         let mut body = json!({
             "model": req.model,
@@ -1229,17 +1271,24 @@ impl OpenAiGenericProvider {
         if let Some(output_spec) = &req.output_spec {
             body["response_format"] = match output_spec {
                 LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
-                LlmOutputSpec::JsonSchema(schema) => json!({
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": schema.name,
-                        "schema": schema.schema,
-                        "strict": schema.strict,
-                    },
-                }),
+                LlmOutputSpec::JsonSchema(schema) => {
+                    let projected = Self::projected_schema(
+                        &schema.schema,
+                        &[],
+                        OpenAiSchemaProfile::StructuredOutput,
+                    )?;
+                    json!({
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": schema.name,
+                            "schema": projected,
+                            "strict": schema.strict,
+                        },
+                    })
+                }
             };
         }
-        body
+        Ok(body)
     }
 
     fn parse_i64(value: Option<&Value>) -> i64 {
@@ -1799,7 +1848,7 @@ impl OpenAiGenericProvider {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
         let timeouts = self.options.llm_timeouts();
-        let body = self.build_responses_request_body(&req, stream_events.is_some());
+        let body = self.build_responses_request_body(&req, stream_events.is_some())?;
         let body_bytes = serde_json::to_vec(&body).map_err(|e| {
             LlmTransportError::new(format!("Failed to serialize Responses body: {e}"))
         })?;
@@ -1826,6 +1875,7 @@ impl OpenAiGenericProvider {
 
         let status = resp.status();
         if !status.is_success() {
+            let headers = resp.headers().clone();
             let text = read_response_text(
                 resp,
                 timeouts.request_timeout,
@@ -1845,13 +1895,12 @@ impl OpenAiGenericProvider {
                 .unwrap_or_else(|| {
                     format!("OpenAI-compatible request failed with {}", status.as_u16())
                 });
-            return Err(LlmTransportError {
-                message,
-                retryable: status.as_u16() == 429 || status.as_u16() >= 500,
-                raw: Some(text),
-                code: Some(status.as_u16().to_string()),
-                request_body: Some(String::from_utf8_lossy(&request_body).into_owned()),
-            });
+            return Err(LlmTransportError::new(message)
+                .with_status(status.as_u16())
+                .with_headers(&headers)
+                .with_raw(text)
+                .with_request_body(String::from_utf8_lossy(&request_body).into_owned())
+                .retryable(status.as_u16() == 429 || status.as_u16() >= 500));
         }
         drop(request_body);
 
@@ -1979,7 +2028,7 @@ impl OpenAiGenericProvider {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
         let timeouts = self.options.llm_timeouts();
-        let body = self.build_chat_request_body(&req, stream_events.is_some());
+        let body = self.build_chat_request_body(&req, stream_events.is_some())?;
         let body_bytes = serde_json::to_vec(&body).map_err(|e| {
             LlmTransportError::new(format!("Failed to serialize Chat Completions body: {e}"))
         })?;
@@ -2006,6 +2055,7 @@ impl OpenAiGenericProvider {
 
         let status = resp.status();
         if !status.is_success() {
+            let headers = resp.headers().clone();
             let text = read_response_text(
                 resp,
                 timeouts.request_timeout,
@@ -2028,13 +2078,12 @@ impl OpenAiGenericProvider {
                         status.as_u16()
                     )
                 });
-            return Err(LlmTransportError {
-                message,
-                retryable: status.as_u16() == 429 || status.as_u16() >= 500,
-                raw: Some(text),
-                code: Some(status.as_u16().to_string()),
-                request_body: Some(String::from_utf8_lossy(&request_body).into_owned()),
-            });
+            return Err(LlmTransportError::new(message)
+                .with_status(status.as_u16())
+                .with_headers(&headers)
+                .with_raw(text)
+                .with_request_body(String::from_utf8_lossy(&request_body).into_owned())
+                .retryable(status.as_u16() == 429 || status.as_u16() >= 500));
         }
         drop(request_body);
 
@@ -2363,7 +2412,7 @@ impl ProviderFactory for OpenAiGenericProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::llm::types::{LlmMessage, LlmToolSpec};
+    use lash::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
     use std::sync::Arc;
 
     fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -2388,7 +2437,7 @@ mod tests {
             LlmMessage::text(LlmRole::System, "system prompt"),
             LlmMessage::text(LlmRole::User, "hello"),
         ]);
-        let body = provider.build_responses_request_body(&req, true);
+        let body = provider.build_responses_request_body(&req, true).unwrap();
         assert_eq!(body["instructions"], "system prompt");
         assert_eq!(body["stream"], true);
         assert!(body.get("messages").is_none());
@@ -2434,7 +2483,8 @@ mod tests {
         req.output_spec = Some(LlmOutputSpec::JsonObject);
 
         let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
-            .build_chat_request_body(&req, true);
+            .build_chat_request_body(&req, true)
+            .unwrap();
 
         assert!(body.get("input").is_none());
         assert!(body.get("instructions").is_none());
@@ -2457,10 +2507,13 @@ mod tests {
             description: "Search".to_string(),
             input_schema: json!({"type": "object"}),
             output_schema: json!({}),
+            input_schema_projections: Vec::new(),
+            output_schema_projections: Vec::new(),
         }]);
 
         let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
-            .build_chat_request_body(&req, true);
+            .build_chat_request_body(&req, true)
+            .unwrap();
 
         assert_eq!(
             body["messages"][0]["content"][0]["cache_control"],
@@ -2474,6 +2527,87 @@ mod tests {
             body["messages"][1]["content"][0]["cache_control"],
             json!({ "type": "ephemeral" })
         );
+    }
+
+    #[test]
+    fn chat_tools_use_projected_openai_schema_and_preserve_override() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.model = "anthropic/claude-sonnet-4.6".to_string();
+        req.tools = Arc::new(vec![
+            LlmToolSpec {
+                name: "empty".to_string(),
+                description: "Empty".to_string(),
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({}),
+                input_schema_projections: Vec::new(),
+                output_schema_projections: Vec::new(),
+            },
+            LlmToolSpec {
+                name: "override".to_string(),
+                description: "Override".to_string(),
+                input_schema: json!({"type": "object", "properties": {"raw": {"const": "x"}}}),
+                output_schema: json!({}),
+                input_schema_projections: vec![lash::SchemaProjectionOverride {
+                    profile: OpenAiSchemaProfile::ToolParameters
+                        .projection_id()
+                        .to_string(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": { "raw": { "type": "string", "enum": ["x"] } }
+                    }),
+                }],
+                output_schema_projections: Vec::new(),
+            },
+        ]);
+
+        let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .build_chat_request_body(&req, true)
+            .unwrap();
+
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["properties"],
+            json!({})
+        );
+        assert_eq!(
+            body["tools"][1]["function"]["parameters"]["properties"]["raw"],
+            json!({ "type": "string", "enum": ["x"] })
+        );
+    }
+
+    #[test]
+    fn structured_output_schema_is_projected_or_rejected_locally() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+            name: "result".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": { "summary": { "type": "string" } }
+            }),
+            strict: true,
+        }));
+
+        let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .build_responses_request_body(&req, false)
+            .unwrap();
+        assert_eq!(
+            body["text"]["format"]["schema"]["required"],
+            json!(["summary"])
+        );
+        assert_eq!(
+            body["text"]["format"]["schema"]["additionalProperties"],
+            false
+        );
+
+        req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+            name: "bad".to_string(),
+            schema: json!({"type": "object", "allOf": []}),
+            strict: true,
+        }));
+        let err = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+            .build_responses_request_body(&req, false)
+            .unwrap_err();
+        assert_eq!(err.kind, ProviderFailureKind::Validation);
+        assert!(err.message.contains("allOf"));
     }
 
     #[test]
@@ -2499,7 +2633,8 @@ mod tests {
         req.model = "anthropic/claude-sonnet-4.6".to_string();
 
         let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
-            .build_chat_request_body(&req, true);
+            .build_chat_request_body(&req, true)
+            .unwrap();
 
         assert_eq!(
             body["messages"][1]["content"][0]["cache_control"],
@@ -2527,7 +2662,8 @@ mod tests {
 
         let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
             .with_cache_retention(OpenAiCacheRetention::None)
-            .build_chat_request_body(&req, true);
+            .build_chat_request_body(&req, true)
+            .unwrap();
 
         assert!(body["messages"][0]["content"].is_string());
         assert!(body["messages"][1]["content"].is_string());
@@ -2544,7 +2680,8 @@ mod tests {
 
         let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
             .with_cache_retention(OpenAiCacheRetention::Long)
-            .build_chat_request_body(&req, true);
+            .build_chat_request_body(&req, true)
+            .unwrap();
 
         assert_eq!(
             body["messages"][0]["content"][0]["cache_control"],
@@ -2558,7 +2695,7 @@ mod tests {
             .with_cache_retention(OpenAiCacheRetention::Long);
         let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
 
-        let body = provider.build_responses_request_body(&req, true);
+        let body = provider.build_responses_request_body(&req, true).unwrap();
 
         assert_eq!(body["prompt_cache_key"], "session-1");
         assert_eq!(body["prompt_cache_retention"], "24h");
@@ -2580,7 +2717,7 @@ mod tests {
                 cache_breakpoint: false,
             }],
         )]);
-        let body = provider.build_responses_request_body(&req, false);
+        let body = provider.build_responses_request_body(&req, false).unwrap();
         assert_eq!(body["input"][0]["type"], "message");
         assert_eq!(body["input"][0]["id"], "msg_1");
         assert_eq!(body["input"][0]["phase"], "final_answer");
@@ -2590,7 +2727,7 @@ mod tests {
     fn legacy_assistant_text_gets_deterministic_id() {
         let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
         let req = request(vec![LlmMessage::text(LlmRole::Assistant, "legacy")]);
-        let body = provider.build_responses_request_body(&req, false);
+        let body = provider.build_responses_request_body(&req, false).unwrap();
         assert_eq!(body["input"][0]["id"], "msg_lash_0_0");
         assert_eq!(body["input"][0]["status"], "completed");
         assert!(body["input"][0].get("phase").is_none());
@@ -2600,7 +2737,7 @@ mod tests {
     fn local_base_url_omits_openai_only_fields() {
         let provider = OpenAiGenericProvider::new("key", "http://localhost:11434/v1");
         let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-        let body = provider.build_responses_request_body(&req, true);
+        let body = provider.build_responses_request_body(&req, true).unwrap();
         assert!(body.get("include").is_none());
         assert!(body.get("store").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
@@ -2668,7 +2805,8 @@ mod tests {
         )]);
 
         let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
-            .build_chat_request_body(&req, false);
+            .build_chat_request_body(&req, false)
+            .unwrap();
 
         assert_eq!(
             body["messages"][0]["reasoning_details"][0],

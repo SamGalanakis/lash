@@ -1,54 +1,35 @@
+#![allow(clippy::result_large_err)]
+
 use async_trait::async_trait;
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::time::Duration;
 
+use lash::SchemaProjectionOverride;
 use lash::llm::streaming::{drive_sse_response, emit_progress};
 use lash::llm::timeouts::{
     build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
     send_request,
 };
-use lash::llm::transport::LlmTransportError;
+use lash::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
-    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta,
-    ResponseTextPhase,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse,
+    LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
 };
 use lash::provider::{
-    AgentModelSelection, ProviderAuth, ProviderComponents, ProviderFactory, ProviderModelPolicy,
-    ProviderOptions, ProviderReadiness, ProviderState, ProviderTransport, VariantRequestConfig,
+    AgentModelSelection, ProviderAuth, ProviderComponents, ProviderFactory,
+    ProviderFailureClassifier, ProviderModelPolicy, ProviderOptions, ProviderReadiness,
+    ProviderReliability, ProviderState, ProviderTransport, VariantRequestConfig,
+};
+use lash_openai_schema::{
+    OpenAiSchemaProfile, SchemaProjectionError, emit_provider_trace, model_id, project_schema,
+    project_structured_output, project_tool_parameters,
 };
 
 pub mod oauth;
 
 const OPENAI_GPT5_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"];
-
-fn emit_provider_trace(
-    tx: Option<&lash::llm::types::LlmProviderTraceSender>,
-    provider: &'static str,
-    raw: &str,
-) {
-    let Some(tx) = tx else {
-        return;
-    };
-    let event_name = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .or_else(|| value.get("event"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "provider_event".to_string());
-    tx.send(LlmProviderTraceEvent {
-        provider,
-        event_name,
-        raw: raw.to_string(),
-    });
-}
 const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 const OPENAI_GPT55_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
@@ -57,13 +38,6 @@ const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 fn has_xhigh_suffix(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     lower.contains("5.2") || lower.contains("5.3") || lower.contains("5.4")
-}
-
-fn model_id(model: &str) -> &str {
-    match model.rsplit_once('/') {
-        Some((_, tail)) => tail,
-        None => model,
-    }
 }
 
 /// OpenAI Codex OAuth provider (ChatGPT Plus/Pro/Team via device-code flow).
@@ -543,12 +517,6 @@ impl CodexStreamState {
 impl CodexProvider {
     const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
     const CODEX_RESPONSES_URL: &'static str = "https://chatgpt.com/backend-api/codex/responses";
-    /// Maximum number of submission attempts (1 initial + up to 3 retries).
-    /// Mirrors pi's `MAX_RETRIES = 3` loop, which iterates `attempt <= MAX_RETRIES`.
-    const MAX_ATTEMPTS: u32 = 4;
-    /// Base delay for exponential backoff between retries (ms).
-    /// Matches pi-mono `BASE_DELAY_MS` at `openai-codex-responses.ts:47`.
-    const BASE_DELAY_MS: u64 = 1000;
 
     pub fn new(
         access_token: impl Into<String>,
@@ -560,7 +528,9 @@ impl CodexProvider {
             refresh_token: refresh_token.into(),
             expires_at,
             account_id: None,
-            options: ProviderOptions::default(),
+            options: ProviderOptions {
+                reliability: ProviderReliability::codex(),
+            },
             client: build_http_client(),
         }
     }
@@ -578,24 +548,6 @@ impl CodexProvider {
     pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
         self.client = (*client).clone();
         self
-    }
-
-    /// Decide whether an HTTP failure should be retried.
-    ///
-    /// Mirrors the rules in pi-mono (`openai-codex-responses.ts:94-99`, `:229`):
-    /// - 429 is retryable *except* when the body reports `"type": "usage_limit_reached"`
-    ///   (the user has exhausted their quota and retrying won't help).
-    /// - 5xx (500-599) is retryable.
-    /// - All other statuses (2xx/3xx, and 4xx other than 429) are not retryable.
-    /// - Once `attempt_number` reaches `MAX_ATTEMPTS - 1` (the final attempt), no more retries.
-    fn should_retry(status: u16, body_text: &str, attempt_number: u32) -> bool {
-        if attempt_number + 1 >= Self::MAX_ATTEMPTS {
-            return false;
-        }
-        if status == 429 {
-            return !Self::is_usage_limit_error(body_text);
-        }
-        (500..600).contains(&status)
     }
 
     /// Detect pi's "usage limit reached" marker in an error body.
@@ -663,13 +615,6 @@ impl CodexProvider {
         Some(format!(
             "You have hit your ChatGPT usage limit{plan}.{when}"
         ))
-    }
-
-    /// Exponential backoff for retry attempt `attempt`.
-    /// attempt=0 -> 1000ms, attempt=1 -> 2000ms, attempt=2 -> 4000ms (mirrors pi's
-    /// `BASE_DELAY_MS * 2 ** attempt`).
-    fn backoff_delay(attempt: u32) -> Duration {
-        Duration::from_millis(Self::BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(16)))
     }
 
     fn should_parse_stream(stream_requested: bool, content_type: Option<&str>) -> bool {
@@ -1023,17 +968,63 @@ impl CodexProvider {
         prev["output"].as_array_mut().unwrap().extend(image_parts);
     }
 
-    fn build_tools(req: &LlmRequest) -> Vec<Value> {
+    fn projection_error(err: SchemaProjectionError) -> LlmTransportError {
+        LlmTransportError::new(format!(
+            "Codex schema projection failed: {}",
+            err.first_diagnostic()
+        ))
+        .with_kind(ProviderFailureKind::Validation)
+        .with_raw(
+            json!({
+                "profile": format!("{:?}", err.profile),
+                "diagnostics": err.diagnostics,
+            })
+            .to_string(),
+        )
+    }
+
+    fn projected_schema(
+        canonical: &Value,
+        overrides: &[SchemaProjectionOverride],
+        profile: OpenAiSchemaProfile,
+    ) -> Result<Value, LlmTransportError> {
+        if let Some(override_schema) = overrides
+            .iter()
+            .find(|projection| projection.profile == profile.projection_id())
+            .map(|projection| projection.schema.clone())
+        {
+            return Ok(override_schema);
+        }
+        match profile {
+            OpenAiSchemaProfile::ToolParameters => {
+                project_tool_parameters(canonical).map(|projection| projection.schema)
+            }
+            OpenAiSchemaProfile::StructuredOutput => {
+                project_structured_output(canonical).map(|projection| projection.schema)
+            }
+            OpenAiSchemaProfile::StrictToolParameters => {
+                project_schema(canonical, profile).map(|projection| projection.schema)
+            }
+        }
+        .map_err(Self::projection_error)
+    }
+
+    fn build_tools(req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
         req.tools
             .iter()
             .map(|tool| {
-                json!({
+                let parameters = Self::projected_schema(
+                    &tool.input_schema,
+                    &tool.input_schema_projections,
+                    OpenAiSchemaProfile::ToolParameters,
+                )?;
+                Ok(json!({
                     "type": "function",
                     "name": tool.name.clone(),
                     "description": tool.description.clone(),
                     "strict": false,
-                    "parameters": tool.input_schema.clone(),
-                })
+                    "parameters": parameters,
+                }))
             })
             .collect()
     }
@@ -1083,8 +1074,8 @@ impl CodexProvider {
         effort.to_string()
     }
 
-    fn build_request_body(req: &LlmRequest, stream: bool) -> Value {
-        let tools = Self::build_tools(req);
+    fn build_request_body(req: &LlmRequest, stream: bool) -> Result<Value, LlmTransportError> {
+        let tools = Self::build_tools(req)?;
         let (instructions, input) = Self::build_input(req);
         let mut body = json!({
             "model": req.model,
@@ -1121,15 +1112,22 @@ impl CodexProvider {
         if let Some(output_spec) = &req.output_spec {
             body["text"]["format"] = match output_spec {
                 LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
-                LlmOutputSpec::JsonSchema(schema) => json!({
-                    "type": "json_schema",
-                    "name": schema.name,
-                    "schema": schema.schema,
-                    "strict": schema.strict,
-                }),
+                LlmOutputSpec::JsonSchema(schema) => {
+                    let projected = Self::projected_schema(
+                        &schema.schema,
+                        &[],
+                        OpenAiSchemaProfile::StructuredOutput,
+                    )?;
+                    json!({
+                        "type": "json_schema",
+                        "name": schema.name,
+                        "schema": projected,
+                        "strict": schema.strict,
+                    })
+                }
             };
         }
-        body
+        Ok(body)
     }
 
     fn extract_text(value: &Value) -> String {
@@ -1566,6 +1564,52 @@ impl CodexProvider {
 impl CodexProvider {
     pub fn into_components(self) -> ProviderComponents {
         ProviderComponents::shared(self, std::sync::Arc::new(CodexModelPolicy))
+            .with_failure_classifier(std::sync::Arc::new(CodexFailureClassifier))
+    }
+}
+
+#[derive(Debug)]
+struct CodexFailureClassifier;
+
+impl ProviderFailureClassifier for CodexFailureClassifier {
+    fn classify(&self, mut failure: ProviderFailure) -> ProviderFailure {
+        let status = failure
+            .status
+            .or_else(|| failure.code.as_deref().and_then(|code| code.parse().ok()));
+        if let Some(status) = status {
+            failure.status = Some(status);
+            failure.kind = ProviderFailureKind::Http;
+            let raw = failure.raw.as_deref().unwrap_or_default();
+            failure.retryable =
+                (status == 429 && !CodexProvider::is_usage_limit_error(raw)) || status >= 500;
+            if let Some(summary) = CodexProvider::codex_error_summary(status, raw) {
+                failure.message = summary;
+            }
+        } else if matches!(
+            failure.kind,
+            ProviderFailureKind::Transport | ProviderFailureKind::Timeout
+        ) || failure.retryable
+        {
+            failure.kind = if failure.kind == ProviderFailureKind::Unknown {
+                ProviderFailureKind::Transport
+            } else {
+                failure.kind
+            };
+            failure.retryable = true;
+        }
+
+        let text = format!(
+            "{}\n{}\n{}",
+            failure.code.as_deref().unwrap_or_default(),
+            failure.message,
+            failure.raw.as_deref().unwrap_or_default()
+        )
+        .to_ascii_lowercase();
+        if text.contains("usage_limit_reached") || text.contains("usage_not_included") {
+            failure.kind = ProviderFailureKind::Quota;
+            failure.retryable = false;
+        }
+        failure
     }
 }
 
@@ -1746,149 +1790,75 @@ impl ProviderTransport for CodexProvider {
         let account_id = self.account_id.clone();
         let timeouts = self.options.llm_timeouts();
 
-        let body = Self::build_request_body(&req, stream_events.is_some());
+        let body = Self::build_request_body(&req, stream_events.is_some())?;
 
         let request_body = serde_json::to_string(&body).ok();
 
-        // Build the HTTP request fresh on each attempt — reqwest's RequestBuilder
-        // doesn't universally implement Clone once `.json()` has been called, and
-        // rebuilding keeps each attempt self-contained.
-        let build_request = || {
-            let mut http = self
-                .client
-                .post(Self::CODEX_RESPONSES_URL)
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
-                .header("OpenAI-Beta", "responses=experimental")
-                .header("originator", Self::CODEX_ORIGINATOR)
-                .header("User-Agent", Self::codex_user_agent())
-                .json(&body);
-            if let Some(session_id) = req.session_id.as_deref() {
-                http = http
-                    .header("session_id", session_id)
-                    .header("x-client-request-id", session_id);
-            }
-            if let Some(id) = account_id.as_deref() {
-                http = http.header("ChatGPT-Account-ID", id);
-            }
-            http
-        };
-
-        // Retry loop: short-circuit locally on 429/5xx and transient network
-        // errors with exponential backoff. Mirrors pi-mono
-        // `openai-codex-responses.ts:206-256`. The adapter still sets
-        // `retryable: true` on the final error so upstream retry infrastructure
-        // keeps working for non-Codex providers; this loop just cuts down
-        // round-trips the user has to endure.
-        let mut attempt: u32 = 0;
-        let (resp, status, content_type) = loop {
-            let http = build_request();
-            let send_result = send_request(
-                http,
-                request_body.clone().map(request_body_snapshot),
-                response_start_timeout(
-                    timeouts.request_timeout,
-                    timeouts.chunk_timeout,
-                    stream_events.is_some(),
-                ),
-                "Codex response start timed out",
+        let mut http = self
+            .client
+            .post(Self::CODEX_RESPONSES_URL)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("originator", Self::CODEX_ORIGINATOR)
+            .header("User-Agent", Self::codex_user_agent())
+            .json(&body);
+        if let Some(session_id) = req.session_id.as_deref() {
+            http = http
+                .header("session_id", session_id)
+                .header("x-client-request-id", session_id);
+        }
+        if let Some(id) = account_id.as_deref() {
+            http = http.header("ChatGPT-Account-ID", id);
+        }
+        let resp = send_request(
+            http,
+            request_body.clone().map(request_body_snapshot),
+            response_start_timeout(
+                timeouts.request_timeout,
+                timeouts.chunk_timeout,
+                stream_events.is_some(),
+            ),
+            "Codex response start timed out",
+        )
+        .await?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let headers = resp.headers().clone();
+        if !status.is_success() {
+            let text = read_response_text(
+                resp,
+                timeouts.request_timeout,
+                "Codex response body timed out",
             )
-            .await;
-
-            match send_result {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let content_type = resp
-                        .headers()
-                        .get(reqwest::header::CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string);
-                    if status.is_success() {
-                        break (resp, status, content_type);
-                    }
-
-                    // Non-success: read body text, decide whether to retry.
-                    let text = match read_response_text(
-                        resp,
-                        timeouts.request_timeout,
-                        "Codex response body timed out",
-                    )
-                    .await
-                    {
-                        Ok(text) => text,
-                        Err(err) => {
-                            return Err(LlmTransportError {
-                                message: format!(
-                                    "Codex request failed with {} and unreadable body: {}",
-                                    status.as_u16(),
-                                    err.message
-                                ),
-                                retryable: err.retryable
-                                    || status.as_u16() == 429
-                                    || status.as_u16() >= 500,
-                                raw: err.raw,
-                                code: Some(status.as_u16().to_string()),
-                                request_body: request_body.clone().or(err.request_body),
-                            });
-                        }
-                    };
-
-                    if Self::should_retry(status.as_u16(), &text, attempt) {
-                        let delay = Self::backoff_delay(attempt);
-                        tracing::debug!(
-                            target: "lash::llm::codex_oauth",
-                            status = status.as_u16(),
-                            attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            "Codex request returned retryable status; sleeping before retry"
-                        );
-                        tokio::time::sleep(delay).await;
-                        attempt += 1;
-                        continue;
-                    }
-
-                    let friendly = Self::codex_error_summary(status.as_u16(), &text);
-                    let message = friendly.unwrap_or_else(|| {
-                        format!(
-                            "Codex request failed with {}{}",
-                            status.as_u16(),
-                            content_type
-                                .as_deref()
-                                .map(|ct| format!(" ({ct})"))
-                                .unwrap_or_default()
-                        )
-                    });
-                    return Err(LlmTransportError {
-                        message,
-                        retryable: status.as_u16() == 429 || status.as_u16() >= 500,
-                        raw: Some(text),
-                        code: Some(status.as_u16().to_string()),
-                        request_body: request_body.clone(),
-                    });
-                }
-                Err(err) => {
-                    // Transient network / body / decode errors: pi retries
-                    // these the same way it retries HTTP 5xx. Respect the
-                    // flag set by `send_request` (timeouts + reqwest
-                    // is_connect / is_body / is_decode).
-                    if err.retryable && attempt + 1 < Self::MAX_ATTEMPTS {
-                        let delay = Self::backoff_delay(attempt);
-                        tracing::debug!(
-                            target: "lash::llm::codex_oauth",
-                            attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            err = %err.message,
-                            "Codex request failed with transient network error; sleeping before retry"
-                        );
-                        tokio::time::sleep(delay).await;
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
-                }
+            .await
+            .unwrap_or_default();
+            let message = Self::codex_error_summary(status.as_u16(), &text).unwrap_or_else(|| {
+                format!(
+                    "Codex request failed with {}{}",
+                    status.as_u16(),
+                    content_type
+                        .as_deref()
+                        .map(|ct| format!(" ({ct})"))
+                        .unwrap_or_default()
+                )
+            });
+            let mut err = LlmTransportError::new(message)
+                .with_kind(ProviderFailureKind::Http)
+                .with_status(status.as_u16())
+                .with_headers(&headers)
+                .with_raw(text)
+                .retryable(status.as_u16() == 429 || status.as_u16() >= 500);
+            if let Some(request_body) = request_body.clone() {
+                err = err.with_request_body(request_body);
             }
-        };
+            return Err(err);
+        }
 
         let is_sse = content_type
             .as_deref()
@@ -2041,8 +2011,14 @@ struct CodexProviderConfig {
     expires_at: u64,
     #[serde(default)]
     account_id: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_codex_options")]
     options: ProviderOptions,
+}
+
+fn default_codex_options() -> ProviderOptions {
+    ProviderOptions {
+        reliability: ProviderReliability::codex(),
+    }
 }
 
 /// Factory that registers [`CodexProvider`] with lash's global
@@ -2086,7 +2062,9 @@ impl ProviderFactory for CodexProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
     use lash::provider::ProviderModelPolicy;
+    use std::sync::Arc;
 
     fn process_event(state: &mut CodexStreamState, event: Value) {
         CodexProvider::process_sse_event(&event.to_string(), state, None).unwrap();
@@ -2102,6 +2080,21 @@ mod tests {
 
     fn response_from_state(state: CodexStreamState) -> LlmResponse {
         CodexProvider::response_from_stream_state(state, None, "test".to_string())
+    }
+
+    fn request(messages: Vec<LlmMessage>) -> LlmRequest {
+        LlmRequest {
+            model: "gpt-5.4".to_string(),
+            messages,
+            attachments: Vec::new(),
+            tools: Arc::new(Vec::<LlmToolSpec>::new()),
+            tool_choice: LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: Some("session-1".to_string()),
+            output_spec: None,
+            stream_events: None,
+            provider_trace: None,
+        }
     }
 
     #[test]
@@ -2133,6 +2126,52 @@ mod tests {
             provider.supported_variants("openai/gpt-5.5"),
             ["low", "medium", "high", "xhigh"]
         );
+    }
+
+    #[test]
+    fn codex_request_uses_openai_schema_projection() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.tools = Arc::new(vec![LlmToolSpec {
+            name: "empty".to_string(),
+            description: "Empty".to_string(),
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({}),
+            input_schema_projections: Vec::new(),
+            output_schema_projections: Vec::new(),
+        }]);
+        req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+            name: "result".to_string(),
+            schema: json!({
+                "type": "object",
+                "properties": { "summary": { "type": "string" } }
+            }),
+            strict: true,
+        }));
+
+        let body = CodexProvider::build_request_body(&req, false).unwrap();
+        assert_eq!(body["tools"][0]["parameters"]["properties"], json!({}));
+        assert_eq!(
+            body["text"]["format"]["schema"]["required"],
+            json!(["summary"])
+        );
+        assert_eq!(
+            body["text"]["format"]["schema"]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
+    fn codex_schema_projection_failure_is_local_validation_error() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+            name: "bad".to_string(),
+            schema: json!({"type": "object", "allOf": []}),
+            strict: true,
+        }));
+
+        let err = CodexProvider::build_request_body(&req, false).unwrap_err();
+        assert_eq!(err.kind, ProviderFailureKind::Validation);
+        assert!(err.message.contains("allOf"));
     }
 
     #[test]

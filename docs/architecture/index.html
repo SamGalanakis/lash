@@ -10,6 +10,26 @@
 <body>
   <div class="page">
     <main class="frame">
+      <aside class="sidebar" aria-label="Architecture navigation">
+        <a class="sidebar__exit" href="../index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Architecture</span>
+            <span class="sidebar__current">All chapters</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./overview.html">Overview</a></li>
+            <li><a href="./modules.html">Modules</a></li>
+            <li><a href="./flow.html">Data Flow</a></li>
+            <li><a href="./execution.html">Execution</a></li>
+            <li><a href="./runtime.html">Runtime</a></li>
+            <li><a href="./abstractions.html">Abstractions</a></li>
+            <li><a href="./deps.html">Dependencies</a></li>
+            <li><a href="./lashlang.html">Lashlang</a></li>
+            <li><a href="./html-exporter.html">HTML Exporter</a></li>
+          </ol>
+        </details>
+      </aside>
       <header class="hero">
         <div>
           <div class="eyebrow">Current workspace architecture</div>
@@ -17,122 +37,54 @@
           <p><strong>lash</strong> is a Rust workspace for embeddable coding agents. The core is a layered agent runtime — a sans-IO turn machine wrapped by an async host runtime, with mode plugins, provider adapters, dynamic tools, durable session graph storage, embedding APIs, benchmark runners, and a CLI/TUI host on top.</p>
         </div>
         <div class="hero-meta">
-          <article class="card"><div class="micro-label">Workspace</div><strong>37 Cargo members</strong><span>Runtime, embed API, CLI/TUI, providers, mode plugins, tool plugins, export, trace, file index, harness optimizer, lashlang, examples, and benchmark runners.</span></article>
-          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~168k LOC</strong><span>Measured by line count over <code>*.rs</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
+          <article class="card"><div class="micro-label">Workspace</div><strong>38 Cargo members</strong><span>Runtime, embed API, CLI/TUI, providers, mode plugins, tool plugins, export, trace, file index, harness optimizer, lashlang, examples, and benchmark runners.</span></article>
+          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~196k LOC</strong><span>Measured by line count over <code>*.rs</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
           <article class="card"><div class="micro-label">Architecture root</div><strong><code>docs/architecture/</code></strong><span>Chaptered documentation matching the current runtime, projection seams, and handoff continuations.</span></article>
         </div>
       </header>
 
-      <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a>
-        <a class="active" href="./index.html">Index</a>
-        <a href="./overview.html">Overview</a>
-        <a href="./modules.html">Modules</a>
-        <a href="./flow.html">Data Flow</a>
-        <a href="./execution.html">Execution</a>
-        <a href="./runtime.html">Runtime</a>
-        <a href="./abstractions.html">Abstractions</a>
-        <a href="./deps.html">Dependencies</a>
-        <a href="./files.html">Files</a>
-        <a href="./lashlang.html">Lashlang</a>
-      </nav>
-
       <section class="content">
         <div class="section">
           <div class="section-header">
-            <h2>Chapters</h2>
-            <p>Each chapter is a standalone page so deep links keep working as the system changes.</p>
+            <h2>Reading Paths</h2>
+            <p>Three curated entry routes. The full chapter index lives in the sidebar; these are the orderings worth following depending on why you're here.</p>
           </div>
-          <ol class="chapter-list">
+          <ol class="path-list">
             <li>
-              <a href="./overview.html">
-                <span class="chapter-num">01</span>
-                <div class="chapter-meta">
-                  <h3>Overview</h3>
-                  <p>Top-level boundaries across CLI, runtime, sans-IO core, modes, providers, plugins, stores, and export tooling.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
+              <div class="path-meta">
+                <span class="path-eyebrow">For newcomers</span>
+                <h3>Understand the architecture top-down</h3>
+                <p>Boundaries first, then the crate map, then how a turn moves through the system.</p>
+              </div>
+              <ol class="path-route">
+                <li><a href="./overview.html">Overview</a></li>
+                <li><a href="./modules.html">Modules</a></li>
+                <li><a href="./flow.html">Data Flow</a></li>
+              </ol>
             </li>
             <li>
-              <a href="./modules.html">
-                <span class="chapter-num">02</span>
-                <div class="chapter-meta">
-                  <h3>Modules</h3>
-                  <p>Crate map and ownership — runtime, modes, providers, plugins, CLI, UI, tracing, export, language core.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
+              <div class="path-meta">
+                <span class="path-eyebrow">Modifying RLM mode</span>
+                <h3>From the executor down to the language</h3>
+                <p>How RLM drives turns, the Lashlang surface the model writes against, and the runtime contracts both rely on.</p>
+              </div>
+              <ol class="path-route">
+                <li><a href="./execution.html">Execution</a></li>
+                <li><a href="./lashlang.html">Lashlang</a></li>
+                <li><a href="./runtime.html">Runtime</a></li>
+              </ol>
             </li>
             <li>
-              <a href="./flow.html">
-                <span class="chapter-num">03</span>
-                <div class="chapter-meta">
-                  <h3>Data Flow</h3>
-                  <p>Turn input, provider streaming, native tools, Lashlang execution, graph commits, read projections, UI rendering.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
-            </li>
-            <li>
-              <a href="./execution.html">
-                <span class="chapter-num">04</span>
-                <div class="chapter-meta">
-                <h3>Execution</h3>
-                <p>Startup, Standard mode, RLM mode, subagents, monitors, async handles, export, and trace viewers.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
-            </li>
-            <li>
-              <a href="./runtime.html">
-                <span class="chapter-num">05</span>
-                <div class="chapter-meta">
-                  <h3>Runtime</h3>
-                  <p>Runtime environment, residency, park/resume, persistence, managed sessions, direct completions, and usage ledgers.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
-            </li>
-            <li>
-              <a href="./abstractions.html">
-                <span class="chapter-num">06</span>
-                <div class="chapter-meta">
-                  <h3>Abstractions</h3>
-                  <p>Traits, handles, contracts, graph and read seams, tool output contracts, UI projection types.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
-            </li>
-            <li>
-              <a href="./deps.html">
-                <span class="chapter-num">07</span>
-                <div class="chapter-meta">
-                  <h3>Dependencies</h3>
-                  <p>LLM providers, OAuth, MCP, Tavily, models.dev, tracing, file indexing, storage.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
-            </li>
-            <li>
-              <a href="./files.html">
-                <span class="chapter-num">08</span>
-                <div class="chapter-meta">
-                  <h3>Files</h3>
-                  <p>High-signal file map — runtime, providers, tools, CLI/TUI, export, tracing, docs maintenance.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
-            </li>
-            <li>
-              <a href="./lashlang.html">
-                <span class="chapter-num">09</span>
-                <div class="chapter-meta">
-                  <h3>Lashlang</h3>
-                  <p>RLM language and runtime reference — async handles, image attachment behavior, persistent REPL state.</p>
-                </div>
-                <span class="chapter-arrow">→</span>
-              </a>
+              <div class="path-meta">
+                <span class="path-eyebrow">Embedding lash</span>
+                <h3>Wire it into another host</h3>
+                <p>System shape, the embed-API path, then the named contracts you'll reach for to compose providers, modes, and plugins.</p>
+              </div>
+              <ol class="path-route">
+                <li><a href="./overview.html">Overview</a></li>
+                <li><a href="./execution.html">Execution</a></li>
+                <li><a href="./abstractions.html">Abstractions</a></li>
+              </ol>
             </li>
           </ol>
         </div>

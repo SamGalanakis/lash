@@ -420,14 +420,70 @@ impl ModeSessionPlugin for RlmModeSession {
         mut ctx: ModeRuntimeContext<'_>,
         request: &lash::SessionCreateRequest,
     ) {
-        if let Ok(Some(RlmCreateExtras { termination })) = request
+        if let Ok(Some(extras)) = request
             .mode_extras
             .decode::<RlmCreateExtras>(&ExecutionMode::new("rlm"))
-            && let Ok(options) =
-                lash::ModeTurnOptions::typed(ExecutionMode::new("rlm"), termination)
         {
-            ctx.set_mode_turn_options(options);
+            if let Ok(options) =
+                lash::ModeTurnOptions::typed(ExecutionMode::new("rlm"), extras.termination)
+            {
+                ctx.set_mode_turn_options(options);
+            }
+            if let Some(snapshot) = extras.projected_seed
+                && !snapshot.is_empty()
+            {
+                self.install_initial_projected_seed(snapshot);
+            }
         }
+    }
+}
+
+impl RlmModeSession {
+    /// Apply a projected-binding seed at session-creation time. Called from
+    /// `configure_runtime_from_request` (sync); session_projected_bindings is
+    /// guaranteed to be uncontended at this point because the session has just
+    /// been constructed and no async path has touched it yet, so a sync
+    /// `try_lock` is safe. We deliberately fail loudly on either an
+    /// already-held lock or a duplicate-name merge so the bug shows up at the
+    /// session boundary instead of silently producing a partial child.
+    fn install_initial_projected_seed(&self, snapshot: lash_rlm_types::RlmProjectedSeedSnapshot) {
+        let bindings = match RlmProjectedBindings::from_snapshot(&snapshot) {
+            Ok(bindings) => bindings,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "rlm projected seed snapshot rejected; child session will start without it",
+                );
+                return;
+            }
+        };
+        if let Err(err) = reject_reserved_projected_binding_names(&bindings) {
+            tracing::error!(
+                error = %err,
+                "rlm projected seed snapshot used reserved name; ignoring",
+            );
+            return;
+        }
+        let mut guard = match self.session_projected_bindings.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::error!(
+                    "rlm projected seed snapshot dropped: session bindings were unexpectedly contended at create time",
+                );
+                return;
+            }
+        };
+        let merged = match guard.clone().merge(bindings) {
+            Ok(merged) => merged,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "rlm projected seed snapshot collided with existing bindings; ignoring",
+                );
+                return;
+            }
+        };
+        *guard = merged;
     }
 }
 

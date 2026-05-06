@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::mode::ModePreamble;
 use crate::prompt::{PreparedPrompt, PromptBuildInput, PromptCache, build_prompt_cached};
 use crate::sansio::{ModeProtocol, TurnMachine, TurnMachineConfig, UnitModeProtocol};
-use crate::session_model::RetryPolicy;
 use crate::{MessageSequence, PromptContribution, PromptTemplate, ToolSurface};
 
 pub struct SansIoTurnInput<M: ModeProtocol = UnitModeProtocol> {
@@ -23,7 +22,6 @@ pub struct SansIoTurnInput<M: ModeProtocol = UnitModeProtocol> {
     pub model_variant: Option<String>,
     pub emit_llm_trace: bool,
     pub termination: M::Termination,
-    pub retry_policy: RetryPolicy,
     /// Optional cache that lets repeat turns skip re-rendering the
     /// system prompt when inputs are unchanged.
     pub prompt_cache: Option<Arc<PromptCache>>,
@@ -68,7 +66,6 @@ pub fn build_turn<M: ModeProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
             session_id: input.session_id,
             emit_llm_trace: input.emit_llm_trace,
             termination: input.termination,
-            retry_policy: input.retry_policy,
         },
         input.messages,
         input.events,
@@ -181,7 +178,6 @@ mod tests {
             model_variant: Some("mini".to_string()),
             emit_llm_trace: true,
             termination: (),
-            retry_policy: RetryPolicy::default(),
             prompt_cache: None,
         });
 

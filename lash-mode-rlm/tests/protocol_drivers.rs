@@ -6,9 +6,7 @@ use lash_mode_rlm::RlmDriver;
 use lash_mode_standard::StandardDriver;
 use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
-use lash_sansio::{
-    CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, RetryPolicy, SessionEvent,
-};
+use lash_sansio::{CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent};
 
 fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
     test_config_with_termination(mode, RlmTermination::default())
@@ -38,7 +36,6 @@ fn test_config_with_termination(
         emit_llm_trace: false,
         termination: lash::ModeTurnOptions::typed(lash::ExecutionMode::new("rlm"), rlm_termination)
             .expect("valid rlm turn options"),
-        retry_policy: RetryPolicy::default(),
     }
 }
 

@@ -13,6 +13,7 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
+use lash::provider::LashConfig;
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
     EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
@@ -276,6 +277,12 @@ struct DomainBucket {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
+    // Register every built-in provider factory (codex, anthropic, openai-…)
+    // before anyone calls `LashConfig::build_active_provider`. Without this,
+    // providers loaded from `~/.lash/config.json` fail with "provider X is
+    // not registered."
+    lash_providers_builtin::register_all();
+
     let args = Args::parse();
 
     // LASH_MAX_OUTPUT_TOKENS is read inside the openrouter adapter for each
@@ -965,14 +972,14 @@ const LONGCOT_DECOMPOSITION_GUIDANCE: &str = r#"This benchmark forbids external 
 
 One capability is registered: `default`, which uses the same model and reasoning settings as the root turn. Every `spawn_agent` call must pass `capability: "default"`.
 
+A child session starts blank — none of the parent's globals or projected bindings are inherited automatically. Pass everything the child needs through `seed: { name: value, ... }`. Each entry's kind is preserved by source: `seed: { problem: input.prompt }` makes `problem` a read-only projected binding on the child (identical to how `input.prompt` reads on the parent), while `seed: { findings: my_findings }` lands as a regular RLM global. Computed values (e.g. `seed: { hint: slice(input.prompt, 0, 1000) }`) default to global. Use seed for everything the child must read; use `task` only for the directive prose.
+
 Default pattern (adjust to the domain):
 
-1. Classify & extract. First `spawn_agent` reads `input.prompt` and returns a compact structured summary: domain (logic/chess/chemistry/cs/math), initial state, goal state, hard constraints. Do NOT solve at this step.
+1. Classify & extract. First `spawn_agent` receives `seed: { problem: input.prompt }` and returns a compact structured summary: domain (logic/chess/chemistry/cs/math), initial state, goal state, hard constraints. Do NOT solve at this step.
 2. Plan. Second `spawn_agent` proposes a solution plan as a list of concrete, bounded sub-problems.
-3. Execute sub-problems. One `spawn_agent` per sub-problem. Where the sub-problems are independent, dispatch them in parallel via `start`/`await` so child contexts don't accumulate. Keep each child task narrowly scoped (≤ ~3k tokens of output) — that's the whole reason to decompose.
+3. Execute sub-problems. One `spawn_agent` per sub-problem. Pass the relevant slice and any prior findings through `seed:`. Where the sub-problems are independent, dispatch them in parallel via `start`/`await` so child contexts don't accumulate. Keep each child task narrowly scoped (≤ ~3k tokens of output).
 4. Stitch & verify. A final `spawn_agent` (or your own root reasoning turn) assembles the pieces and — critically — verifies the concrete end state before emitting `solution = <value>`.
-
-Subagents inherit the bound variables, so they can read `input.prompt` directly (or specific slices you pass in via their `task` field). Keep each `task` description self-contained: the child has no memory of why you spawned it.
 
 Budget discipline: you have a 50-iteration root turn limit. One monolithic try that overflows context is worse than a tree of smaller calls. If you catch yourself reasoning line-by-line in prose over hundreds of items, stop and spawn a subagent for that sub-problem instead."#;
 
@@ -1008,6 +1015,8 @@ fn build_projected_bindings(
 
 fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
     match args.provider_id.as_str() {
+        // The original env-driven path: OpenRouter / any OpenAI-compatible
+        // endpoint with a bare API key. Keeps the no-config workflow intact.
         "openai-compatible" | "openai-generic" => {
             let api_key = resolve_api_key(args).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1018,10 +1027,31 @@ fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
                 lash_provider_openai::OpenAiGenericProvider::new(api_key, resolve_base_url(args));
             Ok(ProviderHandle::new(provider.into_components()))
         }
-        other => bail!(
-            "provider `{other}` is not supported by this harness; use the OpenAI-compatible path"
-        ),
+        // Any other provider key (e.g. `codex`, `anthropic`) is resolved from
+        // the user's `~/.lash/config.json`, mirroring the clbench runner. This
+        // is what enables `--provider-id codex` to use OAuth tokens off the
+        // active Codex subscription.
+        other => {
+            let config_path = lash_home().join("config.json");
+            let mut config = LashConfig::load(&config_path).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing or invalid {} — initialise a lash config to use provider `{other}`",
+                    config_path.display()
+                )
+            })?;
+            config
+                .set_active_provider_kind(other)
+                .map_err(anyhow::Error::msg)?;
+            config.build_active_provider().map_err(anyhow::Error::msg)
+        }
     }
+}
+
+fn lash_home() -> PathBuf {
+    env::var_os("LASH_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".lash")))
+        .unwrap_or_else(|| Path::new(".lash").to_path_buf())
 }
 
 fn resolve_api_key(args: &Args) -> Option<String> {

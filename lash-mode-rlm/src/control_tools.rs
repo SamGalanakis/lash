@@ -16,11 +16,11 @@ impl RlmControlToolsProvider {
         context: &ToolExecutionContext,
     ) -> Result<ContinueAsResult, String> {
         let task = required_string(args, "task")?;
-        let seed = match args.get("seed") {
-            None | Some(Value::Null) => serde_json::Map::new(),
-            Some(Value::Object(map)) => map.clone(),
-            Some(_) => return Err("continue_as `seed` must be a record/dict".to_string()),
-        };
+        // Projected entries (sourced from the parent's host bindings) get
+        // re-projected on the successor; global entries land as RLM globals
+        // via the existing `RlmGlobalsPatch` plumbing.
+        let seed =
+            lash_rlm_types::classify_seed(args).map_err(|err| format!("continue_as {err}"))?;
 
         let current_snapshot = context
             .host
@@ -39,7 +39,10 @@ impl RlmControlToolsProvider {
 
         let mode_extras = ModeExtras::typed(
             lash::ExecutionMode::new("rlm"),
-            lash_rlm_types::RlmCreateExtras { termination },
+            lash_rlm_types::RlmCreateExtras {
+                termination,
+                projected_seed: (!seed.projected.is_empty()).then(|| seed.projected.clone()),
+            },
         )
         .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
         let mut request = fresh_successor_request(
@@ -53,7 +56,7 @@ impl RlmControlToolsProvider {
             .session_id
             .clone()
             .expect("fresh successor request sets session id");
-        request.initial_nodes = rlm_seed_initial_nodes(seed);
+        request.initial_nodes = rlm_seed_initial_nodes(seed.globals);
         request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task.clone()));
         context
             .host
@@ -113,12 +116,12 @@ impl ToolProvider for RlmControlToolsProvider {
 pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
         "continue_as",
-        "Tail-call into a fresh RLM successor with a clean window.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results) the successor needs in scope; leave bulky raw output behind.",
+        "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.",
         continue_as_input_schema(),
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(vec![
-        r#"call continue_as { task: "continue the audit from the summarized findings", seed: { findings: findings } }"#.into(),
+        r#"call continue_as { task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } }"#.into(),
     ])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
@@ -168,7 +171,13 @@ fn fresh_successor_request(
     }
 }
 
-fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<SessionAppendNode> {
+/// Build the `initial_nodes` payload that seeds RLM globals on a new session.
+///
+/// Used by `continue_as` for its own seed split, and re-exported for
+/// `spawn_agent` (lash-subagents) so both tools share the same RLM-mode patch
+/// emission. Each entry of `seed` becomes a `let <name> = <value>` global on
+/// the child via `RlmGlobalsPatch`.
+pub fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<SessionAppendNode> {
     if seed.is_empty() {
         return Vec::new();
     }
@@ -414,5 +423,87 @@ mod tests {
                 ..
             }
         ));
+        assert!(
+            extras.projected_seed.is_none(),
+            "no projected entries → projected_seed should be absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn continue_as_routes_projected_entries_to_mode_extras_and_globals_to_initial_nodes() {
+        // Mixed seed: `proj` was a projected source on the parent (encoded with
+        // the canonical `__projected__` JSON wrapper), `glob` was a regular
+        // global. The successor must receive `proj` as a projected binding via
+        // mode_extras.projected_seed and `glob` via the RlmGlobalsPatch event.
+        let manager = Arc::new(BatonManager {
+            snapshot: PersistedSessionState {
+                policy: SessionPolicy {
+                    execution_mode: lash::ExecutionMode::new("rlm"),
+                    model: "model".to_string(),
+                    max_context_tokens: Some(200_000),
+                    ..SessionPolicy::default()
+                },
+                ..PersistedSessionState::default()
+            },
+            created: Mutex::new(Vec::new()),
+        });
+        let provider = RlmControlToolsProvider;
+        let context = ToolExecutionContext {
+            session_id: "parent".to_string(),
+            host: manager.clone(),
+            cancellation_token: None,
+            async_task_id: None,
+        };
+
+        let result = provider
+            .execute_with_context(
+                "continue_as",
+                &json!({
+                    "task": "finish from here",
+                    "seed": {
+                        "proj": { "__projected__": "carry-over" },
+                        "glob": 7
+                    }
+                }),
+                &context,
+            )
+            .await;
+        assert!(result.success, "{:?}", result.result);
+
+        let created = manager.created.lock().expect("created");
+        let request = &created[0];
+
+        // Globals: the regular entry lands as RlmGlobalsPatch; the projected
+        // entry must NOT appear here.
+        assert_eq!(request.initial_nodes.len(), 1);
+        let SessionAppendNode::Event {
+            event: SessionEventRecord::Mode(mode_event),
+        } = &request.initial_nodes[0]
+        else {
+            panic!("expected seed globals event");
+        };
+        let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = mode_event.rlm_event() else {
+            panic!("expected RlmGlobalsPatch");
+        };
+        assert_eq!(
+            seed.set_default.len(),
+            1,
+            "only `glob` should land as a global"
+        );
+        assert_eq!(seed.set_default["glob"], json!(7));
+        assert!(!seed.set_default.contains_key("proj"));
+
+        // Projected: rides on mode_extras as the snapshot.
+        let extras = request
+            .mode_extras
+            .decode::<RlmCreateExtras>(&lash::ExecutionMode::new("rlm"))
+            .expect("decode extras")
+            .expect("rlm extras");
+        let snapshot = extras
+            .projected_seed
+            .expect("projected entries should ride on mode_extras");
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].0, "proj");
+        assert_eq!(snapshot.entries[0].1, json!("carry-over"));
     }
 }

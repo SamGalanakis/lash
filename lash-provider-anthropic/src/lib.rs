@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use async_trait::async_trait;
 use base64::Engine;
 use serde::Deserialize;
@@ -1069,6 +1071,7 @@ impl ProviderTransport for AnthropicProvider {
 
         let status = resp.status();
         if !status.is_success() {
+            let headers = resp.headers().clone();
             let text = read_response_text(
                 resp,
                 timeouts.request_timeout,
@@ -1086,13 +1089,15 @@ impl ProviderTransport for AnthropicProvider {
             } else {
                 format!("Anthropic request failed with {}", status.as_u16())
             };
-            return Err(LlmTransportError {
-                message,
-                retryable: status.as_u16() == 429 || status.as_u16() >= 500,
-                raw: Some(text),
-                code: Some(status.as_u16().to_string()),
-                request_body,
-            });
+            let mut err = LlmTransportError::new(message)
+                .with_status(status.as_u16())
+                .with_headers(&headers)
+                .with_raw(text)
+                .retryable(status.as_u16() == 429 || status.as_u16() >= 500);
+            if let Some(request_body) = request_body {
+                err = err.with_request_body(request_body);
+            }
+            return Err(err);
         }
 
         let mut state = StreamState::default();

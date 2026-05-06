@@ -11,22 +11,31 @@
 <body>
   <div class="page">
     <main class="frame">
+      <aside class="sidebar" aria-label="Architecture navigation">
+        <a class="sidebar__exit" href="../index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Architecture</span>
+            <span class="sidebar__current">Dependencies</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./overview.html">Overview</a></li>
+            <li><a href="./modules.html">Modules</a></li>
+            <li><a href="./flow.html">Data Flow</a></li>
+            <li><a href="./execution.html">Execution</a></li>
+            <li><a href="./runtime.html">Runtime</a></li>
+            <li><a href="./abstractions.html">Abstractions</a></li>
+            <li><a class="active" href="./deps.html">Dependencies</a></li>
+            <li><a href="./lashlang.html">Lashlang</a></li>
+            <li><a href="./html-exporter.html">HTML Exporter</a></li>
+          </ol>
+        </details>
+      </aside>
       <header class="hero">
-        <div>
-          <div class="eyebrow">Architecture chapter 07</div>
-          <h1>deps<span class="slash">/</span>edges</h1>
-          <p>Lash keeps external systems at explicit edges — LLM transports, OAuth flows, MCP stdio servers, Tavily search/extract, models.dev metadata, trace sinks, file watchers, and SQLite-backed session storage.</p>
-        </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">LLM APIs</div><strong>OpenAI-compatible, Codex, Anthropic, Google</strong><span>Provider crates translate common <code>LlmRequest</code> contracts to wire APIs.</span></article>
-          <article class="card"><div class="micro-label">Tool APIs</div><strong>MCP + Tavily</strong><span>Dynamic tool import and web search/fetch live outside the core protocol.</span></article>
-          <article class="card"><div class="micro-label">Local services</div><strong>SQLite, file watch, JSONL traces</strong><span>Durable sessions, fuzzy file index, and trace capture are local-first.</span></article>
-        </div>
+        <div class="eyebrow">Architecture chapter 07</div>
+        <h1>deps<span class="slash">/</span>edges</h1>
+        <p>Lash keeps external systems at explicit edges — LLM transports, OAuth flows, MCP stdio servers, Tavily search/extract, models.dev metadata, trace sinks, file watchers, and SQLite-backed session storage.</p>
       </header>
-
-      <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a class="active" href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
-      </nav>
 
       <section class="content">
         <div class="section">
@@ -53,7 +62,7 @@ flowchart TD
   Runtime --> Trace["lash-trace schema v2<br/>standard + extended JSONL"]
   Runtime --> Export["lash-export<br/>DB + provider trace"]
   MCP --> Dynamic["DynamicToolProvider"]
-  Tavily --> DefaultTools["lash-default-tools"]
+  DefaultTools["lash-default-tools"] --> Tavily
   Dynamic --> Runtime
   DefaultTools --> Runtime
             </div>
@@ -76,15 +85,24 @@ flowchart TD
               </tbody>
             </table>
           </div>
-          <div class="module-grid">
-            <article class="panel"><h3>OpenAI-compatible selection</h3><p><code>openai-compatible</code> is the public provider kind. Its internal <code>wire_api</code> can be <code>auto</code>, <code>responses</code>, or <code>chat-completions</code>; <code>auto</code> defaults to Responses except for OpenRouter Anthropic/Claude model ids, where message-shaped Chat Completions preserves provider-native caching behavior.</p></article>
-            <article class="panel"><h3>Responses path</h3><p>The Responses path posts to <code>{base_url}/responses</code>, keeps Responses reasoning replay, and uses <code>prompt_cache_key</code> from the Lash session id when cache retention is enabled. Long retention adds <code>prompt_cache_retention</code> where that API supports it.</p></article>
-            <article class="panel"><h3>Chat Completions path</h3><p>The Chat path posts to <code>{base_url}/chat/completions</code>, converts <code>LlmRequest</code> into <code>messages</code>, emits Chat Completions tools, maps structured output to <code>response_format</code>, and preserves OpenRouter reasoning effort through <code>reasoning.effort</code>.</p></article>
-            <article class="panel"><h3>Claude cache markers</h3><p>For OpenRouter Claude on Chat Completions, <code>cache_retention</code> controls Anthropic-style <code>cache_control</code> markers. <code>short</code> emits <code>{"type":"ephemeral"}</code>; <code>long</code> adds <code>"ttl":"1h"</code>; <code>none</code> emits no markers. Breakpoints are the first system/developer text message, the last tool definition, and any explicit <code>LlmContentBlock::Text.cache_breakpoint</code>; without an explicit block, the provider falls back to the last user/assistant text content.</p></article>
-            <article class="panel"><h3>RLM prompt caching</h3><p>RLM projects chronological history as append-only chat-shaped messages: user inputs remain user messages, prior RLM steps become assistant messages, tool observations become user messages, and the mutable current-iteration/finalization prompt stays as the final user message. The rolling <code>cache_breakpoint</code> is placed on the last stable history text block, so OpenRouter Claude can cache a real message prefix instead of a rewritten history blob.</p></article>
-            <article class="panel"><h3>Usage and cost inputs</h3><p>Provider responses still return normalized <code>LlmUsage</code> to the runtime usage ledger. Chat parsing reads streaming and non-streaming usage chunks, including OpenRouter cache fields; cache-write tokens are not counted as cached reads, so downstream cost/export code does not overstate cache hits.</p></article>
-            <article class="panel"><h3>Provider boundary rule</h3><p>Wire-specific schema normalization, cache-marker placement, reasoning-detail replay, and token-field interpretation stay inside provider crates. Runtime modes and canonical tool definitions continue to operate on <code>LlmRequest</code>, <code>LlmResponse</code>, and <code>ToolDefinition</code>.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt>OpenAI-compatible selection</dt>
+            <dd><code>openai-compatible</code> is the public provider kind. Its internal <code>wire_api</code> can be <code>auto</code>, <code>responses</code>, or <code>chat-completions</code>; <code>auto</code> defaults to Responses except for OpenRouter Anthropic/Claude model ids, where message-shaped Chat Completions preserves provider-native caching behavior.</dd>
+            <dt>Responses path</dt>
+            <dd>The Responses path posts to <code>{base_url}/responses</code>, keeps Responses reasoning replay, and uses <code>prompt_cache_key</code> from the Lash session id when cache retention is enabled. Long retention adds <code>prompt_cache_retention</code> where that API supports it.</dd>
+            <dt>Chat Completions path</dt>
+            <dd>The Chat path posts to <code>{base_url}/chat/completions</code>, converts <code>LlmRequest</code> into <code>messages</code>, emits Chat Completions tools, maps structured output to <code>response_format</code>, and preserves OpenRouter reasoning effort through <code>reasoning.effort</code>.</dd>
+            <dt>Claude cache markers</dt>
+            <dd>For OpenRouter Claude on Chat Completions, <code>cache_retention</code> controls Anthropic-style <code>cache_control</code> markers. <code>short</code> emits <code>{"type":"ephemeral"}</code>; <code>long</code> adds <code>"ttl":"1h"</code>; <code>none</code> emits no markers. Breakpoints are the first system/developer text message, the last tool definition, and any explicit <code>LlmContentBlock::Text.cache_breakpoint</code>; without an explicit block, the provider falls back to the last user/assistant text content.</dd>
+            <dt>RLM prompt caching</dt>
+            <dd>RLM projects chronological history as append-only chat-shaped messages: user inputs remain user messages, prior RLM steps become assistant messages, tool observations become user messages, and the mutable current-iteration/finalization prompt stays as the final user message. The rolling <code>cache_breakpoint</code> is placed on the last stable history text block, so OpenRouter Claude can cache a real message prefix instead of a rewritten history blob.</dd>
+            <dt>Usage and cost inputs</dt>
+            <dd>Provider responses still return normalized <code>LlmUsage</code> to the runtime usage ledger. Chat parsing reads streaming and non-streaming usage chunks, including OpenRouter cache fields; cache-write tokens are not counted as cached reads, so downstream cost/export code does not overstate cache hits.</dd>
+            <dt>Provider boundary rule</dt>
+            <dd>Wire-specific schema normalization, cache-marker placement, reasoning-detail replay, and token-field interpretation stay inside provider crates. Runtime modes and canonical tool definitions continue to operate on <code>LlmRequest</code>, <code>LlmResponse</code>, and <code>ToolDefinition</code>.</dd>
+            <dt>Built-in aggregator</dt>
+            <dd><code>lash-providers-builtin::register_all</code> is the one-call aggregator the CLI and embed hosts use to register the four first-party provider factories (Anthropic, OpenAI-compatible, Codex, Google) with the global provider registry.</dd>
+          </dl>
         </div>
 
         <div class="section">
@@ -93,10 +111,10 @@ flowchart TD
             <p>These dependencies are important operationally because they affect startup, discovery, observability, or tool availability.</p>
           </div>
           <div class="module-grid">
-            <article class="panel"><h3>MCP</h3><p><code>attach_mcp_servers</code> imports stdio MCP <code>tools/list</code> entries as <code>mcp__server__tool</code> dynamic tools, preserving input and output schemas where available.</p></article>
+            <article class="panel"><h3>MCP</h3><p><code>attach_mcp_servers</code> imports stdio MCP <code>tools/list</code> entries as <code>mcp__server__tool</code> dynamic tools, preserving input and output schemas where available. <code>McpServerConfig</code> is single-variant — stdio is the only transport; HTTP/SSE are not supported.</p></article>
             <article class="panel"><h3>Tavily</h3><p>Web search and URL extraction register only when <code>LashConfig.auxiliary_secrets.tavily_api_key</code> is present.</p></article>
             <article class="panel"><h3>models.dev</h3><p><code>CachedModelCatalog</code> reads a file cache, can fetch <code>https://models.dev/api.json</code>, and has a bundled snapshot fallback.</p></article>
-            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Standard records cover turns, LLM starts/completions, tools, and summaries; extended records preserve provider/stream details. Optional OTel maps those events to spans.</p></article>
+            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Standard records cover turns, LLM starts/completions, tools, and summaries; extended records preserve provider/stream details. The optional <code>otel</code> cargo feature pulls in <code>opentelemetry 0.31</code> and maps those events to spans. <code>lash-trace-viewer</code> is a standalone binary crate that consumes <code>lash-trace</code> JSONL directly, independent of <code>lash-export</code>.</p></article>
             <article class="panel"><h3>File index</h3><p><code>lash-file-index</code> combines <code>ignore</code> walking, <code>notify</code> watching, and <code>nucleo</code> matching for async <code>@</code> completion.</p></article>
             <article class="panel"><h3>Store</h3><p><code>lash/src/store.rs</code> defines the runtime persistence contract. <code>lash-sqlite-store</code> is the local implementation for session heads, graph nodes, checkpoint blobs, usage deltas, tombstones, and garbage-collection metadata.</p></article>
             <article class="panel"><h3>Export</h3><p><code>lash-export</code> renders the SQLite session plus provider trace JSONL when present, so transcript views can include prompt snapshots, context percentage, cached-token percentage, and exact token counts.</p></article>
@@ -104,8 +122,8 @@ flowchart TD
         </div>
 
         <div class="section-nav">
-          <a href="./abstractions.html"><span>Previous</span><strong>Abstractions</strong></a>
-          <a href="./files.html"><span>Next</span><strong>Files</strong></a>
+          <a href="./abstractions.html"><span>Previous</span><strong>06 · Abstractions</strong></a>
+          <a href="./lashlang.html"><span>Next</span><strong>08 · Lashlang</strong></a>
         </div>
       </section>
 

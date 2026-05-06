@@ -21,11 +21,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::llm::timeouts::{DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts};
 
-use crate::llm::transport::LlmTransportError;
-use crate::llm::types::{LlmRequest, LlmResponse};
+use crate::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
+use crate::llm::types::{LlmContentBlock, LlmRequest, LlmResponse};
 use crate::mcp::McpServerConfig;
 use crate::model_info::{ModelCatalog, ResolvedModelSpec};
 use crate::oauth::OAuthError;
+use tokio::time::Instant;
 
 /// Per-request tuning a provider produces for a model + variant. Each
 /// concrete provider crate interprets its own variant strings and emits
@@ -126,21 +127,123 @@ impl<'de> Deserialize<'de> for RequestTimeout {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderOptions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<RequestTimeout>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chunk_timeout: Option<u64>,
+    pub reliability: ProviderReliability,
 }
 
 impl ProviderOptions {
     pub fn is_default(&self) -> bool {
-        self.timeout.is_none() && self.chunk_timeout.is_none()
+        self.reliability == ProviderReliability::default_llm()
     }
 
     pub fn llm_timeouts(&self) -> LlmTimeouts {
-        let request_timeout = match self.timeout {
+        self.reliability.timeouts.llm_timeouts()
+    }
+}
+
+impl Serialize for ProviderOptions {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            reliability: &'a ProviderReliability,
+        }
+
+        Wire {
+            reliability: &self.reliability,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderOptions {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            reliability: Option<ProviderReliability>,
+            #[serde(default)]
+            timeout: Option<RequestTimeout>,
+            #[serde(default)]
+            chunk_timeout: Option<u64>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if let Some(reliability) = wire.reliability {
+            return Ok(Self { reliability });
+        }
+        let mut reliability = ProviderReliability::default_llm();
+        reliability.timeouts.request_timeout = wire.timeout;
+        reliability.timeouts.chunk_timeout = wire.chunk_timeout;
+        Ok(Self { reliability })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderReliability {
+    #[serde(default)]
+    pub timeouts: ProviderTimeoutPolicy,
+    #[serde(default)]
+    pub retry: ProviderRetryPolicy,
+    #[serde(default)]
+    pub rate_limits: ProviderRateLimitPolicy,
+}
+
+impl ProviderReliability {
+    pub fn default_llm() -> Self {
+        Self {
+            timeouts: ProviderTimeoutPolicy::default(),
+            retry: ProviderRetryPolicy::default(),
+            rate_limits: ProviderRateLimitPolicy::default(),
+        }
+    }
+
+    pub fn codex() -> Self {
+        Self {
+            retry: ProviderRetryPolicy {
+                max_attempts: 4,
+                base_delay_ms: 1_000,
+                max_delay_ms: 4_000,
+                jitter_ms: 0,
+                retry_after_cap_ms: Some(60_000),
+                enabled: true,
+            },
+            ..Self::default_llm()
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            retry: ProviderRetryPolicy::disabled(),
+            rate_limits: ProviderRateLimitPolicy::default(),
+            timeouts: ProviderTimeoutPolicy::default(),
+        }
+    }
+
+    pub fn builder() -> ProviderReliabilityBuilder {
+        ProviderReliabilityBuilder {
+            reliability: Self::default_llm(),
+        }
+    }
+}
+
+impl Default for ProviderReliability {
+    fn default() -> Self {
+        Self::default_llm()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProviderTimeoutPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout: Option<RequestTimeout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_timeout: Option<u64>,
+}
+
+impl ProviderTimeoutPolicy {
+    pub fn llm_timeouts(&self) -> LlmTimeouts {
+        let request_timeout = match self.request_timeout {
             Some(RequestTimeout::Disabled) => None,
             Some(RequestTimeout::Millis(ms)) => Some(Duration::from_millis(ms)),
             None => Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)),
@@ -153,6 +256,138 @@ impl ProviderOptions {
             request_timeout,
             chunk_timeout: Duration::from_millis(chunk_timeout_ms),
         }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderRetryPolicy {
+    pub enabled: bool,
+    pub max_attempts: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub jitter_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_cap_ms: Option<u64>,
+}
+
+impl Default for ProviderRetryPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_attempts: 4,
+            base_delay_ms: 2_000,
+            max_delay_ms: 10_000,
+            jitter_ms: 0,
+            retry_after_cap_ms: Some(60_000),
+        }
+    }
+}
+
+impl ProviderRetryPolicy {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: 1,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            jitter_ms: 0,
+            retry_after_cap_ms: None,
+        }
+    }
+
+    fn attempts(&self) -> u32 {
+        if self.enabled {
+            self.max_attempts.max(1)
+        } else {
+            1
+        }
+    }
+
+    fn delay_for_attempt(&self, retry_index: u32, retry_after: Option<Duration>) -> Duration {
+        if let Some(retry_after) = retry_after {
+            return self
+                .retry_after_cap_ms
+                .map(Duration::from_millis)
+                .map(|cap| retry_after.min(cap))
+                .unwrap_or(retry_after);
+        }
+        let multiplier = 1u64.checked_shl(retry_index).unwrap_or(u64::MAX);
+        let delay_ms = self
+            .base_delay_ms
+            .saturating_mul(multiplier)
+            .min(self.max_delay_ms);
+        Duration::from_millis(delay_ms.saturating_add(self.jitter_ms))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProviderRateLimitPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_window_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_window_ms: Option<u64>,
+}
+
+pub struct ProviderReliabilityBuilder {
+    reliability: ProviderReliability,
+}
+
+impl ProviderReliabilityBuilder {
+    pub fn request_timeout(mut self, timeout: Option<RequestTimeout>) -> Self {
+        self.reliability.timeouts.request_timeout = timeout;
+        self
+    }
+
+    pub fn stream_chunk_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
+        self.reliability.timeouts.chunk_timeout = timeout_ms;
+        self
+    }
+
+    pub fn max_attempts(mut self, attempts: u32) -> Self {
+        self.reliability.retry.max_attempts = attempts.max(1);
+        self
+    }
+
+    pub fn base_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.reliability.retry.base_delay_ms = delay_ms;
+        self
+    }
+
+    pub fn max_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.reliability.retry.max_delay_ms = delay_ms;
+        self
+    }
+
+    pub fn retry_after_cap_ms(mut self, cap_ms: Option<u64>) -> Self {
+        self.reliability.retry.retry_after_cap_ms = cap_ms;
+        self
+    }
+
+    pub fn max_concurrency(mut self, value: Option<usize>) -> Self {
+        self.reliability.rate_limits.max_concurrency = value;
+        self
+    }
+
+    pub fn requests_per_window(mut self, requests: Option<u32>, window_ms: Option<u64>) -> Self {
+        self.reliability.rate_limits.requests_per_window = requests;
+        self.reliability.rate_limits.request_window_ms = window_ms;
+        self
+    }
+
+    pub fn tokens_per_window(mut self, tokens: Option<u32>, window_ms: Option<u64>) -> Self {
+        self.reliability.rate_limits.tokens_per_window = tokens;
+        self.reliability.rate_limits.token_window_ms = window_ms;
+        self
+    }
+
+    pub fn build(self) -> ProviderReliability {
+        self.reliability
     }
 }
 
@@ -237,6 +472,223 @@ pub trait ProviderModelPolicy: Send + Sync + std::fmt::Debug {
     fn input_usage_excludes_cached_tokens(&self) -> bool {
         false
     }
+}
+
+pub trait ProviderFailureClassifier: Send + Sync + std::fmt::Debug {
+    fn classify(&self, failure: ProviderFailure) -> ProviderFailure;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DefaultProviderFailureClassifier;
+
+impl ProviderFailureClassifier for DefaultProviderFailureClassifier {
+    fn classify(&self, mut failure: ProviderFailure) -> ProviderFailure {
+        if let Some(status) = failure.status.or_else(|| {
+            failure
+                .code
+                .as_deref()
+                .and_then(|code| code.parse::<u16>().ok())
+        }) {
+            failure.status = Some(status);
+            if failure.kind == ProviderFailureKind::Unknown {
+                failure.kind = ProviderFailureKind::Http;
+            }
+            failure.retryable = matches!(status, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504);
+            if matches!(status, 401 | 403) {
+                failure.kind = ProviderFailureKind::Auth;
+            } else if matches!(status, 400 | 413 | 422) {
+                failure.kind = ProviderFailureKind::Validation;
+            }
+        } else if matches!(
+            failure.kind,
+            ProviderFailureKind::Transport | ProviderFailureKind::Timeout
+        ) {
+            failure.retryable = true;
+        }
+
+        let haystack = format!(
+            "{}\n{}\n{}",
+            failure.code.as_deref().unwrap_or_default(),
+            failure.message,
+            failure.raw.as_deref().unwrap_or_default()
+        )
+        .to_ascii_lowercase();
+        if haystack.contains("context_length")
+            || haystack.contains("context length")
+            || haystack.contains("maximum context")
+            || haystack.contains("invalid_request_error")
+        {
+            failure.kind = ProviderFailureKind::Validation;
+            failure.retryable = false;
+        }
+        if haystack.contains("insufficient_quota")
+            || haystack.contains("usage_limit_reached")
+            || haystack.contains("usage_not_included")
+            || haystack.contains("quota")
+        {
+            failure.kind = ProviderFailureKind::Quota;
+            failure.retryable = false;
+        }
+        if haystack.contains("model_not_found")
+            || haystack.contains("unsupported model")
+            || haystack.contains("does not exist")
+        {
+            failure.kind = ProviderFailureKind::Unsupported;
+            failure.retryable = false;
+        }
+        failure
+    }
+}
+
+#[derive(Debug)]
+pub struct ProviderRateLimiter {
+    state: Mutex<ProviderRateLimiterState>,
+}
+
+#[derive(Debug)]
+struct ProviderRateLimiterState {
+    policy: ProviderRateLimitPolicy,
+    semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    request_bucket: WindowBucket,
+    token_bucket: WindowBucket,
+}
+
+#[derive(Clone, Debug)]
+struct WindowBucket {
+    used: u32,
+    reset_at: Instant,
+}
+
+impl Default for WindowBucket {
+    fn default() -> Self {
+        Self {
+            used: 0,
+            reset_at: Instant::now(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ProviderRateLimitPermit {
+    _concurrency: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl ProviderRateLimiter {
+    pub fn new(policy: ProviderRateLimitPolicy) -> Self {
+        let semaphore = policy
+            .max_concurrency
+            .filter(|limit| *limit > 0)
+            .map(tokio::sync::Semaphore::new)
+            .map(Arc::new);
+        Self {
+            state: Mutex::new(ProviderRateLimiterState {
+                policy,
+                semaphore,
+                request_bucket: WindowBucket::default(),
+                token_bucket: WindowBucket::default(),
+            }),
+        }
+    }
+
+    pub fn configure(&self, policy: ProviderRateLimitPolicy) {
+        let mut state = self.state.lock().expect("provider rate limiter lock");
+        if state.policy.max_concurrency != policy.max_concurrency {
+            state.semaphore = policy
+                .max_concurrency
+                .filter(|limit| *limit > 0)
+                .map(tokio::sync::Semaphore::new)
+                .map(Arc::new);
+        }
+        state.policy = policy;
+    }
+
+    pub async fn admit(&self, request: &LlmRequest) -> ProviderRateLimitPermit {
+        let semaphore = self
+            .state
+            .lock()
+            .expect("provider rate limiter lock")
+            .semaphore
+            .clone();
+        let concurrency = match semaphore {
+            Some(semaphore) => Some(semaphore.acquire_owned().await.expect("semaphore open")),
+            None => None,
+        };
+        self.wait_for_buckets(1, estimate_request_tokens(request))
+            .await;
+        ProviderRateLimitPermit {
+            _concurrency: concurrency,
+        }
+    }
+
+    async fn wait_for_buckets(&self, requests: u32, tokens: u32) {
+        loop {
+            let wait = {
+                let mut state = self.state.lock().expect("provider rate limiter lock");
+                let now = Instant::now();
+                let policy = state.policy.clone();
+                let request_wait = bucket_wait(
+                    &mut state.request_bucket,
+                    now,
+                    policy.requests_per_window,
+                    policy.request_window_ms,
+                    requests,
+                );
+                let token_wait = bucket_wait(
+                    &mut state.token_bucket,
+                    now,
+                    policy.tokens_per_window,
+                    policy.token_window_ms,
+                    tokens,
+                );
+                match (request_wait, token_wait) {
+                    (None, None) => return,
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                }
+            };
+            if let Some(wait) = wait {
+                tokio::time::sleep(wait).await;
+            }
+        }
+    }
+}
+
+fn bucket_wait(
+    bucket: &mut WindowBucket,
+    now: Instant,
+    limit: Option<u32>,
+    window_ms: Option<u64>,
+    cost: u32,
+) -> Option<Duration> {
+    let limit = limit.filter(|limit| *limit > 0)?;
+    let window = Duration::from_millis(window_ms.unwrap_or(60_000).max(1));
+    if now >= bucket.reset_at {
+        bucket.used = 0;
+        bucket.reset_at = now + window;
+    }
+    if bucket.used.saturating_add(cost.min(limit)) <= limit {
+        bucket.used = bucket.used.saturating_add(cost.min(limit));
+        None
+    } else {
+        Some(bucket.reset_at.saturating_duration_since(now))
+    }
+}
+
+fn estimate_request_tokens(request: &LlmRequest) -> u32 {
+    let mut chars = request.model.len();
+    for message in &request.messages {
+        for block in message.blocks.iter() {
+            match block {
+                LlmContentBlock::Text { text, .. } => chars += text.len(),
+                LlmContentBlock::ToolCall { input_json, .. } => chars += input_json.len(),
+                LlmContentBlock::ToolResult { content, .. } => chars += content.len(),
+                LlmContentBlock::Reasoning { text, .. } => chars += text.len(),
+                LlmContentBlock::Image { .. } => chars += 256,
+            }
+        }
+    }
+    chars = chars.saturating_add(request.attachments.iter().map(|a| a.data.len() / 4).sum());
+    ((chars / 4).max(1)).try_into().unwrap_or(u32::MAX)
 }
 
 /// Provider auth component for API-key providers.
@@ -457,6 +909,8 @@ pub struct ProviderComponents {
     pub readiness: Box<dyn ProviderReadiness>,
     pub transport: Box<dyn ProviderTransport>,
     pub model_policy: Arc<dyn ProviderModelPolicy>,
+    pub failure_classifier: Arc<dyn ProviderFailureClassifier>,
+    pub rate_limiter: Arc<ProviderRateLimiter>,
 }
 
 impl ProviderComponents {
@@ -467,12 +921,15 @@ impl ProviderComponents {
         transport: Box<dyn ProviderTransport>,
         model_policy: Arc<dyn ProviderModelPolicy>,
     ) -> Self {
+        let options = state.options();
         Self {
             state,
             auth,
             readiness,
             transport,
             model_policy,
+            failure_classifier: Arc::new(DefaultProviderFailureClassifier),
+            rate_limiter: Arc::new(ProviderRateLimiter::new(options.reliability.rate_limits)),
         }
     }
 
@@ -489,12 +946,15 @@ impl ProviderComponents {
             + 'static,
     {
         let inner = Arc::new(Mutex::new(provider));
+        let options = inner.lock().expect("provider state lock").options();
         Self {
             state: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
             auth: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
             readiness: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
             transport: Box::new(SharedProviderComponent::new(inner)),
             model_policy,
+            failure_classifier: Arc::new(DefaultProviderFailureClassifier),
+            rate_limiter: Arc::new(ProviderRateLimiter::new(options.reliability.rate_limits)),
         }
     }
 
@@ -503,6 +963,14 @@ impl ProviderComponents {
         map: impl FnOnce(Box<dyn ProviderTransport>) -> Box<dyn ProviderTransport>,
     ) -> Self {
         self.transport = map(self.transport);
+        self
+    }
+
+    pub fn with_failure_classifier(
+        mut self,
+        classifier: Arc<dyn ProviderFailureClassifier>,
+    ) -> Self {
+        self.failure_classifier = classifier;
         self
     }
 }
@@ -515,6 +983,8 @@ impl Clone for ProviderComponents {
             readiness: self.readiness.clone_boxed(),
             transport: self.transport.clone_boxed(),
             model_policy: Arc::clone(&self.model_policy),
+            failure_classifier: Arc::clone(&self.failure_classifier),
+            rate_limiter: Arc::clone(&self.rate_limiter),
         }
     }
 }
@@ -609,6 +1079,9 @@ impl ProviderHandle {
     }
 
     pub fn set_options(&mut self, options: ProviderOptions) {
+        self.components
+            .rate_limiter
+            .configure(options.reliability.rate_limits.clone());
         self.components.state.set_options(options)
     }
 
@@ -628,7 +1101,36 @@ impl ProviderHandle {
         &mut self,
         request: LlmRequest,
     ) -> Result<LlmResponse, LlmTransportError> {
-        self.components.transport.complete(request).await
+        let reliability = self.options().reliability;
+        let attempts = reliability.retry.attempts();
+        let mut attempt = 0;
+        loop {
+            let _permit = self.components.rate_limiter.admit(&request).await;
+            let result = self.components.transport.complete(request.clone()).await;
+            match result {
+                Ok(response) => return Ok(response),
+                Err(failure) => {
+                    let failure = self.components.failure_classifier.classify(failure);
+                    if attempt + 1 >= attempts || !failure.retryable {
+                        return Err(failure);
+                    }
+                    let delay = reliability
+                        .retry
+                        .delay_for_attempt(attempt, failure.retry_after);
+                    tracing::debug!(
+                        target: "lash::provider::reliability",
+                        provider = self.kind(),
+                        attempt = attempt + 1,
+                        max_attempts = attempts,
+                        delay_ms = delay.as_millis() as u64,
+                        err = %failure.message,
+                        "provider call failed with retryable failure; sleeping before retry"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     pub fn to_spec(&self) -> ProviderSpec {
@@ -1162,6 +1664,20 @@ mod tests {
         marker: String,
     }
 
+    #[derive(Clone, Debug)]
+    struct FailingProvider {
+        options: ProviderOptions,
+        attempts: Arc<AtomicUsize>,
+        fail_until: usize,
+        retryable: bool,
+    }
+
+    impl FailingProvider {
+        fn into_components(self) -> ProviderComponents {
+            ProviderComponents::shared(self, Arc::new(StaticModelPolicy::new("model-a")))
+        }
+    }
+
     impl MutatingProvider {
         fn into_components(self, policy: Arc<dyn ProviderModelPolicy>) -> ProviderComponents {
             ProviderComponents::shared(self, policy)
@@ -1190,11 +1706,44 @@ mod tests {
         }
     }
 
+    impl ProviderState for FailingProvider {
+        fn kind(&self) -> &'static str {
+            "failing"
+        }
+
+        fn options(&self) -> ProviderOptions {
+            self.options.clone()
+        }
+
+        fn set_options(&mut self, options: ProviderOptions) {
+            self.options = options;
+        }
+
+        fn serialize_config(&self) -> serde_json::Value {
+            serde_json::Value::Object(Default::default())
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderState> {
+            Box::new(self.clone())
+        }
+    }
+
     #[async_trait::async_trait]
     impl ProviderAuth for MutatingProvider {
         async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
             self.marker = "fresh".to_string();
             Ok(true)
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderAuth for FailingProvider {
+        async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
+            Ok(false)
         }
 
         fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
@@ -1218,12 +1767,60 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl ProviderReadiness for FailingProvider {
+        async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
+            Ok(false)
+        }
+
+        fn requires_streaming(&self) -> bool {
+            false
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
     impl ProviderTransport for MutatingProvider {
         async fn complete(
             &mut self,
             _request: LlmRequest,
         ) -> Result<LlmResponse, LlmTransportError> {
             self.marker = "complete".to_string();
+            Ok(LlmResponse {
+                deltas: vec!["ok".to_string()],
+                full_text: "ok".to_string(),
+                parts: Vec::new(),
+                usage: LlmUsage::default(),
+                provider_usage: None,
+                request_body: None,
+                http_summary: None,
+            })
+        }
+
+        fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderTransport for FailingProvider {
+        async fn complete(
+            &mut self,
+            _request: LlmRequest,
+        ) -> Result<LlmResponse, LlmTransportError> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt <= self.fail_until {
+                let kind = if self.retryable {
+                    ProviderFailureKind::Transport
+                } else {
+                    ProviderFailureKind::Validation
+                };
+                return Err(LlmTransportError::new("temporary failure")
+                    .with_kind(kind)
+                    .retryable(self.retryable));
+            }
             Ok(LlmResponse {
                 deltas: vec!["ok".to_string()],
                 full_text: "ok".to_string(),
@@ -1329,6 +1926,44 @@ mod tests {
         let spec = cfg.active_provider_spec();
         assert_eq!(spec.kind, "openai-compatible");
         assert_eq!(spec.config["api_key"], serde_json::json!("k"));
+    }
+
+    #[test]
+    fn legacy_provider_options_deserialize_into_reliability_timeouts() {
+        let options: ProviderOptions = serde_json::from_value(serde_json::json!({
+            "timeout": false,
+            "chunk_timeout": 42
+        }))
+        .expect("legacy options");
+
+        assert_eq!(
+            options.reliability.timeouts.request_timeout,
+            Some(RequestTimeout::Disabled)
+        );
+        assert_eq!(options.reliability.timeouts.chunk_timeout, Some(42));
+    }
+
+    #[test]
+    fn provider_options_serialize_only_reliability_shape() {
+        let options = ProviderOptions {
+            reliability: ProviderReliability::builder()
+                .request_timeout(Some(RequestTimeout::Millis(1_234)))
+                .stream_chunk_timeout_ms(Some(567))
+                .max_attempts(2)
+                .build(),
+        };
+
+        let value = serde_json::to_value(options).expect("serialize");
+        assert!(value.get("timeout").is_none());
+        assert!(value.get("chunk_timeout").is_none());
+        assert_eq!(
+            value["reliability"]["timeouts"]["request_timeout"],
+            serde_json::json!(1234)
+        );
+        assert_eq!(
+            value["reliability"]["timeouts"]["chunk_timeout"],
+            serde_json::json!(567)
+        );
     }
 
     #[test]
@@ -1462,6 +2097,85 @@ mod tests {
         handle.complete(empty_request()).await.expect("complete");
 
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_handle_retries_retryable_failures_in_shared_executor() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let provider = FailingProvider {
+            options: ProviderOptions {
+                reliability: ProviderReliability::builder()
+                    .max_attempts(3)
+                    .base_delay_ms(0)
+                    .max_delay_ms(0)
+                    .build(),
+            },
+            attempts: Arc::clone(&attempts),
+            fail_until: 2,
+            retryable: true,
+        };
+        let mut handle = ProviderHandle::new(provider.into_components());
+
+        handle
+            .complete(empty_request())
+            .await
+            .expect("eventual success");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn provider_handle_stops_on_non_retryable_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let provider = FailingProvider {
+            options: ProviderOptions {
+                reliability: ProviderReliability::builder()
+                    .max_attempts(3)
+                    .base_delay_ms(0)
+                    .max_delay_ms(0)
+                    .build(),
+            },
+            attempts: Arc::clone(&attempts),
+            fail_until: 3,
+            retryable: false,
+        };
+        let mut handle = ProviderHandle::new(provider.into_components());
+
+        let err = handle
+            .complete(empty_request())
+            .await
+            .expect_err("non retryable");
+
+        assert!(!err.retryable);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_handle_set_options_affects_retry_behavior() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let provider = FailingProvider {
+            options: ProviderOptions {
+                reliability: ProviderReliability::disabled(),
+            },
+            attempts: Arc::clone(&attempts),
+            fail_until: 1,
+            retryable: true,
+        };
+        let mut handle = ProviderHandle::new(provider.into_components());
+        handle.set_options(ProviderOptions {
+            reliability: ProviderReliability::builder()
+                .max_attempts(2)
+                .base_delay_ms(0)
+                .max_delay_ms(0)
+                .build(),
+        });
+
+        handle
+            .complete(empty_request())
+            .await
+            .expect("retry after set_options");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
     #[test]

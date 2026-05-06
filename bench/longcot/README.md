@@ -28,6 +28,16 @@ The Rust runner registers an explicit RLM tool surface for benchmark hygiene, mi
 
 LongCoT prompts explicitly forbid external tool use; this stack honors that while keeping recursive decomposition (via `spawn_agent`) available.
 
+### `seed:` channel for child sessions
+
+Both `spawn_agent` and `continue_as` accept `seed: { name: value, ... }`. Children inherit nothing else; pass everything they need through seed. Each entry's kind is preserved automatically by source:
+
+- `seed: { problem: input.prompt }` — `input.prompt` is a host-projected binding on the parent, so the child receives `problem` as a read-only projected binding (visible in its system prompt under `Host Projected Variables`).
+- `seed: { findings: findings }` — `findings` is a regular RLM global, so the child receives it as a regular global.
+- `seed: { hint: slice(input.prompt, 0, 1000) }` — computed expression, defaults to global.
+
+The wire encoding is a canonical `{"__projected__": <inner>}` wrapper any time lashlang serializes a `Value::Projected` to JSON; tools that don't care unwrap transparently via `lash::tools::unwrap_projected_arg`.
+
 ## Quickstart
 
 ```bash
