@@ -3,6 +3,8 @@ mod provider;
 mod session;
 mod tools;
 
+pub(crate) use session::switch_to_session_identifier;
+
 use super::runtime::send_user_message;
 use super::runtime::sync_runtime_tool_surface;
 use super::*;
@@ -90,7 +92,9 @@ pub(super) async fn dispatch_next_queued_turn(
     paused: &Arc<AtomicBool>,
     plugin_host: &PluginHost,
     ui_extensions: &UiExtensions,
-    dynamic_tools: &Arc<DynamicToolProvider>,
+    runtime_factory: &crate::session_bootstrap::CliRuntimeFactory,
+    lash_config: &lash::provider::LashConfig,
+    dynamic_tools: &mut Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -138,6 +142,8 @@ pub(super) async fn dispatch_next_queued_turn(
                 paused,
                 plugin_host,
                 ui_extensions,
+                runtime_factory,
+                lash_config,
                 dynamic_tools,
                 runtime,
                 history,
@@ -218,7 +224,9 @@ pub(super) async fn handle_parsed_slash_command(
     paused: &Arc<AtomicBool>,
     plugin_host: &PluginHost,
     ui_extensions: &UiExtensions,
-    dynamic_tools: &Arc<DynamicToolProvider>,
+    runtime_factory: &crate::session_bootstrap::CliRuntimeFactory,
+    lash_config: &lash::provider::LashConfig,
+    dynamic_tools: &mut Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -247,6 +255,8 @@ pub(super) async fn handle_parsed_slash_command(
                 args,
                 paused,
                 plugin_host,
+                runtime_factory,
+                lash_config,
                 dynamic_tools,
                 runtime,
                 history,
@@ -291,8 +301,10 @@ async fn handle_slash_command(
     logger: &mut SessionLogger,
     _args: &Args,
     paused: &Arc<AtomicBool>,
-    plugin_host: &PluginHost,
-    dynamic_tools: &Arc<DynamicToolProvider>,
+    _plugin_host: &PluginHost,
+    runtime_factory: &crate::session_bootstrap::CliRuntimeFactory,
+    lash_config: &lash::provider::LashConfig,
+    dynamic_tools: &mut Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -316,15 +328,20 @@ async fn handle_slash_command(
         command::Command::Clear => {
             session::handle_clear(
                 app,
-                plugin_host,
+                runtime_factory,
+                lash_config,
+                logger,
+                dynamic_tools,
                 runtime,
                 history,
                 turn_counter,
                 last_turn,
                 active_stream_id,
+                provider,
                 current_model_variant,
                 current_execution_mode,
                 session_manager,
+                desired_dynamic,
                 pending_clear_after_return,
             )
             .await
@@ -352,8 +369,7 @@ async fn handle_slash_command(
                     current_execution_mode,
                     standard_context_approach.as_ref(),
                     context_window,
-                    dynamic_tools.definitions().len(),
-                    toolset_hash,
+                    Some((dynamic_tools.definitions().len(), toolset_hash)),
                     &cwd,
                     Some(&session_name),
                     Some(&logger.session_id),
@@ -439,7 +455,8 @@ async fn handle_slash_command(
                 name,
                 app,
                 logger,
-                plugin_host,
+                runtime_factory,
+                lash_config,
                 dynamic_tools,
                 runtime,
                 history,

@@ -143,6 +143,7 @@ impl AutonomousRenderer {
             // aligned with the model's final answer.
             SessionEvent::ReasoningDelta { .. } => {}
             SessionEvent::Done
+            | SessionEvent::ToolCallStart { .. }
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::ChildTokenUsage { .. }
             | SessionEvent::InjectedTurnInputAccepted { .. }

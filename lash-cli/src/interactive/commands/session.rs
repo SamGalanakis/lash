@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use lash::attach_mcp_servers;
+use lash::provider::LashConfig;
 use lash::session_model::Message;
 use lash::*;
 use tokio::task;
@@ -8,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::{App, UiTimelineItem};
 use crate::fork;
 use crate::resume;
+use crate::session_bootstrap::{CliRuntimeFactory, OpenedCliSession};
 use crate::session_log::{self, SessionLogger};
 use crate::turn_runner::RuntimeRunResult;
 use crate::{hash12, push_system_message};
@@ -16,53 +19,146 @@ use super::super::helpers::TurnReplayPayload;
 use super::super::runtime::{apply_pending_reconfigure, send_user_message};
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_clear(
+async fn activate_opened_session(
+    opened: OpenedCliSession,
     app: &mut App,
-    _plugin_host: &PluginHost,
+    logger: &mut SessionLogger,
+    dynamic_tools: &mut Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
-    last_turn: &mut Option<TurnReplayPayload>,
-    active_stream_id: &mut u64,
-    current_model_variant: &Option<String>,
-    current_execution_mode: &ExecutionMode,
+    current_execution_mode: &mut ExecutionMode,
+    current_model_variant: &mut Option<String>,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    pending_clear_after_return: &mut bool,
-) -> anyhow::Result<bool> {
-    app.clear();
-    app.set_model_variant(current_model_variant.clone());
-    history.clear();
-    *turn_counter = 0;
-    *last_turn = None;
-    app.token_usage = TokenUsage::default();
-    *active_stream_id = active_stream_id.wrapping_add(1);
+    desired_dynamic: &mut DynamicStateSnapshot,
+    model_catalog: &CachedModelCatalog,
+    provider: &ProviderHandle,
+    lash_config: &LashConfig,
+) -> Result<(), String> {
+    let new_dynamic_tools = opened.dynamic_tools;
+    *dynamic_tools = new_dynamic_tools;
+    *runtime = Some(opened.runtime);
+    *logger = opened.logger;
+    resume::load_resumed_session(
+        opened.bootstrap.filename(),
+        app,
+        logger,
+        history,
+        runtime,
+        turn_counter,
+        current_execution_mode,
+        provider,
+        current_model_variant,
+        dynamic_tools,
+        desired_dynamic,
+        model_catalog,
+    )
+    .await?;
+    attach_mcp_servers(dynamic_tools, lash_config.mcp_servers())
+        .await
+        .map_err(|err| format!("failed to attach MCP servers: {err}"))?;
     if let Some(rt) = runtime.as_mut() {
-        let _ = rt.reset_session().await;
-        let mut state = SessionStateEnvelope {
-            session_id: "root".to_string(),
-            policy: SessionPolicy {
-                execution_mode: current_execution_mode.clone(),
-                ..rt.export_state().policy
-            },
-            session_graph: lash::SessionGraph::default(),
-            iteration: *turn_counter,
-            token_usage: app.token_usage.clone(),
-            last_prompt_usage: None,
-            mode_turn_options: rt.export_state().mode_turn_options,
-        };
-        state.replace_active_read_state(history, &[]);
-        rt.set_persisted_state(lash::PersistedSessionState::from_state(state));
+        rt.refresh_session_tool_surface()
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+    *desired_dynamic = dynamic_tools.export_state();
+    if let Some(rt) = runtime.as_ref() {
         match rt.session_manager() {
             Ok(manager) => *session_manager = manager,
             Err(err) => {
                 push_system_message(app, format!("Failed to refresh session manager: {}", err))
             }
         }
-        app.dirty = true;
-        *pending_clear_after_return = false;
-    } else {
-        *pending_clear_after_return = true;
     }
+    Ok(())
+}
+
+fn fallback_policy_for_session_switch(
+    runtime: &Option<LashRuntime>,
+    provider: &ProviderHandle,
+    app: &App,
+    current_model_variant: &mut Option<String>,
+    current_execution_mode: &mut ExecutionMode,
+) -> SessionPolicy {
+    runtime
+        .as_ref()
+        .map(|rt| rt.export_state().policy)
+        .unwrap_or_else(|| SessionPolicy {
+            provider: provider.clone(),
+            model: app.model.clone(),
+            model_variant: current_model_variant.clone(),
+            max_context_tokens: app.context_window.map(|window| window as usize),
+            execution_mode: current_execution_mode.clone(),
+            ..SessionPolicy::default()
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_clear(
+    app: &mut App,
+    runtime_factory: &CliRuntimeFactory,
+    lash_config: &LashConfig,
+    logger: &mut SessionLogger,
+    dynamic_tools: &mut Arc<DynamicToolProvider>,
+    runtime: &mut Option<LashRuntime>,
+    history: &mut Vec<Message>,
+    turn_counter: &mut usize,
+    last_turn: &mut Option<TurnReplayPayload>,
+    active_stream_id: &mut u64,
+    provider: &ProviderHandle,
+    current_model_variant: &mut Option<String>,
+    current_execution_mode: &mut ExecutionMode,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
+    desired_dynamic: &mut DynamicStateSnapshot,
+    pending_clear_after_return: &mut bool,
+) -> anyhow::Result<bool> {
+    *active_stream_id = active_stream_id.wrapping_add(1);
+    if runtime.is_none() {
+        *pending_clear_after_return = true;
+        return Ok(false);
+    }
+    let policy = fallback_policy_for_session_switch(
+        runtime,
+        provider,
+        app,
+        current_model_variant,
+        current_execution_mode,
+    );
+    let opened = runtime_factory.fresh(policy).await?;
+    *dynamic_tools = opened.dynamic_tools;
+    *runtime = Some(opened.runtime);
+    *logger = opened.logger;
+    attach_mcp_servers(dynamic_tools, lash_config.mcp_servers())
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
+    if let Some(rt) = runtime.as_mut() {
+        rt.refresh_session_tool_surface()
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        let state = rt.export_state();
+        app.session_id = state.session_id;
+        *current_execution_mode = state.policy.execution_mode;
+        *current_model_variant = state.policy.model_variant;
+        match rt.session_manager() {
+            Ok(manager) => *session_manager = manager,
+            Err(err) => {
+                push_system_message(app, format!("Failed to refresh session manager: {}", err))
+            }
+        }
+    }
+    app.session_name = opened.bootstrap.session_name();
+    *desired_dynamic = dynamic_tools.export_state();
+    history.clear();
+    *turn_counter = 0;
+    *last_turn = None;
+    app.clear();
+    app.set_model_variant(current_model_variant.clone());
+    app.timeline.push(UiTimelineItem::SystemMessage(format!(
+        "Started new session: {}",
+        app.session_name
+    )));
+    *pending_clear_after_return = false;
     Ok(false)
 }
 
@@ -217,12 +313,64 @@ pub(super) fn handle_tree(app: &mut App, runtime: &Option<LashRuntime>) -> anyho
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) async fn switch_to_session_identifier(
+    identifier: &str,
+    app: &mut App,
+    logger: &mut SessionLogger,
+    runtime_factory: &CliRuntimeFactory,
+    lash_config: &LashConfig,
+    dynamic_tools: &mut Arc<DynamicToolProvider>,
+    runtime: &mut Option<LashRuntime>,
+    history: &mut Vec<Message>,
+    turn_counter: &mut usize,
+    provider: &ProviderHandle,
+    current_model_variant: &mut Option<String>,
+    current_execution_mode: &mut ExecutionMode,
+    session_manager: &mut Arc<dyn RuntimeSessionHost>,
+    desired_dynamic: &mut DynamicStateSnapshot,
+    model_catalog: &CachedModelCatalog,
+    toolset_hash: &mut String,
+) -> anyhow::Result<()> {
+    let policy = fallback_policy_for_session_switch(
+        runtime,
+        provider,
+        app,
+        current_model_variant,
+        current_execution_mode,
+    );
+    let opened = runtime_factory.resume(identifier, policy).await?;
+    activate_opened_session(
+        opened,
+        app,
+        logger,
+        dynamic_tools,
+        runtime,
+        history,
+        turn_counter,
+        current_execution_mode,
+        current_model_variant,
+        session_manager,
+        desired_dynamic,
+        model_catalog,
+        provider,
+        lash_config,
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+    *toolset_hash = hash12(
+        &serde_json::to_vec(&dynamic_tools.definitions()).unwrap_or_else(|_| b"[]".to_vec()),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_resume(
     name: Option<String>,
     app: &mut App,
-    logger: &SessionLogger,
-    _plugin_host: &PluginHost,
-    dynamic_tools: &Arc<DynamicToolProvider>,
+    logger: &mut SessionLogger,
+    runtime_factory: &CliRuntimeFactory,
+    lash_config: &LashConfig,
+    dynamic_tools: &mut Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -236,40 +384,33 @@ pub(super) async fn handle_resume(
     toolset_hash: &mut String,
 ) -> anyhow::Result<bool> {
     if let Some(filename) = name {
-        match resume::load_resumed_session(
+        match switch_to_session_identifier(
             &filename,
             app,
-            history,
+            logger,
+            runtime_factory,
+            lash_config,
+            dynamic_tools,
             runtime,
+            history,
             turn_counter,
-            current_execution_mode,
             provider,
             current_model_variant,
-            dynamic_tools,
+            current_execution_mode,
+            session_manager,
             desired_dynamic,
             model_catalog,
+            toolset_hash,
         )
         .await
         {
             Ok(()) => {
                 *last_turn = None;
-                if let Some(rt) = runtime.as_ref() {
-                    match rt.session_manager() {
-                        Ok(manager) => *session_manager = manager,
-                        Err(err) => push_system_message(
-                            app,
-                            format!("Failed to refresh session manager: {}", err),
-                        ),
-                    }
-                }
                 app.dirty = true;
-                *toolset_hash = hash12(
-                    &serde_json::to_vec(&dynamic_tools.definitions())
-                        .unwrap_or_else(|_| b"[]".to_vec()),
-                );
             }
             Err(err) => {
-                app.timeline.push(UiTimelineItem::SystemMessage(err));
+                app.timeline
+                    .push(UiTimelineItem::SystemMessage(err.to_string()));
                 app.invalidate_height_cache();
                 app.scroll_to_bottom();
             }

@@ -175,6 +175,15 @@ enum ActiveReadItem<'a> {
     },
 }
 
+#[derive(Debug)]
+pub(crate) struct ActiveReadReplacement {
+    pub(crate) leaf_node_id: Option<String>,
+    pub(crate) new_tail_nodes: Vec<SessionNodeRecord>,
+    pub(crate) active_events: Vec<SessionEventRecord>,
+    pub(crate) active_messages: Vec<Message>,
+    pub(crate) active_tool_calls: Vec<ToolCallRecord>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SessionReadModel {
     pub(crate) active_events: Arc<Vec<SessionEventRecord>>,
@@ -193,6 +202,22 @@ pub(crate) struct SessionGraphAppendBuilder {
 impl SessionGraphAppendBuilder {
     pub(crate) fn leaf_node_id(&self) -> Option<&String> {
         self.leaf_node_id.as_ref()
+    }
+
+    pub(crate) fn set_leaf_node_id(&mut self, leaf_node_id: Option<String>) {
+        self.leaf_node_id = leaf_node_id;
+    }
+
+    pub(crate) fn register_existing_node_ids<'a>(
+        &mut self,
+        node_ids: impl IntoIterator<Item = &'a str>,
+    ) {
+        self.existing_ids
+            .extend(node_ids.into_iter().map(ToOwned::to_owned));
+    }
+
+    pub(crate) fn existing_node_ids(&self) -> &HashSet<String> {
+        &self.existing_ids
     }
 
     pub(crate) fn append_messages<I>(&mut self, messages: I) -> Vec<SessionNodeRecord>
@@ -879,79 +904,16 @@ impl SessionGraph {
         tool_calls: &[ToolCallRecord],
     ) {
         let current_nodes = self.active_path_nodes();
-        let target = build_active_read_items(messages, tool_calls);
-
-        let mut preserved_ids = Vec::new();
-        let mut seen_active_read_keys = HashSet::new();
-        let mut target_idx = 0usize;
-        for node in current_nodes {
-            if node
-                .message()
-                .map(|message| message.is_transient())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if let Some(key) = recognized_active_read_key(node) {
-                if !seen_active_read_keys.insert(key.clone()) {
-                    continue;
-                }
-                let Some(target_item) = target.get(target_idx) else {
-                    break;
-                };
-                if key != active_read_item_key(target_item) {
-                    break;
-                }
-                preserved_ids.push(node.node_id.clone());
-                target_idx += 1;
-            } else {
-                preserved_ids.push(node.node_id.clone());
-            }
-        }
-
-        self.data_mut().leaf_node_id = preserved_ids.last().cloned();
-        let mut existing_ids = self
+        let existing_ids = self
             .nodes
             .iter()
             .map(|node| node.node_id.clone())
             .collect::<HashSet<_>>();
-
-        for item in target.into_iter().skip(target_idx) {
-            let parent_node_id = self.leaf_node_id.clone();
-            let node = match item {
-                ActiveReadItem::Message(message) => {
-                    let node_id = unique_message_node_id(&message.id, &existing_ids);
-                    SessionNodeRecord {
-                        node_id,
-                        parent_node_id,
-                        timestamp: Utc::now().to_rfc3339(),
-                        payload: SessionNodePayload::Event {
-                            event: SessionEventRecord::Conversation(
-                                ConversationRecord::from_message(message.clone()),
-                            ),
-                        },
-                    }
-                }
-                ActiveReadItem::ToolCall { stable_key, record } => {
-                    let node_id = unique_plugin_node_id(&stable_key, &existing_ids);
-                    SessionNodeRecord {
-                        node_id,
-                        parent_node_id,
-                        timestamp: Utc::now().to_rfc3339(),
-                        payload: SessionNodePayload::Event {
-                            event: SessionEventRecord::Tool(ToolEvent::Invocation {
-                                stable_key,
-                                record: record.clone(),
-                            }),
-                        },
-                    }
-                }
-            };
-            existing_ids.insert(node.node_id.clone());
-            let data = self.data_mut();
-            data.leaf_node_id = Some(node.node_id.clone());
-            data.nodes.push(node);
-        }
+        let replacement =
+            build_active_read_replacement(current_nodes, &existing_ids, messages, tool_calls);
+        let data = self.data_mut();
+        data.leaf_node_id = replacement.leaf_node_id;
+        data.nodes.extend(replacement.new_tail_nodes);
     }
 
     pub fn from_active_read_state(messages: &[Message], tool_calls: &[ToolCallRecord]) -> Self {
@@ -1080,6 +1042,144 @@ fn build_active_read_items<'a>(
     out
 }
 
+pub(crate) fn build_active_read_replacement<'a>(
+    current_nodes: impl IntoIterator<Item = &'a SessionNodeRecord>,
+    existing_node_ids: &HashSet<String>,
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+) -> ActiveReadReplacement {
+    let target = build_active_read_items(messages, tool_calls);
+
+    let mut active_events = Vec::new();
+    let mut active_messages = Vec::new();
+    let mut active_message_ids = HashSet::new();
+    let mut active_tool_calls = Vec::new();
+    let mut seen_active_read_keys = HashSet::new();
+    let mut target_idx = 0usize;
+    let mut leaf_node_id = None;
+    for node in current_nodes {
+        if node
+            .message()
+            .map(|message| message.is_transient())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if let Some(key) = recognized_active_read_key(node) {
+            if !seen_active_read_keys.insert(key.clone()) {
+                continue;
+            }
+            let Some(target_item) = target.get(target_idx) else {
+                break;
+            };
+            if key != active_read_item_key(target_item) {
+                break;
+            }
+            push_active_read_node(
+                node,
+                &mut active_events,
+                &mut active_messages,
+                &mut active_message_ids,
+                &mut active_tool_calls,
+            );
+            leaf_node_id = Some(node.node_id.clone());
+            target_idx += 1;
+        } else {
+            push_active_read_node(
+                node,
+                &mut active_events,
+                &mut active_messages,
+                &mut active_message_ids,
+                &mut active_tool_calls,
+            );
+            leaf_node_id = Some(node.node_id.clone());
+        }
+    }
+
+    let mut new_node_ids = HashSet::new();
+    let mut new_tail_nodes = Vec::new();
+
+    for item in target.into_iter().skip(target_idx) {
+        let parent_node_id = leaf_node_id.clone();
+        let node = match item {
+            ActiveReadItem::Message(message) => {
+                let node_id = unique_message_node_id_for_replacement(
+                    &message.id,
+                    existing_node_ids,
+                    &new_node_ids,
+                );
+                SessionNodeRecord {
+                    node_id,
+                    parent_node_id,
+                    timestamp: Utc::now().to_rfc3339(),
+                    payload: SessionNodePayload::Event {
+                        event: SessionEventRecord::Conversation(ConversationRecord::from_message(
+                            message.clone(),
+                        )),
+                    },
+                }
+            }
+            ActiveReadItem::ToolCall { stable_key, record } => {
+                let node_id = unique_plugin_node_id_for_replacement(
+                    &stable_key,
+                    existing_node_ids,
+                    &new_node_ids,
+                );
+                SessionNodeRecord {
+                    node_id,
+                    parent_node_id,
+                    timestamp: Utc::now().to_rfc3339(),
+                    payload: SessionNodePayload::Event {
+                        event: SessionEventRecord::Tool(ToolEvent::Invocation {
+                            stable_key,
+                            record: record.clone(),
+                        }),
+                    },
+                }
+            }
+        };
+        new_node_ids.insert(node.node_id.clone());
+        leaf_node_id = Some(node.node_id.clone());
+        push_active_read_node(
+            &node,
+            &mut active_events,
+            &mut active_messages,
+            &mut active_message_ids,
+            &mut active_tool_calls,
+        );
+        new_tail_nodes.push(node);
+    }
+
+    ActiveReadReplacement {
+        leaf_node_id,
+        new_tail_nodes,
+        active_events,
+        active_messages,
+        active_tool_calls,
+    }
+}
+
+fn push_active_read_node(
+    node: &SessionNodeRecord,
+    active_events: &mut Vec<SessionEventRecord>,
+    active_messages: &mut Vec<Message>,
+    active_message_ids: &mut HashSet<String>,
+    active_tool_calls: &mut Vec<ToolCallRecord>,
+) {
+    if let Some(event) = node.event() {
+        active_events.push(event.clone());
+    }
+    if let Some(message) = node.message() {
+        if !message.is_transient() && active_message_ids.insert(message.id.clone()) {
+            active_messages.push(message);
+        }
+        return;
+    }
+    if let Some(SessionEventRecord::Tool(ToolEvent::Invocation { record, .. })) = node.event() {
+        active_tool_calls.push(record.clone());
+    }
+}
+
 fn recognized_active_read_key(node: &SessionNodeRecord) -> Option<String> {
     match &node.payload {
         SessionNodePayload::Event { event } => match event {
@@ -1125,6 +1225,23 @@ fn unique_plugin_node_id(stable_key: &str, existing_ids: &HashSet<String>) -> St
     }
 }
 
+fn unique_plugin_node_id_for_replacement(
+    stable_key: &str,
+    existing_ids: &HashSet<String>,
+    new_ids: &HashSet<String>,
+) -> String {
+    let base = format!("plugin:{}", stable_key);
+    if !existing_ids.contains(&base) && !new_ids.contains(&base) {
+        return base;
+    }
+    loop {
+        let candidate = format!("plugin:{}:{}", stable_key, uuid::Uuid::new_v4());
+        if !existing_ids.contains(&candidate) && !new_ids.contains(&candidate) {
+            return candidate;
+        }
+    }
+}
+
 fn unique_message_node_id(message_id: &str, existing_ids: &HashSet<String>) -> String {
     if !existing_ids.contains(message_id) {
         return message_id.to_string();
@@ -1136,6 +1253,27 @@ fn unique_message_node_id(message_id: &str, existing_ids: &HashSet<String>) -> S
     for suffix in 2.. {
         let candidate = format!("{base}:{suffix}");
         if !existing_ids.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("message node id space exhausted")
+}
+
+fn unique_message_node_id_for_replacement(
+    message_id: &str,
+    existing_ids: &HashSet<String>,
+    new_ids: &HashSet<String>,
+) -> String {
+    if !existing_ids.contains(message_id) && !new_ids.contains(message_id) {
+        return message_id.to_string();
+    }
+    let base = format!("message:{message_id}");
+    if !existing_ids.contains(&base) && !new_ids.contains(&base) {
+        return base;
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}:{suffix}");
+        if !existing_ids.contains(&candidate) && !new_ids.contains(&candidate) {
             return candidate;
         }
     }
@@ -1302,6 +1440,111 @@ mod tests {
             .filter(|node| node.node_id == "m2")
             .count();
         assert_eq!(m2_count, 2);
+    }
+
+    #[test]
+    fn active_read_replacement_helper_matches_graph_semantics_with_unrecognized_events() {
+        let user = text_message("m1", MessageRole::User, "hello");
+        let old = text_message("m2", MessageRole::Assistant, "old");
+        let new = text_message("m3", MessageRole::Assistant, "new");
+        let mut graph = SessionGraph::default();
+        graph.append_message(user.clone());
+        graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmDiagnostic(RlmDiagnosticEvent {
+                phase: "test".to_string(),
+                payload: serde_json::json!({"kept": true}),
+            }),
+        )));
+        graph.append_message(old);
+
+        let replacement = build_active_read_replacement(
+            graph.active_path_nodes(),
+            &graph
+                .nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect::<HashSet<_>>(),
+            &[user.clone(), new.clone()],
+            &[],
+        );
+        let mut expected = graph.clone();
+        expected.replace_active_read_state(&[user, new], &[]);
+
+        let mut actual_nodes = graph.nodes.clone();
+        actual_nodes.extend(replacement.new_tail_nodes);
+        let actual = SessionGraph::from_nodes(actual_nodes, replacement.leaf_node_id);
+
+        assert_eq!(
+            actual
+                .active_path_nodes()
+                .iter()
+                .map(|node| match node.event() {
+                    Some(SessionEventRecord::Conversation(record)) => record.id.as_str(),
+                    Some(SessionEventRecord::Mode(_)) => "mode",
+                    _ => "other",
+                })
+                .collect::<Vec<_>>(),
+            vec!["m1", "mode", "m3"]
+        );
+        assert_eq!(
+            actual
+                .read_model()
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .read_model()
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            actual.read_model().active_events.len(),
+            expected.read_model().active_events.len()
+        );
+    }
+
+    #[test]
+    fn active_read_replacement_helper_skips_transients_and_duplicate_keys() {
+        let user = text_message("m1", MessageRole::User, "hello");
+        let transient = transient_plugin_message("mem", MessageRole::System, "memory");
+        let assistant = text_message("m2", MessageRole::Assistant, "world");
+        let mut graph =
+            SessionGraph::from_active_read_state(&[user.clone(), assistant.clone()], &[]);
+        graph.push_node_record(SessionNodeRecord {
+            node_id: "m2".to_string(),
+            parent_node_id: Some("m1".to_string()),
+            timestamp: Utc::now().to_rfc3339(),
+            payload: SessionNodePayload::Event {
+                event: SessionEventRecord::Conversation(ConversationRecord::from_message(
+                    assistant.clone(),
+                )),
+            },
+        });
+        graph.set_leaf_node_id(Some("m2".to_string()));
+
+        let replacement = build_active_read_replacement(
+            graph.active_path_nodes(),
+            &graph
+                .nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect::<HashSet<_>>(),
+            &[user, transient, assistant],
+            &[],
+        );
+
+        assert!(replacement.new_tail_nodes.is_empty());
+        assert_eq!(
+            replacement
+                .active_messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
     }
 
     #[test]

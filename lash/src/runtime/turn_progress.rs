@@ -16,8 +16,8 @@ pub(super) struct TurnProgress {
 }
 
 impl TurnProgress {
-    pub(super) fn from_state(state: PersistedSessionState) -> Self {
-        let base_graph = Arc::new(state.session_graph.clone());
+    pub(super) fn from_state(mut state: PersistedSessionState) -> Self {
+        let base_graph = Arc::new(std::mem::take(&mut state.session_graph));
         let base_read_model = base_graph.read_model();
         let sansio_events_synced = base_read_model.active_events.len();
         let graph = TurnGraphOverlay::new(base_graph, base_read_model);
@@ -117,7 +117,6 @@ impl TurnProgress {
     }
 
     pub(super) fn into_final_state(mut self) -> PersistedSessionState {
-        drop(std::mem::take(&mut self.state.session_graph));
         self.state.session_graph = self.graph.into_session_graph();
         self.state
     }
@@ -129,8 +128,23 @@ impl TurnProgress {
         self.graph.graph_commit(graph_replace_required)
     }
 
+    #[cfg(test)]
     pub(super) fn mark_graph_commit_persisted(&mut self, graph: &crate::store::GraphCommitDelta) {
         self.graph.mark_graph_commit_persisted(graph);
+    }
+
+    pub(super) fn mark_node_ids_persisted<I>(&mut self, node_ids: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        self.graph.mark_node_ids_persisted(node_ids);
+    }
+
+    pub(super) fn replace_persisted_node_ids<I>(&mut self, node_ids: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        self.graph.replace_persisted_node_ids(node_ids);
     }
 
     #[cfg(test)]

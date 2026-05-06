@@ -37,7 +37,12 @@ impl ChronologicalProjection {
             );
         }
 
-        let mut projection = Self::from_events(read_model.active_events.iter());
+        let mut projection = Self::from_events_with_capacity(
+            read_model.active_events.iter(),
+            read_model.active_events.len()
+                + read_model.messages.len()
+                + read_model.tool_calls.len(),
+        );
         let mut seen_messages = projection
             .entries
             .iter()
@@ -46,19 +51,20 @@ impl ChronologicalProjection {
                 ChronologicalPayload::ToolCall(_) | ChronologicalPayload::RlmStep(_) => None,
             })
             .collect::<HashSet<_>>();
-        let mut seen_tool_calls = projection
-            .entries
-            .iter()
-            .flat_map(|entry| match &entry.payload {
-                ChronologicalPayload::ToolCall(record) => vec![tool_call_record_key(record)],
-                ChronologicalPayload::RlmStep(entry) => entry
-                    .tool_calls
-                    .iter()
-                    .map(tool_call_record_key)
-                    .collect::<Vec<_>>(),
-                ChronologicalPayload::Message(_) => Vec::new(),
-            })
-            .collect::<HashSet<_>>();
+        seen_messages.reserve(read_model.messages.len());
+        let mut seen_tool_calls =
+            HashSet::with_capacity(projection.entries.len() + read_model.tool_calls.len());
+        for entry in &projection.entries {
+            match &entry.payload {
+                ChronologicalPayload::ToolCall(record) => {
+                    seen_tool_calls.insert(tool_call_record_key(record));
+                }
+                ChronologicalPayload::RlmStep(entry) => {
+                    seen_tool_calls.extend(entry.tool_calls.iter().map(tool_call_record_key));
+                }
+                ChronologicalPayload::Message(_) => {}
+            }
+        }
 
         for message in read_model.messages.iter() {
             if !message.is_transient() && seen_messages.insert(message.id.clone()) {
@@ -73,10 +79,12 @@ impl ChronologicalProjection {
         projection
     }
 
-    pub(crate) fn from_events<'a>(
+    fn from_events_with_capacity<'a>(
         events: impl IntoIterator<Item = &'a SessionEventRecord>,
+        capacity: usize,
     ) -> Self {
         let mut projection = Self::default();
+        projection.entries.reserve(capacity);
         let mut seen_messages = HashSet::new();
         let mut seen_tool_calls = HashSet::new();
 
@@ -212,6 +220,67 @@ impl ChronologicalProjection {
     pub fn rlm_history_value(&self) -> serde_json::Value {
         serde_json::to_value(self.rlm_history())
             .unwrap_or_else(|_| serde_json::Value::Array(vec![]))
+    }
+
+    pub(crate) fn rlm_history_len_from_read_model(
+        read_model: &crate::session_graph::SessionReadModel,
+    ) -> usize {
+        if read_model.active_events.is_empty() {
+            let active_message_count = read_model
+                .messages
+                .iter()
+                .filter(|message| !message.is_transient())
+                .count();
+            return if active_message_count == 0 {
+                0
+            } else {
+                active_message_count + read_model.tool_calls.len()
+            };
+        }
+
+        let mut count = 0usize;
+        let mut seen_messages = HashSet::new();
+        let mut seen_tool_calls = HashSet::new();
+        for event in read_model.active_events.iter() {
+            match event {
+                SessionEventRecord::Conversation(record) => {
+                    let transient = matches!(
+                        record.origin,
+                        Some(crate::MessageOrigin::Plugin {
+                            transient: true,
+                            ..
+                        })
+                    );
+                    if !transient && seen_messages.insert(record.id.clone()) {
+                        count += 1;
+                    }
+                }
+                SessionEventRecord::Tool(ToolEvent::Invocation { record, .. }) => {
+                    if seen_tool_calls.insert(tool_call_record_key(record)) {
+                        count += 1;
+                    }
+                }
+                SessionEventRecord::Mode(event) => {
+                    if let Some(RlmModeEvent::RlmTrajectoryEntry(entry)) = event.rlm_event() {
+                        seen_tool_calls.extend(entry.tool_calls.iter().map(tool_call_record_key));
+                        count += 1;
+                    }
+                }
+                SessionEventRecord::StateSnapshot(_) => {}
+            }
+        }
+
+        for message in read_model.messages.iter() {
+            if !message.is_transient() && seen_messages.insert(message.id.clone()) {
+                count += 1;
+            }
+        }
+        for record in read_model.tool_calls.iter() {
+            if seen_tool_calls.insert(tool_call_record_key(record)) {
+                count += 1;
+            }
+        }
+        count
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use lash::PromptContribution;
 use lash::plugin::{ModeSessionContext, PromptHookContext};
-use lash::{SessionAppendNode, SessionError};
+use lash::{PromptUsage, SessionAppendNode, SessionError};
 
 pub async fn restore_execution_state_and_globals(
     _ctx: &mut ModeSessionContext<'_>,
@@ -19,25 +19,22 @@ pub async fn apply_globals_patch_nodes(
     Ok(())
 }
 
-/// Render the "Context Budget" prompt section. Always emits a one-line
-/// status (iteration · tokens used · % of handoff threshold) once the
-/// session has at least one prior LLM call's usage to report. Adds an
-/// escalation tail at 60% / 90% / 100% nudging toward `continue_as`.
-pub fn budget_prompt_contributions(
-    ctx: &PromptHookContext,
+/// Render the "Context Budget" line for the volatile turn-tail message.
+/// Returns the formatted text (status line + optional escalation tail)
+/// or `None` when there's nothing to say. The string is intentionally
+/// per-turn dynamic; callers must place it AFTER the cache breakpoint,
+/// never inside the cached system prompt.
+pub fn format_budget_suffix(
+    iteration: usize,
+    usage: Option<&PromptUsage>,
     max_budget_tokens: Option<usize>,
-) -> Vec<PromptContribution> {
-    let Some(max) = max_budget_tokens else {
-        return Vec::new();
-    };
-    let Some(usage) = ctx.state.last_prompt_usage() else {
-        return Vec::new();
-    };
+) -> Option<String> {
+    let max = max_budget_tokens?;
+    let usage = usage?;
     let used = usage.context_budget_tokens;
     if used == 0 {
-        return Vec::new();
+        return None;
     }
-    let iteration = ctx.state.iteration();
     let pct = used.saturating_mul(100) / max.max(1);
     let mut content =
         format!("Iteration: {iteration} · Tokens: {used} · handoff threshold: {max} ({pct}%).");
@@ -52,12 +49,30 @@ pub fn budget_prompt_contributions(
         content.push('\n');
         content.push_str(tail);
     }
-    vec![PromptContribution::environment("Context Budget", content)]
+    Some(content)
+}
+
+/// Back-compat shim used by the budget tests in `plugin.rs`. Wraps
+/// `format_budget_suffix` in a `PromptContribution` so the existing test
+/// assertions keep working while the prompt-hook registration is gone.
+#[cfg(test)]
+pub(crate) fn budget_prompt_contributions(
+    ctx: &PromptHookContext,
+    max_budget_tokens: Option<usize>,
+) -> Vec<PromptContribution> {
+    match format_budget_suffix(
+        ctx.state.iteration(),
+        ctx.state.last_prompt_usage(),
+        max_budget_tokens,
+    ) {
+        Some(content) => vec![PromptContribution::environment("Context Budget", content)],
+        None => Vec::new(),
+    }
 }
 
 pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
     let globals = ctx.state.shared_rlm_globals();
-    let history_len = ctx.state.chronological_projection().rlm_history_len();
+    let history_len = ctx.state.rlm_history_len();
     vec![render_bound_variables(&globals, history_len)]
 }
 
@@ -85,7 +100,7 @@ impl BoundVariablesCache {
 
     pub fn contributions(&self, ctx: &PromptHookContext) -> Vec<PromptContribution> {
         let globals = ctx.state.shared_rlm_globals();
-        let history_len = ctx.state.chronological_projection().rlm_history_len();
+        let history_len = ctx.state.rlm_history_len();
         if let Ok(guard) = self.inner.lock()
             && let Some(cached) = guard.as_ref()
             && Arc::ptr_eq(&cached.globals, &globals)
@@ -111,7 +126,7 @@ fn render_bound_variables(
 ) -> PromptContribution {
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
-        "The type and size hints below are there to help you choose the right strategy before inspecting a value.".to_string(),
+        "Type and size hints help you plan before inspecting a value.".to_string(),
     ];
     let mut entries = globals.iter().collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(right.0));

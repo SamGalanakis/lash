@@ -757,7 +757,7 @@ fn shell_activity_renders_live_output_inline_under_tool() {
             "exec_command",
             Value::Null,
             "started cargo check",
-            ActivityStatus::Completed,
+            ActivityStatus::Running,
             Value::Null,
             0,
         )
@@ -804,6 +804,55 @@ fn shell_activity_renders_live_output_inline_under_tool() {
             .iter()
             .any(|line| line.contains("warning: unused import"))
     );
+}
+
+#[test]
+fn live_tool_output_without_running_activity_renders_as_tail_block() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.timeline = vec![UiTimelineItem::Activity(Box::new(ActivityBlock::new(
+        ActivityKind::ShellCommand,
+        "exec_command",
+        Value::Null,
+        "pwd",
+        ActivityStatus::Completed,
+        Value::Null,
+        0,
+    )))]
+    .into();
+    app.live_tool_output.title = Some("cargo check -p lash-cli".into());
+    app.live_tool_output.lines = vec!["Checking lash v0.2.91".into()];
+
+    let completed_block = app
+        .rendered_block_lines_cached(0, 64, 20)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(completed_block.iter().any(|line| line.contains("pwd")));
+    assert!(
+        !completed_block
+            .iter()
+            .any(|line| line.contains("Checking lash"))
+    );
+
+    let tail = live_tool_output_standalone_lines(&app, 64)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        tail.iter()
+            .any(|line| line.contains("cargo check -p lash-cli"))
+    );
+    assert!(tail.iter().any(|line| line.contains("Checking lash")));
 }
 
 #[test]

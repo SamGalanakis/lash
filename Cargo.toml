@@ -26,7 +26,7 @@ members = [
     "lash-ui",
     "lash-tui",
     "lash-autoresearch",
-    "lash-gepa",
+    "lash-harness-opt",
     "lash-cli",
     "lash-export",
     "lash-file-index",

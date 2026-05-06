@@ -102,43 +102,6 @@ fn turn_has_visible_output(turn: &AssembledTurn) -> bool {
         || turn.has_plugin_visible_output
 }
 
-fn autonomous_prompt_template() -> PromptTemplate {
-    PromptTemplate::new(vec![
-        PromptTemplateSection::untitled(vec![
-            PromptTemplateEntry::text(
-                "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.",
-            ),
-            PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro),
-            PromptTemplateEntry::slot(PromptSlot::Intro),
-        ]),
-        PromptTemplateSection::titled(
-            "Execution",
-            vec![
-                PromptTemplateEntry::builtin(PromptBuiltin::ExecutionInstructions),
-                PromptTemplateEntry::text(
-                    "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.\n- Do not stop merely to report that work remains. If concrete actions are still available, keep executing them.\n- Only summarize remaining work when you are blocked, need a decision, or have exhausted feasible actions for this turn.\n- Do not claim completion unless you have actually verified the required end state.",
-                ),
-                PromptTemplateEntry::slot(PromptSlot::Execution),
-            ],
-        ),
-        PromptTemplateSection::titled(
-            "Guidance",
-            vec![
-                PromptTemplateEntry::builtin(PromptBuiltin::CoreGuidance),
-                PromptTemplateEntry::slot(PromptSlot::ProjectInstructions),
-                PromptTemplateEntry::slot(PromptSlot::Guidance),
-            ],
-        ),
-        PromptTemplateSection::titled(
-            "Environment",
-            vec![
-                PromptTemplateEntry::slot(PromptSlot::RuntimeContext),
-                PromptTemplateEntry::slot(PromptSlot::Environment),
-            ],
-        ),
-    ])
-}
-
 fn normalized_cli_args() -> Vec<std::ffi::OsString> {
     let mut out = Vec::new();
     let mut iter = std::env::args_os();
@@ -196,10 +159,6 @@ struct Args {
     #[arg(short = 'c', long = "context-approach", value_name = "APPROACH")]
     standard_context_approach: Option<String>,
 
-    /// Tool surface for specialized harnesses (`default` or `appworld`)
-    #[arg(long = "tool-surface", default_value = "default", hide = true)]
-    tool_surface: String,
-
     /// OM: observe once recent raw history reaches this many tokens
     #[arg(long = "om-observation-message-tokens", value_name = "TOKENS")]
     om_observation_message_tokens: Option<usize>,
@@ -246,10 +205,6 @@ struct Args {
     /// RLM modes only: remove a previously bound variable before the next turn
     #[arg(long = "rlm-unset", value_name = "NAME")]
     rlm_unset: Vec<String>,
-
-    /// RLM modes only: require final answers to use `submit` from a lashlang block
-    #[arg(long = "rlm-require-submit")]
-    rlm_require_submit: bool,
 
     /// Base URL for the LLM API
     #[arg(long, default_value = "")]
@@ -513,7 +468,7 @@ async fn main() -> anyhow::Result<()> {
             "initialized lash tracing"
         );
     }
-    bootstrap::run(args, default_prompt_template()).await
+    bootstrap::run(args).await
 }
 
 #[allow(clippy::too_many_arguments)]

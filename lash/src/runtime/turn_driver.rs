@@ -516,7 +516,11 @@ impl RuntimeTurnDriver {
             tool_surface: execution_surface.tool_surface,
             mode_preamble: execution_surface.mode_preamble,
             prompt_template: self.host.core.prompt_template.clone(),
-            prompt_contributions: execution_surface.prompt_contributions,
+            prompt_contributions: {
+                let mut contributions = self.host.core.prompt_contributions.clone();
+                contributions.extend(execution_surface.prompt_contributions);
+                contributions
+            },
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model_variant.clone(),
             emit_llm_trace: false,

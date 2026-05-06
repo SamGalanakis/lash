@@ -84,7 +84,7 @@ impl LlmToolsProvider {
                         DirectMessage {
                             role: DirectRole::System,
                             parts: vec![DirectPart::Text(
-                                "You answer a focused sub-question for another agent. Use only the task and inputs supplied. Return only JSON matching the requested result wrapper. Use kind=\"error\" with a concise error only when the task cannot be answered from the supplied inputs."
+                                "Answer the focused sub-question using only the supplied task and inputs. Return only JSON matching the requested result wrapper. Use kind=\"error\" with a concise error only when the task cannot be answered from the supplied inputs."
                                     .to_string(),
                             )],
                         },
@@ -146,11 +146,11 @@ impl ToolProvider for LlmToolsProvider {
 pub fn llm_query_tool_definition() -> ToolDefinition {
     tool_definition(
         "llm_query",
-        "Run a one-shot LLM prompt and return its result. The `task` plus everything in `inputs` is rendered into that single prompt; the call cannot use tools, inspect files, or gather more context. Use this for extracting information from supplied data, classification, summarization, judging, or transformation. `inputs` can be any structured value. `output` is optional and defaults to a string; when present, it requests structured output using record descriptors or `Type { ... }` literals.",
+        "Run a one-shot LLM prompt over supplied data and return its result. The `task` plus everything in `inputs` is rendered into that single prompt; the call cannot use tools, inspect files, or gather more context beyond what you pass it. Use this for extracting information, classification, summarization, judging, or transformation over data already in your variables. `inputs` can be any structured value. `output` is optional and defaults to a string; when present, it requests structured output using record descriptors or `Type { ... }` literals.",
         llm_query_input_schema(),
         vec![
-            r#"llm_query(task="Summarize the supplied notes in three bullets", inputs={ notes: notes })"#.into(),
-            r#"llm_query(task="Extract the key claim from each supplied chunk", inputs={ chunks: chunks }, output={ claims: "list[str]" })"#.into(),
+            r#"call llm_query { task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } }"#.into(),
+            r#"call llm_query { task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } }"#.into(),
         ],
         ToolExecutionMode::Parallel,
     )

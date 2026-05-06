@@ -445,6 +445,42 @@ impl CompactToolContract {
     }
 }
 
+/// Render a JSON Schema as a compact value-shape contract using the same
+/// renderer that produces tool input signatures. Suitable for telling the
+/// model the exact shape of a value (e.g. an RLM `submit` payload) without
+/// needing a containing `ToolDefinition`.
+///
+/// Object-with-properties schemas render as `{ field: type, ... }` with a
+/// per-field doc table; scalar/array schemas fall back to the compact JSON
+/// type label (`str`, `list[int]`, `str | null`, …).
+pub fn render_value_schema_contract(schema: &serde_json::Value) -> String {
+    let params = schema_parameter_docs(schema);
+    let head = if params.is_empty() {
+        compact_schema_label(schema)
+    } else {
+        format!(
+            "{{ {} }}",
+            params
+                .iter()
+                .map(ParameterDoc::signature_fragment)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+
+    let lines = params
+        .into_iter()
+        .map(ParameterDoc::into_value)
+        .filter_map(|value| compact_doc_line(&value))
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        head
+    } else {
+        format!("{head}\nFields:\n{}", lines.join("\n"))
+    }
+}
+
 impl ToolDefinition {
     pub fn new(
         name: impl Into<String>,
@@ -553,7 +589,9 @@ impl ToolDefinition {
         format!(
             "{}{}({})",
             self.name,
-            self.output_contract.type_parameter_suffix().unwrap_or_default(),
+            self.output_contract
+                .type_parameter_suffix()
+                .unwrap_or_default(),
             params.join(", ")
         )
     }
@@ -619,7 +657,8 @@ impl ToolDefinition {
 
     fn parameter_docs(&self) -> Vec<ParameterDoc> {
         let mut params = schema_parameter_docs(&self.input_schema);
-        self.output_contract.apply_type_witness_parameter(&mut params);
+        self.output_contract
+            .apply_type_witness_parameter(&mut params);
         params
     }
 }
@@ -670,7 +709,7 @@ impl ParameterDoc {
 
     fn constraint_fragments(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if !self.enum_values.is_empty() {
+        if !self.enum_values.is_empty() && !self.type_label.starts_with("enum[") {
             out.push(format!(
                 "in {}",
                 self.enum_values
@@ -1177,7 +1216,9 @@ fn doc_signature_from_value(
     };
 
     let mut constraints = Vec::new();
-    if let Some(values) = map.get("enum").and_then(serde_json::Value::as_array) {
+    if let Some(values) = map.get("enum").and_then(serde_json::Value::as_array)
+        && !ty.starts_with("enum[")
+    {
         constraints.push(format!(
             "in {}",
             values
@@ -1369,6 +1410,40 @@ mod tests {
     }
 
     #[test]
+    fn render_value_schema_contract_renders_object_shape_with_field_table() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["call", "fold"] },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "required": ["action"]
+        });
+
+        let rendered = render_value_schema_contract(&schema);
+        let head = rendered.lines().next().expect("at least one line");
+        assert_eq!(
+            head,
+            "{ action: enum[\"call\", \"fold\"], confidence?: float >= 0 <= 1 }"
+        );
+        assert!(rendered.contains("Fields:"));
+        assert!(rendered.contains("- `action: enum[\"call\", \"fold\"]`"));
+        assert!(rendered.contains("- `confidence?: float >= 0 <= 1`"));
+    }
+
+    #[test]
+    fn render_value_schema_contract_falls_back_to_compact_label_for_scalars() {
+        let scalar = serde_json::json!({ "type": "string" });
+        assert_eq!(render_value_schema_contract(&scalar), "str");
+
+        let array = serde_json::json!({ "type": "array", "items": { "type": "integer" } });
+        assert_eq!(render_value_schema_contract(&array), "list[int]");
+
+        let nullable_string = serde_json::json!({ "type": ["string", "null"] });
+        assert_eq!(render_value_schema_contract(&nullable_string), "str | null");
+    }
+
+    #[test]
     fn static_output_contract_keeps_existing_compact_docs_and_serde_shape() {
         let tool = ToolDefinition::new(
             "read_text",
@@ -1408,7 +1483,10 @@ mod tests {
         .with_output_from_input_schema("output", None);
 
         let contract = tool.compact_contract();
-        assert_eq!(contract.signature, "spawn_agent<T = any>(output?: TypeSpec<T>)");
+        assert_eq!(
+            contract.signature,
+            "spawn_agent<T = any>(output?: TypeSpec<T>)"
+        );
         assert_eq!(contract.returns, "T");
         assert!(contract.return_fields.is_empty());
         assert_eq!(contract.render_returns(), "");
@@ -1436,7 +1514,10 @@ mod tests {
         .with_output_from_input_schema("output", Some(serde_json::json!({ "type": "string" })));
 
         let contract = tool.compact_contract();
-        assert_eq!(contract.signature, "llm_query<T = str>(task: str, output?: TypeSpec<T>)");
+        assert_eq!(
+            contract.signature,
+            "llm_query<T = str>(task: str, output?: TypeSpec<T>)"
+        );
         assert_eq!(contract.returns, "T");
         assert!(contract.return_fields.is_empty());
         assert_eq!(contract.render_returns(), "");

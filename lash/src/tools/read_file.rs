@@ -107,10 +107,7 @@ impl ToolProvider for ReadFile {
         vec![
             ToolDefinition::new(
                 "read_file",
-                format!(
-                "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: {} lines. Use `ls` for directories.",
-                DEFAULT_LIMIT
-            ),
+                "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: 2000 lines. Use `ls` for directories.",
                 object_schema(
                     serde_json::json!({
                         "path": { "type": "string" },
@@ -123,7 +120,7 @@ impl ToolProvider for ReadFile {
                             "type": "integer",
                             "minimum": 1,
                             "default": DEFAULT_LIMIT,
-                            "description": format!("Maximum lines to read (default: {}).", DEFAULT_LIMIT)
+                            "description": "Maximum lines to read (default: 2000)."
                         }
                     }),
                     &["path"],

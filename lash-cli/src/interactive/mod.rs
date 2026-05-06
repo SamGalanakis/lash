@@ -22,6 +22,7 @@ use crate::command;
 use crate::event::{AppEvent, AppEventPump};
 use crate::render;
 use crate::resume;
+use crate::session_bootstrap::CliRuntimeFactory;
 use crate::session_log::{self, SessionLogger};
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
 use crate::ui_action::UiAction;
@@ -69,7 +70,9 @@ pub(crate) async fn run_app(
     mut terminal: Terminal,
     runtime: LashRuntime,
     plugin_host: PluginHost,
-    dynamic_tools: Arc<DynamicToolProvider>,
+    mut dynamic_tools: Arc<DynamicToolProvider>,
+    runtime_factory: CliRuntimeFactory,
+    lash_config: lash::provider::LashConfig,
     turn_injection_bridge: TurnInjectionBridge,
     turn_input_injection_bridge: TurnInputInjectionBridge,
     logger: &mut SessionLogger,
@@ -245,6 +248,7 @@ pub(crate) async fn run_app(
         if let Err(err) = resume::load_resumed_session(
             filename,
             &mut app,
+            logger,
             &mut history,
             &mut runtime,
             &mut turn_counter,
@@ -383,7 +387,9 @@ pub(crate) async fn run_app(
                 &paused,
                 &plugin_host,
                 ui_extensions.as_ref(),
-                &dynamic_tools,
+                &runtime_factory,
+                &lash_config,
+                &mut dynamic_tools,
                 &mut runtime,
                 &mut history,
                 &mut turn_counter,
@@ -456,7 +462,9 @@ pub(crate) async fn run_app(
                                 &paused,
                                 &plugin_host,
                                 ui_extensions.as_ref(),
-                                &dynamic_tools,
+                                &runtime_factory,
+                                &lash_config,
+                                &mut dynamic_tools,
                                 &mut runtime,
                                 &mut history,
                                 &mut turn_counter,
@@ -606,7 +614,9 @@ pub(crate) async fn run_app(
                             &paused,
                             &plugin_host,
                             ui_extensions.as_ref(),
-                            &dynamic_tools,
+                            &runtime_factory,
+                            &lash_config,
+                            &mut dynamic_tools,
                             &mut runtime,
                             &mut history,
                             &mut turn_counter,
@@ -655,7 +665,9 @@ pub(crate) async fn run_app(
                         &paused,
                         &plugin_host,
                         ui_extensions.as_ref(),
-                        &dynamic_tools,
+                        &runtime_factory,
+                        &lash_config,
+                        &mut dynamic_tools,
                         &mut runtime,
                         &mut history,
                         &mut turn_counter,
@@ -879,7 +891,9 @@ pub(crate) async fn run_app(
                     &paused,
                     &plugin_host,
                     ui_extensions.as_ref(),
-                    &dynamic_tools,
+                    &runtime_factory,
+                    &lash_config,
+                    &mut dynamic_tools,
                     &mut runtime,
                     &mut history,
                     &mut turn_counter,

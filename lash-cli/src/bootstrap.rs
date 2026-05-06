@@ -3,51 +3,33 @@ use std::sync::Arc;
 use lash::provider::{LashConfig, ProviderHandle};
 use lash::*;
 use lash_default_tools::{
-    DefaultToolBundle, DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_plugin_ui_activity::UiActivityPluginFactory;
 use lash_provider_openai::OpenAiGenericProvider;
-use lash_subagents::{
-    CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
-    TierExecutionMode, default_registry,
-};
+use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::interactive::run_app;
-use crate::session_bootstrap::{SessionBootstrap, SessionBootstrapSource};
-use crate::session_log::DbSessionStoreFactory;
+use crate::session_bootstrap::{CliRuntimeFactory, SessionBootstrapSource};
 use crate::{Args, setup};
 use crate::{
-    apply_standard_context_approach_overrides, autonomous_prompt_template, cleanup_terminal,
-    ensure_supported_execution_mode, hash12, info_text, info_text_unconfigured, models_dev_catalog,
-    parse_execution_mode, parse_model_selection, parse_standard_context_approach,
-    provider_display_label, resolve_model_selection, resolve_model_variant,
-    validate_model_selection,
+    apply_standard_context_approach_overrides, cleanup_terminal, ensure_supported_execution_mode,
+    hash12, info_text, info_text_unconfigured, models_dev_catalog, parse_execution_mode,
+    parse_model_selection, parse_standard_context_approach, provider_display_label,
+    resolve_model_selection, resolve_model_variant, validate_model_selection,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CliToolSurface {
-    Default,
-    AppWorld,
-}
-
-fn parse_tool_surface(raw: &str) -> Result<CliToolSurface, String> {
-    match raw {
-        "default" => Ok(CliToolSurface::Default),
-        "appworld" => Ok(CliToolSurface::AppWorld),
-        other => Err(format!(
-            "unsupported --tool-surface `{other}`; expected `default` or `appworld`"
-        )),
-    }
-}
+const CLI_AUTONOMOUS_INTRO: &str = "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.";
+const CLI_AUTONOMOUS_EXECUTION: &str = "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.\n- Do not stop merely to report that work remains. If concrete actions are still available, keep executing them.\n- Only summarize remaining work when you are blocked, need a decision, or have exhausted feasible actions for this turn.\n- Do not claim completion unless you have actually verified the required end state.";
+const CLI_RLM_SUBMISSION_GUIDANCE: &str = "- When calling `submit`, keep the submitted value concise. Do not include large variables such as diffs, full logs, raw command output, or other bulky dumps unless the user explicitly asks for them. Prefer short prose. If you use `format`, use it with small values rather than large captured variables.";
 
 struct PluginFactorySurfaceInput<'a> {
-    tool_surface: CliToolSurface,
     autonomous: bool,
     execution_mode: ExecutionMode,
     tavily_key: String,
@@ -64,7 +46,6 @@ struct PluginFactoriesForSurface {
 
 fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginFactoriesForSurface {
     let PluginFactorySurfaceInput {
-        tool_surface,
         autonomous,
         execution_mode,
         tavily_key,
@@ -74,39 +55,6 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         host_docs_dir,
     } = input;
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
-
-    if tool_surface == CliToolSurface::AppWorld {
-        let bundles = vec![DefaultToolBundle::CoreRuntime];
-        let mut capability_registry = CapabilityRegistry::new();
-        for name in ["explore", "peer"] {
-            capability_registry.add(Arc::new(TierCapability::new(
-                name,
-                None,
-                TierExecutionMode::Inherit,
-            )));
-        }
-        let mut plugin_factories = tool_plugin_factories(DefaultToolPluginOptions {
-            execution_mode,
-            standard_context_approach: session_policy.standard_context_approach.clone(),
-            bundles,
-            tavily_api_key: None,
-            instruction_source: None,
-        });
-        plugin_factories.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
-        plugin_factories.push(Arc::new(
-            lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
-        ));
-        plugin_factories.push(Arc::new(LlmToolsPluginFactory));
-        plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
-            session_policy,
-            Arc::new(capability_registry),
-            Arc::clone(&subagent_host),
-        )));
-        return PluginFactoriesForSurface {
-            factories: plugin_factories,
-            subagent_host,
-        };
-    }
 
     let explore_tier_execution_mode = lash_config
         .runtime
@@ -189,16 +137,6 @@ fn apply_autonomous_tool_policy(
     dynamic_tools.apply_state(snapshot).map(|_| ())
 }
 
-fn apply_appworld_tool_policy(dynamic_tools: &DynamicToolProvider) -> Result<(), ReconfigureError> {
-    let mut snapshot = dynamic_tools.export_state();
-    for (name, spec) in &mut snapshot.tools {
-        if name.starts_with("mcp__appworld__") {
-            spec.definition.availability_override = Some(ToolAvailability::Callable);
-        }
-    }
-    dynamic_tools.apply_state(snapshot).map(|_| ())
-}
-
 fn parse_rlm_var_arg(raw: &str) -> Result<(String, JsonValue), String> {
     let Some((name, json)) = raw.split_once('=') else {
         return Err(format!(
@@ -255,7 +193,73 @@ fn resolve_rlm_globals_patch(
     Ok(Some(patch))
 }
 
-pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::Result<()> {
+fn cli_prompt_config(
+    autonomous: bool,
+    execution_mode: &ExecutionMode,
+) -> (PromptTemplate, Vec<PromptContribution>) {
+    let mut intro_entries = vec![PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro)];
+    if autonomous {
+        intro_entries.push(PromptTemplateEntry::slot(PromptSlot::CliAutonomousIntro));
+    }
+    intro_entries.push(PromptTemplateEntry::slot(PromptSlot::Intro));
+
+    let mut execution_entries = vec![
+        PromptTemplateEntry::builtin(PromptBuiltin::ExecutionInstructions),
+        PromptTemplateEntry::slot(PromptSlot::Execution),
+    ];
+    if autonomous {
+        execution_entries.push(PromptTemplateEntry::slot(
+            PromptSlot::CliAutonomousExecution,
+        ));
+    }
+    if *execution_mode == ExecutionMode::new("rlm") {
+        execution_entries.push(PromptTemplateEntry::slot(PromptSlot::CliRlmExecution));
+    }
+
+    let template = PromptTemplate::new(vec![
+        PromptTemplateSection::untitled(intro_entries),
+        PromptTemplateSection::titled("Execution", execution_entries),
+        PromptTemplateSection::titled(
+            "Guidance",
+            vec![
+                PromptTemplateEntry::builtin(PromptBuiltin::CoreGuidance),
+                PromptTemplateEntry::slot(PromptSlot::ProjectInstructions),
+                PromptTemplateEntry::slot(PromptSlot::Guidance),
+            ],
+        ),
+        PromptTemplateSection::titled(
+            "Environment",
+            vec![
+                PromptTemplateEntry::slot(PromptSlot::RuntimeContext),
+                PromptTemplateEntry::slot(PromptSlot::Environment),
+            ],
+        ),
+    ]);
+
+    let mut contributions = Vec::new();
+    if autonomous {
+        contributions.push(PromptContribution::new(
+            PromptSlot::CliAutonomousIntro,
+            "",
+            CLI_AUTONOMOUS_INTRO,
+        ));
+        contributions.push(PromptContribution::new(
+            PromptSlot::CliAutonomousExecution,
+            "",
+            CLI_AUTONOMOUS_EXECUTION,
+        ));
+    }
+    if *execution_mode == ExecutionMode::new("rlm") {
+        contributions.push(PromptContribution::new(
+            PromptSlot::CliRlmExecution,
+            "RLM Submit Output",
+            CLI_RLM_SUBMISSION_GUIDANCE,
+        ));
+    }
+    (template, contributions)
+}
+
+pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     lash_providers_builtin::register_all();
     // Handle --reset before any TUI/provider setup
     if args.reset {
@@ -451,38 +455,36 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
             None
         };
 
-    let session_bootstrap =
-        SessionBootstrap::open(SessionBootstrapSource::from_resume_arg(args.resume.clone()))?;
-    tracing::debug!(
-        session_file = session_bootstrap.filename(),
-        resumed = args.resume.is_some(),
-        trace_path = ?trace_path,
-        debug_logging = crate::detailed_debug_logging_enabled(args.debug),
-        "prepared session bootstrap"
-    );
     let autonomous = args.print_prompt.is_some();
     if !autonomous && (args.await_background_work || args.turn_usage_json.is_some()) {
         return Err(anyhow::anyhow!(
             "`--await-background-work` and `--turn-usage-json` require `--print`."
         ));
     }
-    let prompt_template = if autonomous {
-        autonomous_prompt_template()
+    let session_bootstrap_probe = if args.info {
+        None
     } else {
-        prompt_template
+        Some(crate::session_bootstrap::SessionBootstrap::open(
+            SessionBootstrapSource::from_resume_arg(args.resume.clone()),
+        )?)
     };
-    let store = session_bootstrap.store();
+    if let Some(session_bootstrap_probe) = session_bootstrap_probe.as_ref() {
+        tracing::debug!(
+            session_file = session_bootstrap_probe.filename(),
+            resumed = args.resume.is_some(),
+            trace_path = ?trace_path,
+            debug_logging = crate::detailed_debug_logging_enabled(args.debug),
+            "prepared session bootstrap"
+        );
+    }
     // Autonomous runs still need a stable session id so provider-side prompt caching
     // and benchmark accounting can key repeated requests within the same session.
-    let run_session_id = session_bootstrap.run_session_id();
-
-    // Peek the persisted session config so we can use the correct
-    // Resolve execution mode before building the plugin host so the
-    // lashlang thread starts correctly and plugins see the right mode on resume.
-    // host and runtime. Without this, resuming a Rlm session from a
-    // Standard-mode bootstrap would fail to start the lashlang thread
-    // and would build plugins with the wrong mode.
-    let persisted_session_config = session_bootstrap.persisted_config();
+    let run_session_id = session_bootstrap_probe
+        .as_ref()
+        .and_then(|bootstrap| bootstrap.run_session_id());
+    let persisted_session_config = session_bootstrap_probe
+        .as_ref()
+        .and_then(|bootstrap| bootstrap.persisted_config());
 
     // Execution mode: CLI flag wins, then persisted config, then Standard.
     // Resolved BEFORE building the plugin host + runtime so the lashlang
@@ -498,14 +500,6 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
             .unwrap_or(ExecutionMode::standard()),
     };
-    let tool_surface =
-        parse_tool_surface(args.tool_surface.as_str()).map_err(anyhow::Error::msg)?;
-    if tool_surface == CliToolSurface::AppWorld && execution_mode != ExecutionMode::new("rlm") {
-        return Err(anyhow::anyhow!(
-            "`--tool-surface appworld` requires `--execution-mode rlm`."
-        ));
-    }
-
     let has_om_overrides = args.om_observation_message_tokens.is_some()
         || args.om_observation_buffer_tokens.is_some()
         || args.om_observation_block_after_tokens.is_some()
@@ -553,30 +547,12 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
             "`--rlm-var`, `--rlm-vars-file`, and `--rlm-unset` require `--execution-mode rlm`."
         ));
     }
-    if args.rlm_require_submit && !rlm_globals_supported {
-        return Err(anyhow::anyhow!(
-            "`--rlm-require-submit` requires `--execution-mode rlm`."
-        ));
-    }
-    let rlm_turn_options = if rlm_globals_supported
-        && (args.rlm_require_submit || tool_surface == CliToolSurface::AppWorld)
-    {
-        Some(lash::ModeTurnOptions::typed(
-            lash::ExecutionMode::new("rlm"),
-            lash_rlm_types::RlmTermination::Finish {
-                schema: None,
-                include_submit_prompt: args.rlm_require_submit,
-            },
-        )?)
-    } else {
-        None
-    };
-
     let instruction_source: Arc<dyn InstructionSource> =
         Arc::new(FsInstructionSource::with_config(InstructionLoaderConfig {
             global_root: Some(crate::paths::lash_home()),
             ..Default::default()
         }));
+    let (prompt_template, prompt_contributions) = cli_prompt_config(autonomous, &execution_mode);
     let session_policy = SessionPolicy {
         model: model.clone(),
         provider: active_provider.clone(),
@@ -590,6 +566,7 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
     };
     let host_core = RuntimeCoreConfig::default()
         .with_prompt_template(prompt_template)
+        .with_prompt_contributions(prompt_contributions)
         .with_attachment_store(Arc::new(FileAttachmentStore::new(
             crate::paths::attachments_dir(),
         )))
@@ -605,7 +582,6 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         factories: plugin_factories,
         subagent_host,
     } = plugin_factories_for_surface(PluginFactorySurfaceInput {
-        tool_surface,
         autonomous,
         execution_mode: execution_mode.clone(),
         tavily_key,
@@ -615,56 +591,10 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         host_docs_dir: host_docs.as_ref().map(|docs| docs.dir().to_path_buf()),
     });
     let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
-    let resolved_session_id = run_session_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let root_plugins = plugin_host.build_session(
-        &resolved_session_id,
-        execution_mode.clone(),
-        session_policy.standard_context_approach.clone(),
-        None,
-    )?;
-    let dynamic_tools = root_plugins
-        .dynamic_tools()
-        .ok_or_else(|| anyhow::anyhow!("root dynamic tool provider was not initialized"))?;
-    let appworld_mcp_servers;
-    let mcp_servers = if tool_surface == CliToolSurface::AppWorld {
-        appworld_mcp_servers = lash_config
-            .mcp_servers()
-            .iter()
-            .filter(|(name, _)| name.as_str() == "appworld")
-            .map(|(name, config)| (name.clone(), config.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        if appworld_mcp_servers.is_empty() {
-            return Err(anyhow::anyhow!(
-                "`--tool-surface appworld` requires an `appworld` MCP server in config."
-            ));
-        }
-        &appworld_mcp_servers
-    } else {
-        lash_config.mcp_servers()
-    };
-    attach_mcp_servers(&dynamic_tools, mcp_servers)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
-    if tool_surface == CliToolSurface::AppWorld {
-        apply_appworld_tool_policy(&dynamic_tools)
-            .map_err(|err| anyhow::anyhow!("failed to apply AppWorld tool policy: {err}"))?;
-    }
-    if autonomous {
-        apply_autonomous_tool_policy(&dynamic_tools)
-            .map_err(|err| anyhow::anyhow!("failed to apply autonomous tool policy: {err}"))?;
-    }
-    let dynamic_tools_provider: Arc<dyn ToolProvider> = dynamic_tools.clone();
-    let toolset_hash = hash12(
-        &serde_json::to_vec(&dynamic_tools_provider.definitions())
-            .unwrap_or_else(|_| b"[]".to_vec()),
-    );
     if args.info {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
-        let session_db_path = session_bootstrap.db_path().to_string_lossy().to_string();
         println!(
             "{}",
             info_text(
@@ -674,45 +604,52 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
                 &execution_mode,
                 session_policy.standard_context_approach.as_ref(),
                 Some(resolved_model_spec.context_window()),
-                dynamic_tools_provider.definitions().len(),
-                &toolset_hash,
+                None,
                 &cwd,
                 None,
-                run_session_id.as_deref(),
-                Some(&session_db_path),
+                None,
+                None,
             )
         );
         return Ok(());
     }
-    let initial_model_variant = session_policy.model_variant.clone();
-    let session_name = session_bootstrap.session_name();
-    let mut logger = session_bootstrap.logger(&model, run_session_id.clone())?;
-    let initial_graph = session_bootstrap.initial_graph();
-    let services = lash::PersistentRuntimeServices::new_with_bridges(
-        root_plugins,
+    let runtime_factory = CliRuntimeFactory::new(
+        plugin_host.clone(),
+        host_core,
         turn_injection_bridge.clone(),
         turn_input_injection_bridge.clone(),
-        store.clone() as Arc<dyn RuntimePersistence>,
+        Arc::new(TokioSessionTaskExecutor::default()),
     );
-    let state = PersistedSessionState {
-        session_id: resolved_session_id.clone(),
-        policy: session_policy.clone(),
-        session_graph: initial_graph,
-        ..PersistedSessionState::default()
-    };
-    let embedded_host = EmbeddedRuntimeHost::new(host_core).with_session_store_factory(Arc::new(
-        DbSessionStoreFactory::new(session_bootstrap.sessions_dir().to_path_buf()),
-    ));
-    let mut runtime = LashRuntime::from_persistent_background_state(
-        session_policy.clone(),
-        BackgroundRuntimeHost::new(embedded_host, Arc::new(TokioSessionTaskExecutor::default())),
-        services,
-        state,
-    )
-    .await?;
-    if let Some(options) = rlm_turn_options {
-        runtime.set_mode_turn_options(options);
+    let opened_session = runtime_factory
+        .open(
+            SessionBootstrapSource::from_resume_arg(args.resume.clone()),
+            session_policy.clone(),
+        )
+        .await?;
+    let dynamic_tools = opened_session.dynamic_tools.clone();
+    attach_mcp_servers(&dynamic_tools, lash_config.mcp_servers())
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
+    if autonomous {
+        apply_autonomous_tool_policy(&dynamic_tools)
+            .map_err(|err| anyhow::anyhow!("failed to apply autonomous tool policy: {err}"))?;
     }
+    let dynamic_tools_provider: Arc<dyn ToolProvider> = dynamic_tools.clone();
+    let toolset_hash = hash12(
+        &serde_json::to_vec(&dynamic_tools_provider.definitions())
+            .unwrap_or_else(|_| b"[]".to_vec()),
+    );
+    let initial_model_variant = opened_session
+        .runtime
+        .export_state()
+        .policy
+        .model_variant
+        .clone();
+    let store = opened_session.bootstrap.store();
+    let session_name = opened_session.bootstrap.session_name();
+    let mut logger = opened_session.logger;
+    let mut runtime = opened_session.runtime;
+    runtime.refresh_session_tool_surface().await?;
     if let Some(patch) = rlm_globals_patch {
         runtime
             .append_session_nodes(lash::AppendSessionNodesRequest {
@@ -756,6 +693,8 @@ pub(crate) async fn run(args: Args, prompt_template: PromptTemplate) -> anyhow::
         runtime,
         plugin_host,
         Arc::clone(&dynamic_tools),
+        runtime_factory,
+        lash_config.clone(),
         turn_injection_bridge,
         turn_input_injection_bridge,
         &mut logger,
@@ -813,7 +752,6 @@ mod tests {
             ProviderHandle::new(OpenAiGenericProvider::new("test", "").into_components());
         let lash_config = LashConfig::new(&provider);
         plugin_factories_for_surface(PluginFactorySurfaceInput {
-            tool_surface: CliToolSurface::Default,
             autonomous,
             execution_mode: ExecutionMode::standard(),
             tavily_key: String::new(),
@@ -842,6 +780,84 @@ mod tests {
     }
 
     #[test]
+    fn rlm_prompt_config_uses_cli_rlm_slot_and_contribution() {
+        let (template, contributions) = cli_prompt_config(false, &ExecutionMode::new("rlm"));
+
+        let execution = template
+            .sections
+            .iter()
+            .find(|section| section.title.as_deref() == Some("Execution"))
+            .expect("execution section");
+        assert!(execution.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                PromptTemplateEntry::Slot {
+                    slot: PromptSlot::CliRlmExecution
+                }
+            )
+        }));
+        assert!(contributions.iter().any(|contribution| {
+            contribution.slot == PromptSlot::CliRlmExecution
+                && contribution.content == CLI_RLM_SUBMISSION_GUIDANCE
+        }));
+    }
+
+    #[test]
+    fn standard_prompt_config_omits_cli_rlm_slot_and_contribution() {
+        let (template, contributions) = cli_prompt_config(false, &ExecutionMode::standard());
+
+        assert!(!template.sections.iter().any(|section| {
+            section.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    PromptTemplateEntry::Slot {
+                        slot: PromptSlot::CliRlmExecution
+                    }
+                )
+            })
+        }));
+        assert!(
+            !contributions
+                .iter()
+                .any(|contribution| contribution.slot == PromptSlot::CliRlmExecution)
+        );
+    }
+
+    #[test]
+    fn autonomous_prompt_config_uses_autonomous_slots() {
+        let (template, contributions) = cli_prompt_config(true, &ExecutionMode::standard());
+
+        assert!(template.sections.iter().any(|section| {
+            section.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    PromptTemplateEntry::Slot {
+                        slot: PromptSlot::CliAutonomousIntro
+                    }
+                )
+            })
+        }));
+        assert!(template.sections.iter().any(|section| {
+            section.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    PromptTemplateEntry::Slot {
+                        slot: PromptSlot::CliAutonomousExecution
+                    }
+                )
+            })
+        }));
+        assert!(contributions.iter().any(|contribution| {
+            contribution.slot == PromptSlot::CliAutonomousIntro
+                && contribution.content == CLI_AUTONOMOUS_INTRO
+        }));
+        assert!(contributions.iter().any(|contribution| {
+            contribution.slot == PromptSlot::CliAutonomousExecution
+                && contribution.content == CLI_AUTONOMOUS_EXECUTION
+        }));
+    }
+
+    #[test]
     fn autonomous_policy_disables_interactive_tools() {
         let dynamic_tools =
             DynamicToolProvider::from_tool_provider(Arc::new(DummyToolProvider)).unwrap();
@@ -853,43 +869,5 @@ mod tests {
         assert!(!tools.contains_key("ask"));
         assert!(!tools.contains_key("plan_exit"));
         assert!(!tools.contains_key("showcase"));
-    }
-
-    #[test]
-    fn appworld_policy_keeps_mcp_callable_but_undocumented() {
-        struct AppWorldToolProvider;
-
-        #[async_trait::async_trait]
-        impl ToolProvider for AppWorldToolProvider {
-            fn definitions(&self) -> Vec<ToolDefinition> {
-                vec![
-                    dummy_tool("search_tools"),
-                    dummy_tool("mcp__appworld__spotify_search_songs"),
-                    dummy_tool("mcp__other__search"),
-                ]
-            }
-
-            async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
-                ToolResult::err_fmt(format_args!("unexpected tool call: {name}"))
-            }
-        }
-
-        let dynamic_tools =
-            DynamicToolProvider::from_tool_provider(Arc::new(AppWorldToolProvider)).unwrap();
-
-        apply_appworld_tool_policy(&dynamic_tools).unwrap();
-
-        let tools = dynamic_tools.export_state().tools;
-        assert_eq!(
-            tools["mcp__appworld__spotify_search_songs"]
-                .definition
-                .availability_override,
-            Some(ToolAvailability::Callable)
-        );
-        assert_eq!(
-            tools["mcp__other__search"].definition.availability_override,
-            None
-        );
-        assert_eq!(tools["search_tools"].definition.availability_override, None);
     }
 }

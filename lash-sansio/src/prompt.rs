@@ -139,10 +139,13 @@ fn slot_order(slot: crate::PromptSlot) -> usize {
     match slot {
         crate::PromptSlot::Intro => 0,
         crate::PromptSlot::Execution => 1,
-        crate::PromptSlot::Guidance => 2,
-        crate::PromptSlot::ProjectInstructions => 3,
-        crate::PromptSlot::RuntimeContext => 4,
-        crate::PromptSlot::Environment => 5,
+        crate::PromptSlot::CliAutonomousIntro => 2,
+        crate::PromptSlot::CliAutonomousExecution => 3,
+        crate::PromptSlot::CliRlmExecution => 4,
+        crate::PromptSlot::Guidance => 5,
+        crate::PromptSlot::ProjectInstructions => 6,
+        crate::PromptSlot::RuntimeContext => 7,
+        crate::PromptSlot::Environment => 8,
     }
 }
 

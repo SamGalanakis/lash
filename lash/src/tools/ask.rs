@@ -165,7 +165,43 @@ impl ToolProvider for AskTool {
                     }),
                     &["question"],
                 ),
-                serde_json::json!({ "type": "object", "additionalProperties": true }),
+                serde_json::json!({
+                    "type": "object",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "text" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["kind", "text"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "single" },
+                                "selection": { "type": "string" },
+                                "note": { "type": "string" }
+                            },
+                            "required": ["kind", "selection"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "multi" },
+                                "selections": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "note": { "type": "string" }
+                            },
+                            "required": ["kind", "selections"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }),
             )
             .with_examples(vec![
                 "ask(question=\"Which environment should I use?\", options=[\"staging\", \"prod\"])"

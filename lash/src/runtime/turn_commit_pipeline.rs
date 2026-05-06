@@ -30,6 +30,30 @@ pub(super) struct TurnCommitPipeline {
     final_graph_commit: Option<GraphCommitDelta>,
 }
 
+enum PersistedGraphMark {
+    Unchanged,
+    Append(Vec<String>),
+    ReplaceFull(Vec<String>),
+}
+
+impl PersistedGraphMark {
+    fn from_graph_commit(graph: &GraphCommitDelta) -> Self {
+        match graph {
+            GraphCommitDelta::Unchanged { .. } => Self::Unchanged,
+            GraphCommitDelta::Append { nodes, .. } => {
+                Self::Append(nodes.iter().map(|node| node.node_id.clone()).collect())
+            }
+            GraphCommitDelta::ReplaceFull(graph) => Self::ReplaceFull(
+                graph
+                    .nodes
+                    .iter()
+                    .map(|node| node.node_id.clone())
+                    .collect(),
+            ),
+        }
+    }
+}
+
 impl TurnCommitPipeline {
     pub(super) fn from_state(state: PersistedSessionState) -> Self {
         Self {
@@ -358,12 +382,20 @@ impl TurnCommitPipeline {
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Result<(), StoreError> {
         let state = self.state_mut();
-        let commit =
-            RuntimeCommit::persisted_state_with_graph_commit(state, graph.clone(), usage_deltas);
+        let mark = PersistedGraphMark::from_graph_commit(&graph);
+        let commit = RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
         let result = store.commit_runtime_state(commit).await?;
         state.apply_persisted_commit_result(result);
         if let Some(progress) = self.progress.as_mut() {
-            progress.mark_graph_commit_persisted(&graph);
+            match mark {
+                PersistedGraphMark::Unchanged => {}
+                PersistedGraphMark::Append(node_ids) => {
+                    progress.mark_node_ids_persisted(node_ids);
+                }
+                PersistedGraphMark::ReplaceFull(node_ids) => {
+                    progress.replace_persisted_node_ids(node_ids);
+                }
+            }
         }
         Ok(())
     }

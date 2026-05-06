@@ -286,6 +286,7 @@ dependencies = [
  "clap",
  "dirs 6.0.0",
  "lash",
+ "lash-harness-opt",
  "lash-llm-tools",
  "lash-mode-rlm",
  "lash-providers-builtin",
@@ -2269,6 +2270,7 @@ dependencies = [
  "lash",
  "lash-autoresearch",
  "lash-default-tools",
+ "lash-embed",
  "lash-export",
  "lash-file-index",
  "lash-llm-tools",
@@ -2356,14 +2358,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-gepa"
+name = "lash-harness-opt"
 version = "0.2.92"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "dirs 6.0.0",
+ "lash",
+ "lash-embed",
+ "lash-providers-builtin",
+ "lash-rlm-types",
  "lash-sansio",
  "lash-trace",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "uuid",
 ]
 
@@ -2439,6 +2452,7 @@ dependencies = [
 name = "lash-plugin-prompt-context"
 version = "0.2.92"
 dependencies = [
+ "async-trait",
  "chrono",
  "lash",
  "serde",
@@ -5153,6 +5167,7 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

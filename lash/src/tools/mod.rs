@@ -29,9 +29,9 @@ pub use ls::Ls;
 #[cfg(feature = "tool-impls")]
 pub use read_file::{ReadFile, ReadFilePluginFactory};
 #[cfg(feature = "tool-impls")]
-pub use shell::StandardShell;
+pub use shell::{StandardShell, StandardShellPluginFactory};
 #[cfg(feature = "tool-impls")]
-pub use shell::shell_prompt_contributions;
+pub use shell::{shell_prompt_contributions, shell_prompt_contributions_for_access};
 pub use web_search::WebSearch;
 
 use crate::ToolResult;
@@ -41,6 +41,13 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "tool-impls")]
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Shared preamble describing default filesystem-listing behavior.
+/// Used by `ls` and `glob` so both tools document hidden-file and
+/// `.gitignore` handling in identical wording.
+#[cfg(feature = "tool-impls")]
+pub(crate) const FS_DEFAULTS_PREAMBLE: &str =
+    "By default this includes hidden files and respects `.gitignore` only inside Git repos.";
 
 #[cfg(feature = "tool-impls")]
 #[derive(Clone, Debug, serde::Serialize)]

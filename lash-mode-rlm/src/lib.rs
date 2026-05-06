@@ -19,5 +19,5 @@ pub use protocol::{
 };
 pub use rlm_support::{
     BoundVariablesCache, apply_globals_patch_nodes, bound_variables_prompt_contributions,
-    budget_prompt_contributions, restore_execution_state_and_globals,
+    format_budget_suffix, restore_execution_state_and_globals,
 };

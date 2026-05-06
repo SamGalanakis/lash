@@ -7,17 +7,15 @@ For each task, the runner:
 1. Starts local AppWorld environment, API, and MCP servers.
 2. Activates the task world through the environment server.
 3. Writes a benchmark-local Lash config that adds the AppWorld MCP server via `npx mcp-remote`.
-4. Runs `lash --print --tool-surface appworld` in an empty per-task workspace.
+4. Runs `lash --print --execution-mode rlm` in an empty per-task workspace using the benchmark-local AppWorld MCP config.
 5. Saves and evaluates the final AppWorld state.
 
 Generated state lives under ignored `.benchmarks/appworld/`.
 
-The AppWorld tool surface is explicit: it registers RLM, AppWorld MCP tools,
-RLM tool discovery, and subagent/handoff tools. AppWorld MCP tools are
-callable and discoverable, but not injected into the initial `Available Tools`
-prompt. It does not register local shell, local file/search/edit/web tools,
-autoresearch, host docs, the shell-backed `monitor` tool, or `tasks_list` /
-`tasks_stop` (RLM exposes the equivalent through lashlang async handles).
+AppWorld-specific setup stays in this benchmark harness: it writes a temporary
+Lash config that exposes the AppWorld MCP server and supplies a task prompt that
+requires completion through AppWorld's supervisor tool. The root Lash CLI does
+not have an AppWorld tool-surface mode.
 
 ## Quickstart
 

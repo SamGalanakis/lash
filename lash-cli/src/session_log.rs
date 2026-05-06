@@ -33,6 +33,9 @@ pub struct SessionStart {
 }
 
 pub struct LoadedSession {
+    pub session_id: String,
+    pub session_name: String,
+    pub filename: String,
     pub messages: Vec<Message>,
     pub blocks: UiTimeline,
     pub last_token_usage: TokenUsage,
@@ -302,6 +305,9 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
 
 pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
+    let meta = store
+        .load_session_meta()
+        .ok_or_else(|| anyhow::anyhow!("Could not load session metadata for {}", filename))?;
     let head = store.load_session_head().unwrap_or_default();
     let checkpoint_ref = head.checkpoint_ref.clone();
     let state = SessionStateEnvelope {
@@ -329,6 +335,9 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     );
 
     Ok(LoadedSession {
+        session_id: meta.session_id,
+        session_name: meta.session_name,
+        filename: filename.to_string(),
         messages,
         blocks,
         last_token_usage: checkpoint

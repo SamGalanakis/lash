@@ -28,7 +28,7 @@ pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.*
 
 ### `print` vs `submit`
 
-- `print <expr>` — inspect a value and keep going. Output appears on the next step so you can refine. Use this to peek at tool results, check a slice of a file, or confirm a value before acting.
+- `print <expr>` — inspect a value and keep going. Output appears on the next step and is capped: keep full tool results in variables and print only lengths, selected fields, samples, or slices. Don't print large objects just to hand-copy IDs back into code.
 - `submit <expr>` — final answer; ends the turn. Strings pass through as the reply; other values render as pretty JSON. If a **Required output** schema is present, the value must match it.
 
 Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
@@ -73,7 +73,7 @@ pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
 - Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
 - Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
-- If the prompt includes a **Bound Variables** section, those names are already in scope — use them, don't rebuild them from prose.
+- When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
 
 ### Builtins
 
@@ -121,7 +121,7 @@ text = to_string(result)
 print { chars: len(text), head: slice(text, 0, 1200) }
 ```
 
-For multi-step work, inspect intermediate results before submitting success:
+For multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
 
 ```lashlang
 first = (call tool_a { key: "value" })?
@@ -143,6 +143,10 @@ if contains(to_string(second), "needs_more_work") {
 - **Nullable field** — use a union with `null`: `email: str | null` means the field is required and its value is either a string or null.
 - **Unions** — `a | b | c`, e.g. `status: str | int`, `value: str | null`.
 - Nested shapes require the `Type` keyword: `nested: Type { ok: bool }` (bare `{ ok: bool }` is rejected — that's a record value, not a type).
+
+```lashlang
+profile = validate(record, Type { name: str, email: str?, tags: list[str] })
+```
 "#;
 
 const RLM_DECOMPOSITION_SECTION: &str = r#"### Working with context
@@ -151,21 +155,10 @@ Your turn's REPL trace is your working memory. Keep it small, decision-sized, an
 
 Choose the lightest mechanism that preserves progress:
 
-| Situation | Use | Why |
-|---|---|---|
-| Small task, data already in current variables | Inline lashlang / direct reasoning | No extra model call or context needed |
-| Extract, classify, summarize, judge, or transform information already in variables | An available helper tool, if one exists | Keep supplied inputs narrow and explicit |
-| Need an isolated, multi-step investigation | An available delegation tool, if one exists | Use only capabilities documented for that tool |
-| Several independent tool calls can run in parallel | `start call ...` + `await` / `parallel` | Fanout while keeping the parent trace small |
-| Current trace is bloated/stale, failed attempts dominate, or context is tight | An available continuation tool, if one exists | Pack only concrete state the successor needs |
-
-Mechanism boundaries:
-
-- Tool-specific behavior, parameters, return shapes, and examples live under **Showcased Tools**. Do not infer that a tool exists from these generic Lashlang examples.
-- One-shot helper tools cannot gather more context after the call starts unless their showcased contract explicitly says otherwise. Use them for extraction, classification, summarization, judging, or transformation over data you already supplied.
-- Delegation and continuation tools, when showcased, have distinct lifecycle semantics. Follow the showcased tool description for whether they branch, block, return handles, or end the current session.
-
-Anti-patterns: don't call a tool for a trivial check you can do inline; don't use helper tools to avoid gathering required source material; don't pass bulky raw logs or large raw values between steps when a compact summary is enough.
+- Current variables already hold what you need → reason inline in lashlang.
+- Several independent tool calls can run at once → `parallel { ... }` or `start call ...` + `await`.
+- The trace is bloated, stale, or failed attempts dominate → use an available continuation tool to hand off concrete state to a fresh successor.
+- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.
 
 Example fanout to two available tools (use `?` for fail-fast unwrapping):
 
@@ -283,7 +276,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             )]));
             let mut events = Vec::new();
             if !assistant_text.trim().is_empty() {
-                events.push(conversation_event(assistant_prose_message(assistant_text)));
+                events.push(conversation_event(internal_assistant_prose_message(
+                    assistant_text,
+                )));
             }
             events.push(conversation_event(submit_required_reminder_message(
                 schema.is_some(),
@@ -549,11 +544,11 @@ fn diagnostic_event(phase: &str, payload: Value) -> SessionEventRecord {
 //  Shared helpers: fence extraction, typed-RLM messages, schema check
 // ─────────────────────────────────────────────────────────────────────
 
-/// Return `true` when `text` contains a complete ` ```lashlang ` (or
-/// `rlm`/`lash`) fenced block — opener of N backticks followed by a
-/// closing run of M ≥ N backticks anywhere (no newline requirement on
-/// either side). Exposed for the stream mask, which raises
-/// `abort_stream` as soon as this is true.
+/// Return `true` when `text` contains a complete ` ```lashlang ` fenced
+/// block — opener of N backticks followed by a closing run of M ≥ N
+/// backticks anywhere (no newline requirement on either side). Exposed
+/// for the stream mask, which raises `abort_stream` as soon as this is
+/// true.
 pub fn contains_closed_lashlang_fence(text: &str) -> bool {
     first_lashlang_fence_span(text).is_some_and(|span| span.close_len > 0)
 }
@@ -586,16 +581,15 @@ fn first_lashlang_fence_span(text: &str) -> Option<FenceSpan> {
         let opener_len = bytes[open..].iter().take_while(|&&b| b == b'`').count();
         let after_open = open + opener_len;
         // The opening `\`\`\`` doesn't have to be on its own line —
-        // reasoning models commonly emit `…required shape.\`\`\`lashlang\n`
-        // inline after prose. The language tag is distinctive enough
-        // (`lashlang`/`rlm`/`lash`) that collisions with inline prose
-        // are essentially impossible.
+        // an inline opener after prose still parses. The `lashlang`
+        // language tag is distinctive enough that collisions with
+        // inline prose are essentially impossible.
         let rest = &text[after_open..];
         let lang_end = rest.find('\n').unwrap_or(rest.len());
         let lang = rest[..lang_end].trim();
-        if !matches!(lang, "lashlang" | "rlm" | "lash") {
-            // Skip past this opener run and keep looking — a non-lash
-            // language tag belongs to a different code block.
+        if lang != "lashlang" {
+            // Skip past this opener run and keep looking — a non-
+            // lashlang language tag belongs to a different code block.
             search_from = after_open;
             continue;
         }
@@ -666,6 +660,20 @@ fn combine_reasoning_and_text(reasoning: &str, text: &str) -> String {
 }
 
 fn assistant_prose_message(content: String) -> Message {
+    prose_message(content, None)
+}
+
+fn internal_assistant_prose_message(content: String) -> Message {
+    prose_message(
+        content,
+        Some(lash::MessageOrigin::Plugin {
+            plugin_id: "mode_rlm".to_string(),
+            transient: false,
+        }),
+    )
+}
+
+fn prose_message(content: String, origin: Option<lash::MessageOrigin>) -> Message {
     let id = fresh_message_id();
     Message {
         id: id.clone(),
@@ -684,18 +692,18 @@ fn assistant_prose_message(content: String) -> Message {
             response_meta: None,
         }]),
         user_input: None,
-        origin: None,
+        origin,
     }
 }
 
 fn submit_required_reminder_message(requires_schema: bool, include_submit_prompt: bool) -> Message {
     let id = fresh_message_id();
     let content = if !include_submit_prompt {
-        "[runtime] This session must continue from a fenced ```lashlang block until the task-specific completion path is satisfied. Plain text outside a fence is not delivered."
+        "Continue from a fenced ```lashlang block until the task-specific completion path is satisfied. Plain text outside a fence is not delivered."
     } else if requires_schema {
-        "[runtime] The final answer must be delivered from a fenced ```lashlang block by calling `submit <value>` with a value matching the required output schema. Plain text outside a fence is not delivered."
+        "Deliver the final answer from a fenced ```lashlang block by calling `submit <value>` with a value matching the required output schema. Plain text outside a fence is not delivered."
     } else {
-        "[runtime] The final answer must be delivered from a fenced ```lashlang block by calling `submit <value>`. Plain text outside a fence is not delivered."
+        "Deliver the final answer from a fenced ```lashlang block by calling `submit <value>`. Plain text outside a fence is not delivered."
     };
     Message {
         id: id.clone(),
@@ -730,7 +738,7 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
             id: format!("{id}.p0"),
             kind: PartKind::Text,
             content: format!(
-                "[runtime] Your `submit` value didn't match the required output schema:\n{error_text}\n\nFix the value and call `submit <corrected>` from another fenced ```lashlang block."
+                "The `submit` value didn't match the required output schema:\n{error_text}\n\nFix the value and call `submit <corrected>` from another fenced ```lashlang block."
             ),
             attachment: None,
             tool_call_id: None,
