@@ -876,6 +876,7 @@ async fn run_once(
                     user_input: None,
                     mode: Some(RunMode::Normal),
                     mode_turn_options: None,
+                    trace_turn_id: None,
                 },
                 CancellationToken::new(),
             )

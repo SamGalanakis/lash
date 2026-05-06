@@ -328,7 +328,7 @@ fn last_message_has_tool_result(ctx: &DriverContextView<'_>) -> bool {
 }
 
 impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
-    fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+    fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
             request: ctx.project_llm_request(true),
             driver_state: None,
@@ -419,7 +419,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
         }
 
         actions.push(DriverAction::Emit(SessionEvent::LlmResponse {
-            iteration: ctx.iteration(),
+            mode_iteration: ctx.mode_iteration(),
             content: assistant_text.clone(),
             duration_ms: 0,
         }));
@@ -666,10 +666,10 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
             )]));
         }
 
-        actions.push(DriverAction::AdvanceIteration);
-        let next_iteration = ctx.iteration() + 1;
+        actions.push(DriverAction::AdvanceModeIteration);
+        let next_mode_iteration = ctx.mode_iteration() + 1;
         if let Some(max_turns) = ctx.max_turns()
-            && next_iteration >= ctx.run_offset() + max_turns
+            && next_mode_iteration >= ctx.mode_run_offset() + max_turns
         {
             actions.push(DriverAction::AppendEvents(vec![conversation_event(
                 turn_limit_exhausted_message(max_turns),

@@ -1521,9 +1521,9 @@ impl App {
                     // Unknown message kinds are intentionally dropped.
                 }
             }
-            SessionEvent::LlmRequest { iteration, .. } => {
+            SessionEvent::LlmRequest { mode_iteration, .. } => {
                 self.finalize_live_markdown();
-                self.iteration = iteration + 1;
+                self.iteration = mode_iteration + 1;
                 if let Some(detail) = self.pending_retry_status.take() {
                     self.set_status("retrying", Some(detail), true);
                 } else {

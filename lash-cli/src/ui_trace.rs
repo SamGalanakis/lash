@@ -193,7 +193,7 @@ pub(crate) enum TraceSessionEvent {
         kind: String,
     },
     LlmRequest {
-        iteration: usize,
+        mode_iteration: usize,
         message_count: usize,
         tool_list: String,
     },
@@ -233,11 +233,11 @@ impl TraceSessionEvent {
                 kind: kind.clone(),
             }),
             SessionEvent::LlmRequest {
-                iteration,
+                mode_iteration,
                 message_count,
                 tool_list,
             } => Some(Self::LlmRequest {
-                iteration: *iteration,
+                mode_iteration: *mode_iteration,
                 message_count: *message_count,
                 tool_list: tool_list.clone(),
             }),

@@ -24,7 +24,7 @@ pub struct SessionStateEnvelope {
     #[serde(default)]
     pub session_graph: crate::SessionGraph,
     #[serde(default)]
-    pub iteration: usize,
+    pub turn_index: usize,
     #[serde(default)]
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,7 +71,7 @@ impl Default for SessionStateEnvelope {
             session_id: "root".to_string(),
             policy: SessionPolicy::default(),
             session_graph: crate::SessionGraph::default(),
-            iteration: 0,
+            turn_index: 0,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
             mode_turn_options: crate::ModeTurnOptions::default(),
@@ -88,7 +88,7 @@ pub struct PersistedSessionState {
     #[serde(default)]
     pub session_graph: crate::SessionGraph,
     #[serde(default)]
-    pub iteration: usize,
+    pub turn_index: usize,
     #[serde(default)]
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,7 +137,7 @@ impl PersistedSessionState {
             session_id: state.session_id,
             policy: state.policy,
             session_graph: state.session_graph,
-            iteration: state.iteration,
+            turn_index: state.turn_index,
             token_usage: state.token_usage,
             last_prompt_usage: state.last_prompt_usage,
             mode_turn_options: state.mode_turn_options,
@@ -161,7 +161,7 @@ impl PersistedSessionState {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
             session_graph: self.session_graph.clone(),
-            iteration: self.iteration,
+            turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
             mode_turn_options: self.mode_turn_options.clone(),
@@ -172,7 +172,7 @@ impl PersistedSessionState {
         self.session_id = state.session_id.clone();
         self.policy = state.policy.clone();
         self.session_graph = state.session_graph.clone();
-        self.iteration = state.iteration;
+        self.turn_index = state.turn_index;
         self.token_usage = state.token_usage.clone();
         self.last_prompt_usage = state.last_prompt_usage.clone();
         self.mode_turn_options = state.mode_turn_options.clone();
@@ -239,7 +239,7 @@ impl PersistedSessionState {
 
     pub fn turn_state(&self) -> PersistedTurnState {
         PersistedTurnState {
-            iteration: self.iteration,
+            turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
             mode_turn_options: self.mode_turn_options.clone(),
@@ -310,7 +310,7 @@ impl Default for PersistedSessionState {
             session_id: "root".to_string(),
             policy: SessionPolicy::default(),
             session_graph: crate::SessionGraph::default(),
-            iteration: 0,
+            turn_index: 0,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
             mode_turn_options: crate::ModeTurnOptions::default(),
@@ -360,7 +360,7 @@ pub(super) fn apply_session_checkpoint(
         state.execution_state_snapshot = None;
         return;
     };
-    state.iteration = checkpoint.turn_state.iteration;
+    state.turn_index = checkpoint.turn_state.turn_index;
     state.token_usage = checkpoint.turn_state.token_usage;
     state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
     state.mode_turn_options = checkpoint.turn_state.mode_turn_options;

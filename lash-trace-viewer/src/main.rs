@@ -609,7 +609,7 @@ function eventCard(record, index, className = 'event') {
     <div class="event-rail">
       <span class="kind ${badgeClass}">${escapeHtml(kind)}</span>
       <div class="meta-line">${escapeHtml(shortTime(record.timestamp))}</div>
-      <div class="meta-line">iter ${record.context?.iteration ?? 'na'}</div>
+      <div class="meta-line">turn ${record.context?.turn_index ?? 'na'} · step ${record.context?.mode_iteration ?? 'na'}</div>
     </div>
     <div class="event-body">
       <div class="title-line">${escapeHtml(eventTitle(record))}</div>

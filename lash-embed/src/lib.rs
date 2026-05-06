@@ -559,6 +559,7 @@ impl Input {
             user_input: None,
             mode: None,
             mode_turn_options: None,
+            trace_turn_id: None,
         }
     }
 }
@@ -609,7 +610,7 @@ pub enum TurnEvent {
         kind: String,
     },
     Usage {
-        iteration: usize,
+        mode_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
     },
@@ -643,11 +644,11 @@ impl TurnEvent {
             }),
             lash::SessionEvent::Message { text, kind } => Some(Self::Message { text, kind }),
             lash::SessionEvent::TokenUsage {
-                iteration,
+                mode_iteration,
                 usage,
                 cumulative,
             } => Some(Self::Usage {
-                iteration,
+                mode_iteration,
                 usage,
                 cumulative,
             }),
@@ -980,7 +981,7 @@ mod tests {
                 content: "why".to_string(),
             },
             SessionEvent::TokenUsage {
-                iteration: 1,
+                mode_iteration: 1,
                 usage: usage.clone(),
                 cumulative: usage.clone(),
             },

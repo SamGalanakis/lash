@@ -68,8 +68,11 @@ fn merge_context(base: &mut TraceContext, overlay: TraceContext) {
     if overlay.parent_graph_node_id.is_some() {
         base.parent_graph_node_id = overlay.parent_graph_node_id;
     }
-    if overlay.iteration.is_some() {
-        base.iteration = overlay.iteration;
+    if overlay.turn_index.is_some() {
+        base.turn_index = overlay.turn_index;
+    }
+    if overlay.mode_iteration.is_some() {
+        base.mode_iteration = overlay.mode_iteration;
     }
     if overlay.effect_id.is_some() {
         base.effect_id = overlay.effect_id;

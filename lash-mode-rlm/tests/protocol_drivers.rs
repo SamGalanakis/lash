@@ -110,8 +110,8 @@ fn find_done(effects: &[Effect]) -> Option<(&lash_sansio::MessageSequence, usize
         Effect::Done {
             messages,
             events: _,
-            iteration,
-        } => Some((messages, *iteration)),
+            mode_iteration,
+        } => Some((messages, *mode_iteration)),
         _ => None,
     })
 }

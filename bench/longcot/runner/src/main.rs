@@ -684,6 +684,7 @@ async fn run_question(
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             sink_trait.as_ref(),
             cancel,
@@ -1312,10 +1313,10 @@ impl LongCoTEventSink {
 #[async_trait::async_trait]
 impl EventSink for LongCoTEventSink {
     async fn emit(&self, event: SessionEvent) {
-        if let SessionEvent::LlmRequest { iteration, .. } = &event
+        if let SessionEvent::LlmRequest { mode_iteration, .. } = &event
             && let Ok(mut turns) = self.iteration_count.lock()
         {
-            turns.insert(*iteration);
+            turns.insert(*mode_iteration);
         }
         if let SessionEvent::LlmResponse { content, .. } = &event
             && let Ok(mut last) = self.last_llm_response.lock()

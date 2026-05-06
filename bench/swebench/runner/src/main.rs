@@ -676,6 +676,7 @@ async fn run_instance(
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             sink_trait.as_ref(),
             cancel,
@@ -1175,9 +1176,9 @@ impl InstanceEventSink {
 impl EventSink for InstanceEventSink {
     async fn emit(&self, event: SessionEvent) {
         match &event {
-            SessionEvent::LlmRequest { iteration, .. } => {
+            SessionEvent::LlmRequest { mode_iteration, .. } => {
                 if let Ok(mut s) = self.iterations.lock() {
-                    s.insert(*iteration);
+                    s.insert(*mode_iteration);
                 }
             }
             SessionEvent::LlmResponse { content, .. } => {

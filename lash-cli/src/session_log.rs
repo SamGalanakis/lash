@@ -371,7 +371,7 @@ mod tests {
         let checkpoint_ref = store
             .put_checkpoint(&lash::HydratedSessionCheckpoint {
                 turn_state: lash::PersistedTurnState {
-                    iteration: 1,
+                    turn_index: 1,
                     token_usage,
                     last_prompt_usage: None,
                     mode_turn_options: Default::default(),

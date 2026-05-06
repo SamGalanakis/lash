@@ -993,6 +993,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -1049,6 +1050,7 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
                 }),
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -1125,6 +1127,7 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -1188,6 +1191,7 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -1302,6 +1306,7 @@ async fn bridge_checkpoint_injection_preserves_images() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -1382,6 +1387,7 @@ async fn checkpoint_hook_can_inject_messages() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -1444,6 +1450,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             &sink,
             CancellationToken::new(),
@@ -1655,6 +1662,7 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
         )
         .await
@@ -1716,7 +1724,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
             origin: None,
         },
     );
-    runtime.state.iteration = 3;
+    runtime.state.turn_index = 3;
 
     let manager = runtime.session_manager().expect("session manager");
     let handle = manager
@@ -1760,7 +1768,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     assert_eq!(messages[0].parts[0].content, "parent hello");
     let checkpoint = read.checkpoint.expect("checkpoint");
     let turn_state = checkpoint.turn_state;
-    assert_eq!(turn_state.iteration, 3);
+    assert_eq!(turn_state.turn_index, 3);
 }
 
 #[tokio::test]
@@ -1854,6 +1862,7 @@ async fn runtime_can_activate_managed_child_session() {
                     user_input: None,
                     mode: None,
                     mode_turn_options: None,
+                    trace_turn_id: None,
                 },
             )
             .await
@@ -1937,6 +1946,7 @@ impl crate::ToolProvider for ChildSessionTool {
                     user_input: None,
                     mode: None,
                     mode_turn_options: None,
+                    trace_turn_id: None,
                 },
             )
             .await
@@ -2131,6 +2141,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             &sink,
             CancellationToken::new(),
@@ -2237,6 +2248,7 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             &sink,
             CancellationToken::new(),
@@ -2755,6 +2767,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             &sink,
             CancellationToken::new(),
@@ -2810,6 +2823,7 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             &sink,
             CancellationToken::new(),
@@ -2901,6 +2915,7 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             cancel,
         )
@@ -2967,6 +2982,7 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3019,6 +3035,7 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             &sink,
             CancellationToken::new(),
@@ -3123,6 +3140,7 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3173,6 +3191,7 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3233,6 +3252,7 @@ async fn standard_runtime_trace_records_stream_event_entries() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3398,6 +3418,7 @@ async fn extended_runtime_trace_records_provider_stream_events() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3482,6 +3503,7 @@ async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3554,6 +3576,7 @@ async fn standard_runtime_trace_records_failed_llm_calls() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3717,6 +3740,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3804,6 +3828,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -3929,6 +3954,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -4021,6 +4047,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )
@@ -4055,7 +4082,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 ..Default::default()
             },
             session_graph: resumed_read.graph,
-            iteration: resumed_checkpoint.turn_state.iteration,
+            turn_index: resumed_checkpoint.turn_state.turn_index,
             token_usage: resumed_checkpoint.turn_state.token_usage.clone(),
             last_prompt_usage: resumed_checkpoint.turn_state.last_prompt_usage.clone(),
             dynamic_state_ref: resumed_checkpoint.dynamic_state_ref.clone(),
@@ -4086,6 +4113,7 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             CancellationToken::new(),
         )

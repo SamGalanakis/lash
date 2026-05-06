@@ -202,6 +202,7 @@ pub(crate) fn turn_input_for_task(text: String) -> TurnInput {
         user_input: None,
         mode: None,
         mode_turn_options: None,
+        trace_turn_id: None,
     }
 }
 

@@ -474,7 +474,7 @@ mod tests {
         };
         let entry = RlmTrajectoryEntry {
             id: "rlm_step_0".to_string(),
-            iteration: 0,
+            mode_iteration: 0,
             reasoning: "I'll inspect with grep.".to_string(),
             code: "g = (call grep { query: \"submit\", path: \".\" })?\nsubmit \"grep worked\""
                 .to_string(),
@@ -640,7 +640,7 @@ mod tests {
         };
         let entry = RlmTrajectoryEntry {
             id: "rlm_step_0".to_string(),
-            iteration: 0,
+            mode_iteration: 0,
             reasoning: "inspect".to_string(),
             code: "call grep".to_string(),
             output: vec!["done".to_string()],

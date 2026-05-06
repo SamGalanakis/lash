@@ -147,7 +147,7 @@ pub struct PersistedSessionConfig {
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PersistedTurnState {
-    pub iteration: usize,
+    pub turn_index: usize,
     #[serde(default)]
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1627,7 +1627,7 @@ mod tests {
         graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
             RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
                 id: "rlm_step_0".to_string(),
-                iteration: 0,
+                mode_iteration: 0,
                 reasoning: "think".to_string(),
                 code: "x = 1".to_string(),
                 output: vec!["observed".to_string()],
@@ -1680,7 +1680,9 @@ mod tests {
                     MessageRole::System => format!("message:system:{}", message.id),
                     MessageRole::Assistant => format!("message:assistant:{}", message.id),
                 },
-                crate::ChronologicalPayload::RlmStep(step) => format!("rlm:{}", step.iteration),
+                crate::ChronologicalPayload::RlmStep(step) => {
+                    format!("rlm:{}", step.mode_iteration)
+                }
                 crate::ChronologicalPayload::ToolCall(record) => format!("tool:{}", record.tool),
             })
             .collect::<Vec<_>>();
@@ -1749,7 +1751,7 @@ mod tests {
         graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
             RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
                 id: "rlm_step_1".to_string(),
-                iteration: 1,
+                mode_iteration: 1,
                 reasoning: "inspect".to_string(),
                 code: "print now".to_string(),
                 output: vec!["now".to_string()],

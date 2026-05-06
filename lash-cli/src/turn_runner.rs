@@ -23,6 +23,7 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
         user_input: Some(turn.input_provenance.clone()),
         mode: Some(RunMode::Normal),
         mode_turn_options: None,
+        trace_turn_id: None,
     }
 }
 
@@ -120,7 +121,7 @@ mod tests {
         let checkpoint_ref = store
             .put_checkpoint(&lash::HydratedSessionCheckpoint {
                 turn_state: PersistedTurnState {
-                    iteration: 2,
+                    turn_index: 2,
                     token_usage: TokenUsage {
                         input_tokens: 30,
                         output_tokens: 7,
@@ -168,7 +169,7 @@ mod tests {
             .expect("refresh persisted session state");
         let stale_state = persistence_state;
 
-        assert_eq!(stale_state.iteration, 2);
+        assert_eq!(stale_state.turn_index, 2);
         assert_eq!(stale_state.read_view().messages().len(), 1);
         assert_eq!(stale_state.token_ledger.len(), 1);
         assert_eq!(stale_state.token_ledger[0].source, "turn");

@@ -284,7 +284,7 @@ struct FenceExtraction {
 }
 
 impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
-    fn prepare_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+    fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
             request: ctx.project_llm_request(false),
             driver_state: Some(driver_state(RlmDriverState::default())),
@@ -299,7 +299,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
         _text_streamed: bool,
     ) -> Vec<DriverAction> {
         let mut actions = vec![DriverAction::Emit(SessionEvent::LlmResponse {
-            iteration: ctx.iteration(),
+            mode_iteration: ctx.mode_iteration(),
             content: llm_response.full_text.clone(),
             duration_ms: 0,
         })];
@@ -363,7 +363,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 include_submit_prompt,
             )));
             actions.push(DriverAction::AppendEvents(events));
-            actions.push(DriverAction::AdvanceIteration);
+            actions.push(DriverAction::AdvanceModeIteration);
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::AfterWork,
                 on_empty: CheckpointResumeAction::PrepareIteration,
@@ -464,7 +464,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 }
                 if let Some(successor_session_id) = continue_as_successor {
                     actions.push(DriverAction::AppendEvents(vec![trajectory_event(
-                        trajectory_entry(ctx.iteration(), &state, None, None),
+                        trajectory_entry(ctx.mode_iteration(), &state, None, None),
                     )]));
                     actions.push(DriverAction::StartCheckpoint {
                         checkpoint: CheckpointKind::BeforeCompletion,
@@ -476,7 +476,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 }
                 if let Some(value) = submitted_error {
                     actions.push(DriverAction::AppendEvents(vec![trajectory_event(
-                        trajectory_entry(ctx.iteration(), &state, None, None),
+                        trajectory_entry(ctx.mode_iteration(), &state, None, None),
                     )]));
                     actions.push(DriverAction::StartCheckpoint {
                         checkpoint: CheckpointKind::BeforeCompletion,
@@ -507,14 +507,14 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             {
                 actions.push(DriverAction::AppendEvents(vec![
                     trajectory_event(trajectory_entry(
-                        ctx.iteration(),
+                        ctx.mode_iteration(),
                         &state,
                         Some(error_text.clone()),
                         None,
                     )),
                     conversation_event(submit_schema_mismatch_message(&error_text)),
                 ]));
-                actions.push(DriverAction::AdvanceIteration);
+                actions.push(DriverAction::AdvanceModeIteration);
                 actions.push(DriverAction::StartCheckpoint {
                     checkpoint: CheckpointKind::AfterWork,
                     on_empty: CheckpointResumeAction::PrepareIteration,
@@ -528,7 +528,12 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
             };
             actions.push(DriverAction::AppendEvents(vec![trajectory_event(
-                trajectory_entry(ctx.iteration(), &state, None, Some(finish_value.clone())),
+                trajectory_entry(
+                    ctx.mode_iteration(),
+                    &state,
+                    None,
+                    Some(finish_value.clone()),
+                ),
             )]));
             if !rendered.trim().is_empty() {
                 actions.push(DriverAction::Emit(SessionEvent::Message {
@@ -549,9 +554,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
         }
 
         actions.push(DriverAction::AppendEvents(vec![trajectory_event(
-            trajectory_entry(ctx.iteration(), &state, None, None),
+            trajectory_entry(ctx.mode_iteration(), &state, None, None),
         )]));
-        actions.push(DriverAction::AdvanceIteration);
+        actions.push(DriverAction::AdvanceModeIteration);
         if ctx.should_force_exit_after_grace_turn() {
             actions.push(DriverAction::Finish(TurnOutcome::Stopped(
                 TurnStop::MaxTurns,
@@ -580,14 +585,14 @@ fn continue_as_successor_from_tool_result(record: &ToolCallRecord) -> Option<Str
 }
 
 fn trajectory_entry(
-    iteration: usize,
+    mode_iteration: usize,
     state: &RlmDriverState,
     validation_error: Option<String>,
     final_output: Option<Value>,
 ) -> RlmTrajectoryEntry {
     RlmTrajectoryEntry {
-        id: format!("rlm_step_{iteration}"),
-        iteration,
+        id: format!("rlm_step_{mode_iteration}"),
+        mode_iteration,
         reasoning: state.reasoning.clone(),
         code: state.executed_code.clone().unwrap_or_default(),
         output: state.output.clone(),
@@ -893,7 +898,7 @@ mod tests {
         // Regression: reasoning models emit the opening fence mid-line:
         // `…required output shape.```lashlang\n…`. Requiring newline
         // before ``` caused the detector to miss the block entirely,
-        // which made the RLM turn terminate after one iteration
+        // which made the RLM turn terminate after one mode_iteration
         // without executing anything.
         let text = "I'll inspect the prompt.```lashlang\nprint slice(input.prompt, 0, 10)\n```";
         let extraction = extract_first_lashlang_fence(text)

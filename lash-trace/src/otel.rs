@@ -328,8 +328,14 @@ fn context_attributes(
         "lash.context.parent_graph_node_id",
         &context.parent_graph_node_id,
     );
-    if let Some(iteration) = context.iteration {
-        attrs.push(KeyValue::new("lash.context.iteration", iteration as i64));
+    if let Some(turn_index) = context.turn_index {
+        attrs.push(KeyValue::new("lash.context.turn_index", turn_index as i64));
+    }
+    if let Some(mode_iteration) = context.mode_iteration {
+        attrs.push(KeyValue::new(
+            "lash.context.mode_iteration",
+            mode_iteration as i64,
+        ));
     }
     push_opt(attrs, "lash.context.effect_id", &context.effect_id);
     push_opt(attrs, "lash.context.llm_call_id", &context.llm_call_id);

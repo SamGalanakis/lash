@@ -265,7 +265,7 @@ pub(super) async fn activate_foreground_session_handoff(
     *current_model_variant = state.policy.model_variant.clone();
     app.set_model_variant(current_model_variant.clone());
     *history = state.read_view().messages().to_vec();
-    *turn_counter = state.iteration;
+    *turn_counter = state.turn_index;
 
     match rt.session_manager() {
         Ok(manager) => *session_manager = manager,
@@ -332,6 +332,7 @@ pub(super) async fn process_pending_monitor_wakes(
         user_input: None,
         mode: Some(RunMode::Normal),
         mode_turn_options: None,
+        trace_turn_id: None,
     };
     send_user_message(
         prepared_turn,

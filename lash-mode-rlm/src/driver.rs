@@ -161,7 +161,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
         let required_output = required_output_block(&termination);
         let budget_suffix = self.last_prompt_usage.read().ok().and_then(|guard| {
             crate::rlm_support::format_budget_suffix(
-                ctx.iteration + 1,
+                ctx.mode_iteration + 1,
                 guard.as_ref(),
                 self.max_budget_tokens,
             )
@@ -178,7 +178,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
         messages.extend(build_rlm_history_messages(
             &projection,
             self.max_output_chars,
-            ctx.iteration + 1,
+            ctx.mode_iteration + 1,
             finalization,
             required_output.as_deref(),
             budget_suffix.as_deref(),
@@ -203,7 +203,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
 fn build_rlm_history_messages(
     projection: &lash::ChronologicalProjection,
     max_output_chars: usize,
-    iteration: usize,
+    mode_iteration: usize,
     finalization: &str,
     required_output: Option<&str>,
     budget_suffix: Option<&str>,
@@ -232,7 +232,7 @@ fn build_rlm_history_messages(
     }
 
     let mut current_prompt = format!(
-        "\n\n\n=== CURRENT ITERATION: {iteration} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
+        "\n\n\n=== CURRENT ITERATION: {mode_iteration} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
     );
     if let Some(block) = required_output {
         current_prompt.push_str("\n\n=== REQUIRED OUTPUT ===\n\n");
@@ -393,7 +393,7 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
         ),
         RlmHistoryItem::RlmStep {
             id: _,
-            iteration,
+            mode_iteration,
             reasoning,
             code,
             output,
@@ -405,7 +405,7 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
             &mut rendered,
             ReplStepRender {
                 index,
-                iteration: *iteration,
+                mode_iteration: *mode_iteration,
                 reasoning,
                 code,
                 output,
@@ -475,7 +475,7 @@ fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> 
                 &mut rendered,
                 ReplStepRender {
                     index: entry.index,
-                    iteration: step.iteration,
+                    mode_iteration: step.mode_iteration,
                     reasoning: &step.reasoning,
                     code: &step.code,
                     output: &step.output,
@@ -624,7 +624,7 @@ fn message_role_label(role: &RlmHistoryRole) -> &'static str {
 
 struct ReplStepRender<'a> {
     index: usize,
-    iteration: usize,
+    mode_iteration: usize,
     reasoning: &'a str,
     code: &'a str,
     output: &'a [String],
@@ -637,7 +637,7 @@ struct ReplStepRender<'a> {
 fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
     let ReplStepRender {
         index,
-        iteration,
+        mode_iteration,
         reasoning,
         code,
         output,
@@ -655,7 +655,7 @@ fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
     );
     let _ = write!(
         out,
-        "--- history[{index}] · rlm step · iteration {iteration} ---\n\nReasoning ({reasoning_raw_len} chars{reasoning_ref}):\n{}\n\nCode:\n```lashlang\n{}\n```",
+        "--- history[{index}] · rlm step · mode_iteration {mode_iteration} ---\n\nReasoning ({reasoning_raw_len} chars{reasoning_ref}):\n{}\n\nCode:\n```lashlang\n{}\n```",
         if reasoning_preview.is_empty() {
             "(none)"
         } else {
@@ -799,11 +799,11 @@ mod tests {
         })
     }
 
-    fn step_event(iteration: usize, code: &str, output: &str) -> SessionEventRecord {
+    fn step_event(mode_iteration: usize, code: &str, output: &str) -> SessionEventRecord {
         SessionEventRecord::Mode(lash::ModeEvent::rlm(RlmModeEvent::RlmTrajectoryEntry(
             RlmTrajectoryEntry {
-                id: format!("rlm_step_{iteration}"),
-                iteration,
+                id: format!("rlm_step_{mode_iteration}"),
+                mode_iteration,
                 reasoning: "thinking".to_string(),
                 code: code.to_string(),
                 output: if output.is_empty() {
@@ -853,11 +853,11 @@ mod tests {
         let history = projector.format_history(&projection_from_events(&events));
 
         assert!(history.contains("--- history[0] · user message · 5 chars ---\n\nfirst"));
-        assert!(history.contains("--- history[1] · rlm step · iteration 0 ---"));
+        assert!(history.contains("--- history[1] · rlm step · mode_iteration 0 ---"));
         assert!(history.contains("Code:\n```lashlang\nprint 1\n```"));
         assert!(history.contains("history[1].output[0] (1 chars):\n1"));
         assert!(history.contains("--- history[2] · user message · 6 chars ---\n\nsecond"));
-        assert!(history.contains("--- history[3] · rlm step · iteration 1 ---"));
+        assert!(history.contains("--- history[3] · rlm step · mode_iteration 1 ---"));
         assert!(history.contains("history[3].output[0] (1 chars):\n2"));
         // Old combined "Output" + "Tool calls" sections were removed —
         // each `print` is now its own block, and tool calls are visible
@@ -880,7 +880,7 @@ mod tests {
 
         assert!(history.contains("--- history[0] · user message"));
         assert!(history.contains("--- history[1] · tool_call · lookup · ok · 4 ms ---"));
-        assert!(history.contains("--- history[2] · rlm step · iteration 0 ---"));
+        assert!(history.contains("--- history[2] · rlm step · mode_iteration 0 ---"));
         assert!(!history.contains("full: history[1].result"));
     }
 
@@ -936,7 +936,7 @@ mod tests {
         let event = SessionEventRecord::Mode(lash::ModeEvent::rlm(
             RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
                 id: "rlm_step_1".to_string(),
-                iteration: 1,
+                mode_iteration: 1,
                 reasoning: String::new(),
                 code: "print img".to_string(),
                 output: vec![r#"{"type":"image","id":"img"}"#.to_string()],
@@ -1069,7 +1069,7 @@ mod tests {
             step_event(0, "print 1", "1"),
         ]));
         assert!(initial.contains("--- history[0] · user message"));
-        assert!(initial.contains("--- history[1] · rlm step · iteration 0 ---"));
+        assert!(initial.contains("--- history[1] · rlm step · mode_iteration 0 ---"));
 
         let extended = projector.format_history(&projection_from_events(&[
             user_event("u1", "first"),
@@ -1079,6 +1079,6 @@ mod tests {
         ]));
         assert!(extended.starts_with(&initial));
         assert!(extended.contains("--- history[2] · user message"));
-        assert!(extended.contains("--- history[3] · rlm step · iteration 1 ---"));
+        assert!(extended.contains("--- history[3] · rlm step · mode_iteration 1 ---"));
     }
 }

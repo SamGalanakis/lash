@@ -50,7 +50,9 @@ pub struct TraceContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_graph_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub iteration: Option<usize>,
+    pub turn_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_iteration: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,8 +67,18 @@ impl TraceContext {
         self
     }
 
-    pub fn for_iteration(mut self, iteration: usize) -> Self {
-        self.iteration = Some(iteration);
+    pub fn for_turn_index(mut self, turn_index: usize) -> Self {
+        self.turn_index = Some(turn_index);
+        self
+    }
+
+    pub fn for_turn(mut self, turn_id: impl Into<String>) -> Self {
+        self.turn_id = Some(turn_id.into());
+        self
+    }
+
+    pub fn for_mode_iteration(mut self, mode_iteration: usize) -> Self {
+        self.mode_iteration = Some(mode_iteration);
         self
     }
 

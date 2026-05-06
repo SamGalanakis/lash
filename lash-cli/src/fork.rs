@@ -660,7 +660,7 @@ mod fork_tests {
     fn persisted_checkpoint(iteration: usize) -> lash::HydratedSessionCheckpoint {
         lash::HydratedSessionCheckpoint {
             turn_state: lash::PersistedTurnState {
-                iteration,
+                turn_index: iteration,
                 token_usage: lash::TokenUsage {
                     input_tokens: 10,
                     output_tokens: 3,
@@ -793,7 +793,7 @@ mod fork_tests {
             .and_then(|blob_ref| child_store.get_checkpoint(blob_ref))
             .expect("child checkpoint")
             .turn_state;
-        assert_eq!(child_turn.iteration, 1);
+        assert_eq!(child_turn.turn_index, 1);
 
         let child_state = lash::SessionStateEnvelope {
             session_graph: child_graph,

@@ -19,7 +19,8 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LlmPromptSnapshot {
-    pub iteration: Option<u64>,
+    pub turn_index: Option<u64>,
+    pub mode_iteration: Option<u64>,
     pub llm_call_id: Option<String>,
     pub timestamp: Option<String>,
     pub model: Option<String>,
@@ -110,8 +111,11 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
     let request_hash = short_hash(&request_concat);
     let context = record.get("context");
     Some(LlmPromptSnapshot {
-        iteration: context
-            .and_then(|c| c.get("iteration"))
+        turn_index: context
+            .and_then(|c| c.get("turn_index"))
+            .and_then(Value::as_u64),
+        mode_iteration: context
+            .and_then(|c| c.get("mode_iteration"))
             .and_then(Value::as_u64),
         llm_call_id: context
             .and_then(|c| c.get("llm_call_id"))
@@ -186,19 +190,8 @@ fn attach_usage_to_latest_matching_snapshot(
     let call_id = context
         .and_then(|c| c.get("llm_call_id"))
         .and_then(Value::as_str);
-    let iteration = context
-        .and_then(|c| c.get("iteration"))
-        .and_then(Value::as_u64);
-
     if let Some(snapshot) = snapshots.iter_mut().rev().find(|snapshot| {
         snapshot.usage.is_none() && call_id.is_some() && snapshot.llm_call_id.as_deref() == call_id
-    }) {
-        snapshot.usage = Some(usage);
-        return;
-    }
-
-    if let Some(snapshot) = snapshots.iter_mut().rev().find(|snapshot| {
-        snapshot.usage.is_none() && iteration.is_some() && snapshot.iteration == iteration
     }) {
         snapshot.usage = Some(usage);
     }
@@ -287,17 +280,17 @@ mod tests {
         let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
         writeln!(
             tmp,
-            r#"{{"type":"turn_started","context":{{"iteration":1}}}}"#
+            r#"{{"type":"turn_started","context":{{"turn_index":1,"turn_id":"turn-1"}}}}"#
         )
         .unwrap();
         writeln!(
             tmp,
-            r#"{{"type":"llm_call_started","timestamp":"2026-05-04T00:00:00Z","context":{{"iteration":0,"llm_call_id":"abc:0"}},"request":{{"model":"gpt-5.5","model_variant":"high","messages":[{{"role":"system","blocks":[{{"kind":"text","text":"You are lash."}}]}},{{"role":"user","blocks":[{{"kind":"text","text":"hi"}}]}}]}}}}"#
+            r#"{{"type":"llm_call_started","timestamp":"2026-05-04T00:00:00Z","context":{{"turn_index":1,"mode_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"request":{{"model":"gpt-5.5","model_variant":"high","messages":[{{"role":"system","blocks":[{{"kind":"text","text":"You are lash."}}]}},{{"role":"user","blocks":[{{"kind":"text","text":"hi"}}]}}]}}}}"#
         )
         .unwrap();
         writeln!(
             tmp,
-            r#"{{"type":"llm_call_completed","context":{{"iteration":0,"llm_call_id":"abc:0"}},"response":{{"text":"ok","duration_ms":1234}},"usage":{{"input_tokens":100,"output_tokens":12,"cached_input_tokens":80,"reasoning_tokens":4}}}}"#
+            r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"mode_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"response":{{"text":"ok","duration_ms":1234}},"usage":{{"input_tokens":100,"output_tokens":12,"cached_input_tokens":80,"reasoning_tokens":4}}}}"#
         )
         .unwrap();
         tmp.flush().unwrap();
@@ -305,8 +298,9 @@ mod tests {
         let prompts = load_prompts_from_trace(tmp.path()).unwrap();
         assert_eq!(prompts.len(), 1);
         let p = &prompts[0];
-        assert_eq!(p.iteration, Some(0));
-        assert_eq!(p.llm_call_id.as_deref(), Some("abc:0"));
+        assert_eq!(p.turn_index, Some(1));
+        assert_eq!(p.mode_iteration, Some(0));
+        assert_eq!(p.llm_call_id.as_deref(), Some("abc:1:0:0"));
         assert_eq!(p.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(p.model_variant.as_deref(), Some("high"));
         assert_eq!(p.system_text, "You are lash.");
@@ -357,12 +351,12 @@ mod tests {
         for input in [11, 22] {
             writeln!(
                 tmp,
-                r#"{{"type":"llm_call_started","context":{{"iteration":2,"llm_call_id":"root:2"}},"request":{{"messages":[{{"role":"system","blocks":[{{"text":"sys {input}"}}]}},{{"role":"user","blocks":[{{"text":"hi"}}]}}]}}}}"#
+                r#"{{"type":"llm_call_started","context":{{"turn_index":1,"mode_iteration":0,"llm_call_id":"root:1:0:{input}"}},"request":{{"messages":[{{"role":"system","blocks":[{{"text":"sys {input}"}}]}},{{"role":"user","blocks":[{{"text":"hi"}}]}}]}}}}"#
             )
             .unwrap();
             writeln!(
                 tmp,
-                r#"{{"type":"llm_call_completed","context":{{"iteration":2,"llm_call_id":"root:2"}},"response":{{"duration_ms":1,"text":"ok"}},"usage":{{"input_tokens":{input},"output_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0}}}}"#
+                r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"mode_iteration":0,"llm_call_id":"root:1:0:{input}"}},"response":{{"duration_ms":1,"text":"ok"}},"usage":{{"input_tokens":{input},"output_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0}}}}"#
             )
             .unwrap();
         }

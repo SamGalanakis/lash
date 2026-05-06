@@ -19,8 +19,11 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) policy: SessionPolicy,
     pub(super) host: RuntimeHost,
     pub(super) session_id: String,
+    pub(super) turn_id: String,
+    pub(super) turn_index: usize,
     pub(super) turn_pipeline: TurnCommitPipeline,
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
+    pub(super) next_llm_ordinal: usize,
     pub(super) session_manager: Arc<dyn RuntimeSessionHost>,
     pub(super) prompt_bridge: HostPromptBridge,
     pub(super) mode_turn_options: crate::ModeTurnOptions,
@@ -60,29 +63,42 @@ impl PreparedExecutionSurface {
 }
 
 impl RuntimeTurnDriver {
-    fn emit_trace(&self, iteration: usize, event: lash_trace::TraceEvent) {
+    fn trace_context(&self, mode_iteration: usize) -> lash_trace::TraceContext {
+        lash_trace::TraceContext::default()
+            .for_session(self.session_id.clone())
+            .for_turn_index(self.turn_index)
+            .for_mode_iteration(mode_iteration)
+            .for_turn(self.turn_id.clone())
+    }
+
+    fn llm_call_id(&mut self, mode_iteration: usize) -> String {
+        let ordinal = self.next_llm_ordinal;
+        self.next_llm_ordinal += 1;
+        format!(
+            "{}:{}:{}:{}",
+            self.session_id, self.turn_index, mode_iteration, ordinal
+        )
+    }
+
+    fn emit_trace(&self, mode_iteration: usize, event: lash_trace::TraceEvent) {
         crate::trace::emit_trace(
             &self.host.core.trace_sink,
             &self.host.core.trace_context,
-            lash_trace::TraceContext::default()
-                .for_session(self.session_id.clone())
-                .for_iteration(iteration),
+            self.trace_context(mode_iteration),
             event,
         );
     }
 
     fn emit_trace_at(
         &self,
-        iteration: usize,
+        mode_iteration: usize,
         event: lash_trace::TraceEvent,
         timestamp: chrono::DateTime<chrono::Utc>,
     ) {
         crate::trace::emit_trace_at(
             &self.host.core.trace_sink,
             &self.host.core.trace_context,
-            lash_trace::TraceContext::default()
-                .for_session(self.session_id.clone())
-                .for_iteration(iteration),
+            self.trace_context(mode_iteration),
             event,
             timestamp,
         );
@@ -90,12 +106,12 @@ impl RuntimeTurnDriver {
 
     fn emit_tool_call_trace_at(
         &self,
-        iteration: usize,
+        mode_iteration: usize,
         record: &crate::ToolCallRecord,
         timestamp: chrono::DateTime<chrono::Utc>,
     ) {
         self.emit_trace_at(
-            iteration,
+            mode_iteration,
             lash_trace::TraceEvent::ToolCallCompleted {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
@@ -110,14 +126,14 @@ impl RuntimeTurnDriver {
 
     fn emit_tool_call_started_trace_at(
         &self,
-        iteration: usize,
+        mode_iteration: usize,
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
         timestamp: chrono::DateTime<chrono::Utc>,
     ) {
         self.emit_trace_at(
-            iteration,
+            mode_iteration,
             lash_trace::TraceEvent::ToolCallStarted {
                 call_id,
                 name,
@@ -127,9 +143,9 @@ impl RuntimeTurnDriver {
         );
     }
 
-    fn emit_tool_call_trace(&self, iteration: usize, record: &crate::ToolCallRecord) {
+    fn emit_tool_call_trace(&self, mode_iteration: usize, record: &crate::ToolCallRecord) {
         self.emit_trace(
-            iteration,
+            mode_iteration,
             lash_trace::TraceEvent::ToolCallCompleted {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
@@ -143,13 +159,13 @@ impl RuntimeTurnDriver {
 
     fn emit_tool_call_started_trace(
         &self,
-        iteration: usize,
+        mode_iteration: usize,
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
     ) {
         self.emit_trace(
-            iteration,
+            mode_iteration,
             lash_trace::TraceEvent::ToolCallStarted {
                 call_id,
                 name,
@@ -162,7 +178,7 @@ impl RuntimeTurnDriver {
         &mut self,
         messages: crate::MessageSequence,
         events: Arc<Vec<crate::SessionEventRecord>>,
-        iteration: usize,
+        mode_iteration: usize,
     ) {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return;
@@ -172,14 +188,14 @@ impl RuntimeTurnDriver {
             .progress_boundary(
                 &mut self.session,
                 self.policy.clone(),
-                iteration,
+                self.turn_index,
                 messages,
                 events,
             )
             .await;
         if boundary.persisted {
             for event in &boundary.mirrored_events {
-                self.emit_mode_event_trace(iteration, event);
+                self.emit_mode_event_trace(mode_iteration, event);
             }
         }
     }
@@ -190,21 +206,26 @@ impl RuntimeTurnDriver {
         }
     }
 
-    fn emit_mode_event_trace(&self, iteration: usize, event: &crate::SessionEventRecord) {
+    fn emit_mode_event_trace(&self, mode_iteration: usize, event: &crate::SessionEventRecord) {
         let crate::SessionEventRecord::Mode(mode_event) = event else {
             return;
         };
-        self.emit_trace(iteration, mode_step_trace_event(mode_event));
+        self.emit_trace(mode_iteration, mode_step_trace_event(mode_event));
     }
 
-    fn emit_rlm_diagnostic_trace(&self, iteration: usize, phase: &str, payload: serde_json::Value) {
+    fn emit_rlm_diagnostic_trace(
+        &self,
+        mode_iteration: usize,
+        phase: &str,
+        payload: serde_json::Value,
+    ) {
         let mode_event = crate::ModeEvent::rlm(lash_rlm_types::RlmModeEvent::RlmDiagnostic(
             lash_rlm_types::RlmDiagnosticEvent {
                 phase: phase.to_string(),
                 payload,
             },
         ));
-        self.emit_trace(iteration, mode_step_trace_event(&mode_event));
+        self.emit_trace(mode_iteration, mode_step_trace_event(&mode_event));
     }
 
     fn mark_phase_end(&self, phase: RuntimeTurnPhase) {
@@ -252,22 +273,22 @@ impl RuntimeTurnDriver {
                     Effect::Progress {
                         messages,
                         events,
-                        iteration,
+                        mode_iteration,
                     } => {
-                        self.persist_progress_boundary(messages, events, iteration)
+                        self.persist_progress_boundary(messages, events, mode_iteration)
                             .await
                     }
                     Effect::Done {
                         messages,
                         events: _,
-                        iteration,
-                    } => return (messages, iteration),
+                        mode_iteration,
+                    } => return (messages, mode_iteration),
                     Effect::LlmCall { id, request } => {
                         if cancel.is_cancelled() {
                             emit!(SessionEvent::Done);
                             return (crate::MessageSequence::default(), run_offset);
                         }
-                        let iteration = machine.iteration();
+                        let iteration = machine.mode_iteration();
                         let (result, text_streamed) = self
                             .run_llm_call(&mut machine, id, request, iteration, &event_tx, &cancel)
                             .await;
@@ -323,7 +344,7 @@ impl RuntimeTurnDriver {
                         if self.host.core.trace_sink.is_some() {
                             for pending in &calls {
                                 self.emit_tool_call_started_trace(
-                                    machine.iteration(),
+                                    machine.mode_iteration(),
                                     Some(pending.call_id.clone()),
                                     pending.tool_name.clone(),
                                     pending.args.clone(),
@@ -341,7 +362,7 @@ impl RuntimeTurnDriver {
                                     success: outcome.state_result.success,
                                     duration_ms: outcome.duration_ms,
                                 };
-                                self.emit_tool_call_trace(machine.iteration(), &record);
+                                self.emit_tool_call_trace(machine.mode_iteration(), &record);
                             }
                         }
                         self.turn_pipeline
@@ -362,7 +383,7 @@ impl RuntimeTurnDriver {
                     Effect::Log { event } => self.handle_log_event(event),
                     Effect::CancelLlm { .. } => {}
                     Effect::ExecCode { id, code } => {
-                        let iteration = machine.iteration();
+                        let iteration = machine.mode_iteration();
                         if self.host.core.trace_sink.is_some() {
                             self.emit_rlm_diagnostic_trace(
                                 iteration,
@@ -487,7 +508,7 @@ impl RuntimeTurnDriver {
             .prepare_execution_surface(
                 execution_mode,
                 &session_policy,
-                run_offset,
+                self.turn_index,
                 messages.clone(),
             )
             .await
@@ -512,7 +533,7 @@ impl RuntimeTurnDriver {
             mode: execution_surface.execution_mode,
             messages,
             events: self.turn_pipeline.active_events(),
-            run_offset,
+            mode_run_offset: run_offset,
             tool_surface: execution_surface.tool_surface,
             mode_preamble: execution_surface.mode_preamble,
             prompt_template: self.host.core.prompt_template.clone(),
@@ -535,9 +556,7 @@ impl RuntimeTurnDriver {
             crate::trace::emit_trace(
                 &self.host.core.trace_sink,
                 &self.host.core.trace_context,
-                lash_trace::TraceContext::default()
-                    .for_session(self.session_id.clone())
-                    .for_iteration(run_offset),
+                self.trace_context(run_offset),
                 lash_trace::TraceEvent::PromptBuilt {
                     prompt_hash: prompt_hash.clone(),
                     prompt_chars,
@@ -570,7 +589,7 @@ impl RuntimeTurnDriver {
             .prepare_execution_surface(
                 policy.execution_mode.clone(),
                 &policy,
-                machine.iteration(),
+                self.turn_index,
                 machine.message_sequence(),
             )
             .await
@@ -590,7 +609,7 @@ impl RuntimeTurnDriver {
         &mut self,
         execution_mode: ExecutionMode,
         session_policy: &SessionPolicy,
-        iteration: usize,
+        turn_index: usize,
         messages: crate::MessageSequence,
     ) -> Result<PreparedExecutionSurface, PluginError> {
         let tool_surface = self
@@ -607,7 +626,7 @@ impl RuntimeTurnDriver {
                 host: self.session_manager.clone(),
                 state: self.turn_pipeline.read_view(
                     session_policy.clone(),
-                    iteration,
+                    turn_index,
                     self.mode_turn_options.clone(),
                     messages,
                 ),
@@ -629,13 +648,13 @@ impl RuntimeTurnDriver {
         machine: &mut TurnMachine,
         effect_id: crate::sansio::EffectId,
         request: LlmRequest,
-        iteration: usize,
+        mode_iteration: usize,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
         let _ = machine;
         let _ = effect_id;
-        self.run_standard_llm_call(request, iteration, event_tx, cancel)
+        self.run_standard_llm_call(request, mode_iteration, event_tx, cancel)
             .await
     }
 
@@ -646,11 +665,11 @@ impl RuntimeTurnDriver {
     fn checkpoint_state_view(
         &self,
         messages: crate::MessageSequence,
-        iteration: usize,
+        _mode_iteration: usize,
     ) -> crate::SessionReadView {
         self.turn_pipeline.read_view(
             self.policy.clone(),
-            iteration,
+            self.turn_index,
             self.mode_turn_options.clone(),
             messages,
         )
@@ -674,7 +693,7 @@ mod tests {
         let mode_event =
             crate::ModeEvent::rlm(RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
                 id: "rlm_step_7".to_string(),
-                iteration: 7,
+                mode_iteration: 7,
                 reasoning: "inspect".to_string(),
                 code: "print \"hi\"".to_string(),
                 output: vec!["hi".to_string()],
