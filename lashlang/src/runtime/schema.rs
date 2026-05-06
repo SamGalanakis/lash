@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub(super) struct CompiledSchema {
+pub(crate) struct CompiledSchema {
     kind: CompiledSchemaKind,
 }
 
