@@ -160,6 +160,62 @@ impl LashRuntime {
         Ok(assembled)
     }
 
+    /// Stream one logical host turn, following foreground handoffs until a
+    /// non-handoff outcome is reached.
+    ///
+    /// RLM `continue_as` creates a successor session with queued first-turn
+    /// input. Hosts that only care about the benchmark/app answer should not
+    /// need to special-case that intermediate outcome; this helper activates
+    /// each successor and drives its queued first turn with the normal runtime
+    /// turn guards.
+    pub async fn stream_turn_following_handoffs(
+        &mut self,
+        mut input: TurnInput,
+        events: &dyn EventSink,
+        cancel: CancellationToken,
+    ) -> Result<FollowedTurn, RuntimeError> {
+        let follow_mode_turn_options = input.mode_turn_options.clone();
+        let follow_trace_turn_id = input
+            .trace_turn_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        input.trace_turn_id = Some(follow_trace_turn_id.clone());
+        let mut turns = Vec::new();
+        loop {
+            let turn = self.stream_turn(input, events, cancel.clone()).await?;
+            let successor_session_id = match &turn.outcome {
+                TurnOutcome::Handoff { session_id } => Some(session_id.clone()),
+                _ => None,
+            };
+            turns.push(turn);
+
+            let Some(successor_session_id) = successor_session_id else {
+                return Ok(FollowedTurn { turns });
+            };
+
+            let seed = self
+                .pending_first_turn_inputs
+                .lock()
+                .expect("pending first turn inputs lock")
+                .remove(&successor_session_id)
+                .ok_or_else(|| RuntimeError {
+                    code: "handoff_missing_first_turn".to_string(),
+                    message: format!(
+                        "handoff session `{successor_session_id}` did not provide a first turn"
+                    ),
+                })?;
+            self.activate_managed_session(&successor_session_id)
+                .await
+                .map_err(|err| RuntimeError {
+                    code: "handoff_activation_failed".to_string(),
+                    message: err.to_string(),
+                })?;
+            input = turn_input_from_plugin_message(seed);
+            input.mode_turn_options = follow_mode_turn_options.clone();
+            input.trace_turn_id = Some(follow_trace_turn_id.clone());
+        }
+    }
+
     async fn stream_turn_inner(
         &mut self,
         input: TurnInput,
@@ -827,5 +883,28 @@ impl LashRuntime {
             self.host.core.path_resolver.as_ref(),
             self.host.core.attachment_store.as_ref(),
         )
+    }
+}
+
+fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
+    let mut items = Vec::new();
+    if !message.content.is_empty() {
+        items.push(InputItem::Text {
+            text: message.content,
+        });
+    }
+    let mut image_blobs = HashMap::new();
+    for (index, bytes) in message.images.into_iter().enumerate() {
+        let id = format!("handoff-seed-image-{index}");
+        image_blobs.insert(id.clone(), bytes);
+        items.push(InputItem::ImageRef { id });
+    }
+    TurnInput {
+        items,
+        image_blobs,
+        user_input: message.user_input,
+        mode: None,
+        mode_turn_options: None,
+        trace_turn_id: None,
     }
 }

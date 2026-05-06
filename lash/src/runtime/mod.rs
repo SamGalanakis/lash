@@ -205,6 +205,33 @@ pub struct AssembledTurn {
     pub errors: Vec<TurnIssue>,
 }
 
+/// Result of driving one logical host turn through any foreground handoffs.
+///
+/// A handoff is an internal runtime continuation, similar to compaction from a
+/// host's perspective. Callers that need a final answer can use
+/// [`LashRuntime::stream_turn_following_handoffs`] and inspect `final_turn()`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FollowedTurn {
+    pub turns: Vec<AssembledTurn>,
+}
+
+impl FollowedTurn {
+    pub fn final_turn(&self) -> Option<&AssembledTurn> {
+        self.turns.last()
+    }
+
+    pub fn into_final_turn(mut self) -> Option<AssembledTurn> {
+        self.turns.pop()
+    }
+
+    pub fn handoff_count(&self) -> usize {
+        self.turns
+            .iter()
+            .filter(|turn| matches!(turn.outcome, crate::TurnOutcome::Handoff { .. }))
+            .count()
+    }
+}
+
 /// Runtime error for unexpected failures.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeError {

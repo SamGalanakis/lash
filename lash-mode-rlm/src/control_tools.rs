@@ -53,7 +53,8 @@ impl RlmControlToolsProvider {
             .session_id
             .clone()
             .expect("fresh successor request sets session id");
-        request.initial_nodes = rlm_seed_initial_nodes(seed);
+        request.initial_nodes =
+            rlm_seed_initial_nodes(current_snapshot.read_view().rlm_globals(), seed);
         request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task.clone()));
         context
             .host
@@ -108,7 +109,7 @@ impl ToolProvider for RlmControlToolsProvider {
 pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
         "continue_as",
-        "Tail-call into a fresh RLM successor with a clean window.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results) the successor needs in scope; leave bulky raw output behind.",
+        "Tail-call into a fresh RLM successor with a clean window.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results) the successor needs in scope; leave bulky raw output behind.",
         continue_as_input_schema(),
         json!({ "type": "object", "additionalProperties": true }),
     )
@@ -159,14 +160,17 @@ fn fresh_successor_request(
     }
 }
 
-fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<SessionAppendNode> {
-    if seed.is_empty() {
+fn rlm_seed_initial_nodes(
+    projected_globals: serde_json::Map<String, Value>,
+    seed: serde_json::Map<String, Value>,
+) -> Vec<SessionAppendNode> {
+    if projected_globals.is_empty() && seed.is_empty() {
         return Vec::new();
     }
     vec![SessionAppendNode::event(SessionEventRecord::Mode(
         ModeEvent::rlm(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(
             lash_rlm_types::RlmGlobalsPatchPluginBody {
-                set: serde_json::Map::new(),
+                set: projected_globals,
                 set_default: seed,
                 unset: Vec::new(),
             },
@@ -299,6 +303,17 @@ mod tests {
 
     #[tokio::test]
     async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
+        let mut session_graph = lash::SessionGraph::default();
+        session_graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmGlobalsPatch(lash_rlm_types::RlmGlobalsPatchPluginBody {
+                set: serde_json::Map::from_iter([
+                    ("current_query".to_string(), json!("benchmark prompt")),
+                    ("iteration".to_string(), json!(27)),
+                ]),
+                set_default: serde_json::Map::from_iter([("diary".to_string(), json!([]))]),
+                unset: Vec::new(),
+            }),
+        )));
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {
                 policy: SessionPolicy {
@@ -320,6 +335,7 @@ mod tests {
                     },
                 )
                 .expect("valid rlm turn options"),
+                session_graph,
                 ..PersistedSessionState::default()
             },
             created: Mutex::new(Vec::new()),
@@ -382,6 +398,8 @@ mod tests {
         let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = mode_event.rlm_event() else {
             panic!("expected RlmGlobalsPatch");
         };
+        assert_eq!(seed.set["current_query"], json!("benchmark prompt"));
+        assert_eq!(seed.set["iteration"], json!(27));
         assert_eq!(seed.set_default["x"], json!(1));
         assert_eq!(seed.set_default["query"], json!("original"));
         let extras = request

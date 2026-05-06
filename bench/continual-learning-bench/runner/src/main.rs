@@ -9,12 +9,12 @@ use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::provider::LashConfig;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, NoopEventSink,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, ProviderHandle,
-    RuntimeCoreConfig, RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
-    SessionUsageReport, StandardContextApproach, TokioSessionTaskExecutor, ToolDefinition,
-    ToolExecutionMode, ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge, TurnInput,
-    TurnInputInjectionBridge, TurnOutcome, diff_usage_reports,
+    EmbeddedRuntimeHost, EventSink, ExecutionMode, FollowedTurn, InputItem, LashRuntime,
+    NoopEventSink, PersistedSessionState, PersistentRuntimeServices, PluginHost, ProviderHandle,
+    RuntimeCommit, RuntimeCoreConfig, RuntimePersistence, SessionAppendNode, SessionEventRecord,
+    SessionPolicy, SessionUsageReport, StandardContextApproach, TokenLedgerEntry,
+    TokioSessionTaskExecutor, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    TurnFinish, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, TurnOutcome,
 };
 use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -153,10 +153,9 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         .await
         .context("bind clbench globals")?;
 
-    let before_usage = runtime.usage_report();
     let sink = NoopEventSink;
-    let turn = runtime
-        .stream_turn(
+    let followed = runtime
+        .stream_turn_following_handoffs(
             TurnInput {
                 items: vec![InputItem::Text {
                     text: clbench_turn_text(&request),
@@ -178,11 +177,15 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         )
         .await
         .context("run clbench turn")?;
-    let after_usage = runtime.usage_report();
-    let usage_rows = diff_usage_reports(&before_usage, &after_usage)
-        .map_err(anyhow::Error::msg)
-        .context("diff usage reports")?;
-    let usage = SessionUsageReport::from_entries(&usage_rows);
+    let usage = usage_from_followed_turn(&followed);
+    if followed.handoff_count() > 0 {
+        persist_followed_runtime_as_request_session(store.as_ref(), &runtime, &request.session_id)
+            .await
+            .context("persist followed clbench session")?;
+    }
+    let turn = followed
+        .final_turn()
+        .context("handoff chain did not produce a turn")?;
 
     let action = match &turn.outcome {
         TurnOutcome::Finished(TurnFinish::Submission { value, .. }) => value.clone(),
@@ -205,8 +208,44 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
             "assistant_output_chars": turn.assistant_output.safe_text.chars().count(),
             "tool_call_count": turn.tool_calls.len(),
             "error_count": turn.errors.len(),
+            "followed_turn_count": followed.turns.len(),
+            "handoff_count": followed.handoff_count(),
         }),
     })
+}
+
+fn usage_from_followed_turn(followed: &FollowedTurn) -> SessionUsageReport {
+    let entries = followed
+        .turns
+        .iter()
+        .filter(|turn| turn.token_usage.total() != 0 || turn.token_usage.cached_input_tokens != 0)
+        .map(|turn| TokenLedgerEntry {
+            source: "turn".to_string(),
+            model: turn.state.policy.model.clone(),
+            usage: turn.token_usage.clone(),
+        })
+        .collect::<Vec<_>>();
+    SessionUsageReport::from_entries(&entries)
+}
+
+async fn persist_followed_runtime_as_request_session(
+    store: &Store,
+    runtime: &LashRuntime,
+    session_id: &str,
+) -> Result<()> {
+    let existing = lash::load_persisted_session_state(store)
+        .await
+        .context("load current persisted session before handoff follow persist")?;
+    let mut state = runtime.export_persisted_state();
+    state.session_id = session_id.to_string();
+    state.policy.session_id = Some(session_id.to_string());
+    state.head_revision = existing.and_then(|state| state.head_revision);
+    state.graph_replace_required = true;
+    store
+        .commit_runtime_state(RuntimeCommit::persisted_state(&state, &[]))
+        .await
+        .context("commit followed handoff state")?;
+    Ok(())
 }
 
 fn clbench_turn_text(request: &RunnerRequest) -> String {

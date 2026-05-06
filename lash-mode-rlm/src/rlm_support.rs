@@ -26,11 +26,11 @@ pub fn format_budget_suffix(
         format!("Turn: {turn_index} · Tokens: {used} · handoff threshold: {max} ({pct}%).");
     if pct >= 60 {
         let tail = if used >= max {
-            "Past the handoff threshold. Do not continue ordinary work — `continue_as` now and pack only what the successor needs into `task` + `seed`."
+            "Past the handoff threshold. End this block with `continue_as` now; do not call `submit` or do more work after it. Pack only what the successor needs into `task` + `seed`."
         } else if pct >= 90 {
-            "Budget tight — finish the current step, then `continue_as`."
+            "Budget tight — finish only the current step, then end the block with `continue_as`."
         } else {
-            "Look for a clean handoff point and `continue_as` rather than starting new work."
+            "Look for a clean handoff point; when you hand off, make `continue_as` the terminal action in the block."
         };
         content.push('\n');
         content.push_str(tail);

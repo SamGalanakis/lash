@@ -555,8 +555,8 @@ mod tests {
         let content = &contributions[0].content;
         assert!(content.contains("Tokens: 120292 · handoff threshold: 100000 (120%)"));
         assert!(content.contains("Past the handoff threshold"));
-        assert!(content.contains("Do not continue ordinary work"));
-        assert!(content.contains("`continue_as` now"));
+        assert!(content.contains("End this block with `continue_as` now"));
+        assert!(content.contains("do not call `submit`"));
         assert!(content.contains("`task` + `seed`"));
     }
 
