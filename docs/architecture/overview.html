@@ -92,10 +92,10 @@ flowchart TD
             <p>These figures are workspace-level and exclude generated build output.</p>
           </div>
           <div class="stats">
-            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">37</span><span class="stat-note">Runtime, embed API, CLI/TUI, providers, plugins, language, export, tracing, file-index, examples, and benchmark crates.</span></article>
-            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">143,668 LOC</span><span class="stat-note">Measured with <code>tokei</code>; Rust dominates the workspace.</span></article>
-            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">285</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, benches, examples, and trace/export utilities.</span></article>
-            <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang.</span></article>
+            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">37</span><span class="stat-note">Runtime, embed API, CLI/TUI, providers, plugins, language, export, tracing, file-index, harness optimizer, examples, and benchmark crates.</span></article>
+            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~168k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">288</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, benches, examples, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang and can hand off to a successor session via <code>continue_as</code>.</span></article>
           </div>
         </div>
 
@@ -120,7 +120,19 @@ flowchart TD
             <li>
               <div>
                 <h3>Modes own protocol behavior.</h3>
-                <p><code>ModePreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn.</p>
+                <p><code>ModePreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn. RLM additionally projects read-only host bindings (e.g., <code>history</code>) into Lashlang scope through the <code>ProjectedBindings</code> seam.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Tool output is projected, not raw.</h3>
+                <p>The <code>BuiltinToolResultProjectionPluginFactory</code> trims oversized tool results once at the <code>BeforeState</code>, <code>BeforeModel</code>, and <code>BeforeHistory</code> hook sites so on-disk state, the live model prompt, and rolled-up history each see a budgeted view.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Handoffs are runtime continuations.</h3>
+                <p>A turn can finish as <code>TurnOutcome::Handoff { session_id }</code>, which transparently activates an RLM successor with a fresh window. Hosts that just want a final answer call <code>stream_turn_following_handoffs</code> and read <code>FollowedTurn::final_turn()</code>.</p>
               </div>
             </li>
             <li>

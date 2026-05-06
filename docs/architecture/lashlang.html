@@ -18,9 +18,9 @@
           <p>Lashlang is the agent-facing execution language for RLM mode. It lets the model run local programs against host tools, preserve state across turns, use async handles, and pass typed values through <code>print</code> and <code>submit</code>.</p>
         </div>
         <div class="hero-meta">
-          <article class="card"><div class="micro-label">Runtime</div><strong><code>lashlang/src/runtime</code></strong><span>Persistent VM state, values, tool host, compiled program cache, image values, and profiling hooks.</span></article>
-          <article class="card"><div class="micro-label">Prompt source</div><strong><code>LASHLANG_LANGUAGE_REFERENCE</code></strong><span>The RLM prompt text is tested against language behavior.</span></article>
-          <article class="card"><div class="micro-label">Multimodal seam</div><strong><code>print(image)</code></strong><span>Image values are backed by runtime attachments and sent to providers through content blocks.</span></article>
+          <article class="card"><div class="micro-label">Runtime</div><strong><code>lashlang/src/runtime</code></strong><span>Persistent VM state, values, tool host, compiled program cache, image values, projected host bindings, and profiling hooks.</span></article>
+          <article class="card"><div class="micro-label">Prompt source</div><strong>RLM execution section</strong><span><code>rlm_execution_section_with_features</code> emits the language reference shown to the model and is covered by prompt-claim tests.</span></article>
+          <article class="card"><div class="micro-label">Host seam</div><strong><code>ProjectedBindings</code></strong><span>Host injects read-only bindings (e.g., <code>history</code>) into Lashlang scope without copying them into VM state.</span></article>
         </div>
       </header>
 
@@ -48,8 +48,8 @@
             <p>RLM mode extracts the first closed <code>```lashlang</code> fence from model output. Anything after that block is ignored by the driver, so the block must contain the next action or final <code>submit</code>.</p>
           </div>
           <div class="two-col">
-            <article class="panel"><h3>REPL state</h3><p>Variables persist across fenced blocks in the active RLM execution state. Bound variables projected by the host are already in scope and should be used directly instead of reconstructed from prompt prose.</p></article>
-            <article class="panel"><h3>Completion</h3><p><code>submit</code> ends the program and turn. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</p></article>
+            <article class="panel"><h3>REPL state</h3><p>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through <code>ProjectedBindings</code> are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose.</p></article>
+            <article class="panel"><h3>Completion</h3><p><code>submit</code> ends the program and turn. <code>continue_as { task, seed }</code> ends the current trajectory and queues a fresh-window successor session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</p></article>
           </div>
           <pre><code>```lashlang
 text = (call read_file { path: "Cargo.toml" })?
@@ -117,6 +117,19 @@ submit counts</code></pre>
             <article class="panel"><h3><code>for</code></h3><p><code>for item in iterable { ... }</code> iterates lists. Non-list iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</p></article>
             <article class="panel"><h3><code>break</code> / <code>continue</code></h3><p><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops and cannot cross <code>parallel</code> branch boundaries.</p></article>
             <article class="panel"><h3><code>submit</code></h3><p><code>submit value</code> ends the whole program or turn. <code>submit</code> inside a loop is not a loop control statement, and <code>submit</code> inside <code>parallel</code> is rejected.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Projected Host Bindings</h2>
+            <p>The host can inject named, read-only values into Lashlang scope without copying them into VM <code>State</code>. They behave like ordinary variables for read access but rejecting reassignment keeps the host-managed values authoritative.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3><code>ProjectedBindings</code></h3><p>Map of names to <code>ProjectedValue</code>s the host hands the executor at the start of each fenced block. RLM rebuilds it from <code>RlmGlobalsPatch</code> + the live <code>history</code> projection.</p></article>
+            <article class="panel"><h3><code>ProjectedValue</code></h3><p>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing).</p></article>
+            <article class="panel"><h3><code>ProjectedHostValue</code></h3><p>Trait that lets the host serve <code>get_field</code>, <code>get_index</code>, <code>len</code>, <code>render</code>, and <code>materialize</code> queries on demand (returning a <code>ProjectedRead</code> for field/index reads) so large host-side structures need not be cloned into Lashlang values.</p></article>
+            <article class="panel"><h3>Reserved names</h3><p><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> or <code>set_default { name: ... }</code> over a projected name raises <code>read-only projected host binding</code>.</p></article>
           </div>
         </div>
 
@@ -197,7 +210,7 @@ validated = validate(candidate, Payload)</code></pre>
         <div class="section">
           <div class="section-header">
             <h2>RLM Execution Path</h2>
-            <p>The model emits code, the runtime executes it locally, and the resulting trajectory is persisted as mode events.</p>
+            <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> in scope, and the resulting trajectory is persisted as mode events. A block ending with <code>continue_as</code> finishes the turn as <code>TurnOutcome::Handoff</code> instead of looping back to the model.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">RLM and Lashlang execution</div>
@@ -212,12 +225,12 @@ sequenceDiagram
 
   Model-->>Driver: prose + ```lashlang fence
   Driver-->>Runtime: DriverAction::StartExec(code)
-  Runtime->>Executor: execute_code(code)
+  Runtime->>Executor: execute_code(code, ProjectedBindings)
   Executor->>Host: call / start / await / cancel tool
   Host-->>Executor: ToolResult / handle / error
   Executor-->>Runtime: ExecResponse + observations + images
   Runtime->>Commit: records tool calls + RLM trajectory in turn events
-  Runtime-->>Driver: Response::ExecResult
+  Runtime-->>Driver: Response::ExecResult or TurnOutcome::Handoff (continue_as)
             </div>
           </div>
         </div>
@@ -240,8 +253,8 @@ sequenceDiagram
           </div>
           <div class="module-grid">
             <article class="panel"><h3>Parser</h3><p><code>lexer.rs</code> tokenizes strings, comments, operators, and keywords. <code>parser.rs</code> builds <code>Program</code>, <code>Stmt</code>, <code>Expr</code>, assignment targets, parallel branches, and type expressions.</p></article>
-            <article class="panel"><h3>Compiler</h3><p><code>runtime/mod.rs</code> folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls, and optimized parallel call sets.</p></article>
-            <article class="panel"><h3>VM</h3><p>The VM stores globals in <code>State</code>, records assignment conflicts inside parallel branches, executes host effects through <code>ToolHost</code>, and snapshots values for later RLM blocks.</p></article>
+            <article class="panel"><h3>Compiler</h3><p><code>runtime/mod.rs</code> folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls, and optimized parallel call sets. <code>cache.rs</code> reuses compiled programs across fenced blocks.</p></article>
+            <article class="panel"><h3>VM</h3><p>The VM stores globals in <code>state.rs</code>'s <code>State</code>, records assignment conflicts inside parallel branches, calls host effects through <code>host.rs</code>'s <code>ToolHost</code>, and consults <code>ProjectedBindings</code> for any name not present in <code>State</code>.</p></article>
             <article class="panel"><h3>Profiling</h3><p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> cover whole-language performance sweeps, including compiler and builtin hot paths.</p></article>
           </div>
         </div>
@@ -257,10 +270,14 @@ sequenceDiagram
               <tbody>
                 <tr><td><code>lashlang/src/lexer.rs</code></td><td>Tokens, including raw triple-single-quote strings used for embedded code and heredoc-like content.</td></tr>
                 <tr><td><code>lashlang/src/parser.rs</code></td><td>AST construction for expressions, statements, type literals, calls, async, and control flow.</td></tr>
-                <tr><td><code>lashlang/src/runtime/mod.rs</code></td><td>Evaluator, value semantics, async handles, image values, serialization, built-ins, and profiling.</td></tr>
+                <tr><td><code>lashlang/src/runtime/mod.rs</code></td><td>VM evaluator, value semantics, async handles, image values, serialization, built-ins, profiling, and the <code>ProjectedBindings</code>/<code>ProjectedValue</code>/<code>ProjectedHostValue</code> seam.</td></tr>
+                <tr><td><code>lashlang/src/runtime/state.rs</code></td><td><code>State</code> globals, mutation rules, and snapshot/restore.</td></tr>
+                <tr><td><code>lashlang/src/runtime/host.rs</code></td><td><code>ToolHost</code>, <code>ToolHostCall</code>, and <code>ToolHostError</code> contracts.</td></tr>
+                <tr><td><code>lashlang/src/runtime/cache.rs</code></td><td><code>CompiledProgramCache</code> with LRU stats for fenced-block reuse.</td></tr>
+                <tr><td><code>lashlang/src/runtime/record.rs</code></td><td>Record value form, ordered keys, and shared structural helpers.</td></tr>
                 <tr><td><code>lashlang/src/runtime/schema.rs</code></td><td>Runtime schema validation and Lash type descriptor support.</td></tr>
-                <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt and language reference shown to the model.</td></tr>
-                <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td>Bridge between Lashlang tool calls and runtime tool execution, including image conversion.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt, <code>RlmPromptFeatures</code>, and language reference shown to the model.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td>Bridge between Lashlang tool calls and runtime tool execution, host-projected bindings (<code>history</code> and globals), snapshot/restore, and image conversion.</td></tr>
                 <tr><td><code>lashlang/tests/rlm_prompt_claims.rs</code></td><td>Tests that prompt claims about language behavior remain true.</td></tr>
                 <tr><td><code>lashlang/examples/perf.rs</code>, <code>profile.rs</code></td><td>Whole-language profiling and benchmark entrypoints.</td></tr>
               </tbody>

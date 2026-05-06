@@ -1685,12 +1685,17 @@ async fn range_and_push_cover_common_collection_building() {
             r#"
         indexes = range(0, 3)
         extended = push(indexes, 3)
+        loop_total = 0
+        for n in range(0, 4) {
+          loop_total = loop_total + n
+        }
         submit {
           indexes: indexes,
           extended: extended,
           from_zero: range(3),
           negative: range(-2, 1),
-          empty: range(5, 2)
+          empty: range(5, 2),
+          loop_total: loop_total
         }
         "#,
             &mut state,
@@ -1728,6 +1733,7 @@ async fn range_and_push_cover_common_collection_building() {
         Value::List(vec![Value::Number(-2.0), Value::Number(-1.0), Value::Number(0.0)].into())
     );
     assert_eq!(record["empty"], Value::List(Vec::new().into()));
+    assert_eq!(record["loop_total"], Value::Number(6.0));
 }
 
 #[tokio::test(flavor = "current_thread")]

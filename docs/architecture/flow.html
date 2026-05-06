@@ -60,9 +60,10 @@ sequenceDiagram
     else ToolCalls
       Runtime->>Tools: native/mode/provider tools
       Tools-->>Runtime: ToolResult + ToolImage[]
+      Runtime->>Plugins: ToolResultProjection BeforeState/Model/History
       Runtime->>Machine: Response::ToolResults
     else ExecCode
-      Runtime->>Lang: execute lashlang
+      Runtime->>Lang: execute lashlang (with ProjectedBindings)
       Lang-->>Runtime: ExecResponse + observations
       Runtime->>Machine: Response::ExecResult
     else Progress / Done
@@ -70,9 +71,47 @@ sequenceDiagram
     end
   end
   Runtime->>Plugins: finalize_turn
-  Runtime-->>Host: AssembledTurn + stream events
+  Runtime-->>Host: AssembledTurn (TurnOutcome) + stream events
             </div>
           </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Handoff Continuations</h2>
+            <p>RLM's <code>continue_as</code> tool ends the current trajectory and queues a successor session with the packed <code>task</code> + <code>seed</code> as its first input. The runtime exposes this as <code>TurnOutcome::Handoff { session_id }</code>; hosts that just want a final answer wrap their call in <code>stream_turn_following_handoffs</code>, which drives the chain until a non-handoff outcome and returns a <code>FollowedTurn</code> whose <code>final_turn()</code> carries the actual answer.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Handoff drive loop</div>
+            <div class="mermaid">
+flowchart LR
+  Host["host (CLI / bench / embed)"] --> Follow["stream_turn_following_handoffs"]
+  Follow --> Turn["stream_turn"]
+  Turn --> Outcome{"TurnOutcome"}
+  Outcome -->|Finished / Stopped| Done["FollowedTurn<br/>final_turn()"]
+  Outcome -->|Handoff{session_id}| Pending["pending_first_turn_inputs<br/>(seeded by continue_as)"]
+  Pending --> Successor["activate successor RLM session<br/>fresh window, inherited turn_index"]
+  Successor --> Turn
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Tool Result Projection</h2>
+            <p><code>BuiltinToolResultProjectionPluginFactory</code> registers projectors at three hook sites so the same raw output can be persisted in full while the model and rolled-up history see budgeted views.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Hook</th><th>Effect</th></tr></thead>
+              <tbody>
+                <tr><td><code>BeforeState</code></td><td>Trims content before it is committed to the durable session graph and tool-result records.</td></tr>
+                <tr><td><code>BeforeModel</code></td><td>Trims content right before it is shown to the LLM in the next request.</td></tr>
+                <tr><td><code>BeforeHistory</code></td><td>Trims content as it rolls into compacted history projections.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>Limits are configured via <code>ToolResultProjectionPluginConfig</code> (<code>ToolResultProjectionMode::{Bytes, Tokens}</code>; defaults: 16 KiB, 400 lines). RLM reuses this projector for its own <code>print</code> observations through <code>project_observation_text</code>.</p>
         </div>
 
         <div class="section">
@@ -154,6 +193,18 @@ flowchart TD
               <div>
                 <h3>Usage is a ledger, not an exporter-only calculation.</h3>
                 <p>Runtime usage events carry source/model/token deltas; exporters add trace-derived prompt context detail when the JSONL trace is available.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Tool output is projected before it is read.</h3>
+                <p>The state, model, and history all read through projector hooks. Skipping these — or projecting twice — breaks budget guarantees and the parity between persisted state and what the model actually saw.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Handoffs are not a separate channel.</h3>
+                <p>A handoff is an outcome of the same <code>stream_turn</code> path. Hosts opt in to chaining with <code>stream_turn_following_handoffs</code>; runtime internals (managed sessions, turn index, attachment store, trace ids) carry across the boundary automatically.</p>
               </div>
             </li>
           </ol>
