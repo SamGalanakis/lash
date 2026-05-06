@@ -65,6 +65,7 @@ struct CurrentSessionCapability {
 #[derive(Clone)]
 struct ManagedSessionCapability {
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
+    active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     /// Maps child session_id → seed PluginMessage queued via
     /// `SessionCreateRequest::first_turn_input`. Drained by
@@ -172,6 +173,7 @@ impl ManagedSessionCapability {
     fn new(runtime: &LashRuntime) -> Self {
         Self {
             registry: Arc::clone(&runtime.managed_sessions),
+            active_handoff_continuations: Arc::clone(&runtime.active_handoff_continuations),
             turns: Arc::clone(&runtime.managed_turns),
             pending_first_turn_inputs: Arc::clone(&runtime.pending_first_turn_inputs),
         }

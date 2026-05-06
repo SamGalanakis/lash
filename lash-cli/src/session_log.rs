@@ -535,6 +535,7 @@ mod tests {
                 }),
                 success: true,
                 duration_ms: 42,
+                control: None,
             }];
             persist_root_snapshot(&store, messages, tool_calls, TokenUsage::default());
 

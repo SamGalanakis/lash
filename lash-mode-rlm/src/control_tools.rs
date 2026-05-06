@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use lash::session_model::{ModeEvent, SessionEventRecord};
 use lash::{
     MessageRole, ModeExtras, PluginMessage, ProgressSender, SessionAppendNode,
-    SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionStartPoint, ToolDefinition,
-    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionRelation, SessionStartPoint,
+    ToolControl, ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -14,7 +14,7 @@ impl RlmControlToolsProvider {
         &self,
         args: &Value,
         context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
+    ) -> Result<ContinueAsResult, String> {
         let task = required_string(args, "task")?;
         let seed = match args.get("seed") {
             None | Some(Value::Null) => serde_json::Map::new(),
@@ -62,11 +62,16 @@ impl RlmControlToolsProvider {
             .await
             .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
 
-        Ok(json!({
-            "ok": true,
-            "_continue_as": successor_session_id,
-            "task": task,
-        }))
+        Ok(ContinueAsResult {
+            value: json!({
+                "ok": true,
+                "session_id": successor_session_id.clone(),
+                "task": task,
+            }),
+            control: ToolControl::Handoff {
+                session_id: successor_session_id,
+            },
+        })
     }
 }
 
@@ -146,7 +151,11 @@ fn fresh_successor_request(
 ) -> SessionCreateRequest {
     SessionCreateRequest {
         session_id: Some(uuid::Uuid::new_v4().to_string()),
-        parent_session_id: Some(parent_session_id),
+        relation: SessionRelation::Handoff {
+            parent_session_id,
+            reason: "continue_as".to_string(),
+            metadata: serde_json::Map::new(),
+        },
         start: SessionStartPoint::Empty,
         policy: Some(policy),
         plugin_mode: SessionPluginMode::Fresh,
@@ -193,9 +202,14 @@ fn required_string(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required parameter: {key}"))
 }
 
-fn finalise_tool_result(result: Result<Value, String>) -> ToolResult {
+struct ContinueAsResult {
+    value: Value,
+    control: ToolControl,
+}
+
+fn finalise_tool_result(result: Result<ContinueAsResult, String>) -> ToolResult {
     match result {
-        Ok(value) => ToolResult::ok(value),
+        Ok(result) => ToolResult::ok(result.value).with_control(result.control),
         Err(err) => ToolResult::err(json!(err)),
     }
 }
@@ -254,7 +268,7 @@ mod tests {
             self.created.lock().expect("created").push(request.clone());
             Ok(SessionHandle {
                 session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
-                parent_session_id: request.parent_session_id,
+                parent_session_id: request.relation.parent_session_id().map(ToOwned::to_owned),
                 policy: request.policy.unwrap_or_default(),
             })
         }
@@ -363,16 +377,17 @@ mod tests {
         assert!(
             result
                 .result
-                .get("_continue_as")
+                .get("session_id")
                 .and_then(Value::as_str)
                 .is_some()
         );
+        assert!(matches!(result.control, Some(ToolControl::Handoff { .. })));
         let created = manager.created.lock().expect("created");
         assert_eq!(created.len(), 1);
         let request = &created[0];
         assert!(matches!(request.start, SessionStartPoint::Empty));
         assert_eq!(request.plugin_mode, SessionPluginMode::InheritCurrent);
-        assert_eq!(request.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(request.relation.parent_session_id(), Some("parent"));
         assert_eq!(
             request
                 .policy

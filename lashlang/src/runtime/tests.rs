@@ -1020,34 +1020,74 @@ async fn exec_with_global(name: &str, value: Value, source: &str) -> Result<Valu
     }
 }
 
-struct TestProjectedList {
+struct TestProjectedValue {
     values: Vec<Value>,
     get_count: AtomicUsize,
+    materialize_count: AtomicUsize,
+    render_count: AtomicUsize,
 }
 
-impl TestProjectedList {
+impl TestProjectedValue {
     fn new(values: Vec<Value>) -> Arc<Self> {
         Arc::new(Self {
             values,
             get_count: AtomicUsize::new(0),
+            materialize_count: AtomicUsize::new(0),
+            render_count: AtomicUsize::new(0),
         })
     }
 }
 
-impl ProjectedList for TestProjectedList {
-    fn len(&self) -> usize {
-        self.values.len()
+impl ProjectedHostValue for TestProjectedValue {
+    fn type_name(&self) -> &'static str {
+        "list"
     }
 
-    fn get(&self, index: usize) -> Option<Value> {
-        self.get_count.fetch_add(1, Ordering::SeqCst);
-        self.values.get(index).cloned()
+    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
+        Box::pin(async { Some(self.values.len()) })
+    }
+
+    fn get_index(&self, index: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let Value::Number(index) = index else {
+                return ProjectedRead::Missing;
+            };
+            if !index.is_finite() || index.fract() != 0.0 {
+                return ProjectedRead::Missing;
+            }
+            let len = self.values.len() as isize;
+            let index = index as isize;
+            let index = if index < 0 { len + index } else { index };
+            if index < 0 || index >= len {
+                return ProjectedRead::Missing;
+            }
+            self.get_count.fetch_add(1, Ordering::SeqCst);
+            self.values
+                .get(index as usize)
+                .cloned()
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn render(&self) -> ProjectedFuture<'_, String> {
+        Box::pin(async {
+            self.render_count.fetch_add(1, Ordering::SeqCst);
+            "<projected list>".to_string()
+        })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value> {
+        Box::pin(async {
+            self.materialize_count.fetch_add(1, Ordering::SeqCst);
+            Value::List(self.values.clone().into())
+        })
     }
 }
 
-fn projected_list_bindings(name: &str, list: Arc<TestProjectedList>) -> ProjectedBindings {
+fn projected_list_bindings(name: &str, list: Arc<TestProjectedValue>) -> ProjectedBindings {
     let mut projected = ProjectedBindings::new();
-    projected.insert(name, ProjectedValue::list(name.to_string(), list));
+    projected.insert(name, ProjectedValue::custom(name.to_string(), list));
     projected
 }
 
@@ -1072,7 +1112,7 @@ async fn exec_with_projected(
 
 #[tokio::test(flavor = "current_thread")]
 async fn projected_list_len_and_index_are_lazy() {
-    let list = TestProjectedList::new(vec![Value::String("first".into()), Value::Number(2.0)]);
+    let list = TestProjectedValue::new(vec![Value::String("first".into()), Value::Number(2.0)]);
     let projected = projected_list_bindings("history", Arc::clone(&list));
 
     let (value, _) = exec_with_projected(
@@ -1089,11 +1129,12 @@ async fn projected_list_len_and_index_are_lazy() {
     assert_eq!(record["first"], Value::String("first".into()));
     assert_eq!(record["missing"], Value::Null);
     assert_eq!(list.get_count.load(Ordering::SeqCst), 1);
+    assert_eq!(list.materialize_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn projected_bindings_are_read_only_and_not_snapshotted() {
-    let list = TestProjectedList::new(vec![Value::String("entry".into())]);
+    let list = TestProjectedValue::new(vec![Value::String("entry".into())]);
     let projected = projected_list_bindings("history", Arc::clone(&list));
 
     let err = exec_with_projected("history = []\nsubmit history", &projected)
@@ -1109,6 +1150,54 @@ async fn projected_bindings_are_read_only_and_not_snapshotted() {
         state.snapshot().globals.get("alias"),
         Some(Value::List(_))
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projected_children_can_be_lazy_inside_ordinary_records() {
+    let body = TestProjectedValue::new(vec![Value::String("lazy markdown".into())]);
+    let mut record = Record::default();
+    record.insert("title".to_string(), Value::String("Rules".into()));
+    record.insert(
+        "body".to_string(),
+        Value::Projected(ProjectedValue::custom("body", body.clone())),
+    );
+    let mut projected = ProjectedBindings::new();
+    projected.insert(
+        "rules",
+        ProjectedValue::scalar("rules", Value::Record(Arc::new(record))),
+    );
+
+    let (value, _) = exec_with_projected(
+        "submit { title: rules.title, first_body_item: rules.body[0] }",
+        &projected,
+    )
+    .await
+    .expect("projected child read");
+
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert_eq!(record["title"], Value::String("Rules".into()));
+    assert_eq!(
+        record["first_body_item"],
+        Value::String("lazy markdown".into())
+    );
+    assert_eq!(body.get_count.load(Ordering::SeqCst), 1);
+    assert_eq!(body.materialize_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn print_projected_uses_render_and_submit_materializes() {
+    let list = TestProjectedValue::new(vec![Value::String("entry".into())]);
+    let projected = projected_list_bindings("history", Arc::clone(&list));
+
+    let (value, _) = exec_with_projected("print history\nsubmit history", &projected)
+        .await
+        .expect("projected print and submit");
+    let _ = to_json(&value);
+
+    assert_eq!(list.render_count.load(Ordering::SeqCst), 1);
+    assert_eq!(list.materialize_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -330,6 +330,7 @@ pub struct LashRuntime {
     pub(in crate::runtime) state: PersistedSessionState,
     pub(in crate::runtime) runtime_scope_id: Arc<str>,
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
+    pub(in crate::runtime) active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     pub(in crate::runtime) overflow_recovery_attempted: bool,
     /// Mode-owned turn options for this session.

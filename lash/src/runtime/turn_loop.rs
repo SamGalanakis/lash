@@ -124,6 +124,15 @@ impl LashRuntime {
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
+        if let Some(execution_session_id) = self
+            .active_handoff_leaf(&self.state.session_id)
+            .await
+            .filter(|session_id| session_id != &self.state.session_id)
+        {
+            return self
+                .stream_turn_on_handoff_successor(execution_session_id, input, events, cancel)
+                .await;
+        }
         // Capture lengths instead of Arcs: holding the read-model Arcs across
         // the turn forces every progress-boundary persist to clone the whole
         // read_messages / read_tool_calls Vec via Arc::make_mut.
@@ -158,6 +167,41 @@ impl LashRuntime {
         }
         self.overflow_recovery_attempted = false;
         Ok(assembled)
+    }
+
+    async fn active_handoff_leaf(&self, session_id: &str) -> Option<String> {
+        let continuations = self.active_handoff_continuations.lock().await;
+        let mut current = session_id.to_string();
+        let mut seen = std::collections::HashSet::new();
+        while seen.insert(current.clone()) {
+            let Some(next) = continuations.get(&current).cloned() else {
+                return (current != session_id).then_some(current);
+            };
+            current = next;
+        }
+        None
+    }
+
+    async fn stream_turn_on_handoff_successor(
+        &mut self,
+        execution_session_id: String,
+        input: TurnInput,
+        events: &dyn EventSink,
+        cancel: CancellationToken,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        let runtime = {
+            let registry = self.managed_sessions.lock().await;
+            registry.get(&execution_session_id).cloned()
+        }
+        .ok_or_else(|| RuntimeError {
+            code: "handoff_successor_missing".to_string(),
+            message: format!("active handoff session `{execution_session_id}` is unavailable"),
+        })?;
+        let mut runtime = runtime.lock().await;
+        runtime.state.turn_index = self.state.turn_index;
+        let turn = runtime.stream_turn_inner(input, events, cancel).await?;
+        self.state.turn_index = turn.state.turn_index;
+        Ok(turn)
     }
 
     /// Stream one logical host turn, following foreground handoffs until a
@@ -204,15 +248,16 @@ impl LashRuntime {
                         "handoff session `{successor_session_id}` did not provide a first turn"
                     ),
                 })?;
-            self.activate_managed_session(&successor_session_id)
-                .await
-                .map_err(|err| RuntimeError {
-                    code: "handoff_activation_failed".to_string(),
-                    message: err.to_string(),
-                })?;
             input = turn_input_from_plugin_message(seed);
             input.mode_turn_options = follow_mode_turn_options.clone();
             input.trace_turn_id = Some(follow_trace_turn_id.clone());
+            if let Some(successor) = {
+                let registry = self.managed_sessions.lock().await;
+                registry.get(&successor_session_id).cloned()
+            } {
+                let mut successor = successor.lock().await;
+                successor.state.turn_index = self.state.turn_index.saturating_sub(1);
+            }
         }
     }
 
@@ -458,6 +503,7 @@ impl LashRuntime {
     }
 
     /// Run a turn using host-prepared message history.
+    #[allow(clippy::too_many_arguments)]
     pub async fn stream_prepared_turn(
         &mut self,
         messages: crate::MessageSequence,

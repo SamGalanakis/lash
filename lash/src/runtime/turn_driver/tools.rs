@@ -59,8 +59,9 @@ async fn run_one_tool_call(
     let _ = progress_handle.await;
     let raw_result = crate::ToolResult {
         success: outcome.record.success,
-        result: outcome.record.result,
+        result: outcome.record.result.clone(),
         images: outcome.images,
+        control: outcome.record.control.clone(),
     };
     let state_result = match plugins
         .project_tool_result(crate::plugin::ToolResultProjectionContext {

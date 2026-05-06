@@ -1559,6 +1559,7 @@ mod tests {
             result: serde_json::json!({"answer": "world"}),
             success: true,
             duration_ms: 3,
+            control: None,
         };
         graph.replace_active_read_state(
             &[user.clone(), assistant.clone()],
@@ -1619,6 +1620,7 @@ mod tests {
             result: serde_json::json!({"answer": "done"}),
             success: true,
             duration_ms: 9,
+            control: None,
         };
 
         graph.append_message(user);
@@ -1734,6 +1736,7 @@ mod tests {
             result: serde_json::json!({"output": "now\n", "exit_code": 0}),
             success: true,
             duration_ms: 7,
+            control: None,
         };
         let lookup_call = ToolCallRecord {
             call_id: Some("call_lookup".to_string()),
@@ -1742,6 +1745,7 @@ mod tests {
             result: serde_json::json!({"answer": "now"}),
             success: true,
             duration_ms: 4,
+            control: None,
         };
 
         graph.append_event(SessionEventRecord::Tool(ToolEvent::Invocation {

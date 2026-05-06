@@ -20,6 +20,7 @@ SCENARIOS = [
     "general_parallel",
     "loop_control",
     "indexed_assignment",
+    "projected_values",
 ]
 
 PERF_MODES = [

@@ -150,12 +150,40 @@ impl std::fmt::Debug for SessionContextSurface {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionRelation {
+    #[default]
+    Root,
+    Child {
+        parent_session_id: String,
+    },
+    Handoff {
+        parent_session_id: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        metadata: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+impl SessionRelation {
+    pub fn parent_session_id(&self) -> Option<&str> {
+        match self {
+            Self::Root => None,
+            Self::Child { parent_session_id }
+            | Self::Handoff {
+                parent_session_id, ..
+            } => Some(parent_session_id),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub relation: SessionRelation,
     pub start: SessionStartPoint,
     #[serde(default)]
     pub policy: Option<SessionPolicy>,
@@ -393,6 +421,7 @@ impl PluginDirective {
                 success,
                 result,
                 images: Vec::new(),
+                control: None,
             }),
             _ => None,
         }

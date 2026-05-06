@@ -1,9 +1,9 @@
 mod bench_support;
 
-use bench_support::{BenchHost, Scenario, benchmark_program, seeded_state};
+use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state};
 use lashlang::{
     CompiledProgramCache, ExecutionOutcome, ExecutionScratch, State, compile_program,
-    compile_source, execute_compiled_with_scratch, parse, prewarm,
+    compile_source, execute_compiled_with_scratch_and_projected_bindings, parse, prewarm,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
@@ -124,6 +124,7 @@ fn main() {
 
 fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterations: usize) {
     let source = benchmark_program(scenario);
+    let projected = projected_bindings(scenario);
     let host = BenchHost;
     let mut scratch = ExecutionScratch::new();
     let mut cache = CompiledProgramCache::default();
@@ -137,11 +138,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             for _ in 0..iterations {
                 let mut state = seeded_state();
                 let outcome = rt
-                    .block_on(execute_compiled_with_scratch(
+                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
                         &compiled,
                         &mut state,
                         &host,
                         &mut scratch,
+                        &projected,
                     ))
                     .expect("benchmark execution should succeed");
                 expect_finished(outcome);
@@ -166,11 +168,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
                 let compiled =
                     compile_source(std::hint::black_box(source)).expect("compile should succeed");
                 let outcome = rt
-                    .block_on(execute_compiled_with_scratch(
+                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
                         &compiled,
                         &mut state,
                         &host,
                         &mut scratch,
+                        &projected,
                     ))
                     .expect("benchmark execution should succeed");
                 expect_finished(outcome);
@@ -188,11 +191,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
                     .get_or_compile(std::hint::black_box(source))
                     .expect("cached compile should succeed");
                 let outcome = rt
-                    .block_on(execute_compiled_with_scratch(
+                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
                         &compiled,
                         &mut state,
                         &host,
                         &mut scratch,
+                        &projected,
                     ))
                     .expect("benchmark execution should succeed");
                 expect_finished(outcome);
@@ -210,11 +214,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
                     .get_or_compile(std::hint::black_box(source))
                     .expect("cached compile should succeed");
                 let outcome = rt
-                    .block_on(execute_compiled_with_scratch(
+                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
                         &compiled,
                         &mut state,
                         &host,
                         &mut scratch,
+                        &projected,
                     ))
                     .expect("benchmark execution should succeed");
                 expect_finished(outcome);
@@ -225,11 +230,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             let compiled =
                 compile_source(std::hint::black_box(source)).expect("compile should succeed");
             let outcome = rt
-                .block_on(execute_compiled_with_scratch(
+                .block_on(execute_compiled_with_scratch_and_projected_bindings(
                     &compiled,
                     &mut state,
                     &host,
                     &mut scratch,
+                    &projected,
                 ))
                 .expect("benchmark execution should succeed");
             expect_finished(outcome);
@@ -242,11 +248,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             let compiled =
                 compile_source(std::hint::black_box(source)).expect("compile should succeed");
             let outcome = rt
-                .block_on(execute_compiled_with_scratch(
+                .block_on(execute_compiled_with_scratch_and_projected_bindings(
                     &compiled,
                     &mut state,
                     &host,
                     &mut scratch,
+                    &projected,
                 ))
                 .expect("benchmark execution should succeed");
             expect_finished(outcome);
@@ -257,11 +264,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
                 .get_or_compile(std::hint::black_box(source))
                 .expect("cached compile should succeed");
             let outcome = rt
-                .block_on(execute_compiled_with_scratch(
+                .block_on(execute_compiled_with_scratch_and_projected_bindings(
                     &compiled,
                     &mut state,
                     &host,
                     &mut scratch,
+                    &projected,
                 ))
                 .expect("benchmark execution should succeed");
             expect_finished(outcome);
@@ -276,11 +284,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
                 let decoded = serde_json::from_slice(&encoded).expect("snapshot decode");
                 state = State::from_snapshot(decoded);
                 let outcome = rt
-                    .block_on(execute_compiled_with_scratch(
+                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
                         &compiled,
                         &mut state,
                         &host,
                         &mut scratch,
+                        &projected,
                     ))
                     .expect("benchmark execution should succeed");
                 expect_finished(outcome);

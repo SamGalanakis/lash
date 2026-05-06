@@ -120,6 +120,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                     success,
                     result,
                     images: Vec::new(),
+                    control: None,
                 });
             }
             PluginDirective::AbortTurn { message, .. } => {
@@ -223,6 +224,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                             success,
                             result,
                             images: Vec::new(),
+                            control: None,
                         };
                     }
                     PluginDirective::AbortTurn { message, .. } => {
@@ -370,6 +372,7 @@ fn outcome(
     duration_ms: u64,
 ) -> ToolDispatchOutcome {
     let images = std::mem::take(&mut result.images);
+    let control = result.control.take();
     let record = ToolCallRecord {
         call_id: None,
         tool: tool_name,
@@ -377,6 +380,7 @@ fn outcome(
         result: result.result,
         success: result.success,
         duration_ms,
+        control,
     };
     ToolDispatchOutcome { record, images }
 }

@@ -105,6 +105,7 @@ impl LashRuntime {
         let host = self.host.clone();
         let services = self.services.clone();
         let managed_sessions = Arc::clone(&self.managed_sessions);
+        let active_handoff_continuations = Arc::clone(&self.active_handoff_continuations);
         let managed_turns = Arc::clone(&self.managed_turns);
         let background_sync_needed = Arc::clone(&self.background_sync_needed);
         let runtime_scope_id = Arc::clone(&self.runtime_scope_id);
@@ -112,6 +113,7 @@ impl LashRuntime {
 
         let mut rebuilt = Self::from_host_state(policy, host, services, persisted_state).await?;
         rebuilt.managed_sessions = managed_sessions;
+        rebuilt.active_handoff_continuations = active_handoff_continuations;
         rebuilt.managed_turns = managed_turns;
         rebuilt.background_sync_needed = background_sync_needed;
         rebuilt.runtime_scope_id = runtime_scope_id;

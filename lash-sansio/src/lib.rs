@@ -2276,6 +2276,7 @@ pub struct ToolResult {
     pub success: bool,
     pub result: serde_json::Value,
     pub images: Vec<ToolImage>,
+    pub control: Option<ToolControl>,
 }
 
 impl ToolResult {
@@ -2284,6 +2285,7 @@ impl ToolResult {
             success: true,
             result,
             images: vec![],
+            control: None,
         }
     }
 
@@ -2292,6 +2294,7 @@ impl ToolResult {
             success: false,
             result,
             images: vec![],
+            control: None,
         }
     }
 
@@ -2304,7 +2307,13 @@ impl ToolResult {
             success,
             result,
             images,
+            control: None,
         }
+    }
+
+    pub fn with_control(mut self, control: ToolControl) -> Self {
+        self.control = Some(control);
+        self
     }
 }
 
@@ -2325,6 +2334,12 @@ where
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolControl {
+    Handoff { session_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
@@ -2333,6 +2348,8 @@ pub struct ToolCallRecord {
     pub result: serde_json::Value,
     pub success: bool,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<ToolControl>,
 }
 
 pub fn head_tail_truncate(value: &str, max_chars: usize) -> (String, usize) {

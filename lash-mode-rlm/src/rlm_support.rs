@@ -122,7 +122,7 @@ fn render_bound_variables(
     lines.push(String::new());
     lines.push("Available variables:".to_string());
     lines.push(format!(
-        "- `history`: `list<HistoryItem>`, projected read-only binding, {history_len} entries"
+        "- `history`: `list<HistoryItem>`, Readonly: true, projected binding, {history_len} entries"
     ));
     for (name, shape) in &variable_types {
         let value = globals
@@ -130,9 +130,13 @@ fn render_bound_variables(
             .expect("bound variable should still exist while rendering prompt contribution");
         let type_text = render_shape_inline(shape, &registry);
         if let Some(size_hint) = render_value_size_hint(value) {
-            lines.push(format!("- `{name}`: `{type_text}`, {size_hint}"));
+            lines.push(format!(
+                "- `{name}`: `{type_text}`, Readonly: true, projected binding, {size_hint}"
+            ));
         } else {
-            lines.push(format!("- `{name}`: `{type_text}`"));
+            lines.push(format!(
+                "- `{name}`: `{type_text}`, Readonly: true, projected binding"
+            ));
         }
     }
 

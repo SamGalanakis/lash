@@ -424,10 +424,10 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
 
         match result {
             Ok(response) => {
-                let continue_as_successor = response
+                let handoff_successor = response
                     .tool_calls
                     .iter()
-                    .find_map(continue_as_successor_from_tool_result);
+                    .find_map(handoff_successor_from_tool_result);
                 let submitted_error = response
                     .tool_calls
                     .iter()
@@ -462,7 +462,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 if let Some(finish_value) = response.terminal_finish {
                     state.terminal_finish = Some(finish_value);
                 }
-                if let Some(successor_session_id) = continue_as_successor {
+                if let Some(successor_session_id) = handoff_successor {
                     actions.push(DriverAction::AppendEvents(vec![trajectory_event(
                         trajectory_entry(ctx.mode_iteration(), &state, None, None),
                     )]));
@@ -572,16 +572,16 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
     }
 }
 
-fn continue_as_successor_from_tool_result(record: &ToolCallRecord) -> Option<String> {
-    if record.tool != "continue_as" || !record.success {
+fn handoff_successor_from_tool_result(record: &ToolCallRecord) -> Option<String> {
+    if !record.success {
         return None;
     }
-    record
-        .result
-        .get("_continue_as")
-        .and_then(Value::as_str)
-        .filter(|session_id| !session_id.trim().is_empty())
-        .map(ToOwned::to_owned)
+    match record.control.as_ref()? {
+        lash::ToolControl::Handoff { session_id } if !session_id.trim().is_empty() => {
+            Some(session_id.clone())
+        }
+        _ => None,
+    }
 }
 
 fn trajectory_entry(

@@ -468,7 +468,7 @@ impl SessionLifecycleHost for MockSessionManager {
                 .session_id
                 .clone()
                 .unwrap_or_else(|| "child".to_string()),
-            parent_session_id: request.parent_session_id.clone(),
+            parent_session_id: request.relation.parent_session_id().map(ToOwned::to_owned),
             policy: request.policy.unwrap_or_else(mock_session_policy),
         })
     }

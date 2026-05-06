@@ -829,6 +829,7 @@ mod tests {
                 result: serde_json::json!({"answer": "done"}),
                 success: true,
                 duration_ms: 4,
+                control: None,
             },
         })
     }
