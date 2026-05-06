@@ -12,20 +12,13 @@
   <div class="page">
     <main class="frame">
       <header class="hero">
-        <div>
-          <div class="eyebrow">Architecture chapter 06</div>
-          <h1>types<span class="slash">/</span>contracts</h1>
-          <p>The important architecture lives in small contracts. Provider components, protocol drivers, tool definitions, output contracts, plugin hooks, store commits, read projections, and UI surfaces — each a named seam.</p>
-        </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">Public read seam</div><strong><code>SessionReadView</code></strong><span>Plugins and UI read state here instead of cloning runtime internals.</span></article>
-          <article class="card"><div class="micro-label">Tool truth</div><strong><code>ToolOutputContract</code></strong><span>Discovery can describe dynamic return schemas for tools like <code>spawn_agent</code> and <code>llm_query</code>.</span></article>
-          <article class="card"><div class="micro-label">Provider boundary</div><strong><code>ProviderComponents</code></strong><span>State, auth, readiness, transport, and model policy stay separated.</span></article>
-        </div>
+        <div class="eyebrow">Architecture chapter 06</div>
+        <h1>types<span class="slash">/</span>contracts</h1>
+        <p>The important architecture lives in small contracts. Provider components, protocol drivers, tool definitions, output contracts, plugin hooks, store commits, read projections, and UI surfaces — each a named seam.</p>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a class="active" href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a class="active" href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./lashlang.html">Lashlang</a><a href="./html-exporter.html">HTML Exporter</a>
       </nav>
 
       <section class="content">
@@ -42,8 +35,12 @@
                 <tr><td><code>TurnOutcome</code>, <code>TurnFinish</code>, <code>TurnStop</code></td><td><code>lash-sansio</code></td><td>Three-class turn result: <code>Finished{AssistantMessage|Submission}</code>, <code>Handoff{session_id}</code>, <code>Stopped{Cancelled|InvalidInput|MaxTurns|ToolFailure|ProviderError|PluginAbort|RuntimeError|SubmittedError{...}}</code>.</td></tr>
                 <tr><td><code>ModePreamble</code>, <code>ContextProjector</code>, <code>ProtocolDriverHandle</code></td><td><code>lash-sansio</code> + mode crates</td><td>Mode-specific prompt, request projection, and model-output interpretation.</td></tr>
                 <tr><td><code>LashRuntime</code>, <code>RuntimeEnvironment</code>, <code>Session</code></td><td><code>lash</code></td><td>Live async runtime, host services, and per-session tool/mode/prompt execution surface.</td></tr>
+                <tr><td><code>SessionRelation::{Root, Child, Handoff}</code></td><td><code>lash/src/plugin/mod.rs</code></td><td>How a new session relates to its parent: top-level, internal child, or successor produced by <code>continue_as</code>.</td></tr>
+                <tr><td><code>StandardCreateExtras</code>, <code>RlmCreateExtras</code>, <code>RlmProjectedSeedSnapshot</code></td><td><code>lash/src/plugin/mode.rs</code> + <code>lash-rlm-types</code></td><td>Mode-specific session-creation payloads. RLM carries a termination policy and an optional projected-binding seed for handoffs and spawned agents.</td></tr>
+                <tr><td><code>PluginSessionContext</code>, <code>SubagentSessionAuthority</code></td><td><code>lash/src/plugin/registry.rs</code></td><td>Per-session context handed to plugin factories, plus the marker that identifies a session as a subagent and tracks <code>agent_name</code>, depth, and parent.</td></tr>
+                <tr><td><code>SessionStateEnvelope</code></td><td><code>lash/src/runtime/state.rs</code></td><td>Durable session-state container: graph, policy, turn index, usage, and mode turn options.</td></tr>
                 <tr><td><code>FollowedTurn</code>, <code>stream_turn_following_handoffs</code></td><td><code>lash/src/runtime</code></td><td>Drives a logical host turn through any <code>continue_as</code> handoffs and returns the chain of <code>AssembledTurn</code>s plus a convenient <code>final_turn()</code>.</td></tr>
-                <tr><td><code>SessionSnapshotHost</code>, <code>ToolCatalogHost</code>, <code>SessionLifecycleHost</code>, <code>TaskHost</code>, <code>DirectCompletionHost</code></td><td><code>lash/src/plugin/mod.rs</code> + <code>lash/src/runtime/session_manager/*</code></td><td>Focused runtime-host trait split implemented by <code>RuntimeSessionManager</code>.</td></tr>
+                <tr><td><code>SessionSnapshotHost</code>, <code>ToolCatalogHost</code>, <code>DynamicToolHost</code>, <code>SessionLifecycleHost</code>, <code>SessionGraphHost</code>, <code>TaskHost</code>, <code>DirectCompletionHost</code></td><td><code>lash/src/plugin/mod.rs</code> + <code>lash/src/runtime/session_manager/*</code></td><td>Focused runtime-host trait split implemented by <code>RuntimeSessionManager</code>.</td></tr>
                 <tr><td><code>TurnCommitPipeline</code>, <code>TurnProgress</code>, <code>TurnGraphOverlay</code></td><td><code>lash/src/runtime</code></td><td>Turn-scoped graph, checkpoint, usage, and read-state commit policy.</td></tr>
                 <tr><td><code>SessionGraph</code>, <code>SessionReadView</code>, <code>ChronologicalProjection</code></td><td><code>lash</code></td><td>Durable event storage, public read seam, and semantic timeline projection.</td></tr>
                 <tr><td><code>RuntimePersistence</code>, <code>RuntimeCommit</code>, <code>GraphCommitDelta</code></td><td><code>lash/src/store.rs</code></td><td>Runtime persistence contract and optimistic head revision commit shape.</td></tr>

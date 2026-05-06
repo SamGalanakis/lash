@@ -12,20 +12,13 @@
   <div class="page">
     <main class="frame">
       <header class="hero">
-        <div>
-          <div class="eyebrow">Architecture chapter 07</div>
-          <h1>deps<span class="slash">/</span>edges</h1>
-          <p>Lash keeps external systems at explicit edges — LLM transports, OAuth flows, MCP stdio servers, Tavily search/extract, models.dev metadata, trace sinks, file watchers, and SQLite-backed session storage.</p>
-        </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">LLM APIs</div><strong>OpenAI-compatible, Codex, Anthropic, Google</strong><span>Provider crates translate common <code>LlmRequest</code> contracts to wire APIs.</span></article>
-          <article class="card"><div class="micro-label">Tool APIs</div><strong>MCP + Tavily</strong><span>Dynamic tool import and web search/fetch live outside the core protocol.</span></article>
-          <article class="card"><div class="micro-label">Local services</div><strong>SQLite, file watch, JSONL traces</strong><span>Durable sessions, fuzzy file index, and trace capture are local-first.</span></article>
-        </div>
+        <div class="eyebrow">Architecture chapter 07</div>
+        <h1>deps<span class="slash">/</span>edges</h1>
+        <p>Lash keeps external systems at explicit edges — LLM transports, OAuth flows, MCP stdio servers, Tavily search/extract, models.dev metadata, trace sinks, file watchers, and SQLite-backed session storage.</p>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a class="active" href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a class="active" href="./deps.html">Dependencies</a><a href="./lashlang.html">Lashlang</a><a href="./html-exporter.html">HTML Exporter</a>
       </nav>
 
       <section class="content">
@@ -53,7 +46,7 @@ flowchart TD
   Runtime --> Trace["lash-trace schema v2<br/>standard + extended JSONL"]
   Runtime --> Export["lash-export<br/>DB + provider trace"]
   MCP --> Dynamic["DynamicToolProvider"]
-  Tavily --> DefaultTools["lash-default-tools"]
+  DefaultTools["lash-default-tools"] --> Tavily
   Dynamic --> Runtime
   DefaultTools --> Runtime
             </div>
@@ -84,6 +77,7 @@ flowchart TD
             <article class="panel"><h3>RLM prompt caching</h3><p>RLM projects chronological history as append-only chat-shaped messages: user inputs remain user messages, prior RLM steps become assistant messages, tool observations become user messages, and the mutable current-iteration/finalization prompt stays as the final user message. The rolling <code>cache_breakpoint</code> is placed on the last stable history text block, so OpenRouter Claude can cache a real message prefix instead of a rewritten history blob.</p></article>
             <article class="panel"><h3>Usage and cost inputs</h3><p>Provider responses still return normalized <code>LlmUsage</code> to the runtime usage ledger. Chat parsing reads streaming and non-streaming usage chunks, including OpenRouter cache fields; cache-write tokens are not counted as cached reads, so downstream cost/export code does not overstate cache hits.</p></article>
             <article class="panel"><h3>Provider boundary rule</h3><p>Wire-specific schema normalization, cache-marker placement, reasoning-detail replay, and token-field interpretation stay inside provider crates. Runtime modes and canonical tool definitions continue to operate on <code>LlmRequest</code>, <code>LlmResponse</code>, and <code>ToolDefinition</code>.</p></article>
+            <article class="panel"><h3>Built-in aggregator</h3><p><code>lash-providers-builtin::register_all</code> is the one-call aggregator the CLI and embed hosts use to register the four first-party provider factories (Anthropic, OpenAI-compatible, Codex, Google) with the global provider registry.</p></article>
           </div>
         </div>
 
@@ -93,10 +87,10 @@ flowchart TD
             <p>These dependencies are important operationally because they affect startup, discovery, observability, or tool availability.</p>
           </div>
           <div class="module-grid">
-            <article class="panel"><h3>MCP</h3><p><code>attach_mcp_servers</code> imports stdio MCP <code>tools/list</code> entries as <code>mcp__server__tool</code> dynamic tools, preserving input and output schemas where available.</p></article>
+            <article class="panel"><h3>MCP</h3><p><code>attach_mcp_servers</code> imports stdio MCP <code>tools/list</code> entries as <code>mcp__server__tool</code> dynamic tools, preserving input and output schemas where available. <code>McpServerConfig</code> is single-variant — stdio is the only transport; HTTP/SSE are not supported.</p></article>
             <article class="panel"><h3>Tavily</h3><p>Web search and URL extraction register only when <code>LashConfig.auxiliary_secrets.tavily_api_key</code> is present.</p></article>
             <article class="panel"><h3>models.dev</h3><p><code>CachedModelCatalog</code> reads a file cache, can fetch <code>https://models.dev/api.json</code>, and has a bundled snapshot fallback.</p></article>
-            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Standard records cover turns, LLM starts/completions, tools, and summaries; extended records preserve provider/stream details. Optional OTel maps those events to spans.</p></article>
+            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Standard records cover turns, LLM starts/completions, tools, and summaries; extended records preserve provider/stream details. The optional <code>otel</code> cargo feature pulls in <code>opentelemetry 0.31</code> and maps those events to spans. <code>lash-trace-viewer</code> is a standalone binary crate that consumes <code>lash-trace</code> JSONL directly, independent of <code>lash-export</code>.</p></article>
             <article class="panel"><h3>File index</h3><p><code>lash-file-index</code> combines <code>ignore</code> walking, <code>notify</code> watching, and <code>nucleo</code> matching for async <code>@</code> completion.</p></article>
             <article class="panel"><h3>Store</h3><p><code>lash/src/store.rs</code> defines the runtime persistence contract. <code>lash-sqlite-store</code> is the local implementation for session heads, graph nodes, checkpoint blobs, usage deltas, tombstones, and garbage-collection metadata.</p></article>
             <article class="panel"><h3>Export</h3><p><code>lash-export</code> renders the SQLite session plus provider trace JSONL when present, so transcript views can include prompt snapshots, context percentage, cached-token percentage, and exact token counts.</p></article>
@@ -104,8 +98,8 @@ flowchart TD
         </div>
 
         <div class="section-nav">
-          <a href="./abstractions.html"><span>Previous</span><strong>Abstractions</strong></a>
-          <a href="./files.html"><span>Next</span><strong>Files</strong></a>
+          <a href="./abstractions.html"><span>Previous</span><strong>06 · Abstractions</strong></a>
+          <a href="./lashlang.html"><span>Next</span><strong>08 · Lashlang</strong></a>
         </div>
       </section>
 

@@ -12,24 +12,37 @@
   <div class="page">
     <main class="frame">
       <header class="hero">
-        <div>
-          <div class="eyebrow">Architecture chapter 09</div>
-          <h1>lashlang<span class="slash">/</span>rlm</h1>
-          <p>Lashlang is the agent-facing execution language for RLM mode. It lets the model run local programs against host tools, preserve state across turns, use async handles, and pass typed values through <code>print</code> and <code>submit</code>.</p>
-        </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">Runtime</div><strong><code>lashlang/src/runtime</code></strong><span>Persistent VM state, values, tool host, compiled program cache, image values, projected host bindings, and profiling hooks.</span></article>
-          <article class="card"><div class="micro-label">Prompt source</div><strong>RLM execution section</strong><span><code>rlm_execution_section_with_features</code> emits the language reference shown to the model and is covered by prompt-claim tests.</span></article>
-          <article class="card"><div class="micro-label">Host seam</div><strong><code>ProjectedBindings</code></strong><span>Host injects read-only bindings (e.g., <code>history</code>) into Lashlang scope without copying them into VM state.</span></article>
-        </div>
+        <div class="eyebrow">Architecture chapter 08</div>
+        <h1>lashlang<span class="slash">/</span>rlm</h1>
+        <p>Lashlang is the agent-facing execution language for RLM mode. It lets the model run local programs against host tools, preserve state across turns, use async handles, and pass typed values through <code>print</code> and <code>submit</code>.</p>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a class="active" href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a class="active" href="./lashlang.html">Lashlang</a><a href="./html-exporter.html">HTML Exporter</a>
       </nav>
 
-      <section class="content">
-        <div class="section">
+      <section class="content content--with-toc">
+        <aside class="toc-rail" aria-label="On this page">
+          <div class="toc-rail__label">On this page</div>
+          <ol>
+            <li><a href="#language-reference">Language Reference</a></li>
+            <li><a href="#program-form">Program Form</a></li>
+            <li><a href="#syntax-and-values">Syntax And Values</a></li>
+            <li><a href="#expressions">Expressions</a></li>
+            <li><a href="#assignment-and-mutation">Assignment And Mutation</a></li>
+            <li><a href="#control-flow">Control Flow</a></li>
+            <li><a href="#projected-host-bindings">Projected Host Bindings</a></li>
+            <li><a href="#tool-calls-and-async-handles">Tool Calls And Async Handles</a></li>
+            <li><a href="#parallel-blocks">Parallel Blocks</a></li>
+            <li><a href="#builtins">Builtins</a></li>
+            <li><a href="#type-literals">Type Literals</a></li>
+            <li><a href="#rlm-execution-path">RLM Execution Path</a></li>
+            <li><a href="#images-and-attachments">Images And Attachments</a></li>
+            <li><a href="#runtime-internals">Runtime Internals</a></li>
+            <li><a href="#important-files">Important Files</a></li>
+          </ol>
+        </aside>
+        <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
             <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. It keeps syntax close to Python where that helps agents, but routes effects through explicit host calls, typed values, and persistent runtime state.</p>
@@ -42,10 +55,10 @@
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="program-form">
           <div class="section-header">
             <h2>Program Form</h2>
-            <p>RLM mode extracts the first closed <code>```lashlang</code> fence from model output. Anything after that block is ignored by the driver, so the block must contain the next action or final <code>submit</code>.</p>
+            <p>RLM mode extracts the first closed <code>```lashlang</code> fence from model output (the driver also accepts <code>rlm</code> and <code>lash</code> labels for legacy/internal callers, but only <code>lashlang</code> is advertised to the model). Anything after that block is ignored by the driver, so the block must contain the next action or final <code>submit</code>.</p>
           </div>
           <div class="two-col">
             <article class="panel"><h3>REPL state</h3><p>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through <code>ProjectedBindings</code> are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose.</p></article>
@@ -57,7 +70,7 @@ print { chars: len(text), head: slice(text, 0, 1200) }
 ```</code></pre>
         </div>
 
-        <div class="section">
+        <div class="section" id="syntax-and-values">
           <div class="section-header">
             <h2>Syntax And Values</h2>
             <p>The language accepts newline-separated statements. Commas are accepted in lists, records, type fields, and parallel branch lists where they make generated code easier to read.</p>
@@ -70,7 +83,7 @@ print { chars: len(text), head: slice(text, 0, 1200) }
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="expressions">
           <div class="section-header">
             <h2>Expressions</h2>
             <p>Expressions are deliberately small but cover the operations agents need for filtering, shaping, validation, and tool orchestration.</p>
@@ -90,7 +103,7 @@ print { chars: len(text), head: slice(text, 0, 1200) }
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="assignment-and-mutation">
           <div class="section-header">
             <h2>Assignment And Mutation</h2>
             <p>Assignments are rooted at named variables. Path assignment mutates the variable's current value through copy-on-write root updates, not through Python-style alias mutation.</p>
@@ -107,7 +120,7 @@ for group in groups {
 submit counts</code></pre>
         </div>
 
-        <div class="section">
+        <div class="section" id="control-flow">
           <div class="section-header">
             <h2>Control Flow</h2>
             <p>Control flow is statement-oriented. Loop cleanup is part of the runtime path, so loop escapes are explicit statements rather than arbitrary jumps.</p>
@@ -120,7 +133,7 @@ submit counts</code></pre>
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="projected-host-bindings">
           <div class="section-header">
             <h2>Projected Host Bindings</h2>
             <p>The host can inject named, read-only values into Lashlang scope without copying them into VM <code>State</code>. They behave like ordinary variables for read access but rejecting reassignment keeps the host-managed values authoritative.</p>
@@ -129,11 +142,11 @@ submit counts</code></pre>
             <article class="panel"><h3><code>ProjectedBindings</code></h3><p>Map of names to <code>ProjectedValue</code>s the host hands the executor at the start of each fenced block. RLM rebuilds it from <code>RlmGlobalsPatch</code> + the live <code>history</code> projection.</p></article>
             <article class="panel"><h3><code>ProjectedValue</code></h3><p>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing).</p></article>
             <article class="panel"><h3><code>ProjectedHostValue</code></h3><p>Trait that lets the host serve <code>get_field</code>, <code>get_index</code>, <code>len</code>, <code>render</code>, and <code>materialize</code> queries on demand (returning a <code>ProjectedRead</code> for field/index reads) so large host-side structures need not be cloned into Lashlang values.</p></article>
-            <article class="panel"><h3>Reserved names</h3><p><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> or <code>set_default { name: ... }</code> over a projected name raises <code>read-only projected host binding</code>.</p></article>
+            <article class="panel"><h3>Reserved names</h3><p><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> over a projected name raises <code>`name` is a read-only projected binding</code>. The host-side seed channel (<code>continue_as</code> / <code>spawn_agent</code> <code>seed:</code>) can land projected entries that lashlang code then sees as read-only.</p></article>
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
             <h2>Tool Calls And Async Handles</h2>
             <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ToolHost</code>.</p>
@@ -146,7 +159,7 @@ submit counts</code></pre>
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="parallel-blocks">
           <div class="section-header">
             <h2>Parallel Blocks</h2>
             <p><code>parallel</code> is for independent work. Branches must not depend on each other's output, and branch-local assignments are merged only when unambiguous.</p>
@@ -161,7 +174,7 @@ results = parallel { one: (await a)?, two: (await b)? }
 submit { a: results.one, b: results.two }</code></pre>
         </div>
 
-        <div class="section">
+        <div class="section" id="builtins">
           <div class="section-header">
             <h2>Builtins</h2>
             <p>Builtins are pure value helpers except for validation errors. They are called as ordinary functions and are optimized by the compiler where static type literals allow it.</p>
@@ -186,7 +199,7 @@ submit { a: results.one, b: results.two }</code></pre>
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="type-literals">
           <div class="section-header">
             <h2>Type Literals</h2>
             <p><code>Type { ... }</code> values describe structured records for validation and dynamic tool output contracts. They are runtime values, not a static type checker for all code.</p>
@@ -207,7 +220,7 @@ submit { a: results.one, b: results.two }</code></pre>
 validated = validate(candidate, Payload)</code></pre>
         </div>
 
-        <div class="section">
+        <div class="section" id="rlm-execution-path">
           <div class="section-header">
             <h2>RLM Execution Path</h2>
             <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> in scope, and the resulting trajectory is persisted as mode events. A block ending with <code>continue_as</code> finishes the turn as <code>TurnOutcome::Handoff</code> instead of looping back to the model.</p>
@@ -235,7 +248,7 @@ sequenceDiagram
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="images-and-attachments">
           <div class="section-header">
             <h2>Images And Attachments</h2>
             <p>Image support is a first-class runtime feature, not a plain record convention.</p>
@@ -246,7 +259,7 @@ sequenceDiagram
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="runtime-internals">
           <div class="section-header">
             <h2>Runtime Internals</h2>
             <p>The implementation compiles AST to a compact VM instruction stream, then executes async host effects without blocking the RLM runtime.</p>
@@ -259,7 +272,7 @@ sequenceDiagram
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="important-files">
           <div class="section-header">
             <h2>Important Files</h2>
             <p>Keep prompt reference, parser/runtime behavior, tests, and docs synchronized when changing the language.</p>
@@ -286,8 +299,8 @@ sequenceDiagram
         </div>
 
         <div class="section-nav">
-          <a href="./files.html"><span>Previous</span><strong>Files</strong></a>
-          <span></span>
+          <a href="./deps.html"><span>Previous</span><strong>07 · Dependencies</strong></a>
+          <a href="./html-exporter.html"><span>Next</span><strong>09 · HTML Exporter</strong></a>
         </div>
       </section>
 

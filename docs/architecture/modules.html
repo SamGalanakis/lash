@@ -12,20 +12,13 @@
   <div class="page">
     <main class="frame">
       <header class="hero">
-        <div>
-          <div class="eyebrow">Architecture chapter 02</div>
-          <h1>modules<span class="slash">/</span>crates</h1>
-          <p>The workspace is split by responsibility: pure protocol, async runtime, mode drivers, provider transports, plugin/tool surfaces, host UI, trace/export utilities, and benchmark runners.</p>
-        </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">Core seam</div><strong><code>lash-sansio</code> -> <code>lash</code></strong><span>The runtime satisfies effects emitted by the pure turn machine.</span></article>
-          <article class="card"><div class="micro-label">Mode seam</div><strong><code>lash-mode-standard</code>, <code>lash-mode-rlm</code></strong><span>Protocol drivers are plugins, not branches baked into provider code.</span></article>
-          <article class="card"><div class="micro-label">UI seam</div><strong><code>lash-ui</code>, <code>lash-tui</code>, <code>lash-cli</code></strong><span>Core runtime stays free of CLI/TUI projection vocabulary.</span></article>
-        </div>
+        <div class="eyebrow">Architecture chapter 02</div>
+        <h1>modules<span class="slash">/</span>crates</h1>
+        <p>The workspace is split by responsibility: pure protocol, async runtime, mode drivers, provider transports, plugin/tool surfaces, host UI, trace/export utilities, and benchmark runners.</p>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a class="active" href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a class="active" href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./lashlang.html">Lashlang</a><a href="./html-exporter.html">HTML Exporter</a>
       </nav>
 
       <section class="content">
@@ -35,15 +28,15 @@
             <p>These are the high-value ownership groups to inspect before changing behavior.</p>
           </div>
           <div class="module-grid">
-            <article class="panel"><small>Pure protocol</small><h3>lash-sansio</h3><p>Owns <code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>, <code>ModePreamble</code>, prompt templates, messages, attachments, the <code>TurnOutcome::{Finished, Handoff, Stopped}</code> contract, and tool definitions/output contracts.</p><code class="path">lash-sansio/src/{sansio,turn,mode,prompt,tool_surface}.rs</code></article>
+            <article class="panel"><small>Pure protocol</small><h3>lash-sansio</h3><p>Owns <code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>, <code>ModePreamble</code>, prompt templates, messages, attachments, the <code>TurnOutcome::{Finished, Handoff, Stopped}</code> contract, and tool definitions/output contracts. Top-level files cover turn, mode, prompt, plugin, attachment, session, and tool surfaces; the <code>sansio/</code>, <code>session_model/</code>, and <code>llm/</code> subdirectories hold the state machine, durable model, and provider request types.</p><code class="path">lash-sansio/src/{turn,mode,prompt,plugin,tool_surface,session,attachment}.rs, sansio/, session_model/, llm/</code></article>
             <article class="panel"><small>Async runtime</small><h3>lash</h3><p>Owns <code>LashRuntime</code>, <code>Session</code>, <code>SessionGraph</code>, and the <code>RuntimePersistence</code> contract, plus tool dispatch, provider registry, MCP, OAuth, attachments, tracing, runtime controls, the built-in tool-result projection plugin, and handoff-following turn execution.</p><code class="path">lash/src/runtime/*, lash/src/session.rs, lash/src/store.rs, lash/src/plugin/*</code></article>
             <article class="panel"><small>Embed API</small><h3>lash-embed</h3><p>Provides app-facing runtime construction, managed chat sessions, parking/resume, and webserver embedding without pushing CLI or TUI vocabulary into core runtime.</p><code class="path">lash-embed/src/lib.rs, examples/*</code></article>
             <article class="panel"><small>Mode plugins</small><h3>standard + rlm</h3><p>Standard drives native provider tool calls. RLM extracts <code>lashlang</code> code fences, runs persistent REPL state with read-only host bindings projected into scope (<code>history</code> and any host-supplied globals), masks fence streaming, owns the <code>continue_as</code> handoff control tool, and records the RLM trajectory.</p><code class="path">lash-mode-standard, lash-mode-rlm, lashlang, lash-rlm-types</code></article>
             <article class="panel"><small>Provider plugins</small><h3>OpenAI, Codex, Anthropic, Google</h3><p>Each provider implements state, auth, readiness, transport, and model policy components behind <code>ProviderHandle</code>.</p><code class="path">lash-provider-*, lash-providers-builtin</code></article>
-            <article class="panel"><small>Tool plugins</small><h3>default tools + subagents + LLM helpers + tool-result projection</h3><p>Default tools, subagents, <code>llm_query</code>, monitors, plan mode, prompt context, observational memory, UI activity, tool discovery, and the built-in tool-result projector register through plugin factories. Discovery remains split across catalog projection, provider execution, lexical/BM25 ranking, LLM rerank, and schema indexing.</p><code class="path">lash-default-tools, lash-subagents, lash-llm-tools, lash-plugin-*, lash/src/plugin/tool_result_projection_builtin.rs</code></article>
+            <article class="panel"><small>Tool plugins</small><h3>default tools + subagents + LLM helpers + tool-result projection</h3><p>Default tools, subagents, <code>llm_query</code>, monitors, plan mode, prompt context, observational memory, rolling-history compaction, UI activity, tool discovery, and the built-in tool-result projector register through plugin factories. Discovery remains split across catalog projection, provider execution, lexical/BM25 ranking, LLM rerank, and schema indexing.</p><code class="path">lash-default-tools, lash-subagents, lash-llm-tools, lash-plugin-*, lash/src/plugin/tool_result_projection_builtin.rs</code></article>
             <article class="panel"><small>Persistence</small><h3>lash-sqlite-store</h3><p>The concrete SQLite implementation persists session heads, graph nodes, blobs, checkpoints, usage ledgers, tombstones, and vacuum metadata behind the runtime store contract.</p><code class="path">lash-sqlite-store/src/lib.rs</code></article>
             <article class="panel"><small>Host UI</small><h3>CLI, TUI, UI surfaces</h3><p>The CLI bootstraps runtime, plugins, and providers, then renders the authoritative <code>SessionReadView</code> through <code>ChronologicalProjection</code> into <code>UiTimeline</code>.</p><code class="path">lash-cli, lash-ui, lash-tui</code></article>
-            <article class="panel"><small>Inspection tools</small><h3>trace + export + file index</h3><p><code>lash-trace</code> defines standard and extended JSONL trace records. <code>lash-export</code> combines store state with provider traces to render chronological sessions, prompt snapshots, and token usage. <code>lash-trace-viewer</code> renders a JSONL trace into a self-contained HTML browser. <code>lash-file-index</code> powers async fuzzy file completion.</p><code class="path">lash-trace, lash-trace-viewer, lash-export, lash-file-index</code></article>
+            <article class="panel"><small>Inspection tools</small><h3>trace + export + file index</h3><p><code>lash-trace</code> defines standard and extended JSONL trace records. <code>lash-export</code> walks a tree of sessions joined by <code>continue_as</code> handoffs and <code>spawn_agent</code> subagents, combining store state with provider traces to render chronological sessions, prompt snapshots, and token usage as a single HTML doc. <code>lash-trace-viewer</code> is a standalone tool that renders JSONL traces into a self-contained HTML browser. <code>lash-file-index</code> powers async fuzzy file completion.</p><code class="path">lash-trace, lash-trace-viewer, lash-export, lash-file-index</code></article>
             <article class="panel"><small>Experimentation</small><h3>benchmarks + harness optimization + autoresearch</h3><p>Benchmark runners embed Lash as an evaluated agent and follow handoff continuations between turns. <code>lash-harness-opt</code> owns generic optimization primitives (<code>Candidate</code>, <code>HarnessProject</code>, <code>HarnessOptimizer</code>, <code>SqliteHarnessStore</code>), the <code>strategies::gepa</code> reflective strategy, and a <code>clbench</code> project binding. Autoresearch adds hidden research tools and a UI extension.</p><code class="path">bench/*/runner, lash-harness-opt, lash-autoresearch</code></article>
           </div>
         </div>
@@ -59,20 +52,28 @@
 flowchart TD
   CLI["lash-cli"] --> Runtime["lash"]
   Embed["lash-embed<br/>examples"] --> Runtime
-  Bench["bench runners<br/>CLBench / TerminalBench"] --> Runtime
+  Bench["bench runners<br/>clbench, longcot, longmemeval-rlm, swebench"] --> Runtime
+  HarnessOpt["lash-harness-opt<br/>Candidate, GEPA, SqliteHarnessStore"] --> Runtime
+  Bench --> HarnessOpt
   CLI --> Tui["lash-ui / lash-tui"]
   CLI --> Builtins["lash-providers-builtin"]
   Runtime --> Sansio["lash-sansio"]
   Runtime --> Lang["lashlang"]
   Runtime --> Store["lash-sqlite-store"]
+  Runtime --> RlmTypes["lash-rlm-types"]
   Modes["lash-mode-standard<br/>lash-mode-rlm"] --> Runtime
   Modes --> Sansio
-  Plugins["lash-plugin-*<br/>lash-subagents<br/>lash-llm-tools<br/>lash-default-tools"] --> Runtime
+  Modes --> RlmTypes
+  Plugins["lash-plugin-*<br/>lash-llm-tools<br/>lash-default-tools"] --> Runtime
+  Subagents["lash-subagents"] --> Runtime
+  Subagents --> RlmTypes
+  Autoresearch["lash-autoresearch"] --> Runtime
   Providers["lash-provider-*"] --> Runtime
   Builtins --> Providers
   Export["lash-export"] --> Runtime
   Export --> TraceCore
-  Trace["lash-trace-viewer"] --> TraceCore["lash-trace"]
+  Export --> RlmTypes
+  TraceViewer["lash-trace-viewer"] --> TraceCore["lash-trace"]
   Runtime --> TraceCore
   FileIndex["lash-file-index"] --> CLI
             </div>

@@ -549,7 +549,6 @@ impl RuntimeTurnDriver {
             model_variant: session_policy.model_variant.clone(),
             emit_llm_trace: false,
             termination: self.mode_turn_options.clone(),
-            retry_policy: self.host.core.retry_policy.clone(),
             prompt_cache: Some(self.session.prompt_cache()),
         });
         if self.host.core.trace_sink.is_some() {

@@ -19,6 +19,10 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LlmPromptSnapshot {
+    /// Session this call belongs to. Populated from `context.session_id`
+    /// in the trace record. Critical for multi-session exports — one trace
+    /// file can span root + handoff successors + spawned subagents.
+    pub session_id: Option<String>,
     pub turn_index: Option<u64>,
     pub mode_iteration: Option<u64>,
     pub llm_call_id: Option<String>,
@@ -111,6 +115,10 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
     let request_hash = short_hash(&request_concat);
     let context = record.get("context");
     Some(LlmPromptSnapshot {
+        session_id: context
+            .and_then(|c| c.get("session_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
         turn_index: context
             .and_then(|c| c.get("turn_index"))
             .and_then(Value::as_u64),

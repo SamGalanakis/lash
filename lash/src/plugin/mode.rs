@@ -310,6 +310,7 @@ mod tests {
             ExecutionMode::new("rlm"),
             lash_rlm_types::RlmCreateExtras {
                 termination: lash_rlm_types::RlmTermination::default(),
+                ..Default::default()
             },
         )
         .expect("encode");

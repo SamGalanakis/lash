@@ -38,9 +38,9 @@ pub use session_model::{
     BaseRenderCache, CORE_GUIDANCE_SECTION, ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO,
     Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind, PromptBuiltin,
     PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, RetryPolicy,
-    SessionEvent, SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent, TurnFinish,
-    TurnOutcome, TurnStop, default_prompt_template, messages_are_prompt_resume_safe, shared_parts,
+    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, SessionEvent,
+    SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent, TurnFinish, TurnOutcome,
+    TurnStop, default_prompt_template, messages_are_prompt_resume_safe, shared_parts,
 };
 pub use tool_surface::{
     ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceEntry,
@@ -327,6 +327,10 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
     #[serde(default)]
     pub output_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_schema_projections: Vec<SchemaProjectionOverride>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_schema_projections: Vec<SchemaProjectionOverride>,
     #[serde(default, skip_serializing_if = "ToolOutputContract::is_static")]
     pub output_contract: ToolOutputContract,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -354,6 +358,14 @@ pub struct ModelTool {
     pub description: String,
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
+    pub input_schema_projections: Vec<SchemaProjectionOverride>,
+    pub output_schema_projections: Vec<SchemaProjectionOverride>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SchemaProjectionOverride {
+    pub profile: String,
+    pub schema: serde_json::Value,
 }
 
 const COMPACT_TOOL_EXAMPLE_LIMIT: usize = 2;
@@ -493,6 +505,8 @@ impl ToolDefinition {
             description: description.into(),
             input_schema,
             output_schema,
+            input_schema_projections: Vec::new(),
+            output_schema_projections: Vec::new(),
             output_contract: ToolOutputContract::Static,
             examples: Vec::new(),
             availability: ToolAvailabilityConfig::documented(),
@@ -558,6 +572,32 @@ impl ToolDefinition {
 
     pub fn with_output_contract(mut self, output_contract: ToolOutputContract) -> Self {
         self.output_contract = output_contract;
+        self
+    }
+
+    pub fn with_input_schema_projection(
+        mut self,
+        profile: impl Into<String>,
+        schema: serde_json::Value,
+    ) -> Self {
+        let profile = profile.into();
+        self.input_schema_projections
+            .retain(|projection| projection.profile != profile);
+        self.input_schema_projections
+            .push(SchemaProjectionOverride { profile, schema });
+        self
+    }
+
+    pub fn with_output_schema_projection(
+        mut self,
+        profile: impl Into<String>,
+        schema: serde_json::Value,
+    ) -> Self {
+        let profile = profile.into();
+        self.output_schema_projections
+            .retain(|projection| projection.profile != profile);
+        self.output_schema_projections
+            .push(SchemaProjectionOverride { profile, schema });
         self
     }
 
@@ -631,6 +671,8 @@ impl ToolDefinition {
             description: self.description.clone(),
             input_schema: self.input_schema.clone(),
             output_schema: self.output_schema.clone(),
+            input_schema_projections: self.input_schema_projections.clone(),
+            output_schema_projections: self.output_schema_projections.clone(),
         }
     }
 
@@ -1294,6 +1336,46 @@ mod tests {
         assert_eq!(
             model_tool.output_schema["properties"]["hits"]["type"],
             serde_json::json!("array")
+        );
+    }
+
+    #[test]
+    fn model_tool_preserves_schema_projection_overrides() {
+        let tool = ToolDefinition::new(
+            "demo",
+            "Demo",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "raw": { "const": "x" } }
+            }),
+            serde_json::json!({ "type": "object" }),
+        )
+        .with_input_schema_projection(
+            "provider.tool_parameters",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "raw": { "type": "string", "enum": ["x"] } }
+            }),
+        )
+        .with_output_schema_projection(
+            "provider.structured_output",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+        );
+
+        let model_tool = tool.model_tool();
+        assert_eq!(model_tool.input_schema["properties"]["raw"]["const"], "x");
+        assert_eq!(
+            model_tool.input_schema_projections[0].schema["properties"]["raw"]["enum"],
+            serde_json::json!(["x"])
+        );
+        assert_eq!(
+            model_tool.output_schema_projections[0].profile,
+            "provider.structured_output"
         );
     }
 

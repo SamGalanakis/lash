@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::AttachmentRef;
+use crate::{AttachmentRef, SchemaProjectionOverride};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +25,8 @@ pub struct LlmToolSpec {
     pub description: String,
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
+    pub input_schema_projections: Vec<SchemaProjectionOverride>,
+    pub output_schema_projections: Vec<SchemaProjectionOverride>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lash-sansio",
+    "lash-openai-schema",
     "lash-trace",
     "lash-trace-viewer",
     "lash-rlm-types",

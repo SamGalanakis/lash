@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -656,6 +658,7 @@ impl GoogleOAuthProvider {
         .await?;
         if !start_resp.status().is_success() {
             let status = start_resp.status().as_u16();
+            let headers = start_resp.headers().clone();
             let body = read_response_text(
                 start_resp,
                 self.options.llm_timeouts().request_timeout,
@@ -663,13 +666,14 @@ impl GoogleOAuthProvider {
             )
             .await
             .unwrap_or_default();
-            return Err(LlmTransportError {
-                message: format!("Gemini Files upload start failed with {}", status),
-                retryable: status == 429 || status >= 500,
-                raw: Some(body),
-                code: Some(status.to_string()),
-                request_body: None,
-            });
+            return Err(LlmTransportError::new(format!(
+                "Gemini Files upload start failed with {}",
+                status
+            ))
+            .with_status(status)
+            .with_headers(&headers)
+            .with_raw(body)
+            .retryable(status == 429 || status >= 500));
         }
 
         let upload_url = start_resp
@@ -704,6 +708,7 @@ impl GoogleOAuthProvider {
         .await?;
         if !finalize_resp.status().is_success() {
             let status = finalize_resp.status().as_u16();
+            let headers = finalize_resp.headers().clone();
             let body = read_response_text(
                 finalize_resp,
                 self.options.llm_timeouts().request_timeout,
@@ -711,13 +716,14 @@ impl GoogleOAuthProvider {
             )
             .await
             .unwrap_or_default();
-            return Err(LlmTransportError {
-                message: format!("Gemini Files upload finalize failed with {}", status),
-                retryable: status == 429 || status >= 500,
-                raw: Some(body),
-                code: Some(status.to_string()),
-                request_body: None,
-            });
+            return Err(LlmTransportError::new(format!(
+                "Gemini Files upload finalize failed with {}",
+                status
+            ))
+            .with_status(status)
+            .with_headers(&headers)
+            .with_raw(body)
+            .retryable(status == 429 || status >= 500));
         }
 
         let upload_status = finalize_resp
@@ -919,6 +925,7 @@ impl GoogleOAuthProvider {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
+            let headers = resp.headers().clone();
             let body = read_response_text(
                 resp,
                 self.options.llm_timeouts().request_timeout,
@@ -926,13 +933,16 @@ impl GoogleOAuthProvider {
             )
             .await
             .unwrap_or_default();
-            return Err(LlmTransportError {
-                message: format!("Cloud Code request failed with {}", status),
-                retryable: status == 429 || status >= 500,
-                raw: Some(body),
-                code: Some(status.to_string()),
-                request_body,
-            });
+            let mut err =
+                LlmTransportError::new(format!("Cloud Code request failed with {}", status))
+                    .with_status(status)
+                    .with_headers(&headers)
+                    .with_raw(body)
+                    .retryable(status == 429 || status >= 500);
+            if let Some(request_body) = request_body {
+                err = err.with_request_body(request_body);
+            }
+            return Err(err);
         }
 
         if stream_events.is_none() {
@@ -1065,14 +1075,18 @@ impl GoogleOAuthProvider {
             })?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
+            let headers = resp.headers().clone();
             let body = resp.text().await.unwrap_or_default();
-            return Err(LlmTransportError {
-                message: format!("Cloud Code loadCodeAssist failed with {}", status),
-                retryable: status == 429 || status >= 500,
-                raw: Some(body),
-                code: Some(status.to_string()),
-                request_body,
-            });
+            let mut err =
+                LlmTransportError::new(format!("Cloud Code loadCodeAssist failed with {}", status))
+                    .with_status(status)
+                    .with_headers(&headers)
+                    .with_raw(body)
+                    .retryable(status == 429 || status >= 500);
+            if let Some(request_body) = request_body {
+                err = err.with_request_body(request_body);
+            }
+            return Err(err);
         }
         let body: Value = resp.json().await.map_err(|e| {
             LlmTransportError::new(format!("Invalid Cloud Code loadCodeAssist JSON: {e}"))

@@ -14,8 +14,8 @@ lash-export = { path = "../../../lash-export" }
 lash-sqlite-store = { path = "../../../lash-sqlite-store" }
 lash-llm-tools = { path = "../../../lash-llm-tools" }
 lash-mode-rlm = { path = "../../../lash-mode-rlm" }
-lash-rlm-types = { path = "../../../lash-rlm-types" }
 lash-provider-openai = { path = "../../../lash-provider-openai" }
+lash-providers-builtin = { path = "../../../lash-providers-builtin" }
 lash-subagents = { path = "../../../lash-subagents" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -26,4 +26,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 async-trait = "0.1"
+dirs = "6"
 dotenvy = "0.15"

@@ -312,6 +312,40 @@ impl ProjectedValue {
         &self.name
     }
 
+    /// Wrap a derived value as a `ProjectedValue` carrying a path-extended name
+    /// (e.g. `parent.field`). Pass-through if the inner value is already a
+    /// `Value::Projected` so we never double-wrap. Used by field/index access on
+    /// projected sources to keep "this came from a projected source" alive
+    /// across path expressions; non-path operations (binary ops, builtins,
+    /// formatters) auto-strip via their existing materialise-and-evaluate code
+    /// paths and so naturally lose the wrapper.
+    pub fn propagate_field(parent_name: &str, field: &str, inner: Value) -> Value {
+        match inner {
+            Value::Projected(_) => inner,
+            other => Value::Projected(ProjectedValue::scalar(
+                Arc::<str>::from(format!("{parent_name}.{field}")),
+                other,
+            )),
+        }
+    }
+
+    pub fn propagate_index(parent_name: &str, index: &Value, inner: Value) -> Value {
+        match inner {
+            Value::Projected(_) => inner,
+            other => {
+                let suffix = match index {
+                    Value::String(s) => format!("[{s:?}]"),
+                    Value::Number(n) => format!("[{n}]"),
+                    other => format!("[{other}]"),
+                };
+                Value::Projected(ProjectedValue::scalar(
+                    Arc::<str>::from(format!("{parent_name}{suffix}")),
+                    other,
+                ))
+            }
+        }
+    }
+
     async fn len(&self) -> usize {
         match &self.kind {
             ProjectedKind::Scalar(value) => value_len(value).unwrap_or(0),
@@ -2985,7 +3019,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let value = self.load_slot(slot)?;
                 let field = &self.chunk.names[field];
                 let value = match value {
-                    Value::Projected(projected) => projected.get_field(field).await?,
+                    Value::Projected(projected) => {
+                        let parent_name = projected.name().to_string();
+                        let inner = projected.get_field(field).await?;
+                        ProjectedValue::propagate_field(&parent_name, &field.text, inner)
+                    }
                     value => read_field_ref_direct(value, field)?,
                 };
                 self.stack.push(value);
@@ -2994,7 +3032,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let value = self.load_slot(slot)?;
                 let field = &self.chunk.names[field];
                 let value = match value {
-                    Value::Projected(projected) => projected.get_field(field).await?,
+                    Value::Projected(projected) => {
+                        let parent_name = projected.name().to_string();
+                        let inner = projected.get_field(field).await?;
+                        ProjectedValue::propagate_field(&parent_name, &field.text, inner)
+                    }
                     value => read_field_ref_direct(value, field)?,
                 };
                 self.stack.push(unwrap_tool_result(value)?);
@@ -3011,7 +3053,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let target = self.pop_stack()?;
                 let field = &self.chunk.names[field];
                 let value = match target {
-                    Value::Projected(projected) => projected.get_field(field).await?,
+                    Value::Projected(projected) => {
+                        let parent_name = projected.name().to_string();
+                        let inner = projected.get_field(field).await?;
+                        ProjectedValue::propagate_field(&parent_name, &field.text, inner)
+                    }
                     target => read_field_direct(target, field)?,
                 };
                 self.stack.push(value);
@@ -3020,7 +3066,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let index = self.pop_stack()?;
                 let target = self.pop_stack()?;
                 let value = match target {
-                    Value::Projected(projected) => projected.get_index(&index).await?,
+                    Value::Projected(projected) => {
+                        let parent_name = projected.name().to_string();
+                        let inner = projected.get_index(&index).await?;
+                        ProjectedValue::propagate_index(&parent_name, &index, inner)
+                    }
                     target => read_index_direct(target, index)?,
                 };
                 self.stack.push(value);

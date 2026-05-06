@@ -67,12 +67,23 @@ pub(crate) struct TruncationMeta {
     pub omitted: usize,
 }
 
+pub use lash_rlm_types::{PROJECTED_JSON_TAG, projection_inner};
+
+/// Strip the canonical `Value::Projected` wrapper if present, returning the
+/// inner value. No-op for any value that isn't a single-key object whose key is
+/// [`PROJECTED_JSON_TAG`]. Used at the top of every standard arg-extraction
+/// helper so tools see bare data regardless of source kind.
+pub fn unwrap_projected_arg(value: &serde_json::Value) -> &serde_json::Value {
+    projection_inner(value).unwrap_or(value)
+}
+
 /// Extract a required non-empty string arg, or return ToolResult::err.
 pub(crate) fn require_str<'a>(
     args: &'a serde_json::Value,
     key: &str,
 ) -> Result<&'a str, ToolResult> {
     args.get(key)
+        .map(unwrap_projected_arg)
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ToolResult::err_fmt(format_args!("Missing required parameter: {key}")))
@@ -85,7 +96,7 @@ pub(crate) fn parse_optional_bool(
     key: &str,
     default: bool,
 ) -> Result<bool, ToolResult> {
-    match args.get(key) {
+    match args.get(key).map(unwrap_projected_arg) {
         None => Ok(default),
         Some(v) if v.is_null() => Ok(default),
         Some(v) => match v.as_bool() {
@@ -107,7 +118,7 @@ pub(crate) fn parse_optional_usize_arg(
     allow_none: bool,
     min: usize,
 ) -> Result<Option<usize>, ToolResult> {
-    match args.get(key) {
+    match args.get(key).map(unwrap_projected_arg) {
         None => Ok(default),
         Some(v) if v.is_null() => {
             if allow_none {

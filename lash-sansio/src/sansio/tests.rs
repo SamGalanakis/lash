@@ -24,7 +24,6 @@ fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineCon
         session_id: "test".to_string(),
         emit_llm_trace: false,
         termination: (),
-        retry_policy: RetryPolicy::default(),
     }
 }
 
@@ -145,13 +144,6 @@ fn find_done(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
     })
 }
 
-fn find_sleep(effects: &[Effect]) -> Option<EffectId> {
-    effects.iter().find_map(|effect| match effect {
-        Effect::Sleep { id, .. } => Some(*id),
-        _ => None,
-    })
-}
-
 fn find_execution_surface_sync(effects: &[Effect]) -> Option<(EffectId, bool)> {
     effects.iter().find_map(|effect| match effect {
         Effect::SyncExecutionSurface {
@@ -183,54 +175,6 @@ impl ProtocolDriverHandle for ProseDriver {
             DriverAction::AppendEvents(vec![conversation_event(text_message(
                 MessageRole::Assistant,
                 "done",
-            ))]),
-            DriverAction::StartCheckpoint {
-                checkpoint: CheckpointKind::BeforeCompletion,
-                on_empty: CheckpointResumeAction::Finish(assistant_done("done")),
-            },
-        ]
-    }
-
-    fn handle_tool_results(
-        &self,
-        _ctx: DriverContextView<'_>,
-        _completed: Vec<CompletedToolCall>,
-    ) -> Vec<DriverAction> {
-        Vec::new()
-    }
-
-    fn handle_exec_result(
-        &self,
-        _ctx: DriverContextView<'_>,
-        _waiting: WaitingExecState,
-        _result: Result<crate::ExecResponse, String>,
-    ) -> Vec<DriverAction> {
-        Vec::new()
-    }
-}
-
-struct RetryStateDriver;
-
-impl ProtocolDriverHandle for RetryStateDriver {
-    fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
-        vec![DriverAction::StartLlm {
-            request: ctx.project_llm_request(false),
-            driver_state: Some(driver_state(7usize)),
-        }]
-    }
-
-    fn handle_llm_success(
-        &self,
-        _ctx: DriverContextView<'_>,
-        mut waiting: WaitingLlmState,
-        _llm_response: LlmResponse,
-        _text_streamed: bool,
-    ) -> Vec<DriverAction> {
-        let marker = waiting.take_driver_state::<usize>().expect("driver state");
-        vec![
-            DriverAction::AppendEvents(vec![conversation_event(text_message(
-                MessageRole::Assistant,
-                format!("state={marker}"),
             ))]),
             DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
@@ -451,62 +395,6 @@ fn driver_can_finish_via_checkpoint() {
 }
 
 #[test]
-fn retryable_error_preserves_driver_state_across_retry() {
-    let config = test_config(Arc::new(RetryStateDriver));
-    let msgs = vec![user_message("hello")];
-    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
-
-    let effects = drain_effects(&mut machine);
-    let llm_id = *find_llm_call(&effects).expect("llm call").0;
-    machine.handle_response(Response::LlmComplete {
-        id: llm_id,
-        text_streamed: false,
-        result: Err(LlmCallError {
-            message: "rate limited".to_string(),
-            retryable: true,
-            raw: None,
-            code: None,
-            request_body: None,
-        }),
-    });
-
-    let effects = drain_effects(&mut machine);
-    let sleep_id = find_sleep(&effects).expect("retry sleep");
-    machine.handle_response(Response::Timeout { id: sleep_id });
-
-    let effects = drain_effects(&mut machine);
-    let retried_id = *find_llm_call(&effects).expect("retried llm").0;
-    machine.handle_response(Response::LlmComplete {
-        id: retried_id,
-        text_streamed: false,
-        result: Ok(LlmResponse {
-            full_text: "ok".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "ok".to_string(),
-                response_meta: None,
-            }],
-            ..LlmResponse::default()
-        }),
-    });
-
-    let effects = drain_effects(&mut machine);
-    let (checkpoint_id, _) = find_checkpoint(&effects).expect("checkpoint");
-    machine.handle_response(Response::Checkpoint {
-        id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
-    });
-
-    let effects = drain_effects(&mut machine);
-    let (messages, _) = find_done(&effects).expect("done");
-    assert!(
-        messages
-            .iter()
-            .any(|message| { message.parts.iter().any(|part| part.content == "state=7") })
-    );
-}
-
-#[test]
 fn checkpoint_messages_resume_prepare_mode_iteration() {
     let config = test_config(Arc::new(ProseDriver));
     let msgs = vec![user_message("hello")];
@@ -684,6 +572,8 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
                 description: "desc".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 output_schema: serde_json::json!({ "type": "object" }),
+                input_schema_projections: Vec::new(),
+                output_schema_projections: Vec::new(),
             }]),
         })),
     });

@@ -307,13 +307,14 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "dirs 6.0.0",
  "dotenvy",
  "lash",
  "lash-export",
  "lash-llm-tools",
  "lash-mode-rlm",
  "lash-provider-openai",
- "lash-rlm-types",
+ "lash-providers-builtin",
  "lash-sqlite-store",
  "lash-subagents",
  "regex",
@@ -338,7 +339,6 @@ dependencies = [
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
  "lash-provider-openai",
- "lash-rlm-types",
  "lash-sqlite-store",
  "lash-subagents",
  "regex",
@@ -2405,6 +2405,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -2417,6 +2418,15 @@ dependencies = [
  "lash-sqlite-store",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "lash-openai-schema"
+version = "0.2.98"
+dependencies = [
+ "lash-sansio",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2511,10 +2521,10 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "lash",
+ "lash-openai-schema",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
  "uuid",
 ]
@@ -2541,6 +2551,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "lash",
+ "lash-openai-schema",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

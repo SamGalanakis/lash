@@ -87,12 +87,6 @@ pub struct RuntimeEnvironment {
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
 
-    // Retry policy for LLM calls that return `retryable: true` errors.
-    // Default matches legacy behaviour (3 retries at 2s / 5s / 10s).
-    // Use `RetryPolicy::disabled()` in tests or when the host has its
-    // own retry layer.
-    pub retry_policy: lash_sansio::RetryPolicy,
-
     // Host-owned destination for refreshed OAuth credentials. lash-cli
     // points this at `paths::config_file()`; library embedders can
     // leave it `None` and persist via their own channel.
@@ -114,7 +108,6 @@ impl Default for RuntimeEnvironment {
             trace_context: TraceContext::default(),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
-            retry_policy: lash_sansio::RetryPolicy::default(),
             credential_store_path: None,
         }
     }
@@ -140,7 +133,6 @@ impl RuntimeEnvironment {
             trace_context: self.trace_context.clone(),
             sanitizer: self.sanitizer.clone(),
             termination: self.termination.clone(),
-            retry_policy: self.retry_policy.clone(),
             credential_store_path: self.credential_store_path.clone(),
         }
     }
@@ -231,11 +223,6 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.env.termination = termination;
-        self
-    }
-
-    pub fn with_retry_policy(mut self, policy: lash_sansio::RetryPolicy) -> Self {
-        self.env.retry_policy = policy;
         self
     }
 

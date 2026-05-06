@@ -19,9 +19,9 @@ use crate::llm::types::{
 };
 use crate::session_model::message::MessageOrigin;
 use crate::session_model::{
-    Message, MessageRole, MessageSequence, Part, PartKind, PruneState, RetryPolicy, SessionEvent,
+    Message, MessageRole, MessageSequence, Part, PartKind, PruneState, SessionEvent,
     SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, fresh_message_id,
-    make_error_envelope, make_error_event, reassign_part_ids,
+    make_error_event, reassign_part_ids,
 };
 use crate::{CheckpointKind, PluginMessage, ToolResult, TurnOutcome, TurnStop};
 
@@ -204,7 +204,6 @@ where
 }
 
 pub struct WaitingLlmState {
-    pub retry_attempt: usize,
     pub request: LlmRequest,
     driver_state: Option<DriverState>,
 }
@@ -406,7 +405,6 @@ pub struct TurnMachineConfig<M: ModeProtocol = UnitModeProtocol> {
     pub session_id: String,
     pub emit_llm_trace: bool,
     pub termination: M::Termination,
-    pub retry_policy: RetryPolicy,
 }
 
 // ─── Internal state ───
@@ -419,13 +417,6 @@ enum MachineState {
     PrepareIteration,
     WaitingLlm {
         effect_id: EffectId,
-        request: LlmRequest,
-        driver_state: Option<DriverState>,
-        retry_attempt: usize,
-    },
-    WaitingRetry {
-        effect_id: EffectId,
-        retry_attempt: usize,
         request: LlmRequest,
         driver_state: Option<DriverState>,
     },
@@ -623,12 +614,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.apply_actions(actions);
     }
 
-    fn start_llm_request(
-        &mut self,
-        request: LlmRequest,
-        retry_attempt: usize,
-        driver_state: Option<DriverState>,
-    ) {
+    fn start_llm_request(&mut self, request: LlmRequest, driver_state: Option<DriverState>) {
         let tool_list = self
             .config
             .tool_specs
@@ -647,7 +633,6 @@ impl<M: ModeProtocol> TurnMachine<M> {
             effect_id: id,
             request: request.clone(),
             driver_state,
-            retry_attempt,
         };
         self.pending_effects
             .push_back(Effect::LlmCall { id, request });
@@ -711,7 +696,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 DriverAction::StartLlm {
                     request,
                     driver_state,
-                } => self.start_llm_request(request, 0, driver_state),
+                } => self.start_llm_request(request, driver_state),
                 DriverAction::StartTools { calls } => self.start_tool_calls(calls),
                 DriverAction::StartExec { code, driver_state } => {
                     self.start_exec(code, driver_state)
@@ -925,9 +910,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 effect_id,
                 request,
                 driver_state,
-                retry_attempt,
             } if effect_id == id => Some(WaitingLlmState {
-                retry_attempt,
                 request,
                 driver_state,
             }),
@@ -949,15 +932,6 @@ impl<M: ModeProtocol> TurnMachine<M> {
         };
         match result {
             Err(error) => {
-                if error.retryable && waiting.retry_attempt < self.config.retry_policy.max_retries {
-                    self.schedule_llm_retry(
-                        waiting.retry_attempt,
-                        error,
-                        waiting.request,
-                        waiting.driver_state,
-                    );
-                    return;
-                }
                 self.emit_llm_error(error);
             }
             Ok(llm_response) => {
@@ -970,41 +944,6 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 self.apply_actions(actions);
             }
         }
-    }
-
-    fn schedule_llm_retry(
-        &mut self,
-        retry_attempt: usize,
-        error: LlmCallError,
-        request: LlmRequest,
-        driver_state: Option<DriverState>,
-    ) {
-        self.record_llm_error(&error);
-        let delay = self.config.retry_policy.delay_for_attempt(retry_attempt);
-        let reason = error.message.clone();
-        self.emit(SessionEvent::RetryStatus {
-            wait_seconds: delay.as_secs(),
-            attempt: retry_attempt + 2,
-            max_attempts: self.config.retry_policy.max_retries + 1,
-            reason: reason.clone(),
-            envelope: Some(make_error_envelope(
-                "llm_provider",
-                error.code.as_deref(),
-                format!("LLM error: {reason}"),
-                error.raw,
-            )),
-        });
-        let sleep_id = self.next_id();
-        self.state = MachineState::WaitingRetry {
-            effect_id: sleep_id,
-            retry_attempt: retry_attempt + 1,
-            request,
-            driver_state,
-        };
-        self.pending_effects.push_back(Effect::Sleep {
-            id: sleep_id,
-            duration: delay,
-        });
     }
 
     fn llm_response_text<'a>(&self, llm_response: &'a LlmResponse) -> &'a str {
@@ -1166,33 +1105,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.apply_actions(actions);
     }
 
-    fn handle_timeout(&mut self, id: EffectId) {
-        let (effect_id, retry_attempt, request, driver_state) =
-            match std::mem::replace(&mut self.state, MachineState::Finished) {
-                MachineState::WaitingRetry {
-                    effect_id,
-                    retry_attempt,
-                    request,
-                    driver_state,
-                } => (effect_id, retry_attempt, request, driver_state),
-                other => {
-                    self.state = other;
-                    return;
-                }
-            };
-
-        if effect_id != id {
-            self.state = MachineState::WaitingRetry {
-                effect_id,
-                retry_attempt,
-                request,
-                driver_state,
-            };
-            return;
-        }
-
-        self.start_llm_request(request, retry_attempt, driver_state);
-    }
+    fn handle_timeout(&mut self, _id: EffectId) {}
 }
 
 fn token_usage_from_llm_usage(usage: &crate::llm::types::LlmUsage) -> TokenUsage {

@@ -401,3 +401,90 @@
 
   applyFilters();
 })();
+
+// ─── multi-view: drill-in / breadcrumb / browser history ──────────────────
+
+(function () {
+  var tree = window.__lashTraceTree;
+  if (!tree || !tree.length) return;
+
+  var byId = Object.create(null);
+  tree.forEach(function (n) { byId[n.id] = n; });
+
+  var trail = document.getElementById('crumb-trail');
+  var backBtn = document.getElementById('back-btn');
+  var views = Array.prototype.slice.call(document.querySelectorAll('.view'));
+
+  function ancestors(id) {
+    var chain = [];
+    var cur = byId[id];
+    while (cur) { chain.unshift(cur); cur = cur.parent ? byId[cur.parent] : null; }
+    return chain;
+  }
+
+  function renderCrumb(id) {
+    var chain = ancestors(id);
+    if (!chain.length) return;
+    while (trail.children.length > 1) trail.removeChild(trail.lastChild);
+    chain.forEach(function (step, i) {
+      if (i > 0) {
+        var sep = document.createElement('span');
+        sep.className = 'crumb-sep';
+        sep.textContent = '›';
+        trail.appendChild(sep);
+      }
+      var btn = document.createElement('button');
+      btn.className = 'crumb-step';
+      btn.dataset.go = step.id;
+      btn.innerHTML = escapeHtml(step.label) + ' <span class="crumb-id">' + escapeHtml(step.sid) + '</span>';
+      if (i === chain.length - 1) btn.setAttribute('aria-current', 'true');
+      trail.appendChild(btn);
+    });
+    backBtn.disabled = chain.length <= 1;
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function goTo(id, push) {
+    if (!byId[id]) return;
+    views.forEach(function (v) { v.classList.toggle('is-active', v.dataset.view === id); });
+    renderCrumb(id);
+    if (push !== false && location.hash !== '#' + id) {
+      history.pushState({ view: id }, '', '#' + id);
+    }
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+
+  document.addEventListener('click', function (ev) {
+    var t = ev.target.closest && ev.target.closest('[data-go]');
+    if (!t) return;
+    if (!byId[t.dataset.go]) return;
+    ev.preventDefault();
+    goTo(t.dataset.go, true);
+  });
+
+  if (backBtn) {
+    backBtn.addEventListener('click', function () {
+      var cur = views.find(function (v) { return v.classList.contains('is-active'); });
+      if (!cur) return;
+      var node = byId[cur.dataset.view];
+      if (node && node.parent) goTo(node.parent, true);
+    });
+  }
+
+  window.addEventListener('popstate', function (ev) {
+    var v = (ev.state && ev.state.view) || (location.hash.replace(/^#/, '') || 'root');
+    goTo(v, false);
+  });
+
+  var initial = location.hash.replace(/^#/, '') || 'root';
+  if (byId[initial]) {
+    goTo(initial, false);
+  } else {
+    renderCrumb('root');
+  }
+})();

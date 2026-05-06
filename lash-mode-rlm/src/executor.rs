@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use lash::plugin::project_observation_text;
+use lash_rlm_types::PROJECTED_JSON_TAG;
 use lash::{
     AttachmentRef, ExecRequest, ExecResponse, ModeExecutionContext, ModeToolBatchItem,
     ModeToolReply, SessionError, TextProjectionMetadata, ToolImage,
@@ -765,7 +766,16 @@ fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
             }
             FlowValue::Record(record) => flow_record_to_json_value(record).await,
             FlowValue::Projected(value) => {
-                flow_to_json_value(&value.materialize_async().await).await
+                // Canonical JSON encoding for projected values: a single-key
+                // object `{"__projected__": <inner>}` rather than the bare
+                // inner value. Tools that don't care unwrap via
+                // `lash::tools::unwrap_projected_arg`; tools that do (e.g.
+                // `spawn_agent` / `continue_as` `seed:`) inspect the wrapper
+                // to preserve "kind" across the lashlang→host boundary.
+                let inner = flow_to_json_value(&value.materialize_async().await).await;
+                let mut obj = serde_json::Map::with_capacity(1);
+                obj.insert(PROJECTED_JSON_TAG.to_string(), inner);
+                Value::Object(obj)
             }
         }
     })
@@ -1188,6 +1198,45 @@ mod tests {
                     .to_string()
                     .contains("read-only projected binding")
             );
+        });
+    }
+
+    #[test]
+    fn flow_to_json_value_emits_projected_marker_for_projected_values() {
+        block_on(async {
+            let projected = ProjectedValue::scalar("input", FlowValue::String("hello".into()));
+            let value = flow_to_json_value(&FlowValue::Projected(projected)).await;
+            let obj = value
+                .as_object()
+                .expect("expected projected wrapper object");
+            assert_eq!(obj.len(), 1, "wrapper should have exactly one key");
+            assert_eq!(
+                obj.get(PROJECTED_JSON_TAG)
+                    .and_then(|v| v.as_str())
+                    .expect("inner string"),
+                "hello"
+            );
+        });
+    }
+
+    #[test]
+    fn flow_record_to_json_value_marks_only_projected_entries() {
+        block_on(async {
+            let projected = ProjectedValue::scalar("input", FlowValue::String("p".into()));
+            let mut record = FlowRecord::default();
+            record.insert("proj".to_string(), FlowValue::Projected(projected));
+            record.insert("glob".to_string(), FlowValue::String("g".into()));
+
+            let value = flow_record_to_json_value(&record).await;
+            let obj = value.as_object().expect("record object");
+            // proj entry must be wrapped in {"__projected__": ...}
+            let proj = obj
+                .get("proj")
+                .and_then(|v| v.as_object())
+                .expect("proj entry is an object");
+            assert!(proj.contains_key(PROJECTED_JSON_TAG));
+            // glob entry stays a bare string
+            assert_eq!(obj.get("glob").and_then(|v| v.as_str()).expect("glob"), "g");
         });
     }
 }

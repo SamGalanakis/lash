@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::llm::transport::LlmTransportError;
+use crate::llm::transport::{LlmTransportError, ProviderFailureKind};
 
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_CHUNK_TIMEOUT_MS: u64 = 120_000;
@@ -66,6 +66,7 @@ where
     match timeout {
         Some(duration) => tokio::time::timeout(duration, future).await.map_err(|_| {
             LlmTransportError::new(timeout_message)
+                .with_kind(ProviderFailureKind::Timeout)
                 .retryable(true)
                 .with_code("timeout")
         })?,
@@ -83,6 +84,7 @@ pub async fn send_request(
         async move {
             request.send().await.map_err(|e| {
                 let error = LlmTransportError::new(format!("HTTP request failed: {e}"))
+                    .with_kind(ProviderFailureKind::Transport)
                     .retryable(is_retryable_http_error(&e));
                 if let Some(request_body) = request_body {
                     error.with_request_body(String::from_utf8_lossy(&request_body).into_owned())
@@ -106,6 +108,7 @@ pub async fn read_response_text(
         async move {
             response.text().await.map_err(|e| {
                 LlmTransportError::new(format!("HTTP response read failed: {e}"))
+                    .with_kind(ProviderFailureKind::Transport)
                     .retryable(is_retryable_http_error(&e))
             })
         },

@@ -12,20 +12,13 @@
   <div class="page">
     <main class="frame">
       <header class="hero">
-        <div>
-          <div class="eyebrow">Architecture chapter 05</div>
-          <h1>runtime<span class="slash">/</span>host</h1>
-          <p>The async runtime is the host boundary around the pure turn machine. It owns residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and app embedding outside the core session model.</p>
-        </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">Host object</div><strong><code>LashRuntime</code></strong><span>Streams turns, owns live sessions, and satisfies protocol effects.</span></article>
-          <article class="card"><div class="micro-label">Store seam</div><strong><code>RuntimePersistence</code></strong><span>Runtime contract implemented by <code>lash-sqlite-store</code>.</span></article>
-          <article class="card"><div class="micro-label">Read seam</div><strong><code>SessionReadView</code></strong><span>Public state view for plugins, exports, UI projection, and history transforms.</span></article>
-        </div>
+        <div class="eyebrow">Architecture chapter 05</div>
+        <h1>runtime<span class="slash">/</span>host</h1>
+        <p>The async runtime is the host boundary around the pure turn machine. It owns residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and app embedding outside the core session model.</p>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a class="active" href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a class="active" href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./lashlang.html">Lashlang</a><a href="./html-exporter.html">HTML Exporter</a>
       </nav>
 
       <section class="content">
@@ -76,7 +69,9 @@ flowchart TD
               <thead><tr><th>Trait</th><th>Runtime responsibility</th></tr></thead>
               <tbody>
                 <tr><td><code>SessionSnapshotHost</code>, <code>ToolCatalogHost</code></td><td>Read current state and tool catalogs through stable projections.</td></tr>
+                <tr><td><code>DynamicToolHost</code></td><td>Read and mutate per-session dynamic tool availability without exposing the inner registry.</td></tr>
                 <tr><td><code>SessionLifecycleHost</code>, <code>TurnHost</code></td><td>Create, fork, continue, and stream managed sessions.</td></tr>
+                <tr><td><code>SessionGraphHost</code></td><td>Append plugin-authored nodes to a session graph through a guarded contract.</td></tr>
                 <tr><td><code>TaskHost</code>, <code>MonitorHost</code></td><td>Register background tasks, monitors, async handles, wakeups, and cancellation.</td></tr>
                 <tr><td><code>PromptHost</code>, <code>TraceHost</code></td><td>Expose prompt state and trace sinks to hooks without exposing session internals.</td></tr>
                 <tr><td><code>DirectCompletionHost</code></td><td>Run one-shot completions for helper tools such as <code>llm_query</code> and account for their usage.</td></tr>

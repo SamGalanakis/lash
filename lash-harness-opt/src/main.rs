@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -472,11 +472,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
     }
 }
 
-fn with_proposal_artifact_refs(
-    mut value: Value,
-    prompt_path: &PathBuf,
-    output_path: &PathBuf,
-) -> Value {
+fn with_proposal_artifact_refs(mut value: Value, prompt_path: &Path, output_path: &Path) -> Value {
     let Some(proposals) = value.get_mut("proposals").and_then(Value::as_array_mut) else {
         return value;
     };

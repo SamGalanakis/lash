@@ -12,27 +12,20 @@
   <div class="page">
     <main class="frame">
       <header class="hero">
-        <div>
-          <div class="eyebrow">Architecture chapter 03</div>
-          <h1>data<span class="slash">/</span>flow</h1>
-          <p>Turn data starts as host input. It becomes normalized messages and attachment refs, passes through plugin context transforms, drives a sans-IO effect loop, commits to the session graph, and finally projects into UI and export views.</p>
-        </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">Write model</div><strong><code>SessionGraph</code></strong><span>Append or full-replace commits preserve durable event history.</span></article>
-          <article class="card"><div class="micro-label">Read model</div><strong><code>SessionReadView</code></strong><span>Public read seam for plugins, CLI projection, export, and history transforms.</span></article>
-          <article class="card"><div class="micro-label">UI model</div><strong><code>UiTimeline</code></strong><span>CLI-only render vocabulary derived from chronological projection.</span></article>
-        </div>
+        <div class="eyebrow">Architecture chapter 03</div>
+        <h1>data<span class="slash">/</span>flow</h1>
+        <p>Turn data starts as host input. It becomes normalized messages and attachment refs, passes through plugin context transforms, drives a sans-IO effect loop, commits to the session graph, and finally projects into UI and export views.</p>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a><a href="./index.html">Index</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a class="active" href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./files.html">Files</a><a href="./lashlang.html">Lashlang</a>
+        <a href="../index.html">← Docs</a><a href="./index.html">Architecture</a><a href="./overview.html">Overview</a><a href="./modules.html">Modules</a><a class="active" href="./flow.html">Data Flow</a><a href="./execution.html">Execution</a><a href="./runtime.html">Runtime</a><a href="./abstractions.html">Abstractions</a><a href="./deps.html">Dependencies</a><a href="./lashlang.html">Lashlang</a><a href="./html-exporter.html">HTML Exporter</a>
       </nav>
 
       <section class="content">
         <div class="section">
           <div class="section-header">
             <h2>Turn Lifecycle</h2>
-            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine.</p>
+            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine. Hosts can seed read-only host values into a session's lashlang scope through <code>RlmProjectedBindings</code>: embedders apply them via <code>LashSession::rlm_project(bindings)</code>, which under the hood installs <code>rlm_session_projection_extension</code> on the runtime's RLM mode (see <code>lash-mode-rlm/src/projected_bindings.rs</code> and <code>lash-embed/src/lib.rs</code>).</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Turn effect loop</div>
@@ -105,9 +98,9 @@ flowchart LR
             <table>
               <thead><tr><th>Hook</th><th>Effect</th></tr></thead>
               <tbody>
-                <tr><td><code>BeforeState</code></td><td>Trims content before it is committed to the durable session graph and tool-result records.</td></tr>
-                <tr><td><code>BeforeModel</code></td><td>Trims content right before it is shown to the LLM in the next request.</td></tr>
-                <tr><td><code>BeforeHistory</code></td><td>Trims content as it rolls into compacted history projections.</td></tr>
+                <tr><td><code>BeforeState</code></td><td>Last chance to shape a result before it is committed to the durable session graph; only string-typed JSON payloads are truncated, structured values pass through.</td></tr>
+                <tr><td><code>BeforeModel</code></td><td>Trims content right before it is shown to the LLM in the next request, including non-string payloads rendered for display.</td></tr>
+                <tr><td><code>BeforeHistory</code></td><td>Same string-only truncation as <code>BeforeState</code>, applied as the result rolls into compacted history projections.</td></tr>
               </tbody>
             </table>
           </div>
@@ -117,7 +110,7 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Graph To UI Projection</h2>
-            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order.</p>
+            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order. <code>lash-export</code> walks an entire session tree: <code>load_tree_from_paths</code> assembles a <code>LoadedSessionTree</code> from the SQLite store and trace JSONL, and <code>render_tree</code> emits a multi-view HTML (<code>lash-export/src/tree.rs</code>, <code>html.rs</code>).</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Read projection path</div>
@@ -216,7 +209,7 @@ flowchart TD
         </div>
       </section>
 
-      <footer class="footer">Flow anchors: <code>lash/src/runtime/turn_loop.rs</code>, <code>turn_driver.rs</code>, <code>turn_commit_pipeline.rs</code>, <code>session_graph.rs</code>, <code>lash-cli/src/app/projection.rs</code>.</footer>
+      <footer class="footer">Flow anchors: <code>lash/src/runtime/turn_loop.rs</code>, <code>turn_driver.rs</code>, <code>turn_commit_pipeline.rs</code>, <code>lash/src/session_graph.rs</code>, <code>lash-cli/src/app/projection.rs</code>.</footer>
     </main>
   </div>
 </body>

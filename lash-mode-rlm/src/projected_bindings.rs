@@ -69,6 +69,20 @@ impl RlmProjectedBindings {
         }
         Ok(self)
     }
+
+    /// Hydrate from a wire-format `RlmProjectedSeedSnapshot`. Each entry is
+    /// re-projected via `bind_json`. Used by RLM mode to seed projections on a
+    /// child session (spawn_agent / continue_as) from the parent's classified
+    /// seed map.
+    pub fn from_snapshot(
+        snapshot: &lash_rlm_types::RlmProjectedSeedSnapshot,
+    ) -> Result<Self, ProjectedBindingError> {
+        let mut out = Self::new();
+        for (name, value) in &snapshot.entries {
+            out = out.bind_json(name.clone(), value.clone())?;
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Clone, Default)]

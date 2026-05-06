@@ -15,8 +15,12 @@ pub mod html;
 pub mod json;
 pub mod markdown;
 pub mod trace;
+pub mod tree;
 
 pub use trace::LlmPromptSnapshot;
+pub use tree::{
+    LoadedSessionNode, LoadedSessionTree, NodeRelation, SubagentEdge, load_tree_from_paths,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -83,17 +87,53 @@ pub fn render(session: &LoadedSession, format: ExportFormat) -> String {
     }
 }
 
+/// Render a multi-session tree. Currently html-only; json falls back to
+/// rendering the root session alone.
+pub fn render_tree(tree: &LoadedSessionTree, format: ExportFormat) -> String {
+    match format {
+        ExportFormat::Html => html::render_tree(tree),
+        ExportFormat::Json => {
+            let root_session = LoadedSession {
+                meta: Some(tree.root().meta.clone()),
+                chronological: tree.root().chronological.clone(),
+                trace_path: tree.trace_path.clone(),
+                context_window_tokens: tree.root().context_window_tokens,
+                llm_prompts: tree.root().llm_prompts.clone(),
+            };
+            json::render(&root_session)
+        }
+    }
+}
+
 /// End-to-end: load a session DB plus full provider trace and write the
 /// rendered output to disk. If `out` is `None`, returns the rendered string
 /// instead of writing it.
+///
+/// Multi-session aware: walks the sessions directory next to `store_path`
+/// for descendants reachable via `parent_session_id`. If any are found the
+/// html exporter renders them as a tree of views with breadcrumb navigation;
+/// otherwise it falls back to single-session rendering.
 pub fn export(
     store_path: &Path,
     trace_path: &Path,
     format: ExportFormat,
     out: Option<&Path>,
 ) -> Result<String> {
-    let session = load_session_from_paths(store_path, trace_path)?;
-    let rendered = render(&session, format);
+    let rendered = match format {
+        ExportFormat::Html => {
+            let tree = load_tree_from_paths(store_path, trace_path)?;
+            if tree.nodes.len() > 1 {
+                render_tree(&tree, format)
+            } else {
+                let session = load_session_from_paths(store_path, trace_path)?;
+                render(&session, format)
+            }
+        }
+        ExportFormat::Json => {
+            let session = load_session_from_paths(store_path, trace_path)?;
+            render(&session, format)
+        }
+    };
     if let Some(path) = out {
         fs::write(path, &rendered)
             .with_context(|| format!("writing export to {}", path.display()))?;

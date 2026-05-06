@@ -285,9 +285,10 @@ mod tests {
             async_task_id: None,
         };
 
-        let request = build_spawn_create_request(&registry, &context, "explore", None)
-            .await
-            .expect("spawn request");
+        let request =
+            build_spawn_create_request(&registry, &context, "explore", None, Default::default())
+                .await
+                .expect("spawn request");
         let child_policy = request.policy.expect("child policy");
 
         // The capability looked up the live policy's provider, not
@@ -333,6 +334,7 @@ mod tests {
                 "properties": { "ok": { "type": "boolean" } },
                 "required": ["ok"]
             })),
+            Default::default(),
         )
         .await
         .expect("structured spawn request");

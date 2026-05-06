@@ -2027,3 +2027,103 @@ async fn lash_type_wrapper_survives_round_trip_through_json() {
         .expect("round-trip must preserve wrapper");
     assert_eq!(schema["type"], Value::String("object".into()));
 }
+
+// ----------------------------------------------------------------------------
+// Projection propagation: `Value::Projected` carries through path expressions
+// (Field / Index) but is stripped by computation. This is the lashlang side
+// of the unified `seed:` channel for spawn_agent / continue_as: the host wire
+// format (`{"__projected__": <inner>}`) only needs a wrapper to survive the
+// JSON boundary, but path-rooted entry-values must already be projected at
+// runtime so they serialize that way.
+// ----------------------------------------------------------------------------
+
+fn projected_record_bindings(name: &str, record: serde_json::Value) -> ProjectedBindings {
+    let mut projected = ProjectedBindings::new();
+    projected.insert(
+        name,
+        ProjectedValue::scalar(name.to_string(), crate::runtime::from_json(record)),
+    );
+    projected
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn field_access_on_projected_record_returns_projected() {
+    let projected = projected_record_bindings(
+        "input",
+        serde_json::json!({ "prompt": "hello", "depth": 3 }),
+    );
+    let (value, _) = exec_with_projected("submit input.prompt", &projected)
+        .await
+        .expect("projected field read");
+    assert!(
+        matches!(value, Value::Projected(_)),
+        "expected `input.prompt` to stay projected, got {value:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn nested_field_access_keeps_projection() {
+    let projected =
+        projected_record_bindings("cfg", serde_json::json!({ "options": { "timeout": 30 } }));
+    let (value, _) = exec_with_projected("submit cfg.options.timeout", &projected)
+        .await
+        .expect("nested projected field read");
+    assert!(
+        matches!(value, Value::Projected(_)),
+        "expected nested field to stay projected, got {value:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn index_on_projected_list_returns_projected() {
+    let projected =
+        projected_record_bindings("items", serde_json::json!(["alpha", "beta", "gamma"]));
+    let (value, _) = exec_with_projected("submit items[1]", &projected)
+        .await
+        .expect("projected index read");
+    assert!(
+        matches!(value, Value::Projected(_)),
+        "expected `items[1]` to stay projected, got {value:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn computation_strips_projection() {
+    let projected = projected_record_bindings("input", serde_json::json!({ "n": 7 }));
+    let (value, _) = exec_with_projected("submit input.n + 1", &projected)
+        .await
+        .expect("computed value");
+    assert!(
+        !matches!(value, Value::Projected(_)),
+        "computation should strip projection, got {value:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn record_literal_preserves_per_entry_projection() {
+    let projected = projected_record_bindings("input", serde_json::json!({ "prompt": "hello" }));
+    let (value, _) = exec_with_projected(
+        "g = 42\nsubmit { proj: input.prompt, glob: g, lit: 99 }",
+        &projected,
+    )
+    .await
+    .expect("record literal");
+    let Value::Record(record) = value else {
+        panic!("expected record");
+    };
+    assert!(
+        matches!(record.get("proj"), Some(Value::Projected(_))),
+        "expected `proj` entry to stay projected, got {:?}",
+        record.get("proj")
+    );
+    assert!(
+        !matches!(record.get("glob"), Some(Value::Projected(_))),
+        "global `glob` should not be projected, got {:?}",
+        record.get("glob")
+    );
+    assert!(
+        !matches!(record.get("lit"), Some(Value::Projected(_))),
+        "literal `lit` should not be projected, got {:?}",
+        record.get("lit")
+    );
+}

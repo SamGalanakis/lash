@@ -17,15 +17,15 @@
           <p><strong>lash</strong> is a Rust workspace for embeddable coding agents. The core is a layered agent runtime — a sans-IO turn machine wrapped by an async host runtime, with mode plugins, provider adapters, dynamic tools, durable session graph storage, embedding APIs, benchmark runners, and a CLI/TUI host on top.</p>
         </div>
         <div class="hero-meta">
-          <article class="card"><div class="micro-label">Workspace</div><strong>37 Cargo members</strong><span>Runtime, embed API, CLI/TUI, providers, mode plugins, tool plugins, export, trace, file index, harness optimizer, lashlang, examples, and benchmark runners.</span></article>
-          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~168k LOC</strong><span>Measured by line count over <code>*.rs</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
+          <article class="card"><div class="micro-label">Workspace</div><strong>38 Cargo members</strong><span>Runtime, embed API, CLI/TUI, providers, mode plugins, tool plugins, export, trace, file index, harness optimizer, lashlang, examples, and benchmark runners.</span></article>
+          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~196k LOC</strong><span>Measured by line count over <code>*.rs</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
           <article class="card"><div class="micro-label">Architecture root</div><strong><code>docs/architecture/</code></strong><span>Chaptered documentation matching the current runtime, projection seams, and handoff continuations.</span></article>
         </div>
       </header>
 
       <nav class="nav" aria-label="Architecture pages">
-        <a href="../index.html">Docs Home</a>
-        <a class="active" href="./index.html">Index</a>
+        <a href="../index.html">← Docs</a>
+        <a class="active" href="./index.html">Architecture</a>
         <a href="./overview.html">Overview</a>
         <a href="./modules.html">Modules</a>
         <a href="./flow.html">Data Flow</a>
@@ -33,8 +33,8 @@
         <a href="./runtime.html">Runtime</a>
         <a href="./abstractions.html">Abstractions</a>
         <a href="./deps.html">Dependencies</a>
-        <a href="./files.html">Files</a>
         <a href="./lashlang.html">Lashlang</a>
+        <a href="./html-exporter.html">HTML Exporter</a>
       </nav>
 
       <section class="content">
@@ -115,21 +115,21 @@
               </a>
             </li>
             <li>
-              <a href="./files.html">
+              <a href="./lashlang.html">
                 <span class="chapter-num">08</span>
                 <div class="chapter-meta">
-                  <h3>Files</h3>
-                  <p>High-signal file map — runtime, providers, tools, CLI/TUI, export, tracing, docs maintenance.</p>
+                  <h3>Lashlang</h3>
+                  <p>RLM language and runtime reference — async handles, image attachment behavior, persistent REPL state.</p>
                 </div>
                 <span class="chapter-arrow">→</span>
               </a>
             </li>
             <li>
-              <a href="./lashlang.html">
+              <a href="./html-exporter.html">
                 <span class="chapter-num">09</span>
                 <div class="chapter-meta">
-                  <h3>Lashlang</h3>
-                  <p>RLM language and runtime reference — async handles, image attachment behavior, persistent REPL state.</p>
+                  <h3>HTML Exporter</h3>
+                  <p>Trace export render path for the two cross-session edges — inline handoff seams, drill-in subagent views, sticky breadcrumb, and the live mockup.</p>
                 </div>
                 <span class="chapter-arrow">→</span>
               </a>

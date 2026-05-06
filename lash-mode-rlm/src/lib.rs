@@ -12,7 +12,7 @@ mod protocol;
 mod rlm_support;
 mod stream_mask;
 
-pub use control_tools::continue_as_tool_definition;
+pub use control_tools::{continue_as_tool_definition, rlm_seed_initial_nodes};
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
 pub use projected_bindings::{
