@@ -127,8 +127,10 @@ impl<'de> Deserialize<'de> for RequestTimeout {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderOptions {
+    #[serde(default)]
     pub reliability: ProviderReliability,
 }
 
@@ -139,43 +141,6 @@ impl ProviderOptions {
 
     pub fn llm_timeouts(&self) -> LlmTimeouts {
         self.reliability.timeouts.llm_timeouts()
-    }
-}
-
-impl Serialize for ProviderOptions {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Wire<'a> {
-            reliability: &'a ProviderReliability,
-        }
-
-        Wire {
-            reliability: &self.reliability,
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ProviderOptions {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Wire {
-            #[serde(default)]
-            reliability: Option<ProviderReliability>,
-            #[serde(default)]
-            timeout: Option<RequestTimeout>,
-            #[serde(default)]
-            chunk_timeout: Option<u64>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        if let Some(reliability) = wire.reliability {
-            return Ok(Self { reliability });
-        }
-        let mut reliability = ProviderReliability::default_llm();
-        reliability.timeouts.request_timeout = wire.timeout;
-        reliability.timeouts.chunk_timeout = wire.chunk_timeout;
-        Ok(Self { reliability })
     }
 }
 
@@ -392,6 +357,7 @@ impl ProviderReliabilityBuilder {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explore_tier_subagent_execution_mode: Option<crate::ExecutionMode>,
@@ -1335,15 +1301,9 @@ impl<'de> Deserialize<'de> for ProviderSpec {
             let raw = map
                 .remove("type")
                 .ok_or_else(|| serde::de::Error::missing_field("type"))?;
-            let kind = raw
-                .as_str()
+            raw.as_str()
                 .ok_or_else(|| serde::de::Error::custom("provider `type` must be a string"))?
-                .to_string();
-            // Legacy alias normalization.
-            match kind.as_str() {
-                "openai-generic" => "openai-compatible".to_string(),
-                _ => kind,
-            }
+                .to_string()
         } else {
             return Err(serde::de::Error::custom(
                 "provider spec must be a JSON object",
@@ -1900,16 +1860,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_spec_accepts_legacy_openai_generic_alias() {
-        let raw = serde_json::json!({
-            "type": "openai-generic",
-            "api_key": "k"
-        });
-        let spec: ProviderSpec = serde_json::from_value(raw).expect("legacy alias");
-        assert_eq!(spec.kind, "openai-compatible");
-    }
-
-    #[test]
     fn lash_config_roundtrips_existing_shape() {
         let raw = serde_json::json!({
             "active_provider": "openai-compatible",
@@ -1926,21 +1876,6 @@ mod tests {
         let spec = cfg.active_provider_spec();
         assert_eq!(spec.kind, "openai-compatible");
         assert_eq!(spec.config["api_key"], serde_json::json!("k"));
-    }
-
-    #[test]
-    fn legacy_provider_options_deserialize_into_reliability_timeouts() {
-        let options: ProviderOptions = serde_json::from_value(serde_json::json!({
-            "timeout": false,
-            "chunk_timeout": 42
-        }))
-        .expect("legacy options");
-
-        assert_eq!(
-            options.reliability.timeouts.request_timeout,
-            Some(RequestTimeout::Disabled)
-        );
-        assert_eq!(options.reliability.timeouts.chunk_timeout, Some(42));
     }
 
     #[test]
@@ -2176,26 +2111,5 @@ mod tests {
             .expect("retry after set_options");
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn legacy_runtime_context_strategy_is_ignored() {
-        let raw = serde_json::json!({
-            "active_provider": "openai-compatible",
-            "providers": {
-                "openai-compatible": {
-                    "type": "openai-compatible",
-                    "api_key": "k",
-                    "base_url": "https://example.com/v1"
-                }
-            },
-            "runtime": {
-                "context_strategy": {
-                    "type": "rolling_context"
-                }
-            }
-        });
-        let _cfg: LashConfig =
-            serde_json::from_value(raw).expect("legacy config json still deserializes");
     }
 }
