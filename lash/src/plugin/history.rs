@@ -430,6 +430,7 @@ mod tests {
             result: serde_json::json!({"answer": tool}),
             success: true,
             duration_ms: 5,
+            control: None,
         }
     }
 
@@ -451,6 +452,7 @@ mod tests {
             result: serde_json::json!("hi"),
             success: true,
             duration_ms: 5,
+            control: None,
         };
         state.session_graph.replace_active_read_state(
             &[user.clone(), assistant.clone()],

@@ -782,6 +782,7 @@ impl PluginSession {
                             success: tool_call.success,
                             result: tool_call.result.clone(),
                             images: Vec::new(),
+                            control: tool_call.control.clone(),
                         },
                         duration_ms: tool_call.duration_ms,
                         host: host.clone(),

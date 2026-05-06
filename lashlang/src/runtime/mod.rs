@@ -12,6 +12,8 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -156,7 +158,7 @@ impl Serialize for Value {
     where
         S: Serializer,
     {
-        to_json(self).serialize(serializer)
+        to_json_blocking(self).serialize(serializer)
     }
 }
 
@@ -203,30 +205,64 @@ pub struct ProjectedValue {
 
 #[derive(Clone)]
 enum ProjectedKind {
-    Value(Arc<Value>),
-    List(Arc<dyn ProjectedList>),
+    Scalar(Arc<Value>),
+    Custom(Arc<dyn ProjectedHostValue>),
 }
 
-pub trait ProjectedList: Send + Sync {
-    fn len(&self) -> usize;
-    fn is_empty(&self) -> bool {
-        self.len() == 0
+pub type ProjectedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProjectedRead {
+    Missing,
+    Value(Value),
+}
+
+pub trait ProjectedHostValue: Send + Sync {
+    fn type_name(&self) -> &'static str;
+
+    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
+        Box::pin(async { None })
     }
-    fn get(&self, index: usize) -> Option<Value>;
+
+    fn is_empty(&self) -> ProjectedFuture<'_, bool> {
+        Box::pin(async { self.len().await.unwrap_or(0) == 0 })
+    }
+
+    fn get_index(&self, _index: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn get_field(&self, _field: Arc<str>) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn contains(&self, _needle: Value) -> ProjectedFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
+    fn keys(&self) -> ProjectedFuture<'_, Vec<String>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    fn render(&self) -> ProjectedFuture<'_, String> {
+        Box::pin(async { format!("<{}>", self.type_name()) })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value>;
 }
 
 impl ProjectedValue {
-    pub fn value(name: impl Into<Arc<str>>, value: Value) -> Self {
+    pub fn scalar(name: impl Into<Arc<str>>, value: Value) -> Self {
         Self {
             name: name.into(),
-            kind: ProjectedKind::Value(Arc::new(value)),
+            kind: ProjectedKind::Scalar(Arc::new(value)),
         }
     }
 
-    pub fn list(name: impl Into<Arc<str>>, list: Arc<dyn ProjectedList>) -> Self {
+    pub fn custom(name: impl Into<Arc<str>>, value: Arc<dyn ProjectedHostValue>) -> Self {
         Self {
             name: name.into(),
-            kind: ProjectedKind::List(list),
+            kind: ProjectedKind::Custom(value),
         }
     }
 
@@ -234,37 +270,73 @@ impl ProjectedValue {
         &self.name
     }
 
-    fn len(&self) -> usize {
+    async fn len(&self) -> usize {
         match &self.kind {
-            ProjectedKind::Value(value) => value_len(value).unwrap_or(0),
-            ProjectedKind::List(list) => list.len(),
+            ProjectedKind::Scalar(value) => value_len(value).unwrap_or(0),
+            ProjectedKind::Custom(value) => value.len().await.unwrap_or(0),
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.len() == 0
+    async fn is_empty(&self) -> bool {
+        match &self.kind {
+            ProjectedKind::Scalar(value) => value_len(value).unwrap_or(0) == 0,
+            ProjectedKind::Custom(value) => value.is_empty().await,
+        }
     }
 
-    fn get_index(&self, index: &Value) -> Result<Value, RuntimeError> {
+    async fn get_index(&self, index: &Value) -> Result<Value, RuntimeError> {
         match &self.kind {
-            ProjectedKind::Value(value) => read_index((**value).clone(), index.clone()),
-            ProjectedKind::List(list) => {
-                let idx = resolve_index(index, list.len())?;
-                Ok(idx.and_then(|idx| list.get(idx)).unwrap_or(Value::Null))
-            }
+            ProjectedKind::Scalar(value) => read_index_direct((**value).clone(), index.clone()),
+            ProjectedKind::Custom(value) => match value.get_index(index.clone()).await {
+                ProjectedRead::Missing => Ok(Value::Null),
+                ProjectedRead::Value(value) => Ok(value),
+            },
+        }
+    }
+
+    async fn get_field(&self, field: &Name) -> Result<Value, RuntimeError> {
+        match &self.kind {
+            ProjectedKind::Scalar(value) => read_field_direct((**value).clone(), field),
+            ProjectedKind::Custom(value) => match value.get_field(field.text.clone()).await {
+                ProjectedRead::Missing => Ok(Value::Null),
+                ProjectedRead::Value(value) => Ok(value),
+            },
+        }
+    }
+
+    async fn contains(&self, needle: &Value) -> Result<bool, RuntimeError> {
+        match &self.kind {
+            ProjectedKind::Scalar(value) => execute_contains_direct(value, needle),
+            ProjectedKind::Custom(value) => Ok(value.contains(needle.clone()).await),
+        }
+    }
+
+    async fn keys(&self) -> Vec<String> {
+        match &self.kind {
+            ProjectedKind::Scalar(value) => match value.as_ref() {
+                Value::Record(record) => record.keys().map(ToString::to_string).collect(),
+                _ => Vec::new(),
+            },
+            ProjectedKind::Custom(value) => value.keys().await,
+        }
+    }
+
+    pub async fn render(&self) -> String {
+        match &self.kind {
+            ProjectedKind::Scalar(value) => stringify_value_async(value).await.unwrap_or_default(),
+            ProjectedKind::Custom(value) => value.render().await,
+        }
+    }
+
+    pub async fn materialize_async(&self) -> Value {
+        match &self.kind {
+            ProjectedKind::Scalar(value) => (**value).clone(),
+            ProjectedKind::Custom(value) => value.materialize().await,
         }
     }
 
     pub fn materialize(&self) -> Value {
-        match &self.kind {
-            ProjectedKind::Value(value) => (**value).clone(),
-            ProjectedKind::List(list) => Value::List(
-                (0..list.len())
-                    .filter_map(|index| list.get(index))
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-        }
+        futures_executor::block_on(self.materialize_async())
     }
 }
 
@@ -273,7 +345,6 @@ impl fmt::Debug for ProjectedValue {
         f.debug_struct("ProjectedValue")
             .field("name", &self.name)
             .field("kind", &self.value_type_name())
-            .field("len", &self.len())
             .finish()
     }
 }
@@ -287,8 +358,8 @@ impl PartialEq for ProjectedValue {
 impl ProjectedValue {
     pub(crate) fn value_type_name(&self) -> &'static str {
         match &self.kind {
-            ProjectedKind::Value(value) => value_type_name(value),
-            ProjectedKind::List(_) => "list",
+            ProjectedKind::Scalar(value) => value_type_name(value),
+            ProjectedKind::Custom(value) => value.type_name(),
         }
     }
 }
@@ -304,7 +375,7 @@ impl fmt::Display for Value {
                 write!(
                     f,
                     "{}",
-                    serde_json::to_string(&to_json(self)).unwrap_or_default()
+                    serde_json::to_string(&to_json_blocking(self)).unwrap_or_default()
                 )
             }
         }
@@ -762,44 +833,101 @@ fn result_wrapper_names() -> &'static ResultWrapperNames {
 #[derive(Clone, Copy)]
 enum Instruction {
     PushConst(usize),
+    PushNull,
+    PushBool(bool),
+    PushNumber(f64),
     LoadName(usize),
     StoreName(usize),
-    StoreConst { slot: usize, constant: usize },
+    StoreConst {
+        slot: usize,
+        constant: usize,
+    },
     BuildList(usize),
     BuildRecord(usize),
-    LoadField { slot: usize, field: usize },
-    LoadFieldUnwrap { slot: usize, field: usize },
+    LoadField {
+        slot: usize,
+        field: usize,
+    },
+    LoadFieldUnwrap {
+        slot: usize,
+        field: usize,
+    },
     Field(usize),
     Index,
-    PathAssign { slot: usize, path: usize },
+    PathAssign {
+        slot: usize,
+        path: usize,
+    },
     ResultUnwrap,
     Unary(UnaryOp),
     Binary(BinaryOp),
     ToBool,
     Jump(usize),
     JumpIfFalse(usize),
+    JumpIfCompareFalse {
+        op: BinaryOp,
+        target: usize,
+    },
+    JumpIfSlotNumberCompareFalse {
+        slot: usize,
+        op: BinaryOp,
+        right: f64,
+        target: usize,
+    },
+    JumpIfSlotNumberBinaryCompareFalse {
+        slot: usize,
+        binary_op: BinaryOp,
+        binary_right: f64,
+        compare_op: BinaryOp,
+        compare_right: f64,
+        target: usize,
+    },
     JumpIfTrue(usize),
-    CallTool { name: usize, keys: usize },
-    CallToolUnwrap { name: usize, keys: usize },
-    StartCallTool { name: usize, keys: usize },
+    CallTool {
+        name: usize,
+        keys: usize,
+    },
+    CallToolUnwrap {
+        name: usize,
+        keys: usize,
+    },
+    StartCallTool {
+        name: usize,
+        keys: usize,
+    },
     AwaitHandle,
     AwaitHandleUnwrap,
     CancelHandle,
-    CallBuiltin { builtin: Builtin, argc: usize },
+    CallBuiltin {
+        builtin: Builtin,
+        argc: usize,
+    },
     Len,
     Join,
     Validate,
     ValidateCompiled(usize),
     Push,
-    Range { argc: usize },
+    Range {
+        argc: usize,
+    },
     FormatCompiled(usize),
     AddAssign(usize),
+    AddAssignNumber {
+        slot: usize,
+        right: f64,
+    },
+    AddAssignIndexNumber {
+        slot: usize,
+        right: f64,
+    },
     AppendAssign(usize),
     Print,
     Submit,
     Pop,
     BeginIter(usize),
-    IterNext { jump_to: usize },
+    IterNext {
+        jump_to: usize,
+    },
     EndIter,
     ParallelCalls(usize),
     ParallelCallsValue(usize),
@@ -841,7 +969,10 @@ enum Builtin {
 impl Instruction {
     fn profile_tag(self) -> InstructionProfileTag {
         match self {
-            Instruction::PushConst(_) => InstructionProfileTag::PushConst,
+            Instruction::PushConst(_)
+            | Instruction::PushNull
+            | Instruction::PushBool(_)
+            | Instruction::PushNumber(_) => InstructionProfileTag::PushConst,
             Instruction::LoadName(_) => InstructionProfileTag::LoadName,
             Instruction::StoreName(_)
             | Instruction::StoreConst { .. }
@@ -857,7 +988,12 @@ impl Instruction {
             Instruction::Binary(_) => InstructionProfileTag::Binary,
             Instruction::ToBool => InstructionProfileTag::ToBool,
             Instruction::Jump(_) => InstructionProfileTag::Jump,
-            Instruction::JumpIfFalse(_) => InstructionProfileTag::JumpIfFalse,
+            Instruction::JumpIfFalse(_)
+            | Instruction::JumpIfCompareFalse { .. }
+            | Instruction::JumpIfSlotNumberCompareFalse { .. }
+            | Instruction::JumpIfSlotNumberBinaryCompareFalse { .. } => {
+                InstructionProfileTag::JumpIfFalse
+            }
             Instruction::JumpIfTrue(_) => InstructionProfileTag::JumpIfTrue,
             Instruction::CallTool { .. } | Instruction::CallToolUnwrap { .. } => {
                 InstructionProfileTag::CallTool
@@ -875,7 +1011,9 @@ impl Instruction {
             | Instruction::Push
             | Instruction::Range { .. }
             | Instruction::FormatCompiled(_) => InstructionProfileTag::CallBuiltin,
-            Instruction::AddAssign(_) => InstructionProfileTag::AddAssign,
+            Instruction::AddAssign(_)
+            | Instruction::AddAssignNumber { .. }
+            | Instruction::AddAssignIndexNumber { .. } => InstructionProfileTag::AddAssign,
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
             Instruction::Print => InstructionProfileTag::Print,
             Instruction::Submit => InstructionProfileTag::Submit,
@@ -1271,6 +1409,18 @@ impl Compiler {
         index
     }
 
+    fn emit_push_value(&mut self, value: Value) {
+        match value {
+            Value::Null => self.code.push(Instruction::PushNull),
+            Value::Bool(value) => self.code.push(Instruction::PushBool(value)),
+            Value::Number(value) => self.code.push(Instruction::PushNumber(value)),
+            value => {
+                let index = self.push_const(value);
+                self.code.push(Instruction::PushConst(index));
+            }
+        }
+    }
+
     fn push_name(&mut self, name: &str) -> usize {
         let symbol = intern_symbol(name);
         if let Some(index) = self.name_lookup.get(&symbol) {
@@ -1494,6 +1644,11 @@ impl Compiler {
                         self.set_const_slot(slot, None);
                         return;
                     }
+                    if let Some(Value::Number(right)) = self.fold_compile_time_expr(right) {
+                        self.code.push(Instruction::AddAssignNumber { slot, right });
+                        self.set_const_slot(slot, None);
+                        return;
+                    }
                     self.compile_expr(right);
                     self.code.push(Instruction::AddAssign(slot));
                     self.set_const_slot(slot, None);
@@ -1515,6 +1670,27 @@ impl Compiler {
             }
             Stmt::Assign { target, expr } => {
                 let slot = self.push_slot(&target.root);
+                if let [AssignPathStep::Index(index)] = target.steps.as_slice()
+                    && is_pure_expr(index)
+                    && let Expr::Binary {
+                        left,
+                        op: BinaryOp::Add,
+                        right,
+                    } = expr
+                    && let Expr::Index {
+                        target: left_target,
+                        index: left_index,
+                    } = left.as_ref()
+                    && matches!(left_target.as_ref(), Expr::Variable(name) if name == target.root)
+                    && left_index.as_ref() == index
+                    && let Some(Value::Number(right)) = self.fold_compile_time_expr(right)
+                {
+                    self.compile_expr(index);
+                    self.code
+                        .push(Instruction::AddAssignIndexNumber { slot, right });
+                    self.set_const_slot(slot, None);
+                    return;
+                }
                 for step in &target.steps {
                     if let AssignPathStep::Index(index) = step {
                         self.compile_expr(index);
@@ -1546,8 +1722,7 @@ impl Compiler {
                 then_block,
                 else_block,
             } => {
-                self.compile_expr(condition);
-                let jump_to_else = self.emit_jump_if_false();
+                let jump_to_else = self.compile_condition_jump_if_false(condition);
                 self.compile_block(then_block);
                 if else_block.is_empty() {
                     self.patch_jump(jump_to_else, self.code.len());
@@ -1857,16 +2032,17 @@ impl Compiler {
                     "push" => Builtin::Push,
                     _ => return None,
                 };
-                execute_builtin(builtin, &[], &values).ok()
+                let _ = (builtin, values);
+                None
             }
             Expr::Field { target, field } => {
                 let target = self.fold_compile_time_expr(target)?;
-                read_field(target, &transient_name(field)).ok()
+                read_field_direct(target, &transient_name(field)).ok()
             }
             Expr::Index { target, index } => {
                 let target = self.fold_compile_time_expr(target)?;
                 let index = self.fold_compile_time_expr(index)?;
-                read_index(target, index).ok()
+                read_index_direct(target, index).ok()
             }
             Expr::Unary { op, expr } => {
                 let value = self.fold_compile_time_expr(expr)?;
@@ -1987,23 +2163,19 @@ impl Compiler {
         if !contains_type_literal(expr)
             && let Some(value) = self.fold_compile_time_expr(expr)
         {
-            let value = self.push_const(value);
-            self.code.push(Instruction::PushConst(value));
+            self.emit_push_value(value);
             return;
         }
 
         match expr {
             Expr::Null => {
-                let value = self.push_const(Value::Null);
-                self.code.push(Instruction::PushConst(value));
+                self.code.push(Instruction::PushNull);
             }
             Expr::Bool(value) => {
-                let value = self.push_const(Value::Bool(*value));
-                self.code.push(Instruction::PushConst(value));
+                self.code.push(Instruction::PushBool(*value));
             }
             Expr::Number(value) => {
-                let value = self.push_const(Value::Number(*value));
-                self.code.push(Instruction::PushConst(value));
+                self.code.push(Instruction::PushNumber(*value));
             }
             Expr::String(value) => {
                 let value = self.push_const(Value::String(value.clone()));
@@ -2012,8 +2184,7 @@ impl Compiler {
             Expr::Variable(name) => {
                 let name = self.push_slot(name);
                 if let Some(value) = self.const_for_slot(name) {
-                    let value = self.push_const(value);
-                    self.code.push(Instruction::PushConst(value));
+                    self.emit_push_value(value);
                 } else {
                     self.code.push(Instruction::LoadName(name));
                 }
@@ -2083,8 +2254,7 @@ impl Compiler {
                 then_expr,
                 else_expr,
             } => {
-                self.compile_expr(condition);
-                let jump_to_else = self.emit_jump_if_false();
+                let jump_to_else = self.compile_condition_jump_if_false(condition);
                 self.compile_expr(then_expr);
                 let jump_to_end = self.emit_jump();
                 self.patch_jump(jump_to_else, self.code.len());
@@ -2100,8 +2270,7 @@ impl Compiler {
                     self.code.push(Instruction::ToBool);
                     let jump_to_end = self.emit_jump();
                     self.patch_jump(jump_to_false, self.code.len());
-                    let value = self.push_const(Value::Bool(false));
-                    self.code.push(Instruction::PushConst(value));
+                    self.code.push(Instruction::PushBool(false));
                     self.patch_jump(jump_to_end, self.code.len());
                 }
                 BinaryOp::Or => {
@@ -2111,8 +2280,7 @@ impl Compiler {
                     self.code.push(Instruction::ToBool);
                     let jump_to_end = self.emit_jump();
                     self.patch_jump(jump_to_true, self.code.len());
-                    let value = self.push_const(Value::Bool(true));
-                    self.code.push(Instruction::PushConst(value));
+                    self.code.push(Instruction::PushBool(true));
                     self.patch_jump(jump_to_end, self.code.len());
                 }
                 _ => {
@@ -2235,6 +2403,72 @@ impl Compiler {
         index
     }
 
+    fn compile_condition_jump_if_false(&mut self, condition: &Expr) -> usize {
+        if !contains_type_literal(condition)
+            && let Some(value) = self.fold_compile_time_expr(condition)
+        {
+            self.emit_push_value(value);
+            return self.emit_jump_if_false();
+        }
+
+        if let Expr::Binary { left, op, right } = condition
+            && is_comparison_binary_op(*op)
+        {
+            if let (
+                Expr::Binary {
+                    left: inner_left,
+                    op: binary_op,
+                    right: inner_right,
+                },
+                Some(Value::Number(compare_right)),
+            ) = (left.as_ref(), self.fold_compile_time_expr(right))
+                && is_numeric_binary_op(*binary_op)
+                && let (Expr::Variable(name), Some(Value::Number(binary_right))) = (
+                    inner_left.as_ref(),
+                    self.fold_compile_time_expr(inner_right),
+                )
+            {
+                let slot = self.push_slot(name);
+                let index = self.code.len();
+                self.code
+                    .push(Instruction::JumpIfSlotNumberBinaryCompareFalse {
+                        slot,
+                        binary_op: *binary_op,
+                        binary_right,
+                        compare_op: *op,
+                        compare_right,
+                        target: usize::MAX,
+                    });
+                return index;
+            }
+
+            if let (Expr::Variable(name), Some(Value::Number(right))) =
+                (left.as_ref(), self.fold_compile_time_expr(right))
+            {
+                let slot = self.push_slot(name);
+                let index = self.code.len();
+                self.code.push(Instruction::JumpIfSlotNumberCompareFalse {
+                    slot,
+                    op: *op,
+                    right,
+                    target: usize::MAX,
+                });
+                return index;
+            }
+            self.compile_expr(left);
+            self.compile_expr(right);
+            let index = self.code.len();
+            self.code.push(Instruction::JumpIfCompareFalse {
+                op: *op,
+                target: usize::MAX,
+            });
+            return index;
+        }
+
+        self.compile_expr(condition);
+        self.emit_jump_if_false()
+    }
+
     fn emit_jump_if_true(&mut self) -> usize {
         let index = self.code.len();
         self.code.push(Instruction::JumpIfTrue(usize::MAX));
@@ -2303,8 +2537,7 @@ impl Compiler {
                 }
                 self.code.push(Instruction::BuildList(required.len()));
 
-                let false_idx = self.push_const(Value::Bool(false));
-                self.code.push(Instruction::PushConst(false_idx));
+                self.code.push(Instruction::PushBool(false));
 
                 let obj_keys = self.push_key_list(
                     ["type", "properties", "required", "additionalProperties"].into_iter(),
@@ -2339,6 +2572,9 @@ impl Compiler {
         match &mut self.code[index] {
             Instruction::Jump(slot)
             | Instruction::JumpIfFalse(slot)
+            | Instruction::JumpIfCompareFalse { target: slot, .. }
+            | Instruction::JumpIfSlotNumberCompareFalse { target: slot, .. }
+            | Instruction::JumpIfSlotNumberBinaryCompareFalse { target: slot, .. }
             | Instruction::JumpIfTrue(slot)
             | Instruction::IterNext { jump_to: slot } => *slot = target,
             _ => unreachable!("patched non-jump instruction"),
@@ -2611,7 +2847,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 .profile
                 .as_ref()
                 .map(|_| (instruction.profile_tag(), Instant::now()));
-            let result = match self.step_instruction(instruction) {
+            let result = match self.step_instruction(instruction).await {
                 Ok(VmStep::Continue) => Ok(None),
                 Ok(VmStep::Finish(value)) => Ok(Some(ExecutionOutcome::Finished(value))),
                 Ok(VmStep::Effect(effect)) => self.resolve_effect(effect).await.map(|()| None),
@@ -2640,10 +2876,19 @@ impl<'a, H: ToolHost> Vm<'a, H> {
     }
 
     #[inline(always)]
-    fn step_instruction(&mut self, instruction: Instruction) -> Result<VmStep, RuntimeError> {
+    async fn step_instruction(&mut self, instruction: Instruction) -> Result<VmStep, RuntimeError> {
         match instruction {
             Instruction::PushConst(index) => {
                 self.stack.push(self.chunk.constants[index].clone());
+            }
+            Instruction::PushNull => {
+                self.stack.push(Value::Null);
+            }
+            Instruction::PushBool(value) => {
+                self.stack.push(Value::Bool(value));
+            }
+            Instruction::PushNumber(value) => {
+                self.stack.push(Value::Number(value));
             }
             Instruction::LoadName(name) => {
                 let value = self.load_slot(name)?.clone();
@@ -2665,12 +2910,20 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::LoadField { slot, field } => {
                 let value = self.load_slot(slot)?;
-                self.stack
-                    .push(read_field_ref(value, &self.chunk.names[field])?);
+                let field = &self.chunk.names[field];
+                let value = match value {
+                    Value::Projected(projected) => projected.get_field(field).await?,
+                    value => read_field_ref_direct(value, field)?,
+                };
+                self.stack.push(value);
             }
             Instruction::LoadFieldUnwrap { slot, field } => {
                 let value = self.load_slot(slot)?;
-                let value = read_field_ref(value, &self.chunk.names[field])?;
+                let field = &self.chunk.names[field];
+                let value = match value {
+                    Value::Projected(projected) => projected.get_field(field).await?,
+                    value => read_field_ref_direct(value, field)?,
+                };
                 self.stack.push(unwrap_tool_result(value)?);
             }
             Instruction::BuildList(len) => {
@@ -2683,13 +2936,21 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::Field(field) => {
                 let target = self.pop_stack()?;
-                self.stack
-                    .push(read_field(target, &self.chunk.names[field])?);
+                let field = &self.chunk.names[field];
+                let value = match target {
+                    Value::Projected(projected) => projected.get_field(field).await?,
+                    target => read_field_direct(target, field)?,
+                };
+                self.stack.push(value);
             }
             Instruction::Index => {
                 let index = self.pop_stack()?;
                 let target = self.pop_stack()?;
-                self.stack.push(read_index(target, index)?);
+                let value = match target {
+                    Value::Projected(projected) => projected.get_index(&index).await?,
+                    target => read_index_direct(target, index)?,
+                };
+                self.stack.push(value);
             }
             Instruction::PathAssign { slot, path } => {
                 let value = self.pop_stack()?;
@@ -2718,29 +2979,112 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let value = self.pop_stack()?;
                 let value = match op {
                     UnaryOp::Negate => Value::Number(-as_number(&value)?),
-                    UnaryOp::Not => Value::Bool(!is_truthy(&value)),
+                    UnaryOp::Not => Value::Bool(match &value {
+                        Value::Projected(_) => !is_truthy_async(&value).await,
+                        _ => !is_truthy(&value),
+                    }),
                 };
                 self.stack.push(value);
             }
             Instruction::Binary(op) => {
                 let right = self.pop_stack()?;
                 let left = self.pop_stack()?;
-                self.stack.push(eval_binary_values(left, op, right)?);
+                let value = match (left, right) {
+                    (Value::Number(left), Value::Number(right)) => {
+                        eval_number_binary_values(left, op, right)
+                    }
+                    (left, right) => {
+                        let has_projected = matches!(left, Value::Projected(_))
+                            || matches!(right, Value::Projected(_));
+                        if has_projected {
+                            eval_binary_values_async(left, op, right).await?
+                        } else {
+                            eval_binary_values(left, op, right)?
+                        }
+                    }
+                };
+                self.stack.push(value);
             }
             Instruction::ToBool => {
                 let value = self.pop_stack()?;
-                self.stack.push(Value::Bool(is_truthy(&value)));
+                let truthy = match &value {
+                    Value::Projected(_) => is_truthy_async(&value).await,
+                    _ => is_truthy(&value),
+                };
+                self.stack.push(Value::Bool(truthy));
             }
             Instruction::Jump(target) => self.ip = target,
             Instruction::JumpIfFalse(target) => {
                 let value = self.pop_stack()?;
-                if !is_truthy(&value) {
+                let truthy = match &value {
+                    Value::Projected(_) => is_truthy_async(&value).await,
+                    _ => is_truthy(&value),
+                };
+                if !truthy {
+                    self.ip = target;
+                }
+            }
+            Instruction::JumpIfCompareFalse { op, target } => {
+                let right = self.pop_stack()?;
+                let left = self.pop_stack()?;
+                if !eval_compare_values_async(left, op, right).await? {
+                    self.ip = target;
+                }
+            }
+            Instruction::JumpIfSlotNumberCompareFalse {
+                slot,
+                op,
+                right,
+                target,
+            } => {
+                let value = self.load_slot(slot)?;
+                let truthy = match value {
+                    Value::Number(left) => eval_number_compare_values(*left, op, right),
+                    value => {
+                        eval_compare_values_async(value.clone(), op, Value::Number(right)).await?
+                    }
+                };
+                if !truthy {
+                    self.ip = target;
+                }
+            }
+            Instruction::JumpIfSlotNumberBinaryCompareFalse {
+                slot,
+                binary_op,
+                binary_right,
+                compare_op,
+                compare_right,
+                target,
+            } => {
+                let value = self.load_slot(slot)?;
+                let truthy = match value {
+                    Value::Number(left) => {
+                        let value =
+                            eval_number_numeric_binary_value(*left, binary_op, binary_right);
+                        eval_number_compare_values(value, compare_op, compare_right)
+                    }
+                    value => {
+                        let value = eval_binary_values_async(
+                            value.clone(),
+                            binary_op,
+                            Value::Number(binary_right),
+                        )
+                        .await?;
+                        eval_compare_values_async(value, compare_op, Value::Number(compare_right))
+                            .await?
+                    }
+                };
+                if !truthy {
                     self.ip = target;
                 }
             }
             Instruction::JumpIfTrue(target) => {
                 let value = self.pop_stack()?;
-                if is_truthy(&value) {
+                let truthy = match &value {
+                    Value::Projected(_) => is_truthy_async(&value).await,
+                    _ => is_truthy(&value),
+                };
+                if truthy {
                     self.ip = target;
                 }
             }
@@ -2765,7 +3109,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::CallBuiltin { builtin, argc } => {
                 let values = self.stack_tail(argc)?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_builtin(builtin, &self.chunk.names, values)?;
+                let value = execute_builtin(builtin, &self.chunk.names, values).await?;
                 if let Some(start) = start {
                     self.record_builtin_profile(builtin, start.elapsed().as_nanos());
                 }
@@ -2775,7 +3119,10 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::Len => {
                 let value = self.pop_stack()?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_len_builtin(&value)?;
+                let value = match &value {
+                    Value::Projected(_) => execute_len_builtin(&value).await?,
+                    _ => execute_len_direct(&value)?,
+                };
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Len, start.elapsed().as_nanos());
                 }
@@ -2834,7 +3181,15 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let template = &self.chunk.format_templates[template];
                 let values = self.stack_tail(template.argc)?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = Value::String(execute_compiled_format(template, values)?.into());
+                let value = if values
+                    .iter()
+                    .any(|value| matches!(value, Value::Projected(_)))
+                {
+                    execute_compiled_format(template, values).await?
+                } else {
+                    execute_compiled_format_direct(template, values)?
+                };
+                let value = Value::String(value.into());
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Format, start.elapsed().as_nanos());
                 }
@@ -2863,6 +3218,44 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                         }
                     }
                 };
+                self.record_assignment(slot);
+                self.last_value = Some(value);
+            }
+            Instruction::AddAssignNumber { slot, right } => {
+                let slot_name = &self.chunk.slot_names[slot];
+                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
+                let value = {
+                    let left = self.slots.get_mut(slot).ok_or_else(|| {
+                        RuntimeError::UndefinedVariable {
+                            name: slot_name.text.to_string(),
+                        }
+                    })?;
+                    match left {
+                        Value::Number(left) => {
+                            *left += right;
+                            Value::Number(*left)
+                        }
+                        left => {
+                            let value = add_values(left.clone(), Value::Number(right))?;
+                            *left = value.clone();
+                            value
+                        }
+                    }
+                };
+                self.record_assignment(slot);
+                self.last_value = Some(value);
+            }
+            Instruction::AddAssignIndexNumber { slot, right } => {
+                let index = self.pop_stack()?;
+                let slot_name = &self.chunk.slot_names[slot];
+                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
+                let root =
+                    self.slots
+                        .get_mut(slot)
+                        .ok_or_else(|| RuntimeError::UndefinedVariable {
+                            name: slot_name.text.to_string(),
+                        })?;
+                let value = add_assign_index_number(root, &index, right)?;
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
@@ -2903,7 +3296,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::BeginIter(binding) => {
                 let iterable = self.pop_stack()?;
-                let values = iterable_values(iterable)?;
+                let values = iterable_values(iterable).await?;
                 self.iter_stack.push(IterState {
                     values,
                     index: 0,
@@ -3048,8 +3441,12 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             VmEffect::Print => {
                 let value = self.pop_stack()?;
+                let host_value = match &value {
+                    Value::Projected(projected) => Value::String(projected.render().await.into()),
+                    _ => value.clone(),
+                };
                 self.host
-                    .print(value.clone())
+                    .print(host_value)
                     .await
                     .map_err(|err| RuntimeError::ValueError {
                         message: format!("print failed: {err}"),
@@ -4166,7 +4563,7 @@ fn eval_pure_expr(
             for arg in args.iter() {
                 values.push(eval_pure_expr(arg, slots, names, slot_names)?);
             }
-            execute_builtin(*builtin, names, &values)
+            execute_builtin_blocking(*builtin, names, &values)
         }
         PureExpr::Format { template, args } => {
             let mut values = SmallVec::<[Value; 8]>::with_capacity(args.len());
@@ -4174,7 +4571,7 @@ fn eval_pure_expr(
                 values.push(eval_pure_expr(arg, slots, names, slot_names)?);
             }
             Ok(Value::String(
-                execute_compiled_format(template, &values)?.into(),
+                execute_compiled_format_blocking(template, &values)?.into(),
             ))
         }
         PureExpr::ResultUnwrap(expr) => {
@@ -4183,12 +4580,12 @@ fn eval_pure_expr(
         }
         PureExpr::Field { target, field } => {
             let value = eval_pure_expr(target, slots, names, slot_names)?;
-            read_field(value, &names[*field])
+            read_field_blocking(value, &names[*field])
         }
         PureExpr::Index { target, index } => {
             let target = eval_pure_expr(target, slots, names, slot_names)?;
             let index = eval_pure_expr(index, slots, names, slot_names)?;
-            read_index(target, index)
+            read_index_blocking(target, index)
         }
         PureExpr::Unary { op, expr } => {
             let value = eval_pure_expr(expr, slots, names, slot_names)?;
@@ -4236,7 +4633,7 @@ fn expect_arg_count(name: &str, values: &[Value], expected: usize) -> Result<(),
     }
 }
 
-fn execute_builtin(
+async fn execute_builtin(
     builtin: Builtin,
     names: &[Name],
     values: &[Value],
@@ -4244,7 +4641,7 @@ fn execute_builtin(
     match builtin {
         Builtin::Len => {
             expect_arg_count("len", values, 1)?;
-            execute_len_builtin(&values[0])
+            execute_len_builtin(&values[0]).await
         }
         Builtin::Empty => {
             expect_arg_count("empty", values, 1)?;
@@ -4252,7 +4649,7 @@ fn execute_builtin(
                 Value::String(value) => Ok(Value::Bool(value.is_empty())),
                 Value::List(values) => Ok(Value::Bool(values.is_empty())),
                 Value::Record(record) => Ok(Value::Bool(record.is_empty())),
-                Value::Projected(value) => Ok(Value::Bool(value.is_empty())),
+                Value::Projected(value) => Ok(Value::Bool(value.is_empty().await)),
                 Value::Null => Ok(Value::Bool(true)),
                 _ => Err(RuntimeError::TypeError {
                     message: "`empty` requires a string, list, record, or null".to_string(),
@@ -4266,6 +4663,15 @@ fn execute_builtin(
                     record
                         .keys()
                         .map(|key| Value::String(key.to_string().into()))
+                        .collect::<Vec<_>>()
+                        .into(),
+                )),
+                Value::Projected(value) => Ok(Value::List(
+                    value
+                        .keys()
+                        .await
+                        .into_iter()
+                        .map(|key| Value::String(key.into()))
                         .collect::<Vec<_>>()
                         .into(),
                 )),
@@ -4289,7 +4695,7 @@ fn execute_builtin(
         }
         Builtin::Contains => {
             expect_arg_count("contains", values, 2)?;
-            execute_contains_builtin(&values[0], &values[1])
+            execute_contains_builtin(&values[0], &values[1]).await
         }
         Builtin::StartsWith => {
             expect_arg_count("starts_with", values, 2)?;
@@ -4344,7 +4750,9 @@ fn execute_builtin(
         }
         Builtin::ToString => {
             expect_arg_count("to_string", values, 1)?;
-            Ok(Value::String(stringify_value(&values[0])?.into()))
+            Ok(Value::String(
+                stringify_value_async(&values[0]).await?.into(),
+            ))
         }
         Builtin::ToInt => {
             expect_arg_count("to_int", values, 1)?;
@@ -4379,7 +4787,9 @@ fn execute_builtin(
                     });
                 }
             };
-            Ok(Value::String(apply_format(template, &values[1..])?.into()))
+            Ok(Value::String(
+                apply_format_async(template, &values[1..]).await?.into(),
+            ))
         }
         Builtin::Validate => {
             expect_arg_count("validate", values, 2)?;
@@ -4396,13 +4806,22 @@ fn execute_builtin(
     }
 }
 
-fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
+fn execute_builtin_blocking(
+    builtin: Builtin,
+    names: &[Name],
+    values: &[Value],
+) -> Result<Value, RuntimeError> {
+    futures_executor::block_on(execute_builtin(builtin, names, values))
+}
+
+async fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
     if let Value::Projected(value) = value {
-        return match &value.kind {
-            ProjectedKind::Value(value) => execute_len_builtin(value),
-            ProjectedKind::List(list) => Ok(Value::Number(list.len() as f64)),
-        };
+        return Ok(Value::Number(value.len().await as f64));
     }
+    execute_len_direct(value)
+}
+
+fn execute_len_direct(value: &Value) -> Result<Value, RuntimeError> {
     value_len(value)
         .map(|len| Value::Number(len as f64))
         .ok_or_else(|| RuntimeError::TypeError {
@@ -4411,22 +4830,29 @@ fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
         })
 }
 
-fn execute_contains_builtin(haystack: &Value, needle: &Value) -> Result<Value, RuntimeError> {
+async fn execute_contains_builtin(haystack: &Value, needle: &Value) -> Result<Value, RuntimeError> {
+    if !matches!(haystack, Value::Projected(_)) {
+        return execute_contains_direct(haystack, needle).map(Value::Bool);
+    }
     match (haystack, needle) {
-        (Value::String(haystack), needle) => Ok(Value::Bool(
-            haystack.contains(coerce_string(needle)?.as_ref()),
-        )),
-        (Value::List(items), needle) => Ok(Value::Bool(items.contains(needle))),
-        (Value::Record(record), needle) => Ok(Value::Bool(
-            record.get(coerce_string(needle)?.as_ref()).is_some(),
-        )),
-        (Value::Projected(value), needle) => match &value.kind {
-            ProjectedKind::Value(value) => execute_contains_builtin(value, needle),
-            ProjectedKind::List(list) => Ok(Value::Bool(
-                (0..list.len()).any(|index| list.get(index).as_ref() == Some(needle)),
-            )),
-        },
+        (Value::Projected(value), needle) => Ok(Value::Bool(value.contains(needle).await?)),
         (Value::Null, _) => Ok(Value::Bool(false)),
+        _ => Err(RuntimeError::TypeError {
+            message:
+                "`contains` requires a string/string, list/value, record/key, or null/value pair"
+                    .to_string(),
+        }),
+    }
+}
+
+fn execute_contains_direct(haystack: &Value, needle: &Value) -> Result<bool, RuntimeError> {
+    match (haystack, needle) {
+        (Value::String(haystack), needle) => Ok(haystack.contains(coerce_string(needle)?.as_ref())),
+        (Value::List(items), needle) => Ok(items.contains(needle)),
+        (Value::Record(record), needle) => {
+            Ok(record.get(coerce_string(needle)?.as_ref()).is_some())
+        }
+        (Value::Null, _) => Ok(false),
         _ => Err(RuntimeError::TypeError {
             message:
                 "`contains` requires a string/string, list/value, record/key, or null/value pair"
@@ -4445,10 +4871,10 @@ fn value_len(value: &Value) -> Option<usize> {
     }
 }
 
-fn iterable_values(value: Value) -> Result<Arc<[Value]>, RuntimeError> {
+async fn iterable_values(value: Value) -> Result<Arc<[Value]>, RuntimeError> {
     match value {
         Value::List(values) => Ok(values),
-        Value::Projected(value) => match value.materialize() {
+        Value::Projected(value) => match value.materialize_async().await {
             Value::List(values) => Ok(values),
             _ => Err(RuntimeError::NonListIteration),
         },
@@ -4538,14 +4964,13 @@ fn build_range(start: i64, end: i64) -> Result<Value, RuntimeError> {
     ))
 }
 
-fn read_field_ref(value: &Value, field: &Name) -> Result<Value, RuntimeError> {
+fn read_field_ref_direct(value: &Value, field: &Name) -> Result<Value, RuntimeError> {
     match value {
         Value::Record(record) => Ok(record
             .get_symbol(field.symbol)
             .cloned()
             .unwrap_or(Value::Null)),
         Value::Image(image) => read_image_field(image, field),
-        Value::Projected(value) => read_field(value.materialize(), field),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!(
@@ -4594,14 +5019,20 @@ fn is_async_handle_record(record: &Record) -> bool {
     record.get("__handle__").is_some() || record.get("handle").is_some()
 }
 
-fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
+async fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
+    match value {
+        Value::Projected(value) => value.get_field(field).await,
+        other => read_field_direct(other, field),
+    }
+}
+
+fn read_field_direct(value: Value, field: &Name) -> Result<Value, RuntimeError> {
     match value {
         Value::Record(record) => Ok(record
             .get_symbol(field.symbol)
             .cloned()
             .unwrap_or(Value::Null)),
         Value::Image(image) => read_image_field(&image, field),
-        Value::Projected(value) => read_field(value.materialize(), field),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!(
@@ -4611,6 +5042,10 @@ fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
             ),
         }),
     }
+}
+
+fn read_field_blocking(value: Value, field: &Name) -> Result<Value, RuntimeError> {
+    futures_executor::block_on(read_field(value, field))
 }
 
 fn read_image_field(image: &ImageValue, field: &Name) -> Result<Value, RuntimeError> {
@@ -4630,7 +5065,14 @@ fn read_image_field(image: &ImageValue, field: &Name) -> Result<Value, RuntimeEr
     }
 }
 
-fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
+async fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
+    match target {
+        Value::Projected(value) => value.get_index(&index).await,
+        other => read_index_direct(other, index),
+    }
+}
+
+fn read_index_direct(target: Value, index: Value) -> Result<Value, RuntimeError> {
     match target {
         Value::List(values) => {
             let idx = resolve_index(&index, values.len())?;
@@ -4649,12 +5091,15 @@ fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
             .get(coerce_string(&index)?.as_ref())
             .cloned()
             .unwrap_or(Value::Null)),
-        Value::Projected(value) => value.get_index(&index),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!("can't index {}", value_type_name(&target)),
         }),
     }
+}
+
+fn read_index_blocking(target: Value, index: Value) -> Result<Value, RuntimeError> {
+    futures_executor::block_on(read_index(target, index))
 }
 
 fn assign_path(
@@ -4777,6 +5222,50 @@ fn assign_index(target: &mut Value, index: &Value, value: Value) -> Result<(), R
     }
 }
 
+fn add_assign_index_number(
+    target: &mut Value,
+    index: &Value,
+    right: f64,
+) -> Result<Value, RuntimeError> {
+    match target {
+        Value::List(values) => {
+            let idx = resolve_existing_list_assignment_index(index, values.len())?;
+            add_assign_value_number(&mut Arc::make_mut(values)[idx], right)
+        }
+        Value::Record(record) => {
+            let key = coerce_string(index)?;
+            let record = Arc::make_mut(record);
+            if let Some(value) = record.get_mut(key.as_ref()) {
+                add_assign_value_number(value, right)
+            } else {
+                let value = Value::Number(right);
+                record.insert_str(key.as_ref(), value.clone());
+                Ok(value)
+            }
+        }
+        Value::Image(_) => Err(RuntimeError::TypeError {
+            message: "can't assign image fields; images are immutable".to_string(),
+        }),
+        _ => Err(RuntimeError::TypeError {
+            message: format!("can't assign index on {}", value_type_name(target)),
+        }),
+    }
+}
+
+fn add_assign_value_number(value: &mut Value, right: f64) -> Result<Value, RuntimeError> {
+    match value {
+        Value::Number(left) => {
+            *left += right;
+            Ok(Value::Number(*left))
+        }
+        left => {
+            let value = add_values(left.clone(), Value::Number(right))?;
+            *left = value.clone();
+            Ok(value)
+        }
+    }
+}
+
 fn descend_index<'a>(target: &'a mut Value, index: &Value) -> Result<&'a mut Value, RuntimeError> {
     match target {
         Value::List(values) => {
@@ -4817,6 +5306,137 @@ fn eval_binary_values(left: Value, op: BinaryOp, right: Value) -> Result<Value, 
         BinaryOp::Greater => compare_ordered(left, right, |a, b| a > b, |a, b| a > b),
         BinaryOp::GreaterEqual => compare_ordered(left, right, |a, b| a >= b, |a, b| a >= b),
         BinaryOp::And | BinaryOp::Or => unreachable!("logical ops are compiled with jumps"),
+    }
+}
+
+fn eval_number_binary_values(left: f64, op: BinaryOp, right: f64) -> Value {
+    match op {
+        BinaryOp::Add
+        | BinaryOp::Subtract
+        | BinaryOp::Multiply
+        | BinaryOp::Divide
+        | BinaryOp::Modulo => Value::Number(eval_number_numeric_binary_value(left, op, right)),
+        BinaryOp::Equal => Value::Bool(left == right),
+        BinaryOp::NotEqual => Value::Bool(left != right),
+        BinaryOp::Less => Value::Bool(left < right),
+        BinaryOp::LessEqual => Value::Bool(left <= right),
+        BinaryOp::Greater => Value::Bool(left > right),
+        BinaryOp::GreaterEqual => Value::Bool(left >= right),
+        BinaryOp::And | BinaryOp::Or => unreachable!("logical ops are compiled with jumps"),
+    }
+}
+
+fn eval_number_numeric_binary_value(left: f64, op: BinaryOp, right: f64) -> f64 {
+    match op {
+        BinaryOp::Add => left + right,
+        BinaryOp::Subtract => left - right,
+        BinaryOp::Multiply => left * right,
+        BinaryOp::Divide => left / right,
+        BinaryOp::Modulo => left % right,
+        _ => unreachable!("non-numeric op in fused numeric branch"),
+    }
+}
+
+fn eval_number_compare_values(left: f64, op: BinaryOp, right: f64) -> bool {
+    match op {
+        BinaryOp::Equal => left == right,
+        BinaryOp::NotEqual => left != right,
+        BinaryOp::Less => left < right,
+        BinaryOp::LessEqual => left <= right,
+        BinaryOp::Greater => left > right,
+        BinaryOp::GreaterEqual => left >= right,
+        _ => unreachable!("non-comparison op in fused slot branch"),
+    }
+}
+
+fn is_comparison_binary_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::Less
+            | BinaryOp::LessEqual
+            | BinaryOp::Greater
+            | BinaryOp::GreaterEqual
+    )
+}
+
+fn is_numeric_binary_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Subtract
+            | BinaryOp::Multiply
+            | BinaryOp::Divide
+            | BinaryOp::Modulo
+    )
+}
+
+fn eval_compare_values(left: Value, op: BinaryOp, right: Value) -> Result<bool, RuntimeError> {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            Ok(eval_number_compare_values(left, op, right))
+        }
+        (left, right) => match op {
+            BinaryOp::Equal => Ok(left == right),
+            BinaryOp::NotEqual => Ok(left != right),
+            BinaryOp::Less => {
+                compare_ordered(left, right, |a, b| a < b, |a, b| a < b).map(expect_bool_value)
+            }
+            BinaryOp::LessEqual => {
+                compare_ordered(left, right, |a, b| a <= b, |a, b| a <= b).map(expect_bool_value)
+            }
+            BinaryOp::Greater => {
+                compare_ordered(left, right, |a, b| a > b, |a, b| a > b).map(expect_bool_value)
+            }
+            BinaryOp::GreaterEqual => {
+                compare_ordered(left, right, |a, b| a >= b, |a, b| a >= b).map(expect_bool_value)
+            }
+            _ => unreachable!("non-comparison op in fused branch"),
+        },
+    }
+}
+
+async fn eval_compare_values_async(
+    left: Value,
+    op: BinaryOp,
+    right: Value,
+) -> Result<bool, RuntimeError> {
+    let has_projected = matches!(left, Value::Projected(_)) || matches!(right, Value::Projected(_));
+    if has_projected {
+        eval_compare_values(
+            materialize_projected_async(left).await,
+            op,
+            materialize_projected_async(right).await,
+        )
+    } else {
+        eval_compare_values(left, op, right)
+    }
+}
+
+fn expect_bool_value(value: Value) -> bool {
+    match value {
+        Value::Bool(value) => value,
+        _ => unreachable!("comparison produced non-bool value"),
+    }
+}
+
+async fn eval_binary_values_async(
+    left: Value,
+    op: BinaryOp,
+    right: Value,
+) -> Result<Value, RuntimeError> {
+    eval_binary_values(
+        materialize_projected_async(left).await,
+        op,
+        materialize_projected_async(right).await,
+    )
+}
+
+async fn materialize_projected_async(value: Value) -> Value {
+    match value {
+        Value::Projected(projected) => projected.materialize_async().await,
+        other => other,
     }
 }
 
@@ -4910,11 +5530,11 @@ fn add_values(left: Value, right: Value) -> Result<Value, RuntimeError> {
         (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
         (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
         (Value::String(mut a), other) => {
-            a.push_str(&stringify_value(&other)?);
+            a.push_str(&stringify_value_blocking(&other)?);
             Ok(Value::String(a))
         }
         (other, Value::String(b)) => {
-            let mut text = stringify_value(&other)?;
+            let mut text = stringify_value_blocking(&other)?;
             text.push_str(&b);
             Ok(Value::String(text.into()))
         }
@@ -4935,7 +5555,14 @@ fn is_truthy(value: &Value) -> bool {
         Value::Number(value) => *value != 0.0 && !value.is_nan(),
         Value::String(value) => !value.is_empty(),
         Value::Image(_) | Value::List(_) | Value::Record(_) => true,
-        Value::Projected(value) => !value.is_empty(),
+        Value::Projected(value) => !futures_executor::block_on(value.is_empty()),
+    }
+}
+
+async fn is_truthy_async(value: &Value) -> bool {
+    match value {
+        Value::Projected(value) => !value.is_empty().await,
+        other => is_truthy(other),
     }
 }
 
@@ -4971,13 +5598,21 @@ fn error_value(message: String) -> Value {
     Value::Record(Arc::new(record))
 }
 
-fn stringify_value(value: &Value) -> Result<String, RuntimeError> {
+async fn stringify_value_async(value: &Value) -> Result<String, RuntimeError> {
     let mut output = String::new();
-    append_stringified_value(&mut output, value)?;
+    append_stringified_value_async(&mut output, value).await?;
     Ok(output)
 }
 
-fn append_stringified_value(output: &mut String, value: &Value) -> Result<(), RuntimeError> {
+fn stringify_value(value: &Value) -> Result<String, RuntimeError> {
+    futures_executor::block_on(stringify_value_async(value))
+}
+
+fn stringify_value_blocking(value: &Value) -> Result<String, RuntimeError> {
+    stringify_value(value)
+}
+
+fn append_stringified_value_direct(output: &mut String, value: &Value) -> Result<(), RuntimeError> {
     match value {
         Value::String(value) => output.push_str(value),
         Value::Null => output.push_str("null"),
@@ -4985,13 +5620,40 @@ fn append_stringified_value(output: &mut String, value: &Value) -> Result<(), Ru
         Value::Number(value) => {
             write_number(output, *value).expect("string writes should not fail")
         }
-        Value::Image(_) | Value::List(_) | Value::Record(_) | Value::Projected(_) => output
-            .push_str(
-                &serde_json::to_string(&to_json(value))
-                    .expect("value json serialization should succeed"),
-            ),
+        Value::Projected(_) => unreachable!("projected values require async stringification"),
+        Value::Image(_) | Value::List(_) | Value::Record(_) => output.push_str(
+            &serde_json::to_string(&to_json_blocking(value))
+                .expect("value json serialization should succeed"),
+        ),
     }
     Ok(())
+}
+
+fn append_stringified_value_async<'a>(
+    output: &'a mut String,
+    value: &'a Value,
+) -> ProjectedFuture<'a, Result<(), RuntimeError>> {
+    Box::pin(async move {
+        match value {
+            Value::String(value) => output.push_str(value),
+            Value::Null => output.push_str("null"),
+            Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+            Value::Number(value) => {
+                write_number(output, *value).expect("string writes should not fail")
+            }
+            Value::Projected(value) => output.push_str(&value.render().await),
+            Value::Image(_) | Value::List(_) | Value::Record(_) => output.push_str(
+                &serde_json::to_string(&to_json_async(value).await)
+                    .expect("value json serialization should succeed"),
+            ),
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+fn append_stringified_value(output: &mut String, value: &Value) -> Result<(), RuntimeError> {
+    futures_executor::block_on(append_stringified_value_async(output, value))
 }
 
 fn value_type_name(value: &Value) -> &'static str {
@@ -5063,7 +5725,7 @@ fn resolve_existing_list_assignment_index(
     Ok(normalized as usize)
 }
 
-fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> {
+async fn apply_format_async(template: &str, args: &[Value]) -> Result<String, RuntimeError> {
     let mut output = String::with_capacity(template.len());
     let bytes = template.as_bytes();
     let mut index = 0;
@@ -5138,7 +5800,7 @@ fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> 
                         None => "format slot `{}` is out of range".to_string(),
                     },
                 })?;
-                append_stringified_value(&mut output, value)?;
+                append_stringified_value_async(&mut output, value).await?;
                 index = cursor + 1;
                 last_literal = index;
                 continue;
@@ -5179,6 +5841,11 @@ fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> 
         });
     }
     Ok(output)
+}
+
+#[cfg(test)]
+fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> {
+    futures_executor::block_on(apply_format_async(template, args))
 }
 
 fn compile_format_template(template: &str, argc: usize) -> CompiledFormatTemplate {
@@ -5310,7 +5977,7 @@ fn push_format_literal(parts: &mut Vec<CompiledFormatPart>, literal: &str) {
     }
 }
 
-fn execute_compiled_format(
+async fn execute_compiled_format(
     template: &CompiledFormatTemplate,
     args: &[Value],
 ) -> Result<String, RuntimeError> {
@@ -5328,7 +5995,46 @@ fn execute_compiled_format(
                 let value = args.get(*slot).ok_or_else(|| RuntimeError::ValueError {
                     message: format!("format slot `{slot}` is out of range"),
                 })?;
-                append_stringified_value(&mut output, value)?;
+                append_stringified_value_async(&mut output, value).await?;
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn execute_compiled_format_blocking(
+    template: &CompiledFormatTemplate,
+    args: &[Value],
+) -> Result<String, RuntimeError> {
+    if args
+        .iter()
+        .any(|value| matches!(value, Value::Projected(_)))
+    {
+        futures_executor::block_on(execute_compiled_format(template, args))
+    } else {
+        execute_compiled_format_direct(template, args)
+    }
+}
+
+fn execute_compiled_format_direct(
+    template: &CompiledFormatTemplate,
+    args: &[Value],
+) -> Result<String, RuntimeError> {
+    if let Some(message) = &template.error {
+        return Err(RuntimeError::ValueError {
+            message: message.clone(),
+        });
+    }
+
+    let mut output = String::with_capacity(template.min_capacity);
+    for part in template.parts.iter() {
+        match part {
+            CompiledFormatPart::Literal(literal) => output.push_str(literal),
+            CompiledFormatPart::Arg(slot) => {
+                let value = args.get(*slot).ok_or_else(|| RuntimeError::ValueError {
+                    message: format!("format slot `{slot}` is out of range"),
+                })?;
+                append_stringified_value_direct(&mut output, value)?;
             }
         }
     }
@@ -5387,24 +6093,41 @@ fn json_number(value: f64) -> Option<serde_json::Number> {
     serde_json::Number::from_f64(value)
 }
 
+fn to_json_async<'a>(value: &'a Value) -> ProjectedFuture<'a, serde_json::Value> {
+    Box::pin(async move {
+        match value {
+            Value::Null => serde_json::Value::Null,
+            Value::Bool(value) => serde_json::Value::Bool(*value),
+            Value::Number(value) => json_number(*value)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Value::String(value) => serde_json::Value::String(value.to_string()),
+            Value::Image(image) => image_to_json(image),
+            Value::List(values) => {
+                let mut out = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    out.push(to_json_async(value).await);
+                }
+                serde_json::Value::Array(out)
+            }
+            Value::Record(record) => {
+                let mut object = serde_json::Map::with_capacity(record.len());
+                for (key, value) in record.iter() {
+                    object.insert(key.to_string(), to_json_async(value).await);
+                }
+                serde_json::Value::Object(object)
+            }
+            Value::Projected(value) => to_json_async(&value.materialize_async().await).await,
+        }
+    })
+}
+
 fn to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(value) => serde_json::Value::Bool(*value),
-        Value::Number(value) => json_number(*value)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Value::String(value) => serde_json::Value::String(value.to_string()),
-        Value::Image(image) => image_to_json(image),
-        Value::List(values) => serde_json::Value::Array(values.iter().map(to_json).collect()),
-        Value::Record(record) => serde_json::Value::Object(
-            record
-                .iter()
-                .map(|(key, value)| (key.to_string(), to_json(value)))
-                .collect(),
-        ),
-        Value::Projected(value) => to_json(&value.materialize()),
-    }
+    futures_executor::block_on(to_json_async(value))
+}
+
+fn to_json_blocking(value: &Value) -> serde_json::Value {
+    to_json(value)
 }
 
 fn image_to_json(image: &ImageValue) -> serde_json::Value {

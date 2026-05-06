@@ -34,6 +34,7 @@ impl ManagedSessionCapability {
                 "session `{session_id}` already exists"
             )));
         }
+        let parent_session_id = request.relation.parent_session_id().map(ToOwned::to_owned);
         let snapshot = match &request.start {
             SessionStartPoint::Empty => SessionSnapshot {
                 session_id: session_id.clone(),
@@ -52,7 +53,7 @@ impl ManagedSessionCapability {
                 SessionStartPoint::Empty => current.policy.clone(),
                 _ => snapshot.policy.clone(),
             });
-        if request.parent_session_id.is_some() {
+        if parent_session_id.is_some() {
             policy.session_id = Some(session_id.clone());
         }
         let state = self.build_runtime_state(session_id.clone(), &request, snapshot, &policy);
@@ -66,7 +67,7 @@ impl ManagedSessionCapability {
                 .host()
                 .build_session_with_parent(
                     &session_id,
-                    request.parent_session_id.clone(),
+                    parent_session_id.clone(),
                     policy.execution_mode.clone(),
                     policy.standard_context_approach.clone(),
                     None,
@@ -77,7 +78,7 @@ impl ManagedSessionCapability {
                 .plugins
                 .fork_for_child_session(
                     &session_id,
-                    request.parent_session_id.clone(),
+                    parent_session_id.clone(),
                     policy.execution_mode.clone(),
                     policy.standard_context_approach.clone(),
                     authority,
@@ -89,7 +90,7 @@ impl ManagedSessionCapability {
                 factory
                     .create_store(&SessionStoreCreateRequest {
                         session_id: session_id.clone(),
-                        parent_session_id: request.parent_session_id.clone(),
+                        parent_session_id: parent_session_id.clone(),
                         policy: policy.clone(),
                     })
                     .map_err(crate::PluginError::Session)?,
@@ -189,6 +190,15 @@ impl ManagedSessionCapability {
             .lock()
             .await
             .insert(session_id.clone(), Arc::new(Mutex::new(runtime)));
+        if let crate::SessionRelation::Handoff {
+            parent_session_id, ..
+        } = &request.relation
+        {
+            self.active_handoff_continuations
+                .lock()
+                .await
+                .insert(parent_session_id.clone(), session_id.clone());
+        }
         if let Some(source) = &request.usage_source {
             usage
                 .child_sources
@@ -204,7 +214,7 @@ impl ManagedSessionCapability {
         }
         Ok(SessionHandle {
             session_id,
-            parent_session_id: request.parent_session_id,
+            parent_session_id,
             policy,
         })
     }

@@ -1,11 +1,11 @@
 #[path = "../examples/bench_support/mod.rs"]
 mod bench_support;
 
-use bench_support::{BenchHost, Scenario, benchmark_program, seeded_state};
+use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lashlang::{
-    CompiledProgramCache, ExecutionOutcome, State, Value, compile_program, execute,
-    execute_compiled, parse,
+    CompiledProgramCache, ExecutionOutcome, State, Value, compile_program,
+    execute_compiled_with_projected_bindings, execute_with_projected_bindings, parse,
 };
 use std::hint::black_box;
 use std::time::Duration;
@@ -37,12 +37,18 @@ fn benchmark_full_block_modes(
     let source = benchmark_program(scenario);
     let program = parse(source).expect("benchmark program should parse");
     let compiled = compile_program(&program);
+    let projected = projected_bindings(scenario);
 
     group.bench_function(BenchmarkId::new("parse_execute", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state();
             let outcome = rt
-                .block_on(execute(black_box(source), &mut state, host))
+                .block_on(execute_with_projected_bindings(
+                    black_box(source),
+                    &mut state,
+                    host,
+                    &projected,
+                ))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
@@ -59,7 +65,12 @@ fn benchmark_full_block_modes(
                 .get_or_compile(black_box(source))
                 .expect("benchmark cache lookup");
             let outcome = rt
-                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
+                .block_on(execute_compiled_with_projected_bindings(
+                    black_box(&compiled),
+                    &mut state,
+                    host,
+                    &projected,
+                ))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
@@ -76,7 +87,12 @@ fn benchmark_full_block_modes(
                 .get_or_compile(black_box(source))
                 .expect("benchmark cache lookup");
             let outcome = rt
-                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
+                .block_on(execute_compiled_with_projected_bindings(
+                    black_box(&compiled),
+                    &mut state,
+                    host,
+                    &projected,
+                ))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
@@ -86,7 +102,12 @@ fn benchmark_full_block_modes(
         b.iter(|| {
             let mut state = seeded_state();
             let outcome = rt
-                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
+                .block_on(execute_compiled_with_projected_bindings(
+                    black_box(&compiled),
+                    &mut state,
+                    host,
+                    &projected,
+                ))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });
@@ -100,7 +121,12 @@ fn benchmark_full_block_modes(
             let decoded = serde_json::from_slice(&encoded).expect("snapshot decode");
             state = State::from_snapshot(decoded);
             let outcome = rt
-                .block_on(execute_compiled(black_box(&compiled), &mut state, host))
+                .block_on(execute_compiled_with_projected_bindings(
+                    black_box(&compiled),
+                    &mut state,
+                    host,
+                    &projected,
+                ))
                 .expect("benchmark execution");
             black_box(expect_finished(outcome));
         });

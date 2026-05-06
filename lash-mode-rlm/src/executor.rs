@@ -10,8 +10,8 @@ use lash::{
 };
 use lashlang::{
     CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ImageValue, ProjectedBindings,
-    ProjectedList, ProjectedValue, Record as FlowRecord, State as FlowState, ToolHost,
-    ToolHostCall, ToolHostError, Value as FlowValue,
+    ProjectedFuture, ProjectedHostValue, ProjectedRead, ProjectedValue, Record as FlowRecord,
+    State as FlowState, ToolHost, ToolHostCall, ToolHostError, Value as FlowValue,
 };
 use serde_json::{Value, json};
 
@@ -190,7 +190,7 @@ async fn execute_code_inner(
     )
     .await;
     let terminal_finish = match result {
-        Ok(ExecutionOutcome::Finished(value)) => Some(flow_to_json_value(&value)),
+        Ok(ExecutionOutcome::Finished(value)) => Some(flow_to_json_value(&value).await),
         Ok(ExecutionOutcome::Continued) => None,
         Err(failure) => {
             let collected = host.into_collected();
@@ -230,14 +230,14 @@ fn projected_bindings(ctx: &ModeExecutionContext) -> ProjectedBindings {
     for (name, value) in ctx.rlm_globals().iter() {
         bindings.insert(
             name.clone(),
-            ProjectedValue::value(name.clone(), json_to_flow_value(value.clone())),
+            ProjectedValue::scalar(name.clone(), json_to_flow_value(value.clone())),
         );
     }
     bindings.insert(
         "history",
-        ProjectedValue::list(
+        ProjectedValue::custom(
             "history",
-            Arc::new(HistoryProjectedList {
+            Arc::new(HistoryProjectedValue {
                 projection: ctx.rlm_chronological_projection(),
             }),
         ),
@@ -245,21 +245,59 @@ fn projected_bindings(ctx: &ModeExecutionContext) -> ProjectedBindings {
     bindings
 }
 
-struct HistoryProjectedList {
+struct HistoryProjectedValue {
     projection: Arc<lash::ChronologicalProjection>,
 }
 
-impl ProjectedList for HistoryProjectedList {
-    fn len(&self) -> usize {
-        self.projection.rlm_history_len()
+impl ProjectedHostValue for HistoryProjectedValue {
+    fn type_name(&self) -> &'static str {
+        "list"
     }
 
-    fn get(&self, index: usize) -> Option<FlowValue> {
-        self.projection
-            .rlm_history_item(index)
-            .and_then(|item| serde_json::to_value(item).ok())
-            .map(json_to_flow_value)
+    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
+        Box::pin(async { Some(self.projection.rlm_history_len()) })
     }
+
+    fn get_index(&self, index: FlowValue) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let Ok(Some(index)) = projected_index(&index, self.projection.rlm_history_len()) else {
+                return ProjectedRead::Missing;
+            };
+            self.projection
+                .rlm_history_item(index)
+                .and_then(|item| serde_json::to_value(item).ok())
+                .map(json_to_flow_value)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn render(&self) -> ProjectedFuture<'_, String> {
+        Box::pin(async move {
+            serde_json::to_string(&self.projection.rlm_history())
+                .unwrap_or_else(|_| "[]".to_string())
+        })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, FlowValue> {
+        Box::pin(async move { json_to_flow_value(self.projection.rlm_history_value()) })
+    }
+}
+
+fn projected_index(index: &FlowValue, len: usize) -> Result<Option<usize>, ()> {
+    let FlowValue::Number(index) = index else {
+        return Err(());
+    };
+    if !index.is_finite() || index.fract() != 0.0 {
+        return Err(());
+    }
+    let len = len as isize;
+    let index = *index as isize;
+    let normalized = if index < 0 { len + index } else { index };
+    if normalized < 0 || normalized >= len {
+        return Ok(None);
+    }
+    Ok(Some(normalized as usize))
 }
 
 struct HostBridge {
@@ -281,7 +319,7 @@ impl ToolHost for HostBridge {
             .call_tool(
                 uuid::Uuid::new_v4().to_string(),
                 name,
-                self.tool_payload(&args),
+                self.tool_payload(&args).await,
                 index,
             )
             .await;
@@ -292,14 +330,14 @@ impl ToolHost for HostBridge {
         if calls.is_empty() {
             return Vec::new();
         }
-        let batch = calls
-            .iter()
-            .map(|call| ModeToolBatchItem {
+        let mut batch = Vec::with_capacity(calls.len());
+        for call in &calls {
+            batch.push(ModeToolBatchItem {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: call.name.clone(),
-                args: self.tool_payload(&call.args),
-            })
-            .collect::<Vec<_>>();
+                args: self.tool_payload(&call.args).await,
+            });
+        }
         let replies = self.ctx.call_tool_batch(batch).await;
         if replies.len() != calls.len() {
             return calls
@@ -323,7 +361,7 @@ impl ToolHost for HostBridge {
             .start_tool_call(
                 uuid::Uuid::new_v4().to_string(),
                 name,
-                self.tool_payload(&args),
+                self.tool_payload(&args).await,
             )
             .await;
         self.consume_reply(reply)
@@ -334,7 +372,7 @@ impl ToolHost for HostBridge {
             .ctx
             .await_tool_handle(
                 uuid::Uuid::new_v4().to_string(),
-                flow_to_json_value(&handle),
+                flow_to_json_value(&handle).await,
             )
             .await;
         self.consume_reply(reply)
@@ -345,7 +383,7 @@ impl ToolHost for HostBridge {
             .ctx
             .cancel_tool_handle(
                 uuid::Uuid::new_v4().to_string(),
-                flow_to_json_value(&handle),
+                flow_to_json_value(&handle).await,
             )
             .await;
         self.consume_reply(reply)
@@ -353,8 +391,8 @@ impl ToolHost for HostBridge {
 
     async fn print(&self, value: FlowValue) -> Result<(), ToolHostError> {
         let attachment_store = self.ctx.attachment_store();
-        let images = collect_printed_images(&value, attachment_store.as_ref())?;
-        let raw_text = format_output_value(&value);
+        let images = collect_printed_images(&value, attachment_store.as_ref()).await?;
+        let raw_text = format_output_value(&value).await;
         let (_projected_text, metadata) =
             project_observation_text(&raw_text, &self.observe_projection);
         self.observations
@@ -390,8 +428,8 @@ impl HostBridge {
         next
     }
 
-    fn tool_payload(&self, args: &FlowRecord) -> Value {
-        let mut payload = flow_record_to_json_value(args);
+    async fn tool_payload(&self, args: &FlowRecord) -> Value {
+        let mut payload = flow_record_to_json_value(args).await;
         if let Some(obj) = payload.as_object_mut() {
             obj.entry("__session_id__".to_string())
                 .or_insert_with(|| Value::String(self.ctx.session_id().to_string()));
@@ -442,55 +480,63 @@ struct CollectedExecutionOutput {
     tool_images: Vec<ToolImage>,
 }
 
-fn collect_printed_images(
+async fn collect_printed_images(
     value: &FlowValue,
     attachment_store: &dyn lash::AttachmentStore,
 ) -> Result<Vec<AttachmentRef>, ToolHostError> {
     let mut seen = HashSet::new();
     let mut images = Vec::new();
-    collect_printed_images_inner(value, attachment_store, &mut seen, &mut images)?;
+    collect_printed_images_inner(value, attachment_store, &mut seen, &mut images).await?;
     Ok(images)
 }
 
-fn collect_printed_images_inner(
-    value: &FlowValue,
-    attachment_store: &dyn lash::AttachmentStore,
-    seen: &mut HashSet<String>,
-    images: &mut Vec<AttachmentRef>,
-) -> Result<(), ToolHostError> {
-    match value {
-        FlowValue::Image(image) => {
-            if !seen.insert(image.id.clone()) {
-                return Ok(());
+fn collect_printed_images_inner<'a>(
+    value: &'a FlowValue,
+    attachment_store: &'a dyn lash::AttachmentStore,
+    seen: &'a mut HashSet<String>,
+    images: &'a mut Vec<AttachmentRef>,
+) -> ProjectedFuture<'a, Result<(), ToolHostError>> {
+    Box::pin(async move {
+        match value {
+            FlowValue::Image(image) => {
+                if !seen.insert(image.id.clone()) {
+                    return Ok(());
+                }
+                let reference = attachment_store
+                    .get(&lash::AttachmentId::new(image.id.clone()))
+                    .ok()
+                    .map(|stored| stored.meta.as_ref())
+                    .ok_or_else(|| {
+                        ToolHostError::new(format!(
+                            "image bytes for `{}` are unavailable or were pruned",
+                            image.id
+                        ))
+                    })?;
+                images.push(reference);
             }
-            let reference = attachment_store
-                .get(&lash::AttachmentId::new(image.id.clone()))
-                .ok()
-                .map(|stored| stored.meta.as_ref())
-                .ok_or_else(|| {
-                    ToolHostError::new(format!(
-                        "image bytes for `{}` are unavailable or were pruned",
-                        image.id
-                    ))
-                })?;
-            images.push(reference);
-        }
-        FlowValue::List(values) => {
-            for value in values.iter() {
-                collect_printed_images_inner(value, attachment_store, seen, images)?;
+            FlowValue::List(values) => {
+                for value in values.iter() {
+                    collect_printed_images_inner(value, attachment_store, seen, images).await?;
+                }
             }
-        }
-        FlowValue::Record(record) => {
-            for (_, value) in record.iter() {
-                collect_printed_images_inner(value, attachment_store, seen, images)?;
+            FlowValue::Record(record) => {
+                for (_, value) in record.iter() {
+                    collect_printed_images_inner(value, attachment_store, seen, images).await?;
+                }
             }
+            FlowValue::Projected(value) => {
+                collect_printed_images_inner(
+                    &value.materialize_async().await,
+                    attachment_store,
+                    seen,
+                    images,
+                )
+                .await?;
+            }
+            FlowValue::Null | FlowValue::Bool(_) | FlowValue::Number(_) | FlowValue::String(_) => {}
         }
-        FlowValue::Projected(value) => {
-            collect_printed_images_inner(&value.materialize(), attachment_store, seen, images)?;
-        }
-        FlowValue::Null | FlowValue::Bool(_) | FlowValue::Number(_) | FlowValue::String(_) => {}
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn lift_tool_result_to_flow_value(
@@ -660,28 +706,36 @@ fn prune_projected_binding_names<'a>(
     *rlm = FlowState::from_snapshot(snapshot);
 }
 
-fn flow_to_json_value(value: &FlowValue) -> Value {
-    match value {
-        FlowValue::Null => Value::Null,
-        FlowValue::Bool(value) => Value::Bool(*value),
-        FlowValue::Number(value) => json_number(*value),
-        FlowValue::String(value) => Value::String(value.to_string()),
-        FlowValue::Image(image) => {
-            serde_json::to_value(image).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
+    Box::pin(async move {
+        match value {
+            FlowValue::Null => Value::Null,
+            FlowValue::Bool(value) => Value::Bool(*value),
+            FlowValue::Number(value) => json_number(*value),
+            FlowValue::String(value) => Value::String(value.to_string()),
+            FlowValue::Image(image) => serde_json::to_value(image)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            FlowValue::List(values) => {
+                let mut out = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    out.push(flow_to_json_value(value).await);
+                }
+                Value::Array(out)
+            }
+            FlowValue::Record(record) => flow_record_to_json_value(record).await,
+            FlowValue::Projected(value) => {
+                flow_to_json_value(&value.materialize_async().await).await
+            }
         }
-        FlowValue::List(values) => Value::Array(values.iter().map(flow_to_json_value).collect()),
-        FlowValue::Record(record) => flow_record_to_json_value(record),
-        FlowValue::Projected(value) => flow_to_json_value(&value.materialize()),
-    }
+    })
 }
 
-fn flow_record_to_json_value(record: &FlowRecord) -> Value {
-    Value::Object(
-        record
-            .iter()
-            .map(|(key, value)| (key.to_string(), flow_to_json_value(value)))
-            .collect(),
-    )
+async fn flow_record_to_json_value(record: &FlowRecord) -> Value {
+    let mut object = serde_json::Map::with_capacity(record.len());
+    for (key, value) in record.iter() {
+        object.insert(key.to_string(), flow_to_json_value(value).await);
+    }
+    Value::Object(object)
 }
 
 fn json_number(value: f64) -> Value {
@@ -745,7 +799,7 @@ fn optional_json_u32(value: &Value) -> Option<Option<u32>> {
     }
 }
 
-fn format_output_value(value: &FlowValue) -> String {
+async fn format_output_value(value: &FlowValue) -> String {
     match value {
         FlowValue::Null => "null".to_string(),
         FlowValue::String(text) => text.to_string(),
@@ -754,9 +808,8 @@ fn format_output_value(value: &FlowValue) -> String {
         FlowValue::Image(_)
         | FlowValue::List(_)
         | FlowValue::Record(_)
-        | FlowValue::Projected(_) => {
-            serde_json::to_string(&flow_to_json_value(value)).unwrap_or_else(|_| value.to_string())
-        }
+        | FlowValue::Projected(_) => serde_json::to_string(&flow_to_json_value(value).await)
+            .unwrap_or_else(|_| value.to_string()),
     }
 }
 
@@ -871,15 +924,32 @@ mod tests {
             .block_on(future)
     }
 
-    struct TestProjectedList(Vec<FlowValue>);
+    struct TestProjectedValue(Vec<FlowValue>);
 
-    impl ProjectedList for TestProjectedList {
-        fn len(&self) -> usize {
-            self.0.len()
+    impl ProjectedHostValue for TestProjectedValue {
+        fn type_name(&self) -> &'static str {
+            "list"
         }
 
-        fn get(&self, index: usize) -> Option<FlowValue> {
-            self.0.get(index).cloned()
+        fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
+            Box::pin(async { Some(self.0.len()) })
+        }
+
+        fn get_index(&self, index: FlowValue) -> ProjectedFuture<'_, ProjectedRead> {
+            Box::pin(async move {
+                let Ok(Some(index)) = projected_index(&index, self.0.len()) else {
+                    return ProjectedRead::Missing;
+                };
+                self.0
+                    .get(index)
+                    .cloned()
+                    .map(ProjectedRead::Value)
+                    .unwrap_or(ProjectedRead::Missing)
+            })
+        }
+
+        fn materialize(&self) -> ProjectedFuture<'_, FlowValue> {
+            Box::pin(async { FlowValue::List(self.0.clone().into()) })
         }
     }
 
@@ -887,7 +957,7 @@ mod tests {
         let mut projected = ProjectedBindings::new();
         projected.insert(
             "history",
-            ProjectedValue::list("history", Arc::new(TestProjectedList(values))),
+            ProjectedValue::custom("history", Arc::new(TestProjectedValue(values))),
         );
         projected
     }
@@ -1054,7 +1124,7 @@ mod tests {
             let mut projected = ProjectedBindings::new();
             projected.insert(
                 "current_query",
-                ProjectedValue::value("current_query", FlowValue::String("host".into())),
+                ProjectedValue::scalar("current_query", FlowValue::String("host".into())),
             );
 
             let compiled = lashlang::compile_source(

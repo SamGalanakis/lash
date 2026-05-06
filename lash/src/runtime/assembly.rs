@@ -312,6 +312,7 @@ impl TurnAssembler {
                     result: result.clone(),
                     success: *success,
                     duration_ms: *duration_ms,
+                    control: None,
                 });
                 if !success {
                     self.saw_tool_failure = true;

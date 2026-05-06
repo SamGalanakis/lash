@@ -574,6 +574,7 @@ impl ModeExecutionContext {
             result: handle_value.clone(),
             success: true,
             duration_ms: 0,
+            control: None,
         };
         ModeToolReply::success(handle_value).with_record(record)
     }
@@ -796,6 +797,7 @@ impl ModeExecutionContext {
                                     result: Self::background_task_status_value(&status),
                                     success: true,
                                     duration_ms: 0,
+                                    control: None,
                                 },
                                 images: Vec::new(),
                             }),

@@ -277,17 +277,13 @@ async fn run_autonomous_turn(
     })
 }
 
-async fn activate_autonomous_handoff(
-    runtime: &mut LashRuntime,
+async fn autonomous_handoff_first_turn(
+    runtime: &LashRuntime,
     session_id: &str,
 ) -> anyhow::Result<TurnInput> {
     let session_manager = runtime
         .session_manager()
         .map_err(|err| anyhow::anyhow!("failed to access session manager: {err}"))?;
-    runtime
-        .activate_managed_session(session_id)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to activate session `{session_id}`: {err}"))?;
     let seed = session_manager
         .take_first_turn_input(session_id)
         .await
@@ -322,7 +318,7 @@ pub(crate) async fn run_autonomous(
     let mut stream_id = 1;
     let (mut done, cancel) = loop {
         let outcome = run_autonomous_turn(runtime, turn_input, &mut renderer, stream_id).await?;
-        let mut turn_done = outcome.done;
+        let turn_done = outcome.done;
         if let Some(session_id) = outcome.handoff_session_id {
             if !matches!(
                 &turn_done.result.outcome,
@@ -330,7 +326,7 @@ pub(crate) async fn run_autonomous(
             ) {
                 break (turn_done, outcome.cancel);
             }
-            turn_input = activate_autonomous_handoff(&mut turn_done.runtime, &session_id).await?;
+            turn_input = autonomous_handoff_first_turn(&turn_done.runtime, &session_id).await?;
             runtime = turn_done.runtime;
             stream_id += 1;
             continue;

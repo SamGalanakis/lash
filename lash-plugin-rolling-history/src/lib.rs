@@ -565,7 +565,9 @@ async fn summarize_compaction_prefix(
     let handle = host
         .create_session(SessionCreateRequest {
             session_id: Some(compaction_session_id),
-            parent_session_id: Some(session_id.to_string()),
+            relation: lash::SessionRelation::Child {
+                parent_session_id: session_id.to_string(),
+            },
             start: SessionStartPoint::Snapshot {
                 snapshot: Box::new(snapshot),
             },
@@ -1067,6 +1069,7 @@ mod tests {
             result: json!(format!("{}\nend", "line\n".repeat(2_500))),
             success: true,
             duration_ms: 5,
+            control: None,
         };
 
         let normalized = normalize_tool_result_content(&record);
@@ -1098,6 +1101,7 @@ mod tests {
             }),
             success: true,
             duration_ms: 5,
+            control: None,
         };
 
         let preview = render_tool_result_preview_for_session(&record);
@@ -1148,6 +1152,7 @@ mod tests {
                 )),
                 success: true,
                 duration_ms: 1,
+                control: None,
             })
             .collect::<Vec<_>>();
         let mut messages = vec![text_message("u0", MessageRole::User, "older")];

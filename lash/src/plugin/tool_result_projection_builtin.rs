@@ -118,6 +118,7 @@ fn project_tool_result(
         success: ctx.result.success,
         result,
         images: ctx.result.images,
+        control: ctx.result.control,
     }
 }
 
@@ -544,6 +545,7 @@ fn project_batch_child_value(
             success,
             result: project_json_value(&child_value, config, ctx),
             images: Vec::new(),
+            control: None,
         }
     } else {
         project_tool_result(
@@ -557,6 +559,7 @@ fn project_batch_child_value(
                     success,
                     result: child_value,
                     images: Vec::new(),
+                    control: None,
                 },
                 duration_ms,
                 host: Arc::clone(&ctx.host),

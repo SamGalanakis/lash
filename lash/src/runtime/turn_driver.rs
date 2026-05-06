@@ -361,6 +361,7 @@ impl RuntimeTurnDriver {
                                     result: outcome.state_result.result.clone(),
                                     success: outcome.state_result.success,
                                     duration_ms: outcome.duration_ms,
+                                    control: outcome.state_result.control.clone(),
                                 };
                                 self.emit_tool_call_trace(machine.mode_iteration(), &record);
                             }
@@ -373,6 +374,7 @@ impl RuntimeTurnDriver {
                                 result: outcome.state_result.result.clone(),
                                 success: outcome.state_result.success,
                                 duration_ms: outcome.duration_ms,
+                                control: outcome.state_result.control.clone(),
                             }));
                         machine.handle_response(Response::ToolResults { id, results });
                     }

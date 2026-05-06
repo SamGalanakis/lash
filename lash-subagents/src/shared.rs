@@ -32,7 +32,7 @@ pub(crate) fn fresh_child_request(
 ) -> SessionCreateRequest {
     SessionCreateRequest {
         session_id: Some(uuid::Uuid::new_v4().to_string()),
-        parent_session_id: Some(parent_session_id),
+        relation: lash::SessionRelation::Child { parent_session_id },
         start,
         policy: Some(policy),
         plugin_mode: SessionPluginMode::Fresh,

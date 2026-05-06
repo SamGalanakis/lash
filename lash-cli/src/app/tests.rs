@@ -590,6 +590,7 @@ fn finish_turn_from_read_view_does_not_duplicate_assistant_text_after_tool_activ
         result: serde_json::json!({"ok": true}),
         success: true,
         duration_ms: 12,
+        control: None,
     }];
     let events = events_from_messages(&messages);
     app.finish_turn_from_read_view(&test_read_view(&events, &messages, &tool_calls));
@@ -851,6 +852,7 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
             }),
             success: true,
             duration_ms: 12,
+            control: None,
         }],
         images: Vec::new(),
         error: None,
@@ -888,6 +890,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
             result: serde_json::json!({ "output": "time\n", "exit_code": 0 }),
             success: true,
             duration_ms: 3,
+            control: None,
         }],
         images: Vec::new(),
         error: None,
@@ -906,6 +909,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
             result: serde_json::json!({ "entries": ["Cargo.toml"] }),
             success: true,
             duration_ms: 4,
+            control: None,
         }],
         images: Vec::new(),
         error: None,
@@ -1521,6 +1525,7 @@ fn interrupted_read_view_hides_rlm_execution_result_user_message() {
         }),
         success: true,
         duration_ms: 0,
+        control: None,
     }];
     let messages = vec![text_message("m0", MessageRole::User, "go"), result_message];
     let events = events_from_messages(&messages);

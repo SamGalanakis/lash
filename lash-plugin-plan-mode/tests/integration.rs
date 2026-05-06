@@ -1174,7 +1174,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
                     .session_id
                     .clone()
                     .unwrap_or_else(|| "new-session".to_string()),
-                parent_session_id: request.parent_session_id.clone(),
+                parent_session_id: request.relation.parent_session_id().map(ToOwned::to_owned),
                 policy: request.policy.clone().unwrap_or_default(),
             })
         }

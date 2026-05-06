@@ -223,6 +223,7 @@ mod tests {
             result: serde_json::json!({ "matches": [] }),
             success: true,
             duration_ms: 7,
+            control: None,
         }
     }
 

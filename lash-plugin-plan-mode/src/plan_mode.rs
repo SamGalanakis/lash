@@ -820,7 +820,9 @@ impl SessionPlugin for PlanModePlugin {
                         directives.push(PluginDirective::CreateSession {
                             request: Box::new(SessionCreateRequest {
                                 session_id: Some(session_id.clone()),
-                                parent_session_id: Some(ctx.session_id.clone()),
+                                relation: lash::SessionRelation::Child {
+                                    parent_session_id: ctx.session_id.clone(),
+                                },
                                 start: SessionStartPoint::Empty,
                                 policy: None,
                                 plugin_mode: SessionPluginMode::Fresh,

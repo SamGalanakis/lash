@@ -46,6 +46,7 @@ mod tests {
                     result: serde_json::json!({"answer": "y"}),
                     success: true,
                     duration_ms: 4,
+                    control: None,
                 }),
             }],
             trace_path: PathBuf::from("session.trace.jsonl"),

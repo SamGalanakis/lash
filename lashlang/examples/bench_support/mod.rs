@@ -1,4 +1,7 @@
-use lashlang::{Record, State, ToolHost, ToolHostCall, ToolHostError, Value};
+use lashlang::{
+    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedRead, ProjectedValue, Record,
+    State, ToolHost, ToolHostCall, ToolHostError, Value,
+};
 use std::fmt;
 use std::sync::Arc;
 
@@ -11,6 +14,7 @@ pub enum Scenario {
     GeneralParallel,
     LoopControl,
     IndexedAssignment,
+    ProjectedValues,
 }
 
 impl Scenario {
@@ -22,6 +26,7 @@ impl Scenario {
         Self::GeneralParallel,
         Self::LoopControl,
         Self::IndexedAssignment,
+        Self::ProjectedValues,
     ];
 
     #[allow(dead_code)]
@@ -34,13 +39,14 @@ impl Scenario {
             "general_parallel" => Self::GeneralParallel,
             "loop_control" => Self::LoopControl,
             "indexed_assignment" => Self::IndexedAssignment,
+            "projected_values" => Self::ProjectedValues,
             _ => return None,
         })
     }
 
     #[allow(dead_code)]
     pub fn expected_values() -> &'static str {
-        "baseline, language_surface, async_await, direct_unwrap, general_parallel, loop_control, indexed_assignment, or all"
+        "baseline, language_surface, async_await, direct_unwrap, general_parallel, loop_control, indexed_assignment, projected_values, or all"
     }
 }
 
@@ -54,6 +60,7 @@ impl fmt::Display for Scenario {
             Self::GeneralParallel => "general_parallel",
             Self::LoopControl => "loop_control",
             Self::IndexedAssignment => "indexed_assignment",
+            Self::ProjectedValues => "projected_values",
         })
     }
 }
@@ -295,7 +302,192 @@ for group in keys(counts) {
 submit { counts: counts, state: state, summary: join(summary, ",") }
 "#
         }
+        Scenario::ProjectedValues => {
+            r#"
+first = history[0]
+second = history[1]
+body_head = docs.body[0]
+if docs.body {
+  body_truthy = true
+} else {
+  body_truthy = false
+}
+print docs.body
+summary = {
+  history_len: len(history),
+  first_role: first.role,
+  first_content: first.content,
+  second_content: second.content,
+  doc_title: docs.title,
+  doc_summary: docs.summary,
+  body_head: body_head,
+  body_truthy: body_truthy,
+  body_text: docs.body
+}
+submit summary
+"#
+        }
     }
+}
+
+pub fn projected_bindings(scenario: Scenario) -> ProjectedBindings {
+    let mut bindings = ProjectedBindings::new();
+    if !matches!(scenario, Scenario::ProjectedValues) {
+        return bindings;
+    }
+    bindings.insert(
+        "history",
+        ProjectedValue::custom("history", Arc::new(ProjectedList::history())),
+    );
+    bindings.insert(
+        "docs",
+        ProjectedValue::scalar("docs", projected_docs_record()),
+    );
+    bindings
+}
+
+fn projected_docs_record() -> Value {
+    let mut record = Record::default();
+    record.insert("title".to_string(), Value::String("Authoring Rules".into()));
+    record.insert(
+        "summary".to_string(),
+        Value::String("Rules for editing workflow JSON drafts.".into()),
+    );
+    record.insert(
+        "body".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            "docs.body",
+            Arc::new(ProjectedText::new("body", "lazy markdown body")),
+        )),
+    );
+    Value::Record(Arc::new(record))
+}
+
+struct ProjectedList {
+    name: &'static str,
+    values: Arc<[Value]>,
+}
+
+impl ProjectedList {
+    fn history() -> Self {
+        Self {
+            name: "history",
+            values: vec![
+                history_item("user", "alpha request"),
+                history_item("assistant", "beta response"),
+                history_item("tool", "gamma observation"),
+            ]
+            .into(),
+        }
+    }
+}
+
+impl ProjectedHostValue for ProjectedList {
+    fn type_name(&self) -> &'static str {
+        "list"
+    }
+
+    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
+        Box::pin(async { Some(self.values.len()) })
+    }
+
+    fn get_index(&self, index: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let Some(index) = resolve_index(&index, self.values.len()) else {
+                return ProjectedRead::Missing;
+            };
+            self.values
+                .get(index)
+                .cloned()
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn render(&self) -> ProjectedFuture<'_, String> {
+        Box::pin(async move { format!("<{}:{}>", self.name, self.values.len()) })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value> {
+        Box::pin(async move { Value::List(self.values.clone()) })
+    }
+}
+
+fn history_item(role: &str, content: &str) -> Value {
+    let mut record = Record::default();
+    record.insert("role".to_string(), Value::String(role.to_string().into()));
+    record.insert(
+        "content".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            format!("history.{role}.content"),
+            Arc::new(ProjectedText::new("content", content)),
+        )),
+    );
+    Value::Record(Arc::new(record))
+}
+
+struct ProjectedText {
+    name: &'static str,
+    text: Arc<str>,
+}
+
+impl ProjectedText {
+    fn new(name: &'static str, text: impl Into<Arc<str>>) -> Self {
+        Self {
+            name,
+            text: text.into(),
+        }
+    }
+}
+
+impl ProjectedHostValue for ProjectedText {
+    fn type_name(&self) -> &'static str {
+        "string"
+    }
+
+    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
+        Box::pin(async { Some(self.text.chars().count()) })
+    }
+
+    fn is_empty(&self) -> ProjectedFuture<'_, bool> {
+        Box::pin(async { self.text.is_empty() })
+    }
+
+    fn get_index(&self, index: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let Some(index) = resolve_index(&index, self.text.chars().count()) else {
+                return ProjectedRead::Missing;
+            };
+            self.text
+                .chars()
+                .nth(index)
+                .map(|ch| ProjectedRead::Value(Value::String(ch.to_string().into())))
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn render(&self) -> ProjectedFuture<'_, String> {
+        Box::pin(async move { format!("<{}:{} chars>", self.name, self.text.chars().count()) })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value> {
+        Box::pin(async move { Value::String(self.text.to_string().into()) })
+    }
+}
+
+fn resolve_index(index: &Value, len: usize) -> Option<usize> {
+    let Value::Number(index) = index else {
+        return None;
+    };
+    if !index.is_finite() || index.fract() != 0.0 {
+        return None;
+    }
+    let len = len as isize;
+    let index = *index as isize;
+    let normalized = if index < 0 { len + index } else { index };
+    (0..len)
+        .contains(&normalized)
+        .then_some(normalized as usize)
 }
 
 pub struct BenchHost;

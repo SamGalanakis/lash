@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use lash::session_model::{ModeEvent, SessionEventRecord};
 use lash::{
     MessageRole, ModeExtras, PluginMessage, ProgressSender, SessionAppendNode,
-    SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionStartPoint, ToolDefinition,
-    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionRelation, SessionStartPoint,
+    ToolControl, ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -14,7 +14,7 @@ impl RlmControlToolsProvider {
         &self,
         args: &Value,
         context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
+    ) -> Result<ContinueAsResult, String> {
         let task = required_string(args, "task")?;
         let seed = match args.get("seed") {
             None | Some(Value::Null) => serde_json::Map::new(),
@@ -53,7 +53,8 @@ impl RlmControlToolsProvider {
             .session_id
             .clone()
             .expect("fresh successor request sets session id");
-        request.initial_nodes = rlm_seed_initial_nodes(seed);
+        request.initial_nodes =
+            rlm_seed_initial_nodes(current_snapshot.read_view().rlm_globals(), seed);
         request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task.clone()));
         context
             .host
@@ -61,11 +62,16 @@ impl RlmControlToolsProvider {
             .await
             .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
 
-        Ok(json!({
-            "ok": true,
-            "_continue_as": successor_session_id,
-            "task": task,
-        }))
+        Ok(ContinueAsResult {
+            value: json!({
+                "ok": true,
+                "session_id": successor_session_id.clone(),
+                "task": task,
+            }),
+            control: ToolControl::Handoff {
+                session_id: successor_session_id,
+            },
+        })
     }
 }
 
@@ -108,7 +114,7 @@ impl ToolProvider for RlmControlToolsProvider {
 pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
         "continue_as",
-        "Tail-call into a fresh RLM successor with a clean window.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results) the successor needs in scope; leave bulky raw output behind.",
+        "Tail-call into a fresh RLM successor with a clean window.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results) the successor needs in scope; leave bulky raw output behind.",
         continue_as_input_schema(),
         json!({ "type": "object", "additionalProperties": true }),
     )
@@ -145,7 +151,11 @@ fn fresh_successor_request(
 ) -> SessionCreateRequest {
     SessionCreateRequest {
         session_id: Some(uuid::Uuid::new_v4().to_string()),
-        parent_session_id: Some(parent_session_id),
+        relation: SessionRelation::Handoff {
+            parent_session_id,
+            reason: "continue_as".to_string(),
+            metadata: serde_json::Map::new(),
+        },
         start: SessionStartPoint::Empty,
         policy: Some(policy),
         plugin_mode: SessionPluginMode::Fresh,
@@ -159,14 +169,17 @@ fn fresh_successor_request(
     }
 }
 
-fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<SessionAppendNode> {
-    if seed.is_empty() {
+fn rlm_seed_initial_nodes(
+    projected_globals: serde_json::Map<String, Value>,
+    seed: serde_json::Map<String, Value>,
+) -> Vec<SessionAppendNode> {
+    if projected_globals.is_empty() && seed.is_empty() {
         return Vec::new();
     }
     vec![SessionAppendNode::event(SessionEventRecord::Mode(
         ModeEvent::rlm(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(
             lash_rlm_types::RlmGlobalsPatchPluginBody {
-                set: serde_json::Map::new(),
+                set: projected_globals,
                 set_default: seed,
                 unset: Vec::new(),
             },
@@ -189,9 +202,14 @@ fn required_string(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required parameter: {key}"))
 }
 
-fn finalise_tool_result(result: Result<Value, String>) -> ToolResult {
+struct ContinueAsResult {
+    value: Value,
+    control: ToolControl,
+}
+
+fn finalise_tool_result(result: Result<ContinueAsResult, String>) -> ToolResult {
     match result {
-        Ok(value) => ToolResult::ok(value),
+        Ok(result) => ToolResult::ok(result.value).with_control(result.control),
         Err(err) => ToolResult::err(json!(err)),
     }
 }
@@ -250,7 +268,7 @@ mod tests {
             self.created.lock().expect("created").push(request.clone());
             Ok(SessionHandle {
                 session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
-                parent_session_id: request.parent_session_id,
+                parent_session_id: request.relation.parent_session_id().map(ToOwned::to_owned),
                 policy: request.policy.unwrap_or_default(),
             })
         }
@@ -299,6 +317,17 @@ mod tests {
 
     #[tokio::test]
     async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
+        let mut session_graph = lash::SessionGraph::default();
+        session_graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmGlobalsPatch(lash_rlm_types::RlmGlobalsPatchPluginBody {
+                set: serde_json::Map::from_iter([
+                    ("current_query".to_string(), json!("benchmark prompt")),
+                    ("iteration".to_string(), json!(27)),
+                ]),
+                set_default: serde_json::Map::from_iter([("diary".to_string(), json!([]))]),
+                unset: Vec::new(),
+            }),
+        )));
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {
                 policy: SessionPolicy {
@@ -320,6 +349,7 @@ mod tests {
                     },
                 )
                 .expect("valid rlm turn options"),
+                session_graph,
                 ..PersistedSessionState::default()
             },
             created: Mutex::new(Vec::new()),
@@ -347,16 +377,17 @@ mod tests {
         assert!(
             result
                 .result
-                .get("_continue_as")
+                .get("session_id")
                 .and_then(Value::as_str)
                 .is_some()
         );
+        assert!(matches!(result.control, Some(ToolControl::Handoff { .. })));
         let created = manager.created.lock().expect("created");
         assert_eq!(created.len(), 1);
         let request = &created[0];
         assert!(matches!(request.start, SessionStartPoint::Empty));
         assert_eq!(request.plugin_mode, SessionPluginMode::InheritCurrent);
-        assert_eq!(request.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(request.relation.parent_session_id(), Some("parent"));
         assert_eq!(
             request
                 .policy
@@ -382,6 +413,8 @@ mod tests {
         let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = mode_event.rlm_event() else {
             panic!("expected RlmGlobalsPatch");
         };
+        assert_eq!(seed.set["current_query"], json!("benchmark prompt"));
+        assert_eq!(seed.set["iteration"], json!(27));
         assert_eq!(seed.set_default["x"], json!(1));
         assert_eq!(seed.set_default["query"], json!("original"));
         let extras = request

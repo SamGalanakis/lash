@@ -68,6 +68,7 @@ impl LashRuntime {
             state,
             runtime_scope_id: Arc::<str>::from(uuid::Uuid::new_v4().to_string()),
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
+            active_handoff_continuations: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
             overflow_recovery_attempted: false,
             mode_turn_options,

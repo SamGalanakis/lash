@@ -2660,6 +2660,7 @@ dependencies = [
  "compact_str",
  "criterion",
  "futures",
+ "futures-executor",
  "futures-util",
  "proptest",
  "rustc-hash 2.1.2",

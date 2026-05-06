@@ -598,6 +598,7 @@ fn rlm_exec_tool_call_events_keep_call_id() {
                 result: serde_json::json!("contents"),
                 success: true,
                 duration_ms: 7,
+                control: None,
             }],
             images: Vec::new(),
             printed_images: Vec::new(),
@@ -613,6 +614,84 @@ fn rlm_exec_tool_call_events_keep_call_id() {
         Effect::Emit(SessionEvent::ToolCall { call_id: Some(call_id), name, .. })
             if call_id == "rlm-call-1" && name == "read_file"
     )));
+}
+
+#[test]
+fn rlm_exec_any_tool_control_handoff_is_terminal() {
+    let config = test_config(ExecutionMode::new("rlm"));
+    let msgs = vec![user_message("run a custom handoff tool")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "```lashlang\nx = (call custom_handoff {})?\n```".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "```lashlang\nx = (call custom_handoff {})?\n```".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let exec_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("exec effect");
+    machine.handle_response(Response::ExecResult {
+        id: exec_id,
+        result: Ok(lash_sansio::ExecResponse {
+            output: String::new(),
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: vec![lash::ToolCallRecord {
+                call_id: Some("custom-call-1".to_string()),
+                tool: "custom_handoff".to_string(),
+                args: serde_json::json!({}),
+                result: serde_json::json!({"ok": true}),
+                success: true,
+                duration_ms: 3,
+                control: Some(lash::ToolControl::Handoff {
+                    session_id: "successor-session".to_string(),
+                }),
+            }],
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: None,
+            duration_ms: 3,
+            terminal_finish: None,
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Emit(SessionEvent::ToolCall { name, success: true, .. })
+            if name == "custom_handoff"
+    )));
+    let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+    machine.handle_response(Response::Checkpoint {
+        id: checkpoint_id,
+        messages: Vec::new(),
+        transient_messages: Vec::new(),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Emit(SessionEvent::TurnOutcome {
+            outcome: lash::TurnOutcome::Handoff { session_id }
+        }) if session_id == "successor-session"
+    )));
+    assert!(find_done(&effects).is_some());
 }
 
 #[test]

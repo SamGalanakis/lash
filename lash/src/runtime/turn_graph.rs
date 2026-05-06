@@ -471,6 +471,7 @@ mod tests {
             result: serde_json::json!({ "matches": [] }),
             success: true,
             duration_ms: 7,
+            control: None,
         };
         let entry = RlmTrajectoryEntry {
             id: "rlm_step_0".to_string(),
@@ -637,6 +638,7 @@ mod tests {
             result: serde_json::json!({ "matches": ["done"] }),
             success: true,
             duration_ms: 5,
+            control: None,
         };
         let entry = RlmTrajectoryEntry {
             id: "rlm_step_0".to_string(),

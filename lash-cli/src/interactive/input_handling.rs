@@ -217,29 +217,15 @@ fn apply_scroll_input_action(
 pub(super) async fn activate_foreground_session_handoff(
     app: &mut App,
     session_id: String,
-    history: &mut Vec<lash::session_model::Message>,
-    runtime: &mut Option<LashRuntime>,
-    turn_counter: &mut usize,
-    current_execution_mode: &mut ExecutionMode,
-    current_model_variant: &mut Option<String>,
+    _history: &mut Vec<lash::session_model::Message>,
+    _runtime: &mut Option<LashRuntime>,
+    _turn_counter: &mut usize,
+    _current_execution_mode: &mut ExecutionMode,
+    _current_model_variant: &mut Option<String>,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
     _ui_extensions: &UiExtensions,
     _plugin_host: &PluginHost,
 ) -> bool {
-    let Some(rt) = runtime.as_mut() else {
-        push_system_message(
-            app,
-            format!("Failed to activate session `{session_id}`: runtime is not available"),
-        );
-        return false;
-    };
-    if let Err(err) = rt.activate_managed_session(&session_id).await {
-        push_system_message(
-            app,
-            format!("Failed to activate session `{session_id}`: {err}"),
-        );
-        return false;
-    }
     let queued_turn = match session_manager.take_first_turn_input(&session_id).await {
         Ok(Some(seed)) if !seed.content.trim().is_empty() => {
             Some(PreparedTurn::prepare_with_effective_text(
@@ -257,20 +243,6 @@ pub(super) async fn activate_foreground_session_handoff(
             None
         }
     };
-    let state = rt.export_state();
-
-    app.clear();
-    app.session_id = state.session_id.clone();
-    *current_execution_mode = state.policy.execution_mode.clone();
-    *current_model_variant = state.policy.model_variant.clone();
-    app.set_model_variant(current_model_variant.clone());
-    *history = state.read_view().messages().to_vec();
-    *turn_counter = state.turn_index;
-
-    match rt.session_manager() {
-        Ok(manager) => *session_manager = manager,
-        Err(err) => push_system_message(app, format!("Failed to refresh session manager: {}", err)),
-    }
 
     app.dirty = true;
 

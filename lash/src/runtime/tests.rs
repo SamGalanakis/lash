@@ -1514,7 +1514,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                     .host
                                     .create_session(crate::SessionCreateRequest {
                                         session_id: Some("branched".to_string()),
-                                        parent_session_id: None,
+                                        relation: crate::SessionRelation::Root,
                                         start: crate::SessionStartPoint::CurrentSession,
                                         policy: None,
                                         plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -1637,7 +1637,7 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
     let handle = manager
         .create_session(crate::SessionCreateRequest {
             session_id: Some("child".to_string()),
-            parent_session_id: None,
+            relation: crate::SessionRelation::Root,
             start: crate::SessionStartPoint::Empty,
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -1730,7 +1730,9 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     let handle = manager
         .create_session(crate::SessionCreateRequest {
             session_id: Some("child-store".to_string()),
-            parent_session_id: Some("root".to_string()),
+            relation: crate::SessionRelation::Child {
+                parent_session_id: "root".to_string(),
+            },
             start: crate::SessionStartPoint::CurrentSession,
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -1772,13 +1774,124 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
 }
 
 #[tokio::test]
+async fn child_relation_does_not_replace_active_session() {
+    let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
+    let manager = runtime.session_manager().expect("session manager");
+    manager
+        .create_session(crate::SessionCreateRequest {
+            session_id: Some("ordinary-child".to_string()),
+            relation: crate::SessionRelation::Child {
+                parent_session_id: runtime.session_id().to_string(),
+            },
+            start: crate::SessionStartPoint::Empty,
+            policy: None,
+            plugin_mode: crate::SessionPluginMode::InheritCurrent,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
+            context_surface: crate::SessionContextSurface::default(),
+            mode_extras: crate::ModeExtras::default(),
+            usage_source: None,
+        })
+        .await
+        .expect("child session");
+
+    assert_eq!(runtime.session_id(), "root");
+    let assembled = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "parent turn".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+                mode_turn_options: None,
+                trace_turn_id: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("parent turn");
+
+    assert_eq!(assembled.state.session_id, "root");
+    assert_eq!(assembled.state.turn_index, 1);
+}
+
+#[tokio::test]
+async fn handoff_relation_routes_original_session_to_successor() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "successor response".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "successor response".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
+    runtime.state.turn_index = 31;
+    let manager = runtime.session_manager().expect("session manager");
+    manager
+        .create_session(crate::SessionCreateRequest {
+            session_id: Some("handoff-child".to_string()),
+            relation: crate::SessionRelation::Handoff {
+                parent_session_id: runtime.session_id().to_string(),
+                reason: "test".to_string(),
+                metadata: serde_json::Map::new(),
+            },
+            start: crate::SessionStartPoint::Empty,
+            policy: None,
+            plugin_mode: crate::SessionPluginMode::InheritCurrent,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            tool_access: crate::SessionToolAccess::default(),
+            subagent: None,
+            context_surface: crate::SessionContextSurface::default(),
+            mode_extras: crate::ModeExtras::default(),
+            usage_source: None,
+        })
+        .await
+        .expect("handoff session");
+
+    let assembled = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "next external turn".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+                mode_turn_options: None,
+                trace_turn_id: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("routed turn");
+
+    assert_eq!(runtime.session_id(), "root");
+    assert_eq!(runtime.export_state().turn_index, 32);
+    assert_eq!(assembled.state.session_id, "handoff-child");
+    assert_eq!(assembled.state.turn_index, 32);
+    assert_eq!(
+        assembled.assistant_output.safe_text.trim(),
+        "successor response"
+    );
+}
+
+#[tokio::test]
 async fn session_manager_rejects_duplicate_child_session_ids() {
     let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     manager
         .create_session(crate::SessionCreateRequest {
             session_id: Some("child".to_string()),
-            parent_session_id: None,
+            relation: crate::SessionRelation::Root,
             start: crate::SessionStartPoint::Empty,
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -1796,7 +1909,7 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
     let err = manager
         .create_session(crate::SessionCreateRequest {
             session_id: Some("child".to_string()),
-            parent_session_id: None,
+            relation: crate::SessionRelation::Root,
             start: crate::SessionStartPoint::Empty,
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -1820,7 +1933,9 @@ async fn runtime_can_activate_managed_child_session() {
     manager
         .create_session(crate::SessionCreateRequest {
             session_id: Some("child".to_string()),
-            parent_session_id: Some(runtime.session_id().to_string()),
+            relation: crate::SessionRelation::Child {
+                parent_session_id: runtime.session_id().to_string(),
+            },
             start: crate::SessionStartPoint::Empty,
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -1916,7 +2031,9 @@ impl crate::ToolProvider for ChildSessionTool {
             .host
             .create_session(crate::SessionCreateRequest {
                 session_id: Some("subagent-child".to_string()),
-                parent_session_id: Some(context.session_id.clone()),
+                relation: crate::SessionRelation::Child {
+                    parent_session_id: context.session_id.clone(),
+                },
                 start: crate::SessionStartPoint::Empty,
                 policy: None,
                 plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -1983,7 +2100,7 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
     let handle = manager
         .create_session(crate::SessionCreateRequest {
             session_id: Some("memory-child".to_string()),
-            parent_session_id: None,
+            relation: crate::SessionRelation::Root,
             start: crate::SessionStartPoint::Empty,
             policy: None,
             plugin_mode: crate::SessionPluginMode::Fresh,
@@ -2049,7 +2166,9 @@ async fn inherited_child_session_carries_parent_dynamic_tool_state() {
     let handle = manager
         .create_session(crate::SessionCreateRequest {
             session_id: Some("dynamic-child".to_string()),
-            parent_session_id: Some("root".to_string()),
+            relation: crate::SessionRelation::Child {
+                parent_session_id: "root".to_string(),
+            },
             start: crate::SessionStartPoint::Empty,
             policy: None,
             plugin_mode: crate::SessionPluginMode::InheritCurrent,

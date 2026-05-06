@@ -39,7 +39,7 @@ For consistency with the other benchmark wrappers, `run.sh` also accepts
 
 ```bash
 bench/continual-learning-bench/run.sh exploitable_poker --schedule quick_test --system lash --dry-run
-bench/continual-learning-bench/run.sh sales_prediction --schedule lifecycle --system lash --system.provider-id openai-compatible --system.model gpt-5.4 --system.variant high
+bench/continual-learning-bench/run.sh sales_prediction --schedule default --system lash --system.provider-id openai-compatible --system.model gpt-5.4 --system.variant high
 bench/continual-learning-bench/run.sh --config .benchmarks/continual-learning-bench/vendor/continual-learning-bench/configs/exploitable_poker/exploitable_poker_icl.json --system lash --system.provider-id codex --system.model gpt-5.5 --system.variant high
 bench/continual-learning-bench/run.sh exploitable_poker --task.schedule quick_test --system lash --runs 3 --max-concurrency 3
 bench/continual-learning-bench/run_all.sh --name lash-full --system lash --task-parallelism 3 --per-task-parallelism 4 --skip-baseline --system.provider-id openai-compatible --system.model anthropic/claude-sonnet-4.6 --system.variant high

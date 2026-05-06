@@ -2272,6 +2272,7 @@ mod tests {
                         result: serde_json::json!({"answer": "y"}),
                         success: true,
                         duration_ms: 4,
+                        control: None,
                     }),
                 },
             ],
@@ -2371,6 +2372,7 @@ mod tests {
                         result: serde_json::json!({"answer": "y"}),
                         success: true,
                         duration_ms: 4,
+                        control: None,
                     }),
                 },
             ],
@@ -2409,6 +2411,7 @@ mod tests {
                         result: serde_json::json!({"answer": "y"}),
                         success: true,
                         duration_ms: 4,
+                        control: None,
                     }],
                     ..rlm_step(0, "rlm_step_0")
                 }),

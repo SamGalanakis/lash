@@ -9,12 +9,12 @@ use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::provider::LashConfig;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, NoopEventSink,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, ProviderHandle,
+    EmbeddedRuntimeHost, EventSink, ExecutionMode, FollowedTurn, InputItem, LashRuntime,
+    NoopEventSink, PersistedSessionState, PersistentRuntimeServices, PluginHost, ProviderHandle,
     RuntimeCoreConfig, RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
-    SessionUsageReport, StandardContextApproach, TokioSessionTaskExecutor, ToolDefinition,
-    ToolExecutionMode, ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge, TurnInput,
-    TurnInputInjectionBridge, TurnOutcome, diff_usage_reports,
+    SessionUsageReport, StandardContextApproach, TokenLedgerEntry, TokioSessionTaskExecutor,
+    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge,
+    TurnInput, TurnInputInjectionBridge, TurnOutcome,
 };
 use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -153,10 +153,9 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         .await
         .context("bind clbench globals")?;
 
-    let before_usage = runtime.usage_report();
     let sink = NoopEventSink;
-    let turn = runtime
-        .stream_turn(
+    let followed = runtime
+        .stream_turn_following_handoffs(
             TurnInput {
                 items: vec![InputItem::Text {
                     text: clbench_turn_text(&request),
@@ -178,11 +177,10 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         )
         .await
         .context("run clbench turn")?;
-    let after_usage = runtime.usage_report();
-    let usage_rows = diff_usage_reports(&before_usage, &after_usage)
-        .map_err(anyhow::Error::msg)
-        .context("diff usage reports")?;
-    let usage = SessionUsageReport::from_entries(&usage_rows);
+    let usage = usage_from_followed_turn(&followed);
+    let turn = followed
+        .final_turn()
+        .context("handoff chain did not produce a turn")?;
 
     let action = match &turn.outcome {
         TurnOutcome::Finished(TurnFinish::Submission { value, .. }) => value.clone(),
@@ -205,8 +203,24 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
             "assistant_output_chars": turn.assistant_output.safe_text.chars().count(),
             "tool_call_count": turn.tool_calls.len(),
             "error_count": turn.errors.len(),
+            "followed_turn_count": followed.turns.len(),
+            "handoff_count": followed.handoff_count(),
         }),
     })
+}
+
+fn usage_from_followed_turn(followed: &FollowedTurn) -> SessionUsageReport {
+    let entries = followed
+        .turns
+        .iter()
+        .filter(|turn| turn.token_usage.total() != 0 || turn.token_usage.cached_input_tokens != 0)
+        .map(|turn| TokenLedgerEntry {
+            source: "turn".to_string(),
+            model: turn.state.policy.model.clone(),
+            usage: turn.token_usage.clone(),
+        })
+        .collect::<Vec<_>>();
+    SessionUsageReport::from_entries(&entries)
 }
 
 fn clbench_turn_text(request: &RunnerRequest) -> String {
