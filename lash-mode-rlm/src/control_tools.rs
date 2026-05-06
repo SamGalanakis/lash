@@ -108,7 +108,7 @@ impl ToolProvider for RlmControlToolsProvider {
 pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
         "continue_as",
-        "Tail-call: end this RLM session and continue the work as a fresh successor with the same tools and a clean window. Use when the current trajectory is stale or context budget is tight; pack only what the successor needs into `task` and `seed`.",
+        "Tail-call into a fresh RLM successor with a clean window.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results) the successor needs in scope; leave bulky raw output behind.",
         continue_as_input_schema(),
         json!({ "type": "object", "additionalProperties": true }),
     )

@@ -64,14 +64,15 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
         .await
         .expect("prompt contributions");
 
-    assert!(contributions.iter().any(|contribution| {
-        contribution.slot == PromptSlot::RuntimeContext
-            && contribution.content.contains("Working directory:")
-    }));
-    assert!(contributions.iter().any(|contribution| {
-        contribution.slot == PromptSlot::RuntimeContext
-            && contribution.content.contains("Current date (UTC):")
-    }));
+    // Volatile environment (date, cwd, git state) is no longer a
+    // PromptContribution — it now rides in a turn-prepare tail message
+    // so the cached system prefix stays byte-stable across turns.
+    assert!(
+        !contributions
+            .iter()
+            .any(|contribution| contribution.slot == PromptSlot::RuntimeContext),
+        "environment context should not appear as a runtime-context contribution",
+    );
     assert!(contributions.iter().any(|contribution| {
         contribution.slot == PromptSlot::ProjectInstructions
             && contribution.title.as_deref() == Some("Project Instructions")

@@ -26,7 +26,7 @@ members = [
     "lash-ui",
     "lash-tui",
     "lash-autoresearch",
-    "lash-gepa",
+    "lash-harness-opt",
     "lash-cli",
     "lash-export",
     "lash-file-index",
@@ -41,7 +41,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.91"
+version = "0.2.92"
 license = "MIT"
 
 [profile.release]

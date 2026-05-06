@@ -580,6 +580,7 @@ fn history_content_lines_snapshot(
             viewport_height,
         ));
     }
+    lines.extend(live_tool_output_standalone_lines(app, viewport_width));
     if let Some(live_lines) = app.live_reasoning_lines_snapshot() {
         if app.live_reasoning_leading_padding() > 0 {
             lines.push(Line::from(""));
@@ -1420,6 +1421,46 @@ fn render_live_tool_output_inline(
         content_style,
         STREAMING_OUTPUT_INLINE_MAX_ROWS,
     );
+}
+
+pub(crate) fn live_tool_output_standalone_height(app: &App, viewport_width: usize) -> usize {
+    live_tool_output_standalone_lines(app, viewport_width).len()
+}
+
+pub(crate) fn live_tool_output_standalone_lines(
+    app: &App,
+    viewport_width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if app.live_tool_output.height() == 0
+        || viewport_width == 0
+        || app.live_tool_output.title.is_none()
+        || app.live_tool_output_anchor_block_index().is_some()
+    {
+        return lines;
+    }
+
+    if !matches!(
+        app.timeline.last(),
+        Some(UiTimelineItem::TurnStart(_) | UiTimelineItem::Splash)
+    ) {
+        lines.push(Line::from(""));
+    }
+    let title = app.live_tool_output.title.as_deref().unwrap_or_default();
+    lines.push(Line::from(vec![
+        Span::styled("• ", Style::default().fg(theme::brand())),
+        Span::styled(title.to_string(), theme::code_chrome()),
+    ]));
+    append_streaming_output_lines(
+        &mut lines,
+        app,
+        viewport_width,
+        "  │ ",
+        theme::code_chrome(),
+        theme::system_output(),
+        0,
+    );
+    lines
 }
 
 pub(crate) fn history_scroll_indicator(app: &App, area: Rect) -> Option<(u16, u16, u16)> {

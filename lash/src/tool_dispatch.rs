@@ -699,24 +699,11 @@ mod tests {
         )
         .await;
 
-        assert!(outcome.record.success);
-        let results = outcome
-            .record
-            .result
-            .get("results")
-            .and_then(|value| value.as_array())
-            .expect("results");
-        assert_eq!(results.len(), 26);
-        assert_eq!(
-            results
-                .iter()
-                .filter(|item| item.get("success").and_then(|value| value.as_bool()) == Some(true))
-                .count(),
-            25
-        );
-        assert_eq!(
-            results[25].get("error"),
-            Some(&json!("Maximum of 25 tool calls allowed in batch"))
+        assert!(!outcome.record.success);
+        let error = outcome.record.result.as_str().expect("string error result");
+        assert!(
+            error.contains("tool_calls") && error.contains("items <= 25"),
+            "{error}",
         );
     }
 

@@ -409,6 +409,7 @@ pub struct RuntimeCoreConfig {
     pub path_resolver: Arc<dyn PathResolver>,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub prompt_template: crate::PromptTemplate,
+    pub prompt_contributions: Vec<crate::PromptContribution>,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
@@ -430,6 +431,7 @@ impl Default for RuntimeCoreConfig {
             path_resolver: Arc::new(DefaultPathResolver),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             prompt_template: crate::default_prompt_template(),
+            prompt_contributions: Vec::new(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
@@ -462,6 +464,14 @@ impl RuntimeCoreConfig {
 
     pub fn with_prompt_template(mut self, prompt_template: crate::PromptTemplate) -> Self {
         self.prompt_template = prompt_template;
+        self
+    }
+
+    pub fn with_prompt_contributions(
+        mut self,
+        prompt_contributions: Vec<crate::PromptContribution>,
+    ) -> Self {
+        self.prompt_contributions = prompt_contributions;
         self
     }
 

@@ -286,6 +286,12 @@ impl App {
         }
 
         let history_tail = self.height_cache.last().copied().unwrap_or(0);
+        if self.live_tool_output.height() > 0
+            && self.live_tool_output.title.is_some()
+            && self.live_tool_output_anchor_block_index().is_none()
+        {
+            return Some(history_tail);
+        }
         if self.live_reasoning.has_renderable_output() {
             return Some(history_tail + self.live_reasoning_leading_padding());
         }
@@ -413,6 +419,7 @@ impl App {
         self.ensure_height_cache(width, viewport_height);
         self.ensure_live_markdown_rendered(width);
         self.height_cache.last().copied().unwrap_or(0)
+            + crate::render::live_tool_output_standalone_height(self, width)
             + self.live_reasoning_height()
             + self.live_assistant_height()
             + crate::render::plan_dock_trailing_height(self)

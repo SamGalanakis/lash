@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::session_graph::SessionReadModel;
+use crate::session_graph::build_active_read_replacement;
 use crate::session_graph::tool_call_record_active_read_key;
 use crate::session_model::SessionEventRecord;
 use crate::store::GraphCommitDelta;
@@ -18,8 +19,8 @@ pub(super) struct TurnGraphOverlay {
     read_tool_calls: Arc<Vec<ToolCallRecord>>,
     append_builder: crate::session_graph::SessionGraphAppendBuilder,
     appended_nodes: Vec<SessionNodeRecord>,
+    appended_node_indices: HashMap<String, usize>,
     committed_node_ids: HashSet<String>,
-    materialized: Option<SessionGraph>,
 }
 
 impl TurnGraphOverlay {
@@ -40,7 +41,7 @@ impl TurnGraphOverlay {
             read_tool_calls: base_read_model.tool_calls,
             append_builder,
             appended_nodes: Vec::new(),
-            materialized: None,
+            appended_node_indices: HashMap::new(),
         }
     }
 
@@ -62,9 +63,6 @@ impl TurnGraphOverlay {
 
     #[allow(dead_code)]
     pub(super) fn read_model(&self) -> SessionReadModel {
-        if let Some(graph) = self.materialized.as_ref() {
-            return graph.read_model();
-        }
         SessionReadModel {
             active_events: Arc::clone(&self.active_events),
             messages: self.active_messages.shared(),
@@ -93,13 +91,8 @@ impl TurnGraphOverlay {
         I: IntoIterator<Item = SessionEventRecord>,
     {
         for event in events {
-            if let Some(graph) = self.materialized.as_mut() {
-                graph.append_event(event);
-                self.refresh_from_materialized();
-                continue;
-            }
             let node = self.append_builder.append_event_record(event.clone());
-            self.appended_nodes.extend(node);
+            self.append_appended_nodes(node);
             Arc::make_mut(&mut self.active_events).push(event.clone());
             match event {
                 SessionEventRecord::Conversation(record) => {
@@ -144,18 +137,13 @@ impl TurnGraphOverlay {
         if appendable_messages.is_empty() {
             return;
         }
-        if let Some(graph) = self.materialized.as_mut() {
-            graph.append_active_conversation_messages(&appendable_messages);
-            self.refresh_from_materialized();
-            return;
-        }
 
         let nodes = self
             .append_builder
             .append_messages(appendable_messages.clone());
         Arc::make_mut(&mut self.active_events)
             .extend(nodes.iter().filter_map(|node| node.event().cloned()));
-        self.appended_nodes.extend(nodes);
+        self.append_appended_nodes(nodes);
         self.active_messages.extend(appendable_messages);
     }
 
@@ -164,12 +152,6 @@ impl TurnGraphOverlay {
         messages: &[Message],
         tool_calls: &[ToolCallRecord],
     ) {
-        if let Some(graph) = self.materialized.as_mut() {
-            graph.append_active_read_delta(messages, tool_calls);
-            self.refresh_from_materialized();
-            return;
-        }
-
         let appendable_messages = {
             let mut seen_message_ids = self
                 .active_messages
@@ -201,7 +183,7 @@ impl TurnGraphOverlay {
                 .append_messages(appendable_messages.clone());
             Arc::make_mut(&mut self.active_events)
                 .extend(nodes.iter().filter_map(|node| node.event().cloned()));
-            self.appended_nodes.extend(nodes);
+            self.append_appended_nodes(nodes);
             self.active_messages.extend(appendable_messages);
         }
         if !appendable_tool_calls.is_empty() {
@@ -210,7 +192,7 @@ impl TurnGraphOverlay {
                 .append_tool_call_records(appendable_tool_calls.clone());
             Arc::make_mut(&mut self.active_events)
                 .extend(nodes.iter().filter_map(|node| node.event().cloned()));
-            self.appended_nodes.extend(nodes);
+            self.append_appended_nodes(nodes);
             self.graph_tool_calls.extend(appendable_tool_calls.clone());
             Arc::make_mut(&mut self.read_tool_calls).extend(appendable_tool_calls);
         }
@@ -221,33 +203,31 @@ impl TurnGraphOverlay {
         messages: &[Message],
         tool_calls: &[ToolCallRecord],
     ) {
-        let graph = self.materialized_graph_mut();
-        graph.replace_active_read_state(messages, tool_calls);
-        self.read_tool_calls = Arc::new(tool_calls.to_vec());
-        self.refresh_from_materialized();
+        let active_path = self.active_path_nodes();
+        let replacement = build_active_read_replacement(
+            active_path,
+            self.append_builder.existing_node_ids(),
+            messages,
+            tool_calls,
+        );
+        self.append_builder.register_existing_node_ids(
+            replacement
+                .new_tail_nodes
+                .iter()
+                .map(|node| node.node_id.as_str()),
+        );
+        self.append_appended_nodes(replacement.new_tail_nodes);
+        self.append_builder
+            .set_leaf_node_id(replacement.leaf_node_id.clone());
+        self.active_events = Arc::new(replacement.active_events);
+        self.active_messages = MessageSequence::from_owned(replacement.active_messages);
+        self.graph_tool_calls = replacement.active_tool_calls.clone();
+        self.read_tool_calls = Arc::new(replacement.active_tool_calls);
     }
 
     pub(super) fn graph_commit(&self, graph_replace_required: bool) -> GraphCommitDelta {
         if graph_replace_required {
             return GraphCommitDelta::ReplaceFull(self.materialized_graph());
-        }
-        if let Some(graph) = self.materialized.as_ref() {
-            let nodes = graph
-                .nodes
-                .iter()
-                .filter(|node| !self.committed_node_ids.contains(&node.node_id))
-                .cloned()
-                .collect::<Vec<_>>();
-            return if nodes.is_empty() {
-                GraphCommitDelta::Unchanged {
-                    leaf_node_id: graph.leaf_node_id.clone(),
-                }
-            } else {
-                GraphCommitDelta::Append {
-                    nodes,
-                    leaf_node_id: graph.leaf_node_id.clone(),
-                }
-            };
         }
 
         let nodes = self
@@ -268,45 +248,44 @@ impl TurnGraphOverlay {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn mark_graph_commit_persisted(&mut self, graph: &GraphCommitDelta) {
         match graph {
             GraphCommitDelta::Unchanged { .. } => {}
             GraphCommitDelta::Append { nodes, .. } => {
-                self.committed_node_ids
-                    .extend(nodes.iter().map(|node| node.node_id.clone()));
+                self.mark_node_ids_persisted(nodes.iter().map(|node| node.node_id.clone()));
             }
             GraphCommitDelta::ReplaceFull(graph) => {
-                self.committed_node_ids = graph
-                    .nodes
-                    .iter()
-                    .map(|node| node.node_id.clone())
-                    .collect();
+                self.replace_persisted_node_ids(
+                    graph.nodes.iter().map(|node| node.node_id.clone()),
+                );
             }
         }
     }
 
+    pub(super) fn mark_node_ids_persisted<I>(&mut self, node_ids: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        self.committed_node_ids.extend(node_ids);
+    }
+
+    pub(super) fn replace_persisted_node_ids<I>(&mut self, node_ids: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        self.committed_node_ids = node_ids.into_iter().collect();
+    }
+
     pub(super) fn into_session_graph(self) -> SessionGraph {
-        if let Some(graph) = self.materialized {
-            return graph;
-        }
         let leaf_node_id = self.leaf_node_id();
         if self.appended_nodes.is_empty() {
             return Arc::try_unwrap(self.base_graph).unwrap_or_else(|graph| graph.as_ref().clone());
         }
         match Arc::try_unwrap(self.base_graph) {
             Ok(mut graph) => {
-                let last_appended_id = self.appended_nodes.last().map(|node| node.node_id.clone());
-                // Use the fast incremental cache path so the active
-                // messages / tool calls / rlm globals carry over instead
-                // of forcing a full `SessionGraphCache::rebuild_read_model`
-                // on the next access.
-                graph.extend_active_path(self.appended_nodes);
-                // `extend_active_path` advances leaf to the last
-                // appended node. Only re-set when the requested leaf
-                // diverges (rare: branch-cut / fork shapes).
-                if leaf_node_id != last_appended_id {
-                    graph.set_leaf_node_id(leaf_node_id);
-                }
+                graph.extend_node_records(self.appended_nodes);
+                graph.set_leaf_node_id(leaf_node_id);
                 graph
             }
             Err(base_graph) => {
@@ -320,16 +299,10 @@ impl TurnGraphOverlay {
     }
 
     fn leaf_node_id(&self) -> Option<String> {
-        if let Some(graph) = self.materialized.as_ref() {
-            return graph.leaf_node_id.clone();
-        }
         self.append_builder.leaf_node_id().cloned()
     }
 
     fn materialized_graph(&self) -> SessionGraph {
-        if let Some(graph) = self.materialized.as_ref() {
-            return graph.clone();
-        }
         if self.appended_nodes.is_empty() {
             return self.base_graph.as_ref().clone();
         }
@@ -339,27 +312,33 @@ impl TurnGraphOverlay {
         SessionGraph::from_nodes(nodes, self.leaf_node_id())
     }
 
-    fn materialized_graph_mut(&mut self) -> &mut SessionGraph {
-        if self.materialized.is_none() {
-            let graph = self.materialized_graph();
-            self.materialized = Some(graph);
-            self.appended_nodes.clear();
+    fn active_path_nodes(&self) -> Vec<&SessionNodeRecord> {
+        let mut path = Vec::new();
+        let mut current = self.leaf_node_id();
+        while let Some(node_id) = current {
+            let Some(node) = self
+                .appended_node_indices
+                .get(node_id.as_str())
+                .and_then(|idx| self.appended_nodes.get(*idx))
+                .or_else(|| self.base_graph.find_node(node_id.as_str()))
+            else {
+                break;
+            };
+            path.push(node);
+            current = node.parent_node_id.clone();
         }
-        self.materialized
-            .as_mut()
-            .expect("turn graph materialized before mutation")
+        path.reverse();
+        path
     }
 
-    fn refresh_from_materialized(&mut self) {
-        let Some(graph) = self.materialized.as_ref() else {
-            return;
-        };
-        let read_model = graph.read_model();
-        self.active_messages = MessageSequence::from_owned(read_model.messages.as_ref().clone());
-        self.active_events = read_model.active_events;
-        self.graph_tool_calls = read_model.tool_calls.as_ref().clone();
-        self.read_tool_calls = Arc::new(self.graph_tool_calls.clone());
-        self.append_builder = graph.append_builder();
+    fn append_appended_nodes(&mut self, nodes: Vec<SessionNodeRecord>) {
+        self.appended_node_indices.reserve(nodes.len());
+        self.appended_nodes.reserve(nodes.len());
+        for node in nodes {
+            self.appended_node_indices
+                .insert(node.node_id.clone(), self.appended_nodes.len());
+            self.appended_nodes.push(node);
+        }
     }
 }
 
@@ -550,6 +529,50 @@ mod tests {
     }
 
     #[test]
+    fn replace_overlay_after_progress_keeps_inactive_branch_as_append_delta() {
+        let first = text_message("u1", MessageRole::User, "hello");
+        let progress = text_message("a1", MessageRole::Assistant, "progress");
+        let replacement = text_message("a2", MessageRole::Assistant, "final");
+        let mut overlay = overlay_from_graph(SessionGraph::from_active_read_state(
+            std::slice::from_ref(&first),
+            &[],
+        ));
+
+        overlay.append_active_conversation_messages(std::slice::from_ref(&progress));
+        overlay.replace_active_read_state(&[first, replacement], &[]);
+
+        let commit = overlay.graph_commit(false);
+        let GraphCommitDelta::Append {
+            nodes,
+            leaf_node_id,
+        } = commit
+        else {
+            panic!("replacement after progress should stay append-only");
+        };
+        assert_eq!(leaf_node_id.as_deref(), Some("a2"));
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1", "a2"]
+        );
+
+        let graph = overlay.into_session_graph();
+        assert_eq!(graph.nodes.len(), 3);
+        assert!(graph.nodes.iter().any(|node| node.node_id == "a1"));
+        assert_eq!(
+            graph
+                .read_model()
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u1", "a2"]
+        );
+    }
+
+    #[test]
     fn overlay_read_model_matches_materialized_graph_after_append_and_replace() {
         let first = text_message("u1", MessageRole::User, "hello");
         let second = text_message("a1", MessageRole::Assistant, "hi");
@@ -586,6 +609,71 @@ mod tests {
         assert_eq!(
             read_model.active_events.len(),
             materialized.active_events.len()
+        );
+        assert_eq!(
+            read_model
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            materialized
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(read_model.tool_calls, materialized.tool_calls);
+    }
+
+    #[test]
+    fn overlay_read_model_matches_materialized_graph_after_rlm_events_tool_calls_and_replace() {
+        let first = text_message("u1", MessageRole::User, "try grep");
+        let progress = text_message("a1", MessageRole::Assistant, "progress");
+        let replacement = text_message("a2", MessageRole::Assistant, "done");
+        let tool_call = ToolCallRecord {
+            call_id: Some("call_grep".to_string()),
+            tool: "grep".to_string(),
+            args: serde_json::json!({ "query": "done" }),
+            result: serde_json::json!({ "matches": ["done"] }),
+            success: true,
+            duration_ms: 5,
+        };
+        let entry = RlmTrajectoryEntry {
+            id: "rlm_step_0".to_string(),
+            iteration: 0,
+            reasoning: "inspect".to_string(),
+            code: "call grep".to_string(),
+            output: vec!["done".to_string()],
+            tool_calls: vec![tool_call.clone()],
+            images: Vec::new(),
+            error: None,
+            final_output: None,
+        };
+        let mut overlay = overlay_from_graph(SessionGraph::from_active_read_state(
+            std::slice::from_ref(&first),
+            &[],
+        ));
+
+        overlay.record_tool_calls([tool_call]);
+        overlay.append_events([SessionEventRecord::Mode(ModeEvent::rlm(
+            RlmModeEvent::RlmTrajectoryEntry(entry),
+        ))]);
+        overlay.append_active_conversation_messages(std::slice::from_ref(&progress));
+        overlay.replace_active_read_state(&[first, replacement], &[]);
+
+        let read_model = overlay.read_model();
+        let materialized = overlay.materialized_graph().read_model();
+        assert_eq!(
+            read_model
+                .active_events
+                .iter()
+                .map(|event| std::mem::discriminant(event))
+                .collect::<Vec<_>>(),
+            materialized
+                .active_events
+                .iter()
+                .map(|event| std::mem::discriminant(event))
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             read_model

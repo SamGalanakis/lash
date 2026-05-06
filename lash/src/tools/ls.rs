@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::{
-    build_path_entry, filesystem_entries_result, object_schema, parse_optional_bool,
-    parse_optional_usize_arg, rg_file_list, run_blocking,
+    FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
+    parse_optional_bool, parse_optional_usize_arg, rg_file_list, run_blocking,
 };
 use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
@@ -20,10 +20,12 @@ impl ToolProvider for Ls {
         vec![
             ToolDefinition::new(
                 "ls",
-                format!(
-                "List filesystem entries. By default this includes hidden files and respects `.gitignore` only inside Git repos. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false, include_hidden=true, respect_gitignore=true.",
-                DEFAULT_DEPTH, MAX_ENTRIES
-            ),
+                [
+                    "List filesystem entries. ",
+                    FS_DEFAULTS_PREAMBLE,
+                    " Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth=3, limit=500, with_lines=false, include_hidden=true, respect_gitignore=true.",
+                ]
+                .concat(),
                 object_schema(
                     serde_json::json!({
                         "path": {
@@ -40,13 +42,13 @@ impl ToolProvider for Ls {
                             "type": ["integer", "null", "string"],
                             "minimum": 1,
                             "default": DEFAULT_DEPTH,
-                            "description": format!("Maximum directory depth to traverse (default: {}). Use null or \"none\" for no depth cap.", DEFAULT_DEPTH)
+                            "description": "Maximum directory depth to traverse (default: 3). Use null or \"none\" for no depth cap."
                         },
                         "limit": {
                             "type": ["integer", "null", "string"],
                             "minimum": 1,
                             "default": MAX_ENTRIES,
-                            "description": format!("Maximum entries to return (default: {}). Use null or \"none\" for no cap.", MAX_ENTRIES)
+                            "description": "Maximum entries to return (default: 500). Use null or \"none\" for no cap."
                         },
                         "with_lines": {
                             "type": "boolean",

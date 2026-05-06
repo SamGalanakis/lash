@@ -426,6 +426,9 @@ fn append_transcript_items(
     activity_state: &mut ActivityState,
     render_tool_results: bool,
 ) {
+    if is_internal_rlm_retry_message(message) {
+        return;
+    }
     match message.role {
         MessageRole::User => {
             if message.parts.iter().any(|part| {
@@ -489,6 +492,22 @@ fn append_transcript_items(
                 timeline.push(UiTimelineItem::SystemMessage(text));
             }
         }
+    }
+}
+
+fn is_internal_rlm_retry_message(message: &Message) -> bool {
+    let Some(lash::MessageOrigin::Plugin { plugin_id, .. }) = &message.origin else {
+        return false;
+    };
+    if plugin_id != "mode_rlm" {
+        return false;
+    }
+    match message.role {
+        MessageRole::Assistant => true,
+        MessageRole::System => {
+            rendered_message_text(message).contains("Plain text outside a fence is not delivered.")
+        }
+        MessageRole::User => false,
     }
 }
 

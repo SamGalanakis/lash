@@ -3,8 +3,8 @@ use std::sync::Arc;
 use lash::instructions::InstructionSource;
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::tools::{
-    ApplyPatchTool, AskTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory, StandardShell,
-    WebSearch, shell_prompt_contributions,
+    ApplyPatchTool, AskTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory,
+    StandardShellPluginFactory, WebSearch,
 };
 use lash::{
     BuiltinToolResultProjectionPluginFactory, ExecutionMode, FsInstructionSource, PluginHost,
@@ -78,10 +78,6 @@ pub struct DefaultToolPluginOptions {
     pub instruction_source: Option<Arc<dyn InstructionSource>>,
 }
 
-fn shell_provider() -> Arc<dyn ToolProvider> {
-    Arc::new(StandardShell::new())
-}
-
 pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<dyn PluginFactory>> {
     if options.bundles.is_empty() {
         options.bundles = DefaultToolSurfaceProfile::for_runtime(
@@ -105,14 +101,7 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
                 factories.push(Arc::new(ObservationalMemoryPluginFactory));
             }
             DefaultToolBundle::Shell => {
-                factories.push(Arc::new(StaticPluginFactory::new(
-                    "shell",
-                    PluginSpec::new()
-                        .with_tool_provider(shell_provider())
-                        .with_prompt_contributor(Arc::new(move |_ctx| {
-                            Box::pin(async move { Ok(shell_prompt_contributions()) })
-                        })),
-                )));
+                factories.push(Arc::new(StandardShellPluginFactory::new()));
             }
             DefaultToolBundle::Editing => {
                 factories.push(Arc::new(StaticPluginFactory::new(

@@ -1,19 +1,23 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use lash::plugin::{
-    CheckpointHookContext, ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext,
-    ModeSessionPlugin, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
-    PluginSessionContext, SessionPlugin,
+    CheckpointHookContext, HistoryError, ModeProtocolDriverPlugin, ModeRuntimeContext,
+    ModeSessionContext, ModeSessionPlugin, PluginDirective, PluginError, PluginFactory,
+    PluginRegistrar, PluginSessionContext, SessionPlugin, TurnContextTransform,
+    TurnTransformContext,
 };
+use lash::session_model::context::PreparedContext;
 use lash::{
-    CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, PromptContribution, SessionError,
-    SessionToolAccess, ToolResultProjectionPluginConfig,
+    CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError, SessionToolAccess,
+    ToolResultProjectionPluginConfig,
 };
 use lash_rlm_types::RlmCreateExtras;
 
-use crate::driver::{RlmProjectorConfig, build_rlm_preamble};
+use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
 use crate::executor::{RlmExecutionState, execute_code};
-use crate::rlm_support::{BoundVariablesCache, budget_prompt_contributions};
+use crate::rlm_support::BoundVariablesCache;
+#[cfg(test)]
+use crate::rlm_support::budget_prompt_contributions;
 use crate::stream_mask;
 
 const BUDGET_WARNING_STATUS: &str = "rlm_context_budget_warning";
@@ -72,6 +76,7 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
             active: ctx.execution_mode == ExecutionMode::new("rlm"),
             config: self.config.clone(),
             tool_access: ctx.tool_access.clone(),
+            last_prompt_usage: Arc::new(RwLock::new(None)),
         }))
     }
 }
@@ -80,6 +85,7 @@ struct RlmModePlugin {
     active: bool,
     config: RlmModePluginConfig,
     tool_access: SessionToolAccess,
+    last_prompt_usage: SharedPromptUsage,
 }
 
 impl SessionPlugin for RlmModePlugin {
@@ -98,6 +104,7 @@ impl SessionPlugin for RlmModePlugin {
         reg.mode().session(mode_session.clone())?;
         reg.mode().protocol_driver(Arc::new(RlmProtocolDriver {
             config: self.config.clone(),
+            last_prompt_usage: Arc::clone(&self.last_prompt_usage),
         }))?;
         reg.tools()
             .provider(Arc::new(crate::control_tools::RlmControlToolsProvider))?;
@@ -109,11 +116,16 @@ impl SessionPlugin for RlmModePlugin {
         });
         reg.prompt().contribute(bound_vars_hook);
 
-        let max_budget_tokens = self.config.continue_as_soft_warn_tokens;
-        let budget_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
-            Box::pin(async move { Ok(budget_prompt_contributions(&ctx, max_budget_tokens)) })
-        });
-        reg.prompt().contribute(budget_hook);
+        // Per-turn `prompt_usage` is captured here and passed to the
+        // projector via a shared cell so the budget line can ride in the
+        // volatile turn-tail message instead of poisoning the cached
+        // system prefix.
+        reg.history().prepare_turn(
+            10,
+            Arc::new(BudgetUsageObserver {
+                cell: Arc::clone(&self.last_prompt_usage),
+            }),
+        );
 
         let control_contributions = crate::control_tools::prompt_contributions(&self.tool_access);
         let control_hook: lash::plugin::PromptContributor = Arc::new(move |_ctx| {
@@ -121,11 +133,6 @@ impl SessionPlugin for RlmModePlugin {
             Box::pin(async move { Ok(contributions) })
         });
         reg.prompt().contribute(control_hook);
-
-        let print_output_hook: lash::plugin::PromptContributor = Arc::new(move |_ctx| {
-            Box::pin(async move { Ok(vec![print_output_prompt_contribution()]) })
-        });
-        reg.prompt().contribute(print_output_hook);
 
         let warn_session = mode_session.clone();
         reg.turn().checkpoint(Arc::new(move |ctx| {
@@ -140,6 +147,7 @@ impl SessionPlugin for RlmModePlugin {
 
 struct RlmProtocolDriver {
     config: RlmModePluginConfig,
+    last_prompt_usage: SharedPromptUsage,
 }
 
 impl ModeProtocolDriverPlugin for RlmProtocolDriver {
@@ -152,16 +160,33 @@ impl ModeProtocolDriverPlugin for RlmProtocolDriver {
             input,
             RlmProjectorConfig {
                 max_output_chars: self.config.max_output_chars,
+                max_budget_tokens: self.config.continue_as_soft_warn_tokens,
+                last_prompt_usage: Arc::clone(&self.last_prompt_usage),
             },
         )
     }
 }
 
-fn print_output_prompt_contribution() -> PromptContribution {
-    PromptContribution::execution(
-        "Print Output",
-        "`print` output is capped. Keep full tool results in variables; print only lengths, selected fields, samples, or slices. Do not print large objects just to hand-copy IDs back into code.",
-    )
+struct BudgetUsageObserver {
+    cell: SharedPromptUsage,
+}
+
+#[async_trait::async_trait]
+impl TurnContextTransform for BudgetUsageObserver {
+    fn id(&self) -> &'static str {
+        "rlm.budget_usage_observer"
+    }
+
+    async fn transform(
+        &self,
+        ctx: &TurnTransformContext,
+        input: PreparedContext,
+    ) -> Result<PreparedContext, HistoryError> {
+        if let Ok(mut guard) = self.cell.write() {
+            *guard = ctx.prompt_usage.clone();
+        }
+        Ok(input)
+    }
 }
 
 struct RlmModeSession {

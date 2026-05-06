@@ -16,7 +16,6 @@ use crate::editor::SuggestionKind;
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
 use crate::render;
-use crate::resume;
 use crate::session_log::SessionLogger;
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
 use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
@@ -28,6 +27,7 @@ use crate::{
 
 use super::commands::{
     handle_parsed_slash_command, parse_slash_command, slash_command_runs_out_of_band_while_running,
+    switch_to_session_identifier,
 };
 use super::helpers::{
     TurnReplayPayload, is_copy_shortcut, key_chord_from_event, monitor_wake_message,
@@ -574,7 +574,9 @@ pub(super) async fn handle_key_event(
     paused: &Arc<AtomicBool>,
     plugin_host: &PluginHost,
     ui_extensions: &UiExtensions,
-    dynamic_tools: &Arc<DynamicToolProvider>,
+    runtime_factory: &crate::session_bootstrap::CliRuntimeFactory,
+    lash_config: &lash::provider::LashConfig,
+    dynamic_tools: &mut Arc<DynamicToolProvider>,
     runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -824,39 +826,32 @@ pub(super) async fn handle_key_event(
                 if let UiActionOutcome::SessionPicked(Some(filename)) =
                     apply_terminal_action(app, terminal, UiAction::SubmitSessionPicker)
                 {
-                    match resume::load_resumed_session(
+                    match switch_to_session_identifier(
                         &filename,
                         app,
-                        history,
+                        logger,
+                        runtime_factory,
+                        lash_config,
+                        dynamic_tools,
                         runtime,
+                        history,
                         turn_counter,
-                        current_execution_mode,
                         provider,
                         current_model_variant,
-                        dynamic_tools,
+                        current_execution_mode,
+                        session_manager,
                         desired_dynamic,
                         model_catalog,
+                        toolset_hash,
                     )
                     .await
                     {
                         Ok(()) => {
-                            if let Some(rt) = runtime.as_ref() {
-                                match rt.session_manager() {
-                                    Ok(manager) => *session_manager = manager,
-                                    Err(err) => push_system_message(
-                                        app,
-                                        format!("Failed to refresh session manager: {}", err),
-                                    ),
-                                }
-                            }
                             app.dirty = true;
-                            *toolset_hash = hash12(
-                                &serde_json::to_vec(&dynamic_tools.definitions())
-                                    .unwrap_or_else(|_| b"[]".to_vec()),
-                            );
                         }
                         Err(err) => {
-                            app.timeline.push(UiTimelineItem::SystemMessage(err));
+                            app.timeline
+                                .push(UiTimelineItem::SystemMessage(err.to_string()));
                             app.invalidate_height_cache();
                             app.scroll_to_bottom();
                         }
@@ -1068,6 +1063,8 @@ pub(super) async fn handle_key_event(
                         paused,
                         plugin_host,
                         ui_extensions,
+                        runtime_factory,
+                        lash_config,
                         dynamic_tools,
                         runtime,
                         history,
@@ -1172,6 +1169,8 @@ pub(super) async fn handle_key_event(
                             paused,
                             plugin_host,
                             ui_extensions,
+                            runtime_factory,
+                            lash_config,
                             dynamic_tools,
                             runtime,
                             history,
@@ -1212,6 +1211,8 @@ pub(super) async fn handle_key_event(
                     paused,
                     plugin_host,
                     ui_extensions,
+                    runtime_factory,
+                    lash_config,
                     dynamic_tools,
                     runtime,
                     history,
@@ -1289,6 +1290,8 @@ pub(super) async fn handle_key_event(
                         paused,
                         plugin_host,
                         ui_extensions,
+                        runtime_factory,
+                        lash_config,
                         dynamic_tools,
                         runtime,
                         history,
@@ -1432,6 +1435,8 @@ pub(super) async fn handle_key_event(
                     paused,
                     plugin_host,
                     ui_extensions,
+                    runtime_factory,
+                    lash_config,
                     dynamic_tools,
                     runtime,
                     history,

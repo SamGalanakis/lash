@@ -1,24 +1,36 @@
+use std::sync::RwLock;
 use std::{fmt::Write as _, sync::Arc};
 
 use lash::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
 use lash::sansio::ContextProjector;
 use lash::{
-    LlmRequest, ModeBuildInput, ModeConfig, ModePreamble, ProjectorContext, PromptContribution,
-    head_tail_truncate,
+    ChronologicalEntry, ChronologicalPayload, LlmRequest, ModeBuildInput, ModeConfig, ModePreamble,
+    ProjectorContext, PromptContribution, PromptUsage, head_tail_truncate,
 };
-use lash_rlm_types::{
-    RlmAttachmentRef, RlmHistoryItem, RlmHistoryRole, RlmImageRef, RlmTermination,
-};
+#[cfg(test)]
+use lash_rlm_types::RlmHistoryItem;
+use lash_rlm_types::{RlmAttachmentRef, RlmHistoryRole, RlmImageRef, RlmTermination};
 
-#[derive(Clone, Debug)]
+/// Cell shared between the RLM mode plugin's turn-prepare hook (writer)
+/// and the projector (reader). The plugin's hook captures `prompt_usage`
+/// from `TurnTransformContext` each turn and stores it here so the
+/// projector can render the budget suffix into the volatile turn-tail
+/// message — keeping the cached system prefix byte-stable.
+pub type SharedPromptUsage = Arc<RwLock<Option<PromptUsage>>>;
+
+#[derive(Clone)]
 pub struct RlmProjectorConfig {
     pub max_output_chars: usize,
+    pub max_budget_tokens: Option<usize>,
+    pub last_prompt_usage: SharedPromptUsage,
 }
 
 impl Default for RlmProjectorConfig {
     fn default() -> Self {
         Self {
             max_output_chars: 10_000,
+            max_budget_tokens: None,
+            last_prompt_usage: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -39,6 +51,8 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
             protocol: Arc::new(crate::protocol::RlmDriver),
             projector: Arc::new(RlmContextProjector {
                 max_output_chars: config.max_output_chars,
+                max_budget_tokens: config.max_budget_tokens,
+                last_prompt_usage: config.last_prompt_usage,
             }),
             sync_execution_surface: true,
         },
@@ -123,6 +137,8 @@ mod catalogue_tests {
 
 struct RlmContextProjector {
     max_output_chars: usize,
+    max_budget_tokens: Option<usize>,
+    last_prompt_usage: SharedPromptUsage,
 }
 
 fn rlm_termination(options: &lash::ModeTurnOptions) -> RlmTermination {
@@ -138,6 +154,14 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
         let projection = projection_from_projector_context(&ctx);
         let termination = rlm_termination(&ctx.config.termination);
         let finalization = rlm_finalization_prompt(&termination);
+        let required_output = required_output_block(&termination);
+        let budget_suffix = self.last_prompt_usage.read().ok().and_then(|guard| {
+            crate::rlm_support::format_budget_suffix(
+                ctx.iteration + 1,
+                guard.as_ref(),
+                self.max_budget_tokens,
+            )
+        });
 
         let mut messages = Vec::new();
         if !ctx.config.system_prompt.trim().is_empty() {
@@ -152,6 +176,8 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
             self.max_output_chars,
             ctx.iteration + 1,
             finalization,
+            required_output.as_deref(),
+            budget_suffix.as_deref(),
             &mut attachments,
         ));
 
@@ -175,12 +201,13 @@ fn build_rlm_history_messages(
     max_output_chars: usize,
     iteration: usize,
     finalization: &str,
+    required_output: Option<&str>,
+    budget_suffix: Option<&str>,
     attachments: &mut Vec<LlmAttachment>,
 ) -> Vec<LlmMessage> {
-    let history = projection.rlm_history();
     let mut messages = Vec::new();
 
-    if history.is_empty() {
+    if projection.entries().is_empty() {
         messages.push(LlmMessage::new(
             LlmRole::User,
             vec![text_block(
@@ -189,27 +216,43 @@ fn build_rlm_history_messages(
             )],
         ));
     } else {
-        for (index, item) in history.iter().enumerate() {
+        for entry in projection.entries() {
             let mut blocks = vec![text_block(
-                render_history_item(index, item, max_output_chars),
+                render_history_entry(entry, max_output_chars),
                 false,
             )];
-            if let Some(entry) = projection.entries().get(index) {
-                append_entry_image_blocks(entry, attachments, &mut blocks);
-            }
-            messages.push(LlmMessage::new(history_item_llm_role(item), blocks));
+            append_entry_image_blocks(entry, attachments, &mut blocks);
+            messages.push(LlmMessage::new(history_entry_llm_role(entry), blocks));
         }
         mark_last_history_text_cache_breakpoint(&mut messages);
     }
 
-    let current_prompt = format!(
+    let mut current_prompt = format!(
         "\n\n\n=== CURRENT ITERATION: {iteration} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
     );
+    if let Some(block) = required_output {
+        current_prompt.push_str("\n\n=== REQUIRED OUTPUT ===\n\n");
+        current_prompt.push_str(block);
+    }
+    if let Some(suffix) = budget_suffix {
+        current_prompt.push_str("\n\n=== CONTEXT BUDGET ===\n\n");
+        current_prompt.push_str(suffix);
+    }
     messages.push(LlmMessage::new(
         LlmRole::User,
         vec![text_block(current_prompt, false)],
     ));
     messages
+}
+
+fn required_output_block(termination: &RlmTermination) -> Option<String> {
+    match termination {
+        RlmTermination::Finish {
+            schema: Some(schema),
+            ..
+        } => Some(lash::render_value_schema_contract(schema)),
+        _ => None,
+    }
 }
 
 fn text_block(text: impl Into<Arc<str>>, cache_breakpoint: bool) -> LlmContentBlock {
@@ -220,15 +263,15 @@ fn text_block(text: impl Into<Arc<str>>, cache_breakpoint: bool) -> LlmContentBl
     }
 }
 
-fn history_item_llm_role(item: &RlmHistoryItem) -> LlmRole {
-    match item {
-        RlmHistoryItem::Message { role, .. } => match role {
-            RlmHistoryRole::User => LlmRole::User,
-            RlmHistoryRole::Assistant => LlmRole::Assistant,
-            RlmHistoryRole::System => LlmRole::System,
+fn history_entry_llm_role(entry: &ChronologicalEntry) -> LlmRole {
+    match &entry.payload {
+        ChronologicalPayload::Message(message) => match message.role {
+            lash::MessageRole::User => LlmRole::User,
+            lash::MessageRole::Assistant => LlmRole::Assistant,
+            lash::MessageRole::System => LlmRole::System,
         },
-        RlmHistoryItem::ToolCall { .. } => LlmRole::User,
-        RlmHistoryItem::RlmStep { .. } => LlmRole::Assistant,
+        ChronologicalPayload::ToolCall(_) => LlmRole::User,
+        ChronologicalPayload::RlmStep(_) => LlmRole::Assistant,
     }
 }
 
@@ -257,15 +300,11 @@ fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
         RlmTermination::Finish {
             include_submit_prompt: true,
             ..
-        } => {
-            "Call `submit <value>` from lashlang when the task is complete. Do not answer in prose without a lashlang block. Avoid submitting large raw variables; summarize results or submit a concise final answer instead."
-        }
+        } => "Call `submit <value>` from lashlang when the task is complete.",
         RlmTermination::Finish {
             include_submit_prompt: false,
             ..
-        } => {
-            "Continue in lashlang blocks until the task-specific completion path is satisfied. Do not answer in prose without a lashlang block."
-        }
+        } => "Continue in lashlang blocks until the task-specific completion path is satisfied.",
     }
 }
 
@@ -312,6 +351,7 @@ fn render_history_prompt(history: &[RlmHistoryItem], max_output_chars: usize) ->
     rendered
 }
 
+#[cfg(test)]
 fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: usize) -> String {
     let mut rendered = String::new();
     match item {
@@ -371,6 +411,77 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
                 max_output_chars,
             },
         ),
+    }
+    rendered
+}
+
+fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> String {
+    let mut rendered = String::new();
+    match &entry.payload {
+        ChronologicalPayload::Message(message) => {
+            let content = message_history_text(message);
+            let attachments = message
+                .parts
+                .iter()
+                .filter_map(|part| {
+                    let attachment = part.attachment.as_ref()?;
+                    Some(RlmAttachmentRef {
+                        id: part.id.clone(),
+                        media_type: attachment.reference.media_type,
+                        label: attachment.reference.label.clone(),
+                        reference: attachment.reference.id.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            append_history_message(
+                &mut rendered,
+                entry.index,
+                &history_role(message.role),
+                &content,
+                &attachments,
+                max_output_chars,
+            );
+        }
+        ChronologicalPayload::ToolCall(record) => append_history_tool_call(
+            &mut rendered,
+            HistoryToolCallRender {
+                index: entry.index,
+                tool: &record.tool,
+                args: &record.args,
+                result: &record.result,
+                success: record.success,
+                duration_ms: record.duration_ms,
+                max_output_chars,
+            },
+        ),
+        ChronologicalPayload::RlmStep(step) => {
+            let images = step
+                .images
+                .iter()
+                .map(|image| RlmImageRef {
+                    id: image.id.to_string(),
+                    media_type: image.media_type,
+                    width: image.width,
+                    height: image.height,
+                    bytes: image.byte_len as usize,
+                    label: image.label.clone(),
+                })
+                .collect::<Vec<_>>();
+            append_repl_step(
+                &mut rendered,
+                ReplStepRender {
+                    index: entry.index,
+                    iteration: step.iteration,
+                    reasoning: &step.reasoning,
+                    code: &step.code,
+                    output: &step.output,
+                    images: &images,
+                    error: step.error.as_deref(),
+                    final_output: step.final_output.as_ref(),
+                    max_output_chars,
+                },
+            );
+        }
     }
     rendered
 }
@@ -472,6 +583,30 @@ fn append_history_message(
                 "\n- history[{index}].attachments[{attachment_index}]: {rendered}"
             );
         }
+    }
+}
+
+fn message_history_text(message: &lash::Message) -> String {
+    if let Some(user_input) = message.effective_user_text()
+        && !user_input.trim().is_empty()
+    {
+        return user_input.to_string();
+    }
+    let chunks = message
+        .parts
+        .iter()
+        .filter(|part| matches!(part.kind, lash::PartKind::Text | lash::PartKind::Prose))
+        .map(|part| part.content.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    chunks.join("\n\n")
+}
+
+fn history_role(role: lash::MessageRole) -> RlmHistoryRole {
+    match role {
+        lash::MessageRole::User => RlmHistoryRole::User,
+        lash::MessageRole::System => RlmHistoryRole::System,
+        lash::MessageRole::Assistant => RlmHistoryRole::Assistant,
     }
 }
 
@@ -695,7 +830,11 @@ mod tests {
     }
 
     fn projector(max_output_chars: usize) -> RlmContextProjector {
-        RlmContextProjector { max_output_chars }
+        RlmContextProjector {
+            max_output_chars,
+            max_budget_tokens: None,
+            last_prompt_usage: Arc::new(RwLock::new(None)),
+        }
     }
 
     #[test]
@@ -847,6 +986,8 @@ mod tests {
             1000,
             2,
             rlm_finalization_prompt(&RlmTermination::default()),
+            None,
+            None,
             &mut attachments,
         );
 
@@ -878,6 +1019,42 @@ mod tests {
                 ..
             }) if text.contains("=== CURRENT ITERATION: 2 ===")
         ));
+    }
+
+    #[test]
+    fn rlm_prompt_renders_required_output_block_when_schema_present() {
+        let projection = projection_from_events(&[user_event("u1", "first")]);
+        let mut attachments = Vec::new();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["call", "fold"] },
+                "amount": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["action"]
+        });
+
+        let messages = build_rlm_history_messages(
+            &projection,
+            1000,
+            1,
+            "Call submit",
+            Some(&lash::render_value_schema_contract(&schema)),
+            None,
+            &mut attachments,
+        );
+
+        let tail = messages
+            .last()
+            .and_then(|message| message.blocks.first())
+            .and_then(|block| match block {
+                LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+                _ => None,
+            })
+            .expect("tail block");
+        assert!(tail.contains("=== REQUIRED OUTPUT ==="));
+        assert!(tail.contains("{ action: enum[\"call\", \"fold\"], amount?: int >= 0 }"));
+        assert!(tail.contains("Fields:"));
     }
 
     #[test]

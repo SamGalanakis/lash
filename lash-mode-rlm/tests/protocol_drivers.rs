@@ -393,8 +393,7 @@ fn rlm_prose_only_response_requests_submit_by_default() {
     assert!(machine.messages().iter().any(|message| {
         message.role == MessageRole::System
             && message.parts.iter().any(|part| {
-                part.content.contains("final answer must be delivered")
-                    && part.content.contains("submit")
+                part.content.contains("Deliver the final answer") && part.content.contains("submit")
             })
     }));
     machine.handle_response(Response::Checkpoint {
@@ -436,7 +435,7 @@ fn typed_rlm_prose_only_response_requests_submit() {
     assert!(machine.messages().iter().any(|message| {
         message.role == MessageRole::System
             && message.parts.iter().any(|part| {
-                part.content.contains("final answer must be delivered")
+                part.content.contains("Deliver the final answer")
                     && part.content.contains("submit")
                     && !part.content.contains("required output schema")
             })

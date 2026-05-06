@@ -37,24 +37,30 @@ pub(crate) enum RuntimePerfScenario {
     RlmGlobals,
     ObservationalMemory,
     OpenAiCompatStream,
+    EmbedStandard,
+    EmbedRlm,
 }
 
 impl RuntimePerfScenario {
-    const DEFAULTS: [Self; 6] = [
+    const DEFAULTS: [Self; 8] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmToolCalls,
         Self::RlmGlobals,
         Self::ObservationalMemory,
         Self::OpenAiCompatStream,
+        Self::EmbedStandard,
+        Self::EmbedRlm,
     ];
-    const KNOWN: [Self; 6] = [
+    const KNOWN: [Self; 8] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmToolCalls,
         Self::RlmGlobals,
         Self::ObservationalMemory,
         Self::OpenAiCompatStream,
+        Self::EmbedStandard,
+        Self::EmbedRlm,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -65,6 +71,8 @@ impl RuntimePerfScenario {
             "rlm_globals" => Some(Self::RlmGlobals),
             "observational_memory" => Some(Self::ObservationalMemory),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
+            "embed_standard" => Some(Self::EmbedStandard),
+            "embed_rlm" => Some(Self::EmbedRlm),
             _ => None,
         }
     }
@@ -77,15 +85,20 @@ impl RuntimePerfScenario {
             Self::RlmGlobals => "rlm_globals",
             Self::ObservationalMemory => "observational_memory",
             Self::OpenAiCompatStream => "openai_compat_stream",
+            Self::EmbedStandard => "embed_standard",
+            Self::EmbedRlm => "embed_rlm",
         }
     }
 
     fn execution_mode(self) -> ExecutionMode {
         match self {
-            Self::Standard | Self::ObservationalMemory | Self::OpenAiCompatStream => {
-                ExecutionMode::standard()
+            Self::Standard
+            | Self::ObservationalMemory
+            | Self::OpenAiCompatStream
+            | Self::EmbedStandard => ExecutionMode::standard(),
+            Self::Rlm | Self::RlmToolCalls | Self::RlmGlobals | Self::EmbedRlm => {
+                ExecutionMode::new("rlm")
             }
-            Self::Rlm | Self::RlmToolCalls | Self::RlmGlobals => ExecutionMode::new("rlm"),
         }
     }
 
@@ -307,6 +320,30 @@ struct RuntimePerfStore {
     session_graph: Mutex<SessionGraph>,
     usage_deltas: Mutex<Vec<TokenLedgerEntry>>,
     session_meta: Mutex<Option<store::SessionMeta>>,
+}
+
+impl RuntimePerfStore {
+    fn graph_node_count(&self) -> usize {
+        self.session_graph
+            .lock()
+            .expect("lock perf graph")
+            .nodes
+            .len()
+    }
+}
+
+#[derive(Clone)]
+struct RuntimePerfStoreFactory {
+    store: Arc<RuntimePerfStore>,
+}
+
+impl SessionStoreFactory for RuntimePerfStoreFactory {
+    fn create_store(
+        &self,
+        _request: &SessionStoreCreateRequest,
+    ) -> Result<Arc<dyn RuntimePersistence>, String> {
+        Ok(Arc::clone(&self.store) as Arc<dyn RuntimePersistence>)
+    }
 }
 
 #[async_trait::async_trait]
@@ -793,6 +830,13 @@ async fn run_once(
     scenario: RuntimePerfScenario,
     chat_turns: usize,
 ) -> anyhow::Result<RuntimePerfRunResult> {
+    if matches!(
+        scenario,
+        RuntimePerfScenario::EmbedStandard | RuntimePerfScenario::EmbedRlm
+    ) {
+        return run_once_embed(scenario, chat_turns).await;
+    }
+
     let total_started = Instant::now();
     let before_memory = process_memory_sample();
     let total_before_alloc = allocator_stats();
@@ -942,6 +986,163 @@ async fn run_once(
         turns,
         cumulative_usage,
     })
+}
+
+async fn run_once_embed(
+    scenario: RuntimePerfScenario,
+    chat_turns: usize,
+) -> anyhow::Result<RuntimePerfRunResult> {
+    let total_started = Instant::now();
+    let before_memory = process_memory_sample();
+    let total_before_alloc = allocator_stats();
+
+    let build_before_alloc = allocator_stats();
+    let build_started = Instant::now();
+    let store = Arc::new(RuntimePerfStore::default());
+    let core = build_embed_core(scenario, Arc::clone(&store))?;
+    let session = core
+        .session(format!("runtime-perf-{}", scenario.name()))
+        .mode(lash_embed::ModeId::new(
+            scenario.execution_mode().plugin_id(),
+        ))
+        .open()
+        .await
+        .with_context(|| format!("open embed session for {}", scenario.name()))?;
+    let build_runtime_ms = elapsed_ms(build_started);
+    let build_runtime_alloc = alloc_delta(build_before_alloc, allocator_stats());
+    let after_build_memory = process_memory_sample();
+
+    let seed_before_alloc = allocator_stats();
+    let seed_started = Instant::now();
+    let seed_state_ms = elapsed_ms(seed_started);
+    let seed_state_alloc = alloc_delta(seed_before_alloc, allocator_stats());
+    let after_seed_memory = process_memory_sample();
+
+    let mut turns = Vec::with_capacity(chat_turns);
+    for turn_index in 0..chat_turns {
+        let before_turn_usage = SessionUsageReport::default();
+        let turn_before_alloc = allocator_stats();
+        let turn_before_memory = process_memory_sample();
+        let turn_started = Instant::now();
+        let turn = session
+            .run(lash_embed::Input::text(benchmark_prompt(
+                scenario, turn_index,
+            )))
+            .await
+            .with_context(|| {
+                format!(
+                    "run embed runtime perf scenario {} turn {}",
+                    scenario.name(),
+                    turn_index + 1
+                )
+            })?;
+        let run_turn_ms = elapsed_ms(turn_started);
+        let run_turn_alloc = alloc_delta(turn_before_alloc, allocator_stats());
+        let after_turn_memory = process_memory_sample();
+
+        let await_before_alloc = allocator_stats();
+        let background_started = Instant::now();
+        let await_background_work_ms = elapsed_ms(background_started);
+        let await_background_work_alloc = alloc_delta(await_before_alloc, allocator_stats());
+        let after_await_memory = process_memory_sample();
+        let turn_total_alloc =
+            sum_allocation_deltas([&run_turn_alloc, &await_background_work_alloc]);
+
+        turns.push(RuntimePerfTurnResult {
+            turn_index,
+            run_turn_ms,
+            await_background_work_ms,
+            total_ms: round3(run_turn_ms + await_background_work_ms),
+            memory: RuntimePerfTurnMemoryRunResult {
+                rss_before_kb: turn_before_memory.rss_kb,
+                rss_after_turn_kb: after_turn_memory.rss_kb,
+                rss_after_await_kb: after_await_memory.rss_kb,
+                peak_hwm_before_kb: turn_before_memory.hwm_kb,
+                peak_hwm_after_await_kb: after_await_memory.hwm_kb,
+                rss_growth_kb: diff_opt_i64(turn_before_memory.rss_kb, after_await_memory.rss_kb),
+                hwm_growth_kb: diff_opt_i64(turn_before_memory.hwm_kb, after_await_memory.hwm_kb),
+            },
+            allocations: RuntimePerfTurnAllocationRunResult {
+                run_turn: run_turn_alloc,
+                await_background_work: await_background_work_alloc,
+                total: turn_total_alloc,
+            },
+            phase_profile: BTreeMap::new(),
+            turn_usage: turn.usage,
+            usage_delta: before_turn_usage,
+            cumulative_usage: SessionUsageReport::default(),
+        });
+    }
+
+    let export_before_alloc = allocator_stats();
+    let export_started = Instant::now();
+    let read_view = session.read_view().await;
+    let export_state_ms = elapsed_ms(export_started);
+    let export_state_alloc = alloc_delta(export_before_alloc, allocator_stats());
+    let after_export_memory = process_memory_sample();
+    let total_alloc = alloc_delta(total_before_alloc, allocator_stats());
+    let last_turn_memory = turns.last().map(|turn| &turn.memory);
+
+    Ok(RuntimePerfRunResult {
+        scenario: scenario.name().to_string(),
+        chat_turns,
+        build_runtime_ms,
+        seed_state_ms,
+        run_turn_ms: round3(turns.iter().map(|turn| turn.run_turn_ms).sum()),
+        await_background_work_ms: round3(
+            turns.iter().map(|turn| turn.await_background_work_ms).sum(),
+        ),
+        export_state_ms,
+        total_ms: elapsed_ms(total_started),
+        session_nodes: store.graph_node_count(),
+        active_path_messages: read_view.messages().len(),
+        memory: RuntimePerfMemoryRunResult {
+            rss_before_kb: before_memory.rss_kb,
+            rss_after_build_kb: after_build_memory.rss_kb,
+            rss_after_seed_kb: after_seed_memory.rss_kb,
+            rss_after_turn_kb: last_turn_memory.and_then(|memory| memory.rss_after_turn_kb),
+            rss_after_await_kb: last_turn_memory.and_then(|memory| memory.rss_after_await_kb),
+            rss_after_export_kb: after_export_memory.rss_kb,
+            peak_hwm_before_kb: before_memory.hwm_kb,
+            peak_hwm_after_export_kb: after_export_memory.hwm_kb,
+            rss_growth_kb: diff_opt_i64(before_memory.rss_kb, after_export_memory.rss_kb),
+            hwm_growth_kb: diff_opt_i64(before_memory.hwm_kb, after_export_memory.hwm_kb),
+        },
+        allocations: RuntimePerfAllocationRunResult {
+            build_runtime: build_runtime_alloc,
+            seed_state: seed_state_alloc,
+            run_turn: sum_allocation_deltas(turns.iter().map(|turn| &turn.allocations.run_turn)),
+            await_background_work: sum_allocation_deltas(
+                turns
+                    .iter()
+                    .map(|turn| &turn.allocations.await_background_work),
+            ),
+            export_state: export_state_alloc,
+            total: total_alloc,
+        },
+        phase_profile: BTreeMap::new(),
+        turns,
+        cumulative_usage: SessionUsageReport::default(),
+    })
+}
+
+fn build_embed_core(
+    scenario: RuntimePerfScenario,
+    store: Arc<RuntimePerfStore>,
+) -> anyhow::Result<lash_embed::LashCore> {
+    let mut builder = match scenario {
+        RuntimePerfScenario::EmbedStandard => lash_embed::LashCore::standard(),
+        RuntimePerfScenario::EmbedRlm => lash_embed::LashCore::rlm()
+            .tools(Arc::new(BenchmarkEchoTool))
+            .default_mode(lash_embed::ModeId::rlm()),
+        _ => anyhow::bail!("{} is not an embed scenario", scenario.name()),
+    };
+    builder = builder
+        .provider(benchmark_provider(scenario).into_handle())
+        .model("mock-model")
+        .max_context_tokens(200_000)
+        .store_factory(Arc::new(RuntimePerfStoreFactory { store }));
+    builder.build().map_err(anyhow::Error::from)
 }
 
 async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<BenchmarkRuntime> {
@@ -1141,7 +1342,7 @@ async fn prepare_turn(
 
 fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize) -> String {
     match scenario {
-        RuntimePerfScenario::Standard => format!(
+        RuntimePerfScenario::Standard | RuntimePerfScenario::EmbedStandard => format!(
             "Turn {} of a longer runtime benchmark conversation. Inspect the state and reply with exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
@@ -1149,7 +1350,7 @@ fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize) -> String 
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
-        RuntimePerfScenario::Rlm => format!(
+        RuntimePerfScenario::Rlm | RuntimePerfScenario::EmbedRlm => format!(
             "Turn {} in RLM mode. Continue the benchmark chat and reply with exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
@@ -1210,7 +1411,9 @@ fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> BenchmarkStreamPro
                 deltas,
             }
         }
-        RuntimePerfScenario::Rlm | RuntimePerfScenario::RlmGlobals => {
+        RuntimePerfScenario::Rlm
+        | RuntimePerfScenario::RlmGlobals
+        | RuntimePerfScenario::EmbedRlm => {
             let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
             BenchmarkStreamProfile {
                 full_text: text.clone(),

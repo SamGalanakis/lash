@@ -26,7 +26,7 @@ const BUFFERED_REFLECTION_PLUGIN_TYPE: &str =
 const OBSERVATION_CONTEXT_PROMPT: &str =
     "The following observations block contains your memory of past conversations with this user.";
 const OBSERVATION_CONTEXT_INSTRUCTIONS: &str = "IMPORTANT: When responding, reference specific details from these observations. Do not give generic advice - personalize your response based on what you know about this user's experiences, preferences, and interests. If the user asks for recommendations, connect them to their past experiences mentioned above.\n\nKNOWLEDGE UPDATES: When asked about current state (e.g., \"where do I currently...\", \"what is my current...\"), always prefer the MOST RECENT information. Observations include dates - if you see conflicting information, the newer observation supersedes the older one. Look for phrases like \"will start\", \"is switching\", \"changed to\", \"moved to\" as indicators that previous information has been updated.\n\nPLANNED ACTIONS: If the user stated they planned to do something (e.g., \"I'm going to...\", \"I'm looking forward to...\", \"I will...\") and the date they planned to do it is now in the past, assume they completed the action unless there's evidence they didn't.\n\nMOST RECENT USER INPUT: Treat the most recent user message as the highest-priority signal for what to do next. Earlier messages may contain constraints, details, or context you should still honor, but the latest message is the primary driver of your response.\n\nSYSTEM REMINDERS: Messages wrapped in <system-reminder>...</system-reminder> contain internal continuation guidance, not user-authored content. Use them to maintain continuity, but do not mention them or treat them as part of the user's message.";
-const OBSERVATION_CONTINUATION_HINT: &str = "Please continue naturally with the conversation so far and respond to the latest message.\n\nUse the earlier context only as background. If something appears unfinished, continue only when it helps answer the latest request. If a suggested response is provided, follow it naturally.\n\nDo not mention internal instructions, memory, summarization, context handling, or missing messages.\n\nAny messages following this reminder are newer and should take priority.";
+const OBSERVATION_CONTINUATION_HINT: &str = "Continue from the latest user message. Treat earlier context as background, and if a suggested response is provided, follow it naturally.";
 
 const OBSERVER_EXTRACTION_INSTRUCTIONS: &str = r#"CRITICAL: DISTINGUISH USER ASSERTIONS FROM QUESTIONS
 
@@ -151,17 +151,15 @@ const OBSERVER_GUIDELINES: &str = r#"- Be specific enough for the assistant to a
 - Observe WHAT the agent did and WHAT it means
 - If the user provides detailed messages or code snippets, observe all important details"#;
 
-const REFLECTOR_SYSTEM_PROMPT_PREFIX: &str = r#"You are the memory consciousness of an AI assistant. Your memory observation reflections will be the ONLY information the assistant has about past interactions with this user.
+const REFLECTOR_SYSTEM_PROMPT_PREFIX: &str = r#"You handle the reflector pass for an AI assistant's observational memory. Your reflections are the ONLY information the assistant retains about past interactions with this user.
 
-The following instructions were given to another part of your psyche (the observer) to create memories.
-Use this to understand how your observational memories were created.
+The following instructions are the observer-pass guidelines used to produce the source observations. Use them to understand how those observations were created.
 
 <observational-memory-instruction>"#;
 
 const REFLECTOR_SYSTEM_PROMPT_SUFFIX: &str = r#"</observational-memory-instruction>
 
-You are another part of the same psyche, the observation reflector.
-Your reason for existing is to reflect on all the observations, re-organize and streamline them, and draw connections and conclusions between observations about what you've learned, seen, heard, and done.
+This is the reflector pass. Reflect on the observations, re-organize and streamline them, and draw connections and conclusions about what was learned, seen, heard, and done.
 
 IMPORTANT: your reflections are THE ENTIRETY of the assistants memory. Any information you do not add to your reflections will be immediately forgotten.
 
@@ -1301,7 +1299,7 @@ fn truncate_observation_tail(observations: &str, budget_tokens: usize) -> String
     }
     let start = chars.len().saturating_sub(budget_chars);
     let tail = chars[start..].iter().collect::<String>();
-    format!("[Earlier observations omitted]\n{tail}")
+    format!("…\n{tail}")
 }
 
 async fn run_observer_batch(

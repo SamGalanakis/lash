@@ -282,6 +282,7 @@ async fn apply_graph_resume_state(
 pub async fn load_resumed_session(
     identifier: &str,
     app: &mut App,
+    logger: &mut session_log::SessionLogger,
     history: &mut Vec<Message>,
     runtime: &mut Option<LashRuntime>,
     turn_counter: &mut usize,
@@ -296,14 +297,22 @@ pub async fn load_resumed_session(
         .unwrap_or_else(|| identifier.to_string());
     let loaded =
         session_log::load_session(&filename).map_err(|err| format!("Could not load: {err}"))?;
+    let store = Arc::new(
+        Store::open(&session_log::sessions_dir().join(&loaded.filename))
+            .map_err(|err| format!("Could not open session database: {err}"))?,
+    );
+    *logger = session_log::SessionLogger::resume(store, &loaded.filename)
+        .map_err(|err| format!("Could not resume session logger: {err}"))?;
     *history = loaded.messages;
     app.timeline = loaded.blocks;
+    app.session_id = loaded.session_id;
+    app.session_name = loaded.session_name;
     app.last_response_usage = loaded.last_token_usage;
     app.last_prompt_usage = None;
     app.plugin_mode_indicators = loaded.plugin_mode_indicators;
     app.timeline.push(UiTimelineItem::SystemMessage(format!(
         "Resumed: {}",
-        filename
+        loaded.filename
     )));
     restore_session_state(
         &filename,

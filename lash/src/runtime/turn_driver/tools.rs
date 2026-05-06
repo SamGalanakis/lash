@@ -20,6 +20,13 @@ async fn run_one_tool_call(
     let tool_name = pending_tool.tool_name;
     let args = pending_tool.args;
     let item_id = pending_tool.item_id;
+    let _ = event_tx
+        .send(RuntimeStreamEvent::Session(SessionEvent::ToolCallStart {
+            call_id: Some(call_id.clone()),
+            name: tool_name.clone(),
+            args: args.clone(),
+        }))
+        .await;
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
     let progress_event_tx = event_tx.clone();
     let progress_handle = tokio::spawn(async move {

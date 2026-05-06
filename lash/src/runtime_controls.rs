@@ -177,9 +177,9 @@ pub fn monitor_tool_definition() -> ToolDefinition {
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(vec![
-            "monitor(command=\"tail -f /var/log/app.log | grep -E --line-buffered 'ERROR|Traceback|FAILED'\", description=\"errors in app.log\")".into(),
-            "monitor(command=\"while true; do curl -sf http://localhost:3000/health && echo ready && break; sleep 2; done\", description=\"local server ready\", timeout_ms=300000)".into(),
-        ])
+        r#"monitor(command="tail -f /var/log/app.log | grep -E --line-buffered 'ERROR|Traceback|FAILED'", description="errors in app.log")"#.into(),
+        r#"monitor(command="while true; do curl -sf http://localhost:3000/health && echo ready && break; sleep 2; done", description="local server ready", timeout_ms=300000)"#.into(),
+    ])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
@@ -212,9 +212,9 @@ pub fn tasks_stop_tool_definition() -> ToolDefinition {
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(vec![
-            "tasks_stop(task_id=\"monitor:app-errors\")".into(),
-            "tasks_stop(task_id=\"subagent:/root/inspect_auth\")".into(),
-        ])
+        r#"tasks_stop(task_id="monitor:app-errors")"#.into(),
+        r#"tasks_stop(task_id="subagent:/root/inspect_auth")"#.into(),
+    ])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 

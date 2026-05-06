@@ -64,6 +64,7 @@ struct SessionReadState {
     meta: SessionReadMeta,
     graph: SessionReadGraph,
     read_model: crate::session_graph::SessionReadModel,
+    chronological_projection: OnceLock<Arc<crate::ChronologicalProjection>>,
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +171,7 @@ impl SessionReadView {
                 rlm_globals: Arc::new(serde_json::Map::new()),
                 prompt_render_cache: Arc::new(crate::BaseRenderCache::new()),
             },
+            chronological_projection: OnceLock::new(),
         }))
     }
 
@@ -195,6 +197,7 @@ impl SessionReadView {
                 rlm_globals,
                 prompt_render_cache: Arc::new(crate::BaseRenderCache::new()),
             },
+            chronological_projection: OnceLock::new(),
         }))
     }
 
@@ -219,6 +222,7 @@ impl SessionReadView {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Owned(Arc::new(state.session_graph.clone())),
             read_model,
+            chronological_projection: OnceLock::new(),
         }))
     }
 
@@ -229,6 +233,7 @@ impl SessionReadView {
             meta: SessionReadMeta::from_persisted_ref(state),
             graph: SessionReadGraph::Owned(graph),
             read_model,
+            chronological_projection: OnceLock::new(),
         }))
     }
 
@@ -245,6 +250,7 @@ impl SessionReadView {
                 .with_mode_turn_options(mode_turn_options),
             graph: SessionReadGraph::Owned(graph),
             read_model,
+            chronological_projection: OnceLock::new(),
         }))
     }
 
@@ -333,8 +339,20 @@ impl SessionReadView {
         crate::ChronologicalProjection::from_read_model(&self.0.read_model)
     }
 
+    pub(crate) fn shared_chronological_projection(&self) -> Arc<crate::ChronologicalProjection> {
+        Arc::clone(self.0.chronological_projection.get_or_init(|| {
+            Arc::new(crate::ChronologicalProjection::from_read_model(
+                &self.0.read_model,
+            ))
+        }))
+    }
+
+    pub fn rlm_history_len(&self) -> usize {
+        crate::ChronologicalProjection::rlm_history_len_from_read_model(&self.0.read_model)
+    }
+
     pub fn rlm_history(&self) -> Vec<lash_rlm_types::RlmHistoryItem> {
-        self.chronological_projection().rlm_history()
+        self.shared_chronological_projection().rlm_history()
     }
 
     pub fn message_tree(&self) -> Vec<crate::SessionMessageTreeNode> {
@@ -367,9 +385,9 @@ mod tests {
     use super::*;
     use crate::{
         Message, MessageRole, ModeEvent, Part, PartKind, PruneState, SessionEventRecord,
-        ToolCallRecord,
+        ToolCallRecord, ToolEvent,
     };
-    use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
+    use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTrajectoryEntry};
 
     fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
         Message {
@@ -391,6 +409,27 @@ mod tests {
             .into(),
             user_input: None,
             origin: None,
+        }
+    }
+
+    fn transient_plugin_message(id: &str, role: MessageRole, content: &str) -> Message {
+        Message {
+            origin: Some(crate::MessageOrigin::Plugin {
+                plugin_id: "test-plugin".to_string(),
+                transient: true,
+            }),
+            ..text_message(id, role, content)
+        }
+    }
+
+    fn tool_call(call_id: &str, tool: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            call_id: Some(call_id.to_string()),
+            tool: tool.to_string(),
+            args: serde_json::json!({"q": tool}),
+            result: serde_json::json!({"answer": tool}),
+            success: true,
+            duration_ms: 5,
         }
     }
 
@@ -504,6 +543,145 @@ mod tests {
             SessionReadGraph::Derived { cache, .. } => assert!(cache.get().is_some()),
             SessionReadGraph::Owned(_) => panic!("expected derived read graph"),
         }
+    }
+
+    #[test]
+    fn shared_chronological_projection_reuses_arc_and_matches_owned_projection() {
+        let mut state = SessionStateEnvelope {
+            session_id: "shared-projection".to_string(),
+            mode_turn_options: crate::ModeTurnOptions::default(),
+            ..SessionStateEnvelope::default()
+        };
+        let user = text_message("u1", MessageRole::User, "hello");
+        let transient = transient_plugin_message("t1", MessageRole::System, "hidden");
+        let lookup = tool_call("call_lookup", "lookup");
+        state.session_graph.append_message(user);
+        state.session_graph.append_message(transient);
+        state
+            .session_graph
+            .append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+                RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
+                    id: "rlm_step_1".to_string(),
+                    iteration: 1,
+                    reasoning: "inspect".to_string(),
+                    code: "lookup()".to_string(),
+                    output: vec!["observed".to_string()],
+                    tool_calls: vec![lookup.clone(), lookup.clone()],
+                    images: Vec::new(),
+                    error: None,
+                    final_output: None,
+                }),
+            )));
+        state
+            .session_graph
+            .append_event(SessionEventRecord::Tool(ToolEvent::Invocation {
+                stable_key: "call_lookup".to_string(),
+                record: lookup,
+            }));
+        state
+            .session_graph
+            .append_message(text_message("a1", MessageRole::Assistant, "done"));
+
+        let view = SessionReadView::from_exported_state(&state);
+        let first = view.shared_chronological_projection();
+        let second = view.shared_chronological_projection();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            serde_json::to_value(first.entries()).unwrap(),
+            serde_json::to_value(view.chronological_projection().entries()).unwrap()
+        );
+        assert_eq!(
+            view.rlm_history_len(),
+            view.chronological_projection().rlm_history_len()
+        );
+    }
+
+    #[test]
+    fn shared_chronological_projection_keeps_derived_graph_cache_cold() {
+        let state = SessionStateEnvelope {
+            session_id: "derived-shared-projection".to_string(),
+            mode_turn_options: crate::ModeTurnOptions::default(),
+            ..SessionStateEnvelope::default()
+        };
+        let base_graph = Arc::new(crate::SessionGraph::default());
+        let user = text_message("u1", MessageRole::User, "hello");
+        let tool_call = tool_call("call_lookup", "lookup");
+        let view = SessionReadView::from_graph_message_sequence(
+            &state,
+            base_graph,
+            crate::MessageSequence::from_base(vec![user].into()),
+            Arc::new(vec![tool_call]),
+        );
+
+        match &view.0.graph {
+            SessionReadGraph::Derived { cache, .. } => assert!(cache.get().is_none()),
+            SessionReadGraph::Owned(_) => panic!("expected derived read graph"),
+        }
+
+        let shared = view.shared_chronological_projection();
+        assert_eq!(
+            shared.entries().len(),
+            view.chronological_projection().entries().len()
+        );
+
+        match &view.0.graph {
+            SessionReadGraph::Derived { cache, .. } => assert!(cache.get().is_none()),
+            SessionReadGraph::Owned(_) => panic!("expected derived read graph"),
+        }
+    }
+
+    #[test]
+    fn rlm_history_len_matches_full_projection_for_mixed_read_model() {
+        let mut state = SessionStateEnvelope {
+            session_id: "rlm-history-len".to_string(),
+            mode_turn_options: crate::ModeTurnOptions::default(),
+            ..SessionStateEnvelope::default()
+        };
+        let lookup = tool_call("call_lookup", "lookup");
+        state
+            .session_graph
+            .append_message(text_message("u1", MessageRole::User, "hello"));
+        state.session_graph.append_message(transient_plugin_message(
+            "t1",
+            MessageRole::System,
+            "hidden",
+        ));
+        state
+            .session_graph
+            .append_event(SessionEventRecord::Tool(ToolEvent::Invocation {
+                stable_key: "call_lookup".to_string(),
+                record: lookup.clone(),
+            }));
+        state
+            .session_graph
+            .append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+                RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
+                    id: "rlm_step_1".to_string(),
+                    iteration: 1,
+                    reasoning: "inspect".to_string(),
+                    code: "lookup()".to_string(),
+                    output: vec!["observed".to_string()],
+                    tool_calls: vec![lookup],
+                    images: Vec::new(),
+                    error: None,
+                    final_output: None,
+                }),
+            )));
+        state
+            .session_graph
+            .append_message(text_message("a1", MessageRole::Assistant, "done"));
+
+        let view = SessionReadView::from_exported_state(&state);
+
+        assert_eq!(
+            view.rlm_history_len(),
+            view.chronological_projection().rlm_history_len()
+        );
+        assert_eq!(
+            view.rlm_history_len(),
+            view.shared_chronological_projection().rlm_history_len()
+        );
     }
 }
 

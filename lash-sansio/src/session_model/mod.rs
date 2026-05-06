@@ -131,6 +131,13 @@ pub enum SessionEvent {
         success: bool,
         duration_ms: u64,
     },
+    #[serde(rename = "tool_call_start")]
+    ToolCallStart {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        name: String,
+        args: serde_json::Value,
+    },
     #[serde(rename = "message")]
     Message { text: String, kind: String },
     #[serde(rename = "llm_request")]
@@ -526,6 +533,8 @@ pub fn format_tool_result_content(success: bool, result: &serde_json::Value) -> 
             serde_json::Value::String(text) => {
                 if text.is_empty() {
                     "[Tool execution failed]".to_string()
+                } else if text.starts_with("[Tool execution failed]") {
+                    text.clone()
                 } else {
                     format!("[Tool execution failed]\n{text}")
                 }

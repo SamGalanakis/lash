@@ -248,7 +248,6 @@ def lash_command(args: argparse.Namespace, prompt: str, root: Path) -> list[str]
     if args.variant:
         cmd.extend(["--variant", args.variant])
     cmd.extend(["--execution-mode", args.execution_mode])
-    cmd.extend(["--tool-surface", "appworld"])
     cmd.extend(["--print", prompt])
     return cmd
 

@@ -17,9 +17,12 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use crate::plugin::{
+    PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
+};
 use crate::{
-    ProgressSender, PromptContribution, SandboxMessage, ToolDefinition, ToolExecutionContext,
-    ToolExecutionMode, ToolProvider, ToolResult,
+    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolDefinition,
+    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
 
 use super::{object_schema, require_str};
@@ -39,16 +42,38 @@ struct ShellProcess {
 }
 
 pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
+    shell_prompt_contributions_for_access(&SessionToolAccess::default())
+}
+
+/// Returns the shell prompt contributions, gating the `write_stdin`
+/// reference on whether that tool is actually callable in the current
+/// session.
+pub fn shell_prompt_contributions_for_access(
+    access: &SessionToolAccess,
+) -> Vec<PromptContribution> {
+    let mut command_execution = String::from(
+        "Use `exec_command` for one-shot commands; it returns only after the process exits and successful results include `status: \"completed\"`, `done: true`, and `exit_code`. Use `start_command` only for interactive or intentionally long-lived processes; it may return `status: \"running\"`, `done: false`, and `session_id`, which means the output is partial and must not be treated as completion.",
+    );
+    if tool_callable_from_authority(access, "write_stdin") {
+        command_execution.push_str(" Continue running sessions with `write_stdin`.");
+    }
+    command_execution.push_str(
+        " For builds, installs, tests, migrations, service setup, and verification commands, use `exec_command` and wait for completion before concluding.",
+    );
     vec![
-        PromptContribution::guidance(
-            "Command Execution",
-            "Use `exec_command` for one-shot commands; it returns only after the process exits and successful results include `status: \"completed\"`, `done: true`, and `exit_code`. Use `start_command` only for interactive or intentionally long-lived processes; it may return `status: \"running\"`, `done: false`, and `session_id`, which means the output is partial and must not be treated as completion. Continue running sessions with `write_stdin`. For builds, installs, tests, migrations, service setup, and verification commands, use `exec_command` and wait for completion before concluding.",
-        ),
+        PromptContribution::guidance("Command Execution", command_execution),
         PromptContribution::guidance(
             "Git Safety",
             "Avoid destructive git commands unless explicitly requested.",
         ),
     ]
+}
+
+fn tool_callable_from_authority(access: &SessionToolAccess, name: &str) -> bool {
+    if access.hides(name) {
+        return false;
+    }
+    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name == name)
 }
 
 #[derive(Clone)]
@@ -1211,6 +1236,8 @@ impl Default for StandardShell {
 #[async_trait::async_trait]
 impl ToolProvider for StandardShell {
     fn definitions(&self) -> Vec<ToolDefinition> {
+        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.";
+        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. Use `poll_ms` only to choose the initial observation window; use `exec_command.timeout_ms` for bounded one-shot commands. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
         let command_common = |command_description: &str| {
             json!({
                 "cmd": {
@@ -1246,7 +1273,7 @@ impl ToolProvider for StandardShell {
         vec![
             ToolDefinition::new(
                 "exec_command",
-                "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                exec_command_description,
                 {
                     let mut properties = command_common("Shell command to execute.");
                     properties["timeout_ms"] = json!({
@@ -1267,7 +1294,7 @@ impl ToolProvider for StandardShell {
             .with_execution_mode(ToolExecutionMode::Serial),
             ToolDefinition::new(
                 "start_command",
-                "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. Continue the session with `write_stdin`. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. Use `poll_ms` only to choose the initial observation window; use `exec_command.timeout_ms` for bounded one-shot commands. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.",
+                start_command_description,
                 {
                     let mut properties = command_common("Shell command to start.");
                     properties["poll_ms"] = json!({
@@ -1743,6 +1770,47 @@ fn parse_standard_session_id(args: &serde_json::Value) -> Result<String, ToolRes
     }
 
     require_str(args, "id").map(str::to_string)
+}
+
+/// PluginFactory for the built-in shell tool surface.
+///
+/// Wires `StandardShell` into the active session with the access-gated
+/// `write_stdin` mention in the prompt contribution so the model only
+/// sees that bullet when the tool is actually callable.
+#[derive(Default)]
+pub struct StandardShellPluginFactory;
+
+impl StandardShellPluginFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PluginFactory for StandardShellPluginFactory {
+    fn id(&self) -> &'static str {
+        "shell"
+    }
+
+    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        let tool_access = ctx.tool_access.clone();
+        let provider = Arc::new(StandardShell::new()) as Arc<dyn ToolProvider>;
+        PluginSpecFactory::new(
+            "shell",
+            Arc::new(move |_ctx| {
+                let provider = Arc::clone(&provider);
+                let tool_access = tool_access.clone();
+                Ok(PluginSpec::new()
+                    .with_tool_provider(provider)
+                    .with_prompt_contributor(Arc::new(move |_ctx| {
+                        let tool_access = tool_access.clone();
+                        Box::pin(
+                            async move { Ok(shell_prompt_contributions_for_access(&tool_access)) },
+                        )
+                    })))
+            }),
+        )
+        .build(ctx)
+    }
 }
 
 #[cfg(test)]

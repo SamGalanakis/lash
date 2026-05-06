@@ -134,6 +134,7 @@ impl RuntimeEnvironment {
             path_resolver: Arc::clone(&self.path_resolver),
             attachment_store: Arc::clone(&self.attachment_store),
             prompt_template: self.prompt_template.clone(),
+            prompt_contributions: Vec::new(),
             trace_sink: self.trace_sink.clone(),
             trace_level: self.trace_level,
             trace_context: self.trace_context.clone(),

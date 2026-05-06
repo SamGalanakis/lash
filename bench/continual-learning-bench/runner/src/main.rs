@@ -10,13 +10,13 @@ use lash::provider::LashConfig;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, NoopEventSink,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot,
-    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
-    RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy, SessionUsageReport,
-    StandardContextApproach, TokioSessionTaskExecutor, ToolDefinition, ToolExecutionMode,
-    ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
-    TurnOutcome, diff_usage_reports,
+    PersistedSessionState, PersistentRuntimeServices, PluginHost, ProviderHandle,
+    RuntimeCoreConfig, RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
+    SessionUsageReport, StandardContextApproach, TokioSessionTaskExecutor, ToolDefinition,
+    ToolExecutionMode, ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge, TurnInput,
+    TurnInputInjectionBridge, TurnOutcome, diff_usage_reports,
 };
+use lash_harness_opt::clbench::{CLBENCH_MEMORY_GUIDANCE, DEFAULT_USER_DIRECTIVE};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination};
 use lash_sqlite_store::Store;
@@ -125,7 +125,9 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         EmbeddedRuntimeHost::new(
             RuntimeCoreConfig::default()
                 .with_trace_jsonl_path(request.trace_path.clone())
-                .with_prompt_template(clbench_prompt_template()),
+                .with_prompt_template(lash_harness_opt::clbench::clbench_prompt_template(
+                    CLBENCH_MEMORY_GUIDANCE,
+                )),
         ),
         Arc::new(TokioSessionTaskExecutor::default()),
     );
@@ -157,7 +159,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         .stream_turn(
             TurnInput {
                 items: vec![InputItem::Text {
-                    text: build_user_message(&request),
+                    text: DEFAULT_USER_DIRECTIVE.to_string(),
                 }],
                 image_blobs: Default::default(),
                 user_input: None,
@@ -290,58 +292,6 @@ fn list_async_handles_tool_definition() -> ToolDefinition {
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
-fn clbench_prompt_template() -> PromptTemplate {
-    PromptTemplate::new(vec![
-        PromptTemplateSection::untitled(vec![PromptTemplateEntry::text(
-            "You are being evaluated by Continual Learning Bench, which tests whether an agent improves from feedback across sequential task instances.",
-        )]),
-        PromptTemplateSection::titled(
-            "Execution",
-            vec![
-                PromptTemplateEntry::builtin(PromptBuiltin::ExecutionInstructions),
-                PromptTemplateEntry::slot(PromptSlot::Execution),
-            ],
-        ),
-        PromptTemplateSection::titled(
-            "Continual Memory",
-            vec![PromptTemplateEntry::text(CLBENCH_MEMORY_GUIDANCE)],
-        ),
-        PromptTemplateSection::titled(
-            "Guidance",
-            vec![PromptTemplateEntry::slot(PromptSlot::ProjectInstructions)],
-        ),
-    ])
-}
-
-const CLBENCH_MEMORY_GUIDANCE: &str = r#"Use your persistent Lash RLM REPL as memory. A global list named `diary` is already bound. Each entry is a short record:
-
-`{ index: int, history_index: int, summary: str, learnings: str }`
-
-The current benchmark iteration is bound as `iteration`.
-
-At the start of each turn:
-- If `diary` is small, inspect it directly.
-- If `diary` is large, use parallel `llm_query` calls over diary entries or chunks to identify entries relevant to the current query and feedback.
-- For relevant entries, inspect the matching `history[entry.history_index]` when more detail is needed.
-- You may use `spawn_agent` with `capability: "explore"` to analyze one selected history entry or a small selected group of history entries and return focused lessons.
-- Apply useful prior learnings before choosing the benchmark action.
-
-Before every `submit`, append exactly one diary record:
-
-```lashlang
-diary = push(diary, {
-  index: len(diary),
-  history_index: len(history) - 1,
-  summary: "brief task/action summary",
-  learnings: "reusable lesson from this interaction"
-})
-submit { action: "..." }
-```
-
-Keep entries short, factual, and reusable. Do not duplicate old lessons; incorporate feedback and revise strategy in later entries. Use only the available tools: `llm_query`, `spawn_agent` with `capability: "explore"`, `continue_as`, and `list_async_handles` when you need to rediscover live async handles. Do not use local shell, file, search, edit, web, monitor, or external tools.
-
-Return the benchmark action by calling `submit <value>` from a fenced `lashlang` block. The submitted value must match the current response schema exactly."#;
-
 fn build_globals_patch(request: &RunnerRequest) -> RlmGlobalsPatchPluginBody {
     let mut set = serde_json::Map::new();
     if request.init_diary {
@@ -357,31 +307,10 @@ fn build_globals_patch(request: &RunnerRequest) -> RlmGlobalsPatchPluginBody {
             .map(|feedback| json!(feedback))
             .unwrap_or(Value::Null),
     );
-    set.insert(
-        "benchmark_response_schema".to_string(),
-        request.response_schema.clone(),
-    );
     RlmGlobalsPatchPluginBody {
         set,
         unset: Vec::new(),
     }
-}
-
-fn build_user_message(request: &RunnerRequest) -> String {
-    let mut parts = vec![format!("Benchmark iteration: {}", request.iteration)];
-    if let Some(feedback) = request
-        .feedback
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-    {
-        parts.push(format!("Feedback from the previous action:\n{feedback}"));
-    }
-    parts.push(format!("Current query:\n{}", request.prompt));
-    parts.push(
-        "Choose the next benchmark action. Return it with `submit <value>` from a fenced `lashlang` block."
-            .to_string(),
-    );
-    parts.join("\n\n")
 }
 
 fn resolve_provider(provider_id: Option<&str>) -> Result<ProviderHandle> {

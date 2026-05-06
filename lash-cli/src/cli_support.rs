@@ -525,8 +525,7 @@ pub(crate) fn info_text(
     execution_mode: &ExecutionMode,
     standard_context_approach: Option<&lash::StandardContextApproach>,
     context_window: Option<u64>,
-    tool_count: usize,
-    toolset_hash: &str,
+    tool_summary: Option<(usize, &str)>,
     cwd: &str,
     session_name: Option<&str>,
     session_id: Option<&str>,
@@ -563,8 +562,12 @@ pub(crate) fn info_text(
         lines.push("context window: unknown".to_string());
     }
 
+    if let Some((tool_count, toolset_hash)) = tool_summary {
+        lines.push(format!("tools: {} (hash {})", tool_count, toolset_hash));
+    } else {
+        lines.push("tools: (session not started)".to_string());
+    }
     lines.extend([
-        format!("tools: {} (hash {})", tool_count, toolset_hash),
         format!("cwd: {}", cwd),
         format!("session: {}", session_name.unwrap_or("(not started)")),
     ]);
@@ -912,8 +915,7 @@ mod tests {
             &ExecutionMode::new("rlm"),
             None,
             Some(123_000),
-            7,
-            "abcd1234",
+            Some((7, "abcd1234")),
             "/tmp/demo",
             Some("demo-session"),
             Some("sess-123"),

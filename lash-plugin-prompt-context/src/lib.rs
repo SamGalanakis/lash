@@ -4,7 +4,12 @@ use chrono::Utc;
 
 use lash::PromptContribution;
 use lash::instructions::InstructionSource;
-use lash::plugin::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext};
+use lash::plugin::{
+    HistoryError, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
+    TurnContextTransform, TurnTransformContext,
+};
+use lash::session_model::context::PreparedContext;
+use lash::{ExecutionMode, Message, MessageRole, Part, PartKind, PruneState, shared_parts};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromptContextPluginConfig {
@@ -45,11 +50,12 @@ impl PluginFactory for PromptContextPluginFactory {
 
     fn build(
         &self,
-        _ctx: &PluginSessionContext,
+        ctx: &PluginSessionContext,
     ) -> Result<Arc<dyn lash::SessionPlugin>, PluginError> {
         Ok(Arc::new(PromptContextPlugin {
             instruction_source: Arc::clone(&self.instruction_source),
             config: self.config.clone(),
+            execution_mode: ctx.execution_mode.clone(),
         }))
     }
 }
@@ -57,6 +63,7 @@ impl PluginFactory for PromptContextPluginFactory {
 struct PromptContextPlugin {
     instruction_source: Arc<dyn InstructionSource>,
     config: PromptContextPluginConfig,
+    execution_mode: ExecutionMode,
 }
 
 impl lash::SessionPlugin for PromptContextPlugin {
@@ -66,26 +73,84 @@ impl lash::SessionPlugin for PromptContextPlugin {
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         let instruction_source = Arc::clone(&self.instruction_source);
-        let config = self.config.clone();
+        let include_project_instructions = self.config.include_project_instructions;
         reg.prompt().contribute(Arc::new(move |_ctx| {
             let instruction_source = Arc::clone(&instruction_source);
-            let config = config.clone();
             Box::pin(async move {
                 let mut contributions = Vec::new();
-                let base_context = build_prompt_environment_context();
-                if config.include_environment && !base_context.trim().is_empty() {
-                    contributions.push(PromptContribution::runtime_context(base_context));
-                }
-                let project_instructions = instruction_source.system_instructions();
-                if config.include_project_instructions && !project_instructions.trim().is_empty() {
-                    contributions.push(PromptContribution::project_instructions(
-                        project_instructions,
-                    ));
+                if include_project_instructions {
+                    let project_instructions = instruction_source.system_instructions();
+                    if !project_instructions.trim().is_empty() {
+                        contributions.push(PromptContribution::project_instructions(
+                            project_instructions,
+                        ));
+                    }
                 }
                 Ok(contributions)
             })
         }));
+
+        if self.config.include_environment && self.execution_mode == ExecutionMode::standard() {
+            reg.history()
+                .prepare_turn(50, Arc::new(EnvironmentTailTransform));
+        }
         Ok(())
+    }
+}
+
+struct EnvironmentTailTransform;
+
+#[async_trait::async_trait]
+impl TurnContextTransform for EnvironmentTailTransform {
+    fn id(&self) -> &'static str {
+        "prompt_context.environment_tail"
+    }
+
+    async fn transform(
+        &self,
+        _ctx: &TurnTransformContext,
+        input: PreparedContext,
+    ) -> Result<PreparedContext, HistoryError> {
+        let context = build_prompt_environment_context();
+        if context.trim().is_empty() {
+            return Ok(input);
+        }
+
+        let mut messages: Vec<Message> = input.messages.as_slice().to_vec();
+        messages.push(environment_tail_message(context));
+
+        let base = Arc::new(messages);
+        let cache = Arc::new(lash::BaseRenderCache::new());
+        Ok(PreparedContext {
+            messages: lash::MessageSequence::from_base(base).with_base_render_cache(cache),
+            ..input
+        })
+    }
+}
+
+fn environment_tail_message(content: String) -> Message {
+    let id = "prompt-context-env";
+    Message {
+        id: id.to_string(),
+        role: MessageRole::User,
+        parts: shared_parts(vec![Part {
+            id: format!("{id}.p0"),
+            kind: PartKind::Prose,
+            content: format!("<system-reminder>\n{content}\n</system-reminder>"),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_item_id: None,
+            tool_signature: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        user_input: None,
+        origin: Some(lash::MessageOrigin::Plugin {
+            plugin_id: "prompt_context".to_string(),
+            transient: true,
+        }),
     }
 }
 

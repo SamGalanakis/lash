@@ -96,7 +96,7 @@ impl ToolProvider for UpdatePlanTool {
         vec![
             ToolDefinition::new(
                 "update_plan",
-                "Update the sticky plan dock at the bottom of the TUI. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time. Use this to keep user-visible progress current for substantial multi-step work. After updating the plan, do not repeat the full checklist in prose; briefly summarize what changed and what comes next.",
+                "Publish or replace the current plan: a list of short ordered steps with statuses (pending, in_progress, completed), plus an optional explanation. At most one step can be in_progress at a time. Each call fully replaces the previous plan. Use this for substantial multi-step work to keep progress visible to the user. After updating, briefly summarize what changed and what comes next instead of repeating the full checklist.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {

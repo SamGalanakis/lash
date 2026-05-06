@@ -15,7 +15,8 @@ use lash_tui::{Line, Rect};
 use lash_ui::UiExtensions;
 
 use crate::activity::{
-    ActivityArtifact, ActivityBlock, ActivityKind, ActivityState, is_batch_tool_name,
+    ActivityArtifact, ActivityBlock, ActivityKind, ActivityState, ActivityStatus,
+    is_batch_tool_name,
 };
 use crate::assistant_text::{
     MarkdownLane, merge_assistant_reasoning_text, normalize_assistant_text,
@@ -183,6 +184,10 @@ pub struct LiveToolOutput {
     pub hidden: usize,
     #[serde(default)]
     pub partial: String,
+    #[serde(default)]
+    pub call_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 impl LiveToolOutput {
@@ -190,6 +195,14 @@ impl LiveToolOutput {
         self.lines.clear();
         self.hidden = 0;
         self.partial.clear();
+        self.call_id = None;
+        self.title = None;
+    }
+
+    fn start(&mut self, call_id: Option<String>, title: String) {
+        self.clear();
+        self.call_id = call_id;
+        self.title = Some(title);
     }
 
     pub(crate) fn height(&self) -> usize {
@@ -238,6 +251,26 @@ impl LiveToolOutput {
         }
         self.lines
             .push(smart_truncate_preview_line(&line, line_char_limit));
+    }
+}
+
+fn live_tool_output_title(name: &str, args: &serde_json::Value) -> String {
+    fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        args.get(key).and_then(|value| value.as_str())
+    }
+
+    match name {
+        "exec_command" | "start_command" => arg_str(args, "cmd")
+            .map(str::to_string)
+            .unwrap_or_else(|| "shell output".to_string()),
+        "write_stdin" => {
+            if arg_str(args, "chars").is_some_and(str::is_empty) {
+                "poll command output".to_string()
+            } else {
+                "write to command".to_string()
+            }
+        }
+        other => other.replace('_', " "),
     }
 }
 
@@ -1139,6 +1172,9 @@ impl App {
                         ActivityKind::ShellCommand
                             | ActivityKind::ShellInteraction
                             | ActivityKind::Subagent
+                    ) && matches!(
+                        activity.result.status,
+                        ActivityStatus::Running | ActivityStatus::Partial
                     ) =>
                 {
                     Some(idx)
@@ -1430,6 +1466,16 @@ impl App {
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
+            }
+            SessionEvent::ToolCallStart {
+                call_id,
+                name,
+                args,
+            } => {
+                self.finalize_live_markdown();
+                let title = live_tool_output_title(&name, &args);
+                self.live_tool_output.start(call_id, title);
+                self.invalidate_live_tool_output_cache();
             }
             SessionEvent::Message { text, kind } => {
                 if kind == "lashlang_code" {

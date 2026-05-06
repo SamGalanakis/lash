@@ -16,6 +16,9 @@ pub enum PromptBuiltin {
 pub enum PromptSlot {
     Intro,
     Execution,
+    CliAutonomousIntro,
+    CliAutonomousExecution,
+    CliRlmExecution,
     Guidance,
     ProjectInstructions,
     RuntimeContext,

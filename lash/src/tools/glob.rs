@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use super::{
-    build_path_entry, filesystem_entries_result, object_schema, parse_optional_bool,
-    parse_optional_usize_arg, require_str, rg_file_list, run_blocking,
+    FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
+    parse_optional_bool, parse_optional_usize_arg, require_str, rg_file_list, run_blocking,
 };
 
 /// Find files by glob pattern.
@@ -20,10 +20,12 @@ impl ToolProvider for Glob {
         vec![
             ToolDefinition::new(
                 "glob",
-                format!(
-                "Find filesystem entries by glob. By default this includes hidden files and respects `.gitignore` only inside Git repos. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false, include_hidden=true, respect_gitignore=true.",
-                MAX_RESULTS
-            ),
+                [
+                    "Find filesystem entries by glob. ",
+                    FS_DEFAULTS_PREAMBLE,
+                    " Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit=100, with_lines=false, include_hidden=true, respect_gitignore=true.",
+                ]
+                .concat(),
                 object_schema(
                     serde_json::json!({
                         "pattern": { "type": "string" },
@@ -36,7 +38,7 @@ impl ToolProvider for Glob {
                             "type": ["integer", "null", "string"],
                             "minimum": 1,
                             "default": MAX_RESULTS,
-                            "description": format!("Maximum results to return (default: {}). Use null or \"none\" for no cap.", MAX_RESULTS)
+                            "description": "Maximum results to return (default: 100). Use null or \"none\" for no cap."
                         },
                         "with_lines": {
                             "type": "boolean",

@@ -1345,7 +1345,9 @@ mod tests {
         assert_eq!(results[0]["name"], json!("spawn_agent"));
         assert_eq!(
             results[0]["signature"],
-            json!("spawn_agent<T = any>(agent_name: str, task: str, output?: TypeSpec<T>) -> T\nParameters:\n- `agent_name: str`\n- `task: str`\n- `output?: TypeSpec<T>`")
+            json!(
+                "spawn_agent<T = any>(agent_name: str, task: str, output?: TypeSpec<T>) -> T\nParameters:\n- `agent_name: str`\n- `task: str`\n- `output?: TypeSpec<T>`"
+            )
         );
         assert!(results[0].get("returns").is_none());
 
@@ -1362,7 +1364,9 @@ mod tests {
         assert_eq!(results[0]["name"], json!("llm_query"));
         assert_eq!(
             results[0]["signature"],
-            json!("llm_query<T = str>(task: str, output?: TypeSpec<T>) -> T\nParameters:\n- `task: str`\n- `output?: TypeSpec<T>`")
+            json!(
+                "llm_query<T = str>(task: str, output?: TypeSpec<T>) -> T\nParameters:\n- `task: str`\n- `output?: TypeSpec<T>`"
+            )
         );
         assert!(results[0].get("returns").is_none());
     }

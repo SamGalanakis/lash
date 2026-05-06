@@ -250,6 +250,7 @@ impl TraceSessionEvent {
                 event: TracePluginSurfaceEvent::from_event(event),
             }),
             SessionEvent::Prompt { .. }
+            | SessionEvent::ToolCallStart { .. }
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::ChildTokenUsage { .. }

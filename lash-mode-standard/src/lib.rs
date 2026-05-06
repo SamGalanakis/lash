@@ -45,7 +45,18 @@ use serde_json::Value;
 const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls.
 
 - Use `batch` (up to 25 calls) for two or more independent tool calls. Serialize calls when later arguments depend on earlier results.
-- For direct conversational requests that need no tools, respond in prose only."#;
+- For direct conversational requests that need no tools, respond in prose only.
+
+Example — two independent reads in one `batch` call:
+
+```json
+{
+  "tool_calls": [
+    { "tool": "read_file", "parameters": { "path": "src/main.rs" } },
+    { "tool": "grep", "parameters": { "query": "ToolProvider", "path": "lash/src/" } }
+  ]
+}
+```"#;
 
 const BATCH_MAX_TOOL_CALLS: usize = 25;
 

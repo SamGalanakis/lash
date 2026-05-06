@@ -64,7 +64,8 @@ pub use lash_sansio::{
     TurnOutcome, TurnStop, UserInputProvenance, UserInputTransform, append_assistant_text_part,
     build_prompt, build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
     execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, reasoning_part, shared_parts, turn_limit_exhausted_message,
+    normalized_response_parts, reasoning_part, render_value_schema_contract, shared_parts,
+    turn_limit_exhausted_message,
 };
 pub use standard_context_approach::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
