@@ -658,6 +658,7 @@ async fn run_question(
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
+                trace_turn_id: None,
             },
             &sink,
             cancel,
@@ -1346,12 +1347,12 @@ impl JsonlEventSink {
 #[async_trait::async_trait]
 impl EventSink for JsonlEventSink {
     async fn emit(&self, event: SessionEvent) {
-        if let SessionEvent::LlmRequest { iteration, .. } = &event {
+        if let SessionEvent::LlmRequest { mode_iteration, .. } = &event {
             if let Ok(mut count) = self.llm_call_count.lock() {
                 *count += 1;
             }
             if let Ok(mut iterations) = self.llm_iterations.lock() {
-                iterations.insert(*iteration);
+                iterations.insert(*mode_iteration);
             }
         }
         if let SessionEvent::LlmResponse { content, .. } = &event

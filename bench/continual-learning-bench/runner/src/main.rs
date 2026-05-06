@@ -171,6 +171,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                         include_submit_prompt: true,
                     },
                 )?),
+                trace_turn_id: Some(format!("clbench-turn-{:04}", request.iteration)),
             },
             &sink as &dyn EventSink,
             tokio_util::sync::CancellationToken::new(),

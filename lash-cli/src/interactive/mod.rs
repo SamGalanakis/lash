@@ -533,7 +533,7 @@ pub(crate) async fn run_app(
                     ) && !turn_has_visible_output(&done.result);
                     let state = done.result.state;
                     tracing::info!(
-                        iteration = state.iteration,
+                        turn_index = state.turn_index,
                         outcome = ?done.result.outcome,
                         assistant_chars = done.result.assistant_output.safe_text.len(),
                         plugin_visible_output = done.result.has_plugin_visible_output,
@@ -564,12 +564,12 @@ pub(crate) async fn run_app(
 
                     let read_view = state.read_view();
                     history = read_view.messages().to_vec();
-                    turn_counter = state.iteration;
+                    turn_counter = state.turn_index;
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
                     tracing::debug!(
                         stream_id = done.stream_id,
-                        iteration = state.iteration,
+                        turn_index = state.turn_index,
                         outcome = ?done.result.outcome,
                         messages = read_view.messages().len(),
                         blocks = app.timeline.len(),

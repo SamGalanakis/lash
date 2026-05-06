@@ -205,7 +205,7 @@ pub struct RuntimeCommitResult {
 
 fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::PersistedTurnState {
     crate::PersistedTurnState {
-        iteration: state.iteration,
+        turn_index: state.turn_index,
         token_usage: state.token_usage.clone(),
         last_prompt_usage: state.last_prompt_usage.clone(),
         mode_turn_options: state.mode_turn_options.clone(),
@@ -272,7 +272,7 @@ fn persisted_session_state_from_head(
         session_id: head.session_id,
         policy: crate::SessionPolicy::default(),
         session_graph: head.graph,
-        iteration: 0,
+        turn_index: 0,
         token_usage: crate::TokenUsage::default(),
         last_prompt_usage: None,
         mode_turn_options: crate::ModeTurnOptions::default(),
@@ -297,7 +297,7 @@ fn persisted_session_state_from_head(
     state.policy.standard_context_approach = head.config.standard_context_approach.clone();
     state.policy.model_variant = head.config.model_variant.clone();
     if let Some(checkpoint) = checkpoint {
-        state.iteration = checkpoint.turn_state.iteration;
+        state.turn_index = checkpoint.turn_state.turn_index;
         state.token_usage = checkpoint.turn_state.token_usage;
         state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
         state.mode_turn_options = checkpoint.turn_state.mode_turn_options;

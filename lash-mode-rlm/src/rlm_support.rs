@@ -11,7 +11,7 @@ use lash::plugin::PromptHookContext;
 /// per-turn dynamic; callers must place it AFTER the cache breakpoint,
 /// never inside the cached system prompt.
 pub fn format_budget_suffix(
-    iteration: usize,
+    turn_index: usize,
     usage: Option<&PromptUsage>,
     max_budget_tokens: Option<usize>,
 ) -> Option<String> {
@@ -23,7 +23,7 @@ pub fn format_budget_suffix(
     }
     let pct = used.saturating_mul(100) / max.max(1);
     let mut content =
-        format!("Iteration: {iteration} · Tokens: {used} · handoff threshold: {max} ({pct}%).");
+        format!("Turn: {turn_index} · Tokens: {used} · handoff threshold: {max} ({pct}%).");
     if pct >= 60 {
         let tail = if used >= max {
             "Past the handoff threshold. Do not continue ordinary work — `continue_as` now and pack only what the successor needs into `task` + `seed`."
@@ -47,7 +47,7 @@ pub(crate) fn budget_prompt_contributions(
     max_budget_tokens: Option<usize>,
 ) -> Vec<PromptContribution> {
     match format_budget_suffix(
-        ctx.state.iteration(),
+        ctx.state.turn_index(),
         ctx.state.last_prompt_usage(),
         max_budget_tokens,
     ) {

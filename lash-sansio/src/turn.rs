@@ -14,7 +14,7 @@ pub struct SansIoTurnInput<M: ModeProtocol = UnitModeProtocol> {
     pub mode: crate::ExecutionMode,
     pub messages: MessageSequence,
     pub events: Arc<Vec<crate::SessionEventRecord<M::Event>>>,
-    pub run_offset: usize,
+    pub mode_run_offset: usize,
     pub tool_surface: Arc<ToolSurface>,
     pub mode_preamble: Arc<ModePreamble<M>>,
     pub prompt_template: PromptTemplate,
@@ -72,7 +72,7 @@ pub fn build_turn<M: ModeProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
         },
         input.messages,
         input.events,
-        input.run_offset,
+        input.mode_run_offset,
     );
 
     PreparedTurnMachine {
@@ -118,7 +118,7 @@ mod tests {
     struct NoopDriver;
 
     impl ProtocolDriverHandle for NoopDriver {
-        fn prepare_iteration(&self, _ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+        fn prepare_mode_iteration(&self, _ctx: DriverContextView<'_>) -> Vec<DriverAction> {
             Vec::new()
         }
 
@@ -172,7 +172,7 @@ mod tests {
             mode: ExecutionMode::standard(),
             messages: crate::MessageSequence::default(),
             events: Arc::new(Vec::new()),
-            run_offset: 2,
+            mode_run_offset: 2,
             tool_surface: Arc::clone(&tool_surface),
             mode_preamble,
             prompt_template: default_prompt_template(),
@@ -185,7 +185,7 @@ mod tests {
             prompt_cache: None,
         });
 
-        assert_eq!(prepared.machine.iteration(), 2);
+        assert_eq!(prepared.machine.mode_iteration(), 2);
         assert!(
             prepared
                 .prepared_prompt

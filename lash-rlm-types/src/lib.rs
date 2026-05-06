@@ -3,7 +3,7 @@ use lash_sansio::{AttachmentRef, ModeProtocol, ToolCallRecord};
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RlmTrajectoryEntry {
     pub id: String,
-    pub iteration: usize,
+    pub mode_iteration: usize,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reasoning: String,
     pub code: String,
@@ -81,7 +81,7 @@ pub enum RlmHistoryItem {
     },
     RlmStep {
         id: String,
-        iteration: usize,
+        mode_iteration: usize,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         reasoning: String,
         code: String,
@@ -247,7 +247,7 @@ mod tests {
         };
         let entry = RlmTrajectoryEntry {
             id: "step-1".to_string(),
-            iteration: 1,
+            mode_iteration: 1,
             code: "submit 1".to_string(),
             ..Default::default()
         };

@@ -325,7 +325,7 @@ fn history_item_from_message(message: &Message) -> Option<RlmHistoryItem> {
 fn history_item_from_rlm_step(entry: &RlmTrajectoryEntry) -> RlmHistoryItem {
     RlmHistoryItem::RlmStep {
         id: entry.id.clone(),
-        iteration: entry.iteration,
+        mode_iteration: entry.mode_iteration,
         reasoning: entry.reasoning.clone(),
         code: entry.code.clone(),
         output: entry.output.clone(),

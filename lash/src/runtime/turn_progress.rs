@@ -67,14 +67,14 @@ impl TurnProgress {
     pub(super) fn read_view(
         &self,
         policy: crate::SessionPolicy,
-        iteration: usize,
+        turn_index: usize,
         mode_turn_options: crate::ModeTurnOptions,
         messages: MessageSequence,
     ) -> SessionReadView {
         SessionReadView::derived_from_persisted_state(
             &self.state,
             policy,
-            iteration,
+            turn_index,
             mode_turn_options,
             self.graph.base_graph(),
             messages,
@@ -259,7 +259,7 @@ mod tests {
         let record = tool_call("call-1", "grep");
         let entry = RlmTrajectoryEntry {
             id: "rlm_step_0".to_string(),
-            iteration: 0,
+            mode_iteration: 0,
             reasoning: "I'll inspect with grep.".to_string(),
             code: "submit \"grep worked\"".to_string(),
             output: Vec::new(),

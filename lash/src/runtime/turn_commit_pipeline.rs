@@ -16,7 +16,7 @@ pub(super) struct ProgressBoundaryCommit {
 
 struct ProgressBoundarySnapshot<'a> {
     policy: SessionPolicy,
-    iteration: usize,
+    turn_index: usize,
     messages: MessageSequence,
     events: Arc<Vec<SessionEventRecord>>,
     execution_state_snapshot: Option<Option<Vec<u8>>>,
@@ -87,12 +87,12 @@ impl TurnCommitPipeline {
     pub(super) fn read_view(
         &self,
         policy: crate::SessionPolicy,
-        iteration: usize,
+        turn_index: usize,
         mode_turn_options: crate::ModeTurnOptions,
         messages: MessageSequence,
     ) -> SessionReadView {
         self.progress_ref()
-            .read_view(policy, iteration, mode_turn_options, messages)
+            .read_view(policy, turn_index, mode_turn_options, messages)
     }
 
     pub(super) fn active_events(&self) -> Arc<Vec<SessionEventRecord>> {
@@ -113,7 +113,7 @@ impl TurnCommitPipeline {
         &mut self,
         store: Option<&(dyn RuntimePersistence + '_)>,
         policy: SessionPolicy,
-        iteration: usize,
+        turn_index: usize,
         messages: &MessageSequence,
         session: Option<&mut Session>,
     ) -> Result<(), StoreError> {
@@ -134,7 +134,7 @@ impl TurnCommitPipeline {
         };
         let state = self.progress_mut().state_mut();
         state.policy = policy;
-        state.iteration = iteration;
+        state.turn_index = turn_index;
         if let Some(execution_state_snapshot) = execution_state_snapshot {
             state.set_execution_state_snapshot(execution_state_snapshot);
         }
@@ -148,7 +148,7 @@ impl TurnCommitPipeline {
         &mut self,
         session: &mut Session,
         policy: SessionPolicy,
-        iteration: usize,
+        turn_index: usize,
         messages: MessageSequence,
         events: Arc<Vec<SessionEventRecord>>,
     ) -> ProgressBoundaryCommit {
@@ -164,7 +164,7 @@ impl TurnCommitPipeline {
         let plugins = Arc::clone(session.plugins());
         self.progress_boundary_with_snapshot(ProgressBoundarySnapshot {
             policy,
-            iteration,
+            turn_index,
             messages,
             events,
             execution_state_snapshot,
@@ -180,7 +180,7 @@ impl TurnCommitPipeline {
     ) -> ProgressBoundaryCommit {
         let ProgressBoundarySnapshot {
             policy,
-            iteration,
+            turn_index,
             messages,
             events,
             execution_state_snapshot,
@@ -200,7 +200,7 @@ impl TurnCommitPipeline {
             progress.apply_prepared_messages(&messages);
             let state = progress.state_mut();
             state.policy = policy;
-            state.iteration = iteration;
+            state.turn_index = turn_index;
             if let Some(execution_state_snapshot) = execution_state_snapshot {
                 state.set_execution_state_snapshot(execution_state_snapshot);
             }
@@ -718,7 +718,7 @@ mod tests {
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
                 policy: SessionPolicy::default(),
-                iteration: 1,
+                turn_index: 1,
                 messages: MessageSequence::from_base(vec![user.clone(), assistant.clone()].into()),
                 events: Arc::clone(&events),
                 execution_state_snapshot: None,
@@ -732,7 +732,7 @@ mod tests {
         let second = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
                 policy: SessionPolicy::default(),
-                iteration: 1,
+                turn_index: 1,
                 messages: MessageSequence::from_base(vec![user, assistant].into()),
                 events,
                 execution_state_snapshot: None,
@@ -766,7 +766,7 @@ mod tests {
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
                 policy: SessionPolicy::default(),
-                iteration: 1,
+                turn_index: 1,
                 messages: MessageSequence::from_base(vec![user, assistant].into()),
                 events,
                 execution_state_snapshot: None,

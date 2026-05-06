@@ -195,7 +195,7 @@ mod tests {
         harness.user_turn("write a poem");
         harness.start_turn();
         harness.dispatch_event(SessionEvent::LlmRequest {
-            iteration: 0,
+            mode_iteration: 0,
             message_count: 1,
             tool_list: "read_file, shell".to_string(),
         });
@@ -364,7 +364,7 @@ mod tests {
         harness.user_turn("write lines");
         harness.start_turn();
         harness.dispatch_event(SessionEvent::LlmRequest {
-            iteration: 0,
+            mode_iteration: 0,
             message_count: 1,
             tool_list: "read_file".into(),
         });
@@ -422,7 +422,7 @@ mod tests {
         harness.user_turn("write a very long answer please");
         harness.start_turn();
         harness.dispatch_event(SessionEvent::LlmRequest {
-            iteration: 0,
+            mode_iteration: 0,
             message_count: 1,
             tool_list: String::new(),
         });

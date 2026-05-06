@@ -200,6 +200,11 @@ impl LashRuntime {
                 ));
             }
         };
+        let turn_index = self.state.turn_index + 1;
+        let trace_turn_id = input
+            .trace_turn_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         if self.host.core.trace_sink.is_some() {
             let mut trace_metadata = std::collections::BTreeMap::new();
             trace_metadata.insert(
@@ -215,7 +220,8 @@ impl LashRuntime {
                 &self.host.core.trace_context,
                 lash_trace::TraceContext::default()
                     .for_session(self.state.session_id.clone())
-                    .for_iteration(self.state.iteration + 1),
+                    .for_turn_index(turn_index)
+                    .for_turn(trace_turn_id.clone()),
                 lash_trace::TraceEvent::TurnStarted {
                     metadata: trace_metadata,
                 },
@@ -378,6 +384,8 @@ impl LashRuntime {
             messages,
             previous_prompt_usage,
             input.mode_turn_options.clone(),
+            trace_turn_id,
+            turn_index,
             events,
             cancel,
         )
@@ -399,6 +407,8 @@ impl LashRuntime {
         messages: crate::MessageSequence,
         _previous_prompt_usage: Option<PromptUsage>,
         mode_turn_options: Option<crate::ModeTurnOptions>,
+        trace_turn_id: String,
+        turn_index: usize,
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
@@ -532,7 +542,7 @@ impl LashRuntime {
             .prepared_checkpoint(
                 store.as_ref().map(|store| store.as_ref()),
                 self.policy.clone(),
-                self.state.iteration,
+                turn_index,
                 &prepared.messages,
                 self.session.as_mut(),
             )
@@ -551,8 +561,11 @@ impl LashRuntime {
             policy: self.policy.clone(),
             host: self.host.clone(),
             session_id: self.state.session_id.clone(),
+            turn_id: trace_turn_id.clone(),
+            turn_index,
             turn_pipeline,
             llm_stream_summaries: HashMap::new(),
+            next_llm_ordinal: 0,
             session_manager: manager,
             prompt_bridge,
             mode_turn_options: mode_turn_options
@@ -560,17 +573,17 @@ impl LashRuntime {
                 .unwrap_or_else(|| self.mode_turn_options.clone()),
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
-        let run_offset = self.state.iteration;
+        let mode_run_offset = 0;
         let run_task = tokio::spawn(async move {
-            let (new_messages, new_iteration) = driver
-                .run(prepared.messages, event_tx, cancel, run_offset)
+            let (new_messages, new_mode_iteration) = driver
+                .run(prepared.messages, event_tx, cancel, mode_run_offset)
                 .await;
-            (driver, new_messages, new_iteration)
+            (driver, new_messages, new_mode_iteration)
         });
         tokio::pin!(run_task);
 
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
-        let (driver, new_messages, new_iteration) = loop {
+        let (driver, new_messages, _new_mode_iteration) = loop {
             tokio::select! {
                 maybe_event = event_rx.recv() => {
                     if let Some(event) = maybe_event {
@@ -651,7 +664,7 @@ impl LashRuntime {
         self.session = Some(session);
         self.policy = policy;
         turn_pipeline.state_mut().policy = self.policy.clone();
-        turn_pipeline.state_mut().iteration = new_iteration;
+        turn_pipeline.state_mut().turn_index = turn_index;
         let mut turn_usage_delta = child_ledger.clone();
         if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             let entry = TokenLedgerEntry {
@@ -771,7 +784,8 @@ impl LashRuntime {
                     &self.host.core.trace_context,
                     lash_trace::TraceContext::default()
                         .for_session(returned_turn.state.session_id.clone())
-                        .for_iteration(returned_turn.state.iteration),
+                        .for_turn_index(returned_turn.state.turn_index)
+                        .for_turn(trace_turn_id.clone()),
                     lash_trace::TraceEvent::TurnCompleted {
                         status: status.to_string(),
                         done_reason: done_reason.to_string(),
@@ -789,7 +803,8 @@ impl LashRuntime {
                     &self.host.core.trace_context,
                     lash_trace::TraceContext::default()
                         .for_session(assembled.state.session_id.clone())
-                        .for_iteration(assembled.state.iteration),
+                        .for_turn_index(assembled.state.turn_index)
+                        .for_turn(trace_turn_id),
                     lash_trace::TraceEvent::TurnCompleted {
                         status: status.to_string(),
                         done_reason: done_reason.to_string(),

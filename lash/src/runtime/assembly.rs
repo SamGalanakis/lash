@@ -48,7 +48,7 @@ pub(super) struct LlmDebugToolCall<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) struct LlmStreamEventLog<'a> {
-    pub(super) iteration: usize,
+    pub(super) mode_iteration: usize,
     pub(super) event_type: &'a str,
     pub(super) text: LlmDebugText<'a>,
     pub(super) item_id: Option<&'a str>,
@@ -62,7 +62,7 @@ pub(super) struct StandardStreamState<'a> {
     pub(super) streamed_output: &'a mut StandardStreamFallback,
     pub(super) buffer_stream_fallback: bool,
     pub(super) debug: &'a mut LlmStreamDebugState,
-    pub(super) iteration: usize,
+    pub(super) mode_iteration: usize,
     /// Set to `true` by `forward_standard_stream_event` when a plugin
     /// stream hook has raised `AssistantStreamTransform.abort_stream`.
     /// The LLM runner checks this after each stream event and

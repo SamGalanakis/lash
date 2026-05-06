@@ -85,8 +85,8 @@ impl AutonomousRenderer {
                 }
                 _ => {}
             },
-            SessionEvent::LlmRequest { iteration, .. } => {
-                eprintln!("[thinking] turn {}", iteration + 1);
+            SessionEvent::LlmRequest { mode_iteration, .. } => {
+                eprintln!("[thinking] step {}", mode_iteration + 1);
             }
             SessionEvent::RetryStatus {
                 wait_seconds,

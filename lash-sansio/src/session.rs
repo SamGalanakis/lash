@@ -49,7 +49,7 @@ pub struct SansIoSessionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
-    pub iteration: usize,
+    pub mode_iteration: usize,
     #[serde(default)]
     pub token_usage: crate::TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,7 +62,7 @@ pub struct SansIoSessionState {
 pub struct CompletedTurn {
     pub messages: Vec<crate::Message>,
     pub tool_calls: Vec<ToolCallRecord>,
-    pub iteration: usize,
+    pub mode_iteration: usize,
     pub token_usage: crate::TokenUsage,
     pub last_prompt_usage: Option<PromptUsage>,
     pub mode_state: Option<serde_json::Value>,
@@ -74,7 +74,7 @@ pub fn apply_completed_turn(
 ) -> SansIoSessionState {
     state.messages = turn.messages;
     state.tool_calls = turn.tool_calls;
-    state.iteration = turn.iteration;
+    state.mode_iteration = turn.mode_iteration;
     state.token_usage = turn.token_usage;
     state.last_prompt_usage = turn.last_prompt_usage;
     state.mode_state = turn.mode_state;
@@ -89,13 +89,13 @@ mod tests {
     fn completed_turn_replaces_projected_session_state() {
         let state = SansIoSessionState {
             session_id: "session".to_string(),
-            iteration: 1,
+            mode_iteration: 1,
             ..SansIoSessionState::default()
         };
         let reduced = apply_completed_turn(
             state,
             CompletedTurn {
-                iteration: 4,
+                mode_iteration: 4,
                 token_usage: crate::TokenUsage {
                     input_tokens: 10,
                     output_tokens: 3,
@@ -112,7 +112,7 @@ mod tests {
             },
         );
 
-        assert_eq!(reduced.iteration, 4);
+        assert_eq!(reduced.mode_iteration, 4);
         assert_eq!(reduced.token_usage.input_tokens, 10);
         assert_eq!(
             reduced

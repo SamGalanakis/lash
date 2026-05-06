@@ -179,7 +179,7 @@ async fn apply_graph_resume_state(
     let turn_state = checkpoint.as_ref().map(|checkpoint| &checkpoint.turn_state);
     *turn_counter = turn_state
         .as_ref()
-        .map(|state| state.iteration)
+        .map(|state| state.turn_index)
         .unwrap_or(0);
     app.token_usage = restored_token_usage(turn_state).unwrap_or_default();
     app.last_prompt_usage = normalized_last_prompt_usage(
@@ -238,7 +238,7 @@ async fn apply_graph_resume_state(
             session_id: app.session_id.clone(),
             policy: restored_policy,
             session_graph: graph,
-            iteration: *turn_counter,
+            turn_index: *turn_counter,
             token_usage: app.token_usage.clone(),
             last_prompt_usage: app.last_prompt_usage.clone(),
             mode_turn_options: checkpoint
@@ -440,7 +440,7 @@ mod tests {
             lash::SessionGraph::from_active_read_state(&messages, &[]),
             lash::HydratedSessionCheckpoint {
                 turn_state: lash::PersistedTurnState {
-                    iteration,
+                    turn_index: iteration,
                     token_usage,
                     last_prompt_usage,
                     mode_turn_options: Default::default(),
@@ -595,7 +595,7 @@ mod tests {
         assert_eq!(app_prompt_usage.context_budget_tokens, 4096);
 
         let restored_state = runtime.expect("runtime").export_state();
-        assert_eq!(restored_state.iteration, 7);
+        assert_eq!(restored_state.turn_index, 7);
         assert_eq!(restored_state.token_usage.input_tokens, 1200);
         assert_eq!(restored_state.token_usage.reasoning_tokens, 55);
     }

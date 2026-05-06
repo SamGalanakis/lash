@@ -35,7 +35,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
     let checkpoint_ref = store
         .put_checkpoint(&lash::HydratedSessionCheckpoint {
             turn_state: PersistedTurnState {
-                iteration: 3,
+                turn_index: 3,
                 token_usage: TokenUsage {
                     input_tokens: 20,
                     output_tokens: 5,
@@ -86,7 +86,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
     let read_view = state.read_view();
     assert_eq!(read_view.messages().len(), 1);
     assert_eq!(read_view.messages()[0].parts[0].content, "stored question");
-    assert_eq!(state.iteration, 3);
+    assert_eq!(state.turn_index, 3);
     assert_eq!(state.token_usage.input_tokens, 20);
     assert_eq!(state.policy.model, "gpt-5.4-mini");
     assert_eq!(state.session_id, "stored-session");

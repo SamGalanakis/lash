@@ -286,7 +286,7 @@ fn final_message_never_replaces_visible_streamed_text_with_shorter_text() {
 fn text_delta_updates_live_token_estimate() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        iteration: 0,
+        mode_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -323,7 +323,7 @@ fn final_message_event_renders_in_live_assistant_lane() {
 fn first_text_delta_switches_thinking_to_responding() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        iteration: 0,
+        mode_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -346,7 +346,7 @@ fn first_text_delta_switches_thinking_to_responding() {
 fn llm_request_sets_plain_thinking_status() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        iteration: 0,
+        mode_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -377,7 +377,7 @@ fn llm_request_flushes_intermediate_stream_text() {
         duration_ms: 1,
     });
     app.handle_session_event(SessionEvent::LlmRequest {
-        iteration: 1,
+        mode_iteration: 1,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -425,7 +425,7 @@ fn token_usage_resets_live_token_estimate() {
     });
     assert!(app.live_output_tokens_estimate > 0);
     app.handle_session_event(SessionEvent::TokenUsage {
-        iteration: 0,
+        mode_iteration: 0,
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -453,7 +453,7 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
     let live_estimate = app.live_output_tokens_estimate;
     assert!(live_estimate > 0);
     app.handle_session_event(SessionEvent::TokenUsage {
-        iteration: 0,
+        mode_iteration: 0,
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 0,
@@ -743,7 +743,7 @@ fn read_view_timeline_round_trips_to_existing_display_blocks() {
 fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        iteration: 0,
+        mode_iteration: 0,
         reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"hi\"\n```".to_string(),
         code: "submit \"hi\"".to_string(),
         output: Vec::new(),
@@ -772,7 +772,7 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
 fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversation() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        iteration: 0,
+        mode_iteration: 0,
         reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
         output: Vec::new(),
@@ -797,7 +797,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     let assistant = text_message("a1", MessageRole::Assistant, "Hi!");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        iteration: 0,
+        mode_iteration: 0,
         reasoning: "I'll answer directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
         output: Vec::new(),
@@ -837,7 +837,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
 fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        iteration: 0,
+        mode_iteration: 0,
         reasoning: "I'll inspect the environment.".to_string(),
         code: "now = (call exec_command { cmd: \"date -u\" })?\nprint now".to_string(),
         output: vec!["2026-04-25 20:05:57 UTC".to_string()],
@@ -877,7 +877,7 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
 fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
     let first = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        iteration: 0,
+        mode_iteration: 0,
         reasoning: "First check the time.".to_string(),
         code: "now = (call exec_command { cmd: \"date -u\" })?\nprint now".to_string(),
         output: vec!["time".to_string()],
@@ -895,7 +895,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
     };
     let second = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_1".to_string(),
-        iteration: 1,
+        mode_iteration: 1,
         reasoning: "Then check files.".to_string(),
         code: "files = (call ls { path: \".\" })?\nprint files".to_string(),
         output: vec!["files".to_string()],
@@ -1547,7 +1547,7 @@ fn interrupted_read_view_hides_rlm_execution_result_user_message() {
 fn non_manual_error_sets_transient_status() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        iteration: 0,
+        mode_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -1578,7 +1578,7 @@ fn non_manual_error_sets_transient_status() {
 fn retry_status_stays_visible_when_retry_request_starts() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        iteration: 0,
+        mode_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -1602,7 +1602,7 @@ fn retry_status_stays_visible_when_retry_request_starts() {
     );
 
     app.handle_session_event(SessionEvent::LlmRequest {
-        iteration: 0,
+        mode_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -1623,7 +1623,7 @@ fn retry_status_stays_visible_when_retry_request_starts() {
 fn transient_status_expires_on_tick() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        iteration: 0,
+        mode_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });

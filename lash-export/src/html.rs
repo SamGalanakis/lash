@@ -359,7 +359,7 @@ fn write_usage_overview(out: &mut String, session: &LoadedSession) {
     out.push_str("  <div class=\"usage-overview-bars\">\n");
     for (idx, prompt) in session.llm_prompts.iter().enumerate() {
         let id = prompt
-            .iteration
+            .mode_iteration
             .map(|i| format!("iter {i}"))
             .unwrap_or_else(|| format!("call {idx}"));
         let Some(usage) = prompt.usage.as_ref() else {
@@ -542,7 +542,7 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
             .or_insert(PromptAnchor {
                 entry_id: id,
                 iter_label: prompt
-                    .iteration
+                    .mode_iteration
                     .map(|i| format!("iter {i}"))
                     .unwrap_or_else(|| "first call".to_string()),
             });
@@ -614,8 +614,8 @@ struct PromptInsertions {
 /// Decide where each per-LLM-call system prompt belongs in the rendered
 /// timeline.
 ///
-/// Each LLM call kicks off one iteration. In RLM mode the chronological
-/// projection emits everything that iteration produced — its tool calls
+/// Each LLM call kicks off one mode iteration. In RLM mode the chronological
+/// projection emits everything that mode iteration produced — its tool calls
 /// (children of the lashlang block) followed by the `RlmStep` trajectory
 /// record — as a contiguous run. We want the system prompt to appear at
 /// the *start* of that run, before the tool calls, since that's when the
@@ -635,30 +635,33 @@ fn compute_prompt_insertions(
         .any(|e| matches!(e.payload, ChronologicalPayload::RlmStep(_)));
 
     if has_rlm_steps {
-        let mut by_iteration: HashMap<u64, VecDeque<usize>> = HashMap::new();
+        let mut by_mode_iteration: HashMap<u64, VecDeque<usize>> = HashMap::new();
         for (idx, prompt) in prompts.iter().enumerate() {
-            if let Some(iteration) = prompt.iteration {
-                by_iteration.entry(iteration).or_default().push_back(idx);
+            if let Some(mode_iteration) = prompt.mode_iteration {
+                by_mode_iteration
+                    .entry(mode_iteration)
+                    .or_default()
+                    .push_back(idx);
             }
         }
 
-        // Iteration 0's prompt was sent to the model alongside the
+        // Mode iteration 0's prompt was sent to the model alongside the
         // initial user message, so anchor it to that user message
-        // rather than to the iteration's first tool/rlm output —
+        // rather than to the mode iteration's first tool/rlm output —
         // otherwise the user message would appear *above* the prompt
         // that contextualised it.
-        let mut initial_user_anchor_iteration = None;
+        let mut initial_user_anchor_mode_iteration = None;
         let first_user_idx = chronological.iter().position(|e| {
             matches!(&e.payload, ChronologicalPayload::Message(m)
                 if matches!(m.role, MessageRole::User) && !m.is_transient())
         });
-        if let (Some(idx), Some(queue)) = (first_user_idx, by_iteration.get_mut(&0))
+        if let (Some(idx), Some(queue)) = (first_user_idx, by_mode_iteration.get_mut(&0))
             && let Some(pi) = queue.pop_front()
             && !consumed[pi]
         {
             before_index[idx].push(pi);
             consumed[pi] = true;
-            initial_user_anchor_iteration = Some(0);
+            initial_user_anchor_mode_iteration = Some(0);
         }
 
         let mut run_start: Option<usize> = None;
@@ -671,10 +674,10 @@ fn compute_prompt_insertions(
                 }
                 ChronologicalPayload::RlmStep(step) => {
                     let begin = run_start.unwrap_or(i);
-                    let iteration = step.iteration as u64;
-                    if initial_user_anchor_iteration == Some(iteration) {
-                        initial_user_anchor_iteration = None;
-                    } else if let Some(queue) = by_iteration.get_mut(&iteration) {
+                    let mode_iteration = step.mode_iteration as u64;
+                    if initial_user_anchor_mode_iteration == Some(mode_iteration) {
+                        initial_user_anchor_mode_iteration = None;
+                    } else if let Some(queue) = by_mode_iteration.get_mut(&mode_iteration) {
                         while let Some(pi) = queue.pop_front() {
                             if consumed[pi] {
                                 continue;
@@ -1325,7 +1328,7 @@ fn render_rlm_step(
     let _ = writeln!(
         out,
         "          <span class=\"entry-tag entry-tag--rlm\">RLM step {}</span>",
-        step.iteration
+        step.mode_iteration
     );
     if has_reasoning_body {
         // Reasoning renders below as its own block — keep the layout
@@ -1386,7 +1389,7 @@ fn render_rlm_step(
     let _ = writeln!(
         spine,
         "    <a class=\"spine-tick spine-tick--rlm\" href=\"#{id}\" data-spine=\"rlm\" data-status=\"{status_key}\" title=\"RLM step {it}{nested}\"></a>",
-        it = step.iteration,
+        it = step.mode_iteration,
         nested = if nested_calls > 0 {
             format!(" · {nested_calls} calls")
         } else {
@@ -1491,8 +1494,8 @@ fn render_system_prompt(
     let id = ctx.next_id();
     let repeat_of = prev_hash.filter(|h| *h == prompt.system_hash.as_str());
     let iter_label = prompt
-        .iteration
-        .map(|i| format!("iter {i}"))
+        .mode_iteration
+        .map(|i| format!("step {i}"))
         .unwrap_or_else(|| "llm call".to_string());
     let model_label = match (prompt.model.as_deref(), prompt.model_variant.as_deref()) {
         (Some(m), Some(v)) if !v.is_empty() => format!("{m}/{v}"),
@@ -1747,7 +1750,7 @@ fn write_usage_chart_bar(
     context_window_tokens: Option<u64>,
 ) {
     let iter_label = prompt
-        .iteration
+        .mode_iteration
         .map(|i| i.to_string())
         .unwrap_or_else(|| "llm".to_string());
     let Some(usage) = prompt.usage.as_ref() else {
@@ -2191,10 +2194,11 @@ mod tests {
     use lash::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
     use std::path::PathBuf;
 
-    fn prompt_snapshot(iteration: u64, text: &str) -> LlmPromptSnapshot {
+    fn prompt_snapshot(mode_iteration: u64, text: &str) -> LlmPromptSnapshot {
         LlmPromptSnapshot {
-            iteration: Some(iteration),
-            llm_call_id: Some(format!("root:{iteration}")),
+            turn_index: Some(1),
+            mode_iteration: Some(mode_iteration),
+            llm_call_id: Some(format!("root:1:{mode_iteration}:0")),
             timestamp: None,
             model: Some("gpt-test".to_string()),
             model_variant: None,
@@ -2236,10 +2240,10 @@ mod tests {
         }
     }
 
-    fn rlm_step(iteration: usize, id: &str) -> RlmTrajectoryEntry {
+    fn rlm_step(mode_iteration: usize, id: &str) -> RlmTrajectoryEntry {
         RlmTrajectoryEntry {
             id: id.to_string(),
-            iteration,
+            mode_iteration,
             reasoning: "thinking".to_string(),
             code: "x = 1".to_string(),
             output: vec!["1".to_string()],
@@ -2284,7 +2288,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_rlm_trace_iterations_are_anchored_in_prompt_order() {
+    fn repeated_rlm_trace_mode_iterations_are_anchored_in_prompt_order() {
         let chronological = vec![
             ChronologicalEntry {
                 index: 0,

@@ -466,7 +466,7 @@ mod tests {
         assert_eq!(contributions.len(), 1);
         let content = &contributions[0].content;
         assert!(content.contains("Tokens: 47213 · handoff threshold: 200000 (23%)"));
-        assert!(content.contains("Iteration:"));
+        assert!(content.contains("Turn:"));
         assert!(!content.contains("Look for a clean handoff point"));
         assert!(!content.contains("Budget tight"));
         assert!(!content.contains("Past the handoff threshold"));

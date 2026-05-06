@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use lash_trace::{
-    TraceContext, TraceError, TraceEvent, TraceProviderStreamEvent, TraceRuntimeStreamEvent,
-};
+use lash_trace::{TraceError, TraceEvent, TraceProviderStreamEvent, TraceRuntimeStreamEvent};
 
 use super::*;
 
@@ -108,7 +106,7 @@ impl RuntimeTurnDriver {
     pub(super) async fn run_standard_llm_call(
         &mut self,
         request: LlmRequest,
-        iteration: usize,
+        mode_iteration: usize,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
@@ -131,18 +129,12 @@ impl RuntimeTurnDriver {
             }
         };
         let trace_enabled = self.host.core.trace_sink.is_some();
-        let llm_call_id = if trace_enabled {
-            Some(format!("{}:{iteration}", self.session_id))
-        } else {
-            None
-        };
+        let llm_call_id = trace_enabled.then(|| self.llm_call_id(mode_iteration));
         if let Some(llm_call_id) = llm_call_id.as_ref() {
             crate::trace::emit_trace(
                 &self.host.core.trace_sink,
                 &self.host.core.trace_context,
-                TraceContext::default()
-                    .for_session(self.session_id.clone())
-                    .for_iteration(iteration)
+                self.trace_context(mode_iteration)
                     .for_llm_call(llm_call_id.clone()),
                 TraceEvent::LlmCallStarted {
                     request: crate::trace::trace_llm_request(&request),
@@ -152,7 +144,8 @@ impl RuntimeTurnDriver {
         let (llm_stream_tx, mut llm_stream_rx) =
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
         let mut debug = LlmStreamDebugState::new();
-        let provider_trace = self.provider_trace_sender(iteration, &debug);
+        let provider_trace =
+            self.provider_trace_sender(mode_iteration, llm_call_id.clone(), &debug);
         let llm_request = LlmRequest {
             stream_events: transport_stream_events(&self.policy.provider, Some(llm_stream_tx)),
             provider_trace,
@@ -177,7 +170,7 @@ impl RuntimeTurnDriver {
             streamed_output: &mut streamed_output,
             buffer_stream_fallback,
             debug: &mut debug,
-            iteration,
+            mode_iteration,
             abort_requested: &mut abort_requested,
         };
         let result = loop {
@@ -207,7 +200,7 @@ impl RuntimeTurnDriver {
                         // `response.completed` SSE event. Codex attaches
                         // usage there, and the next prompt's budget
                         // contribution depends on the driver seeing that
-                        // accounting before the next iteration starts.
+                        // accounting before the next mode_iteration starts.
                         if let Err(err) = self
                             .drain_standard_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
                             .await
@@ -284,7 +277,7 @@ impl RuntimeTurnDriver {
         if let Err(err) = &result {
             tracing::error!(
                 session_id = %self.session_id,
-                turn = iteration,
+                turn = mode_iteration,
                 retryable = err.retryable,
                 code = ?err.code,
                 raw_present = err.raw.is_some(),
@@ -300,10 +293,7 @@ impl RuntimeTurnDriver {
                     crate::trace::emit_trace(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
-                        TraceContext::default()
-                            .for_session(self.session_id.clone())
-                            .for_iteration(iteration)
-                            .for_llm_call(llm_call_id),
+                        self.trace_context(mode_iteration).for_llm_call(llm_call_id),
                         TraceEvent::LlmCallCompleted {
                             response: crate::trace::trace_llm_response(
                                 response.full_text.clone(),
@@ -320,10 +310,7 @@ impl RuntimeTurnDriver {
                     crate::trace::emit_trace(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
-                        TraceContext::default()
-                            .for_session(self.session_id.clone())
-                            .for_iteration(iteration)
-                            .for_llm_call(llm_call_id),
+                        self.trace_context(mode_iteration).for_llm_call(llm_call_id),
                         TraceEvent::LlmCallFailed {
                             error: TraceError {
                                 message: error.message.clone(),
@@ -338,7 +325,8 @@ impl RuntimeTurnDriver {
             }
         }
         if trace_enabled {
-            self.llm_stream_summaries.insert(iteration, debug.summary);
+            self.llm_stream_summaries
+                .insert(mode_iteration, debug.summary);
         }
         (result, text_streamed)
     }
@@ -351,21 +339,23 @@ impl RuntimeTurnDriver {
         match event {
             crate::sansio::LogEvent::LlmDebug {
                 session_id,
-                iteration,
+                mode_iteration,
                 usage,
                 provider_usage,
                 response_text,
                 response_parts,
                 ..
             } => {
-                let stream_summary = self.llm_stream_summaries.remove(&iteration);
+                let stream_summary = self.llm_stream_summaries.remove(&mode_iteration);
                 crate::trace::emit_trace(
                     &self.host.core.trace_sink,
                     &self.host.core.trace_context,
-                    TraceContext::default()
+                    self.trace_context(mode_iteration)
                         .for_session(session_id)
-                        .for_iteration(iteration)
-                        .for_llm_call(format!("{}:{iteration}", self.session_id)),
+                        .for_llm_call(format!(
+                            "{}:{}:{}:log",
+                            self.session_id, self.turn_index, mode_iteration
+                        )),
                     TraceEvent::LlmCallCompleted {
                         response: crate::trace::trace_llm_response(
                             response_text,
@@ -380,21 +370,23 @@ impl RuntimeTurnDriver {
             }
             crate::sansio::LogEvent::LlmError {
                 session_id,
-                iteration,
+                mode_iteration,
                 message,
                 retryable,
                 raw,
                 code,
                 ..
             } => {
-                let stream_summary = self.llm_stream_summaries.remove(&iteration);
+                let stream_summary = self.llm_stream_summaries.remove(&mode_iteration);
                 crate::trace::emit_trace(
                     &self.host.core.trace_sink,
                     &self.host.core.trace_context,
-                    TraceContext::default()
+                    self.trace_context(mode_iteration)
                         .for_session(session_id)
-                        .for_iteration(iteration)
-                        .for_llm_call(format!("{}:{iteration}", self.session_id)),
+                        .for_llm_call(format!(
+                            "{}:{}:{}:log",
+                            self.session_id, self.turn_index, mode_iteration
+                        )),
                     TraceEvent::LlmCallFailed {
                         error: TraceError {
                             message,
@@ -452,27 +444,25 @@ impl RuntimeTurnDriver {
         crate::trace::emit_trace(
             &self.host.core.trace_sink,
             &self.host.core.trace_context,
-            TraceContext::default()
-                .for_session(self.session_id.clone())
-                .for_iteration(log.iteration)
-                .for_llm_call(format!("{}:{}", self.session_id, log.iteration)),
+            self.trace_context(log.mode_iteration),
             TraceEvent::RuntimeStreamEvent { event },
         );
     }
 
     fn provider_trace_sender(
         &self,
-        iteration: usize,
+        mode_iteration: usize,
+        llm_call_id: Option<String>,
         debug: &LlmStreamDebugState,
     ) -> Option<LlmProviderTraceSender> {
         if !self.host.core.trace_level.is_extended() || self.host.core.trace_sink.is_none() {
             return None;
         }
 
+        let llm_call_id = llm_call_id?;
         let sink = self.host.core.trace_sink.clone();
         let base_context = self.host.core.trace_context.clone();
-        let session_id = self.session_id.clone();
-        let llm_call_id = format!("{}:{iteration}", self.session_id);
+        let context = self.trace_context(mode_iteration);
         let started_at = debug.started_at;
         let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
@@ -496,10 +486,7 @@ impl RuntimeTurnDriver {
                 crate::trace::emit_trace(
                     &sink,
                     &base_context,
-                    TraceContext::default()
-                        .for_session(session_id.clone())
-                        .for_iteration(iteration)
-                        .for_llm_call(llm_call_id.clone()),
+                    context.clone().for_llm_call(llm_call_id.clone()),
                     TraceEvent::ProviderStreamEvent { event },
                 );
             },
@@ -544,7 +531,7 @@ impl RuntimeTurnDriver {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            iteration: state.iteration,
+                            mode_iteration: state.mode_iteration,
                             event_type: "delta",
                             text: LlmDebugText {
                                 raw: raw_delta.as_deref(),
@@ -569,7 +556,7 @@ impl RuntimeTurnDriver {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            iteration: state.iteration,
+                            mode_iteration: state.mode_iteration,
                             event_type: "reasoning_delta",
                             text: LlmDebugText {
                                 raw: None,
@@ -627,7 +614,7 @@ impl RuntimeTurnDriver {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            iteration: state.iteration,
+                            mode_iteration: state.mode_iteration,
                             event_type: "text_part",
                             text: LlmDebugText {
                                 raw: raw_text.as_deref(),
@@ -657,7 +644,7 @@ impl RuntimeTurnDriver {
                 self.log_llm_stream_event(
                     state.debug,
                     LlmStreamEventLog {
-                        iteration: state.iteration,
+                        mode_iteration: state.mode_iteration,
                         event_type: "tool_call_part",
                         text: LlmDebugText {
                             raw: None,
@@ -690,7 +677,7 @@ impl RuntimeTurnDriver {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            iteration: state.iteration,
+                            mode_iteration: state.mode_iteration,
                             event_type: "reasoning_part",
                             text: LlmDebugText {
                                 raw: None,
@@ -719,7 +706,7 @@ impl RuntimeTurnDriver {
                 self.log_llm_stream_event(
                     state.debug,
                     LlmStreamEventLog {
-                        iteration: state.iteration,
+                        mode_iteration: state.mode_iteration,
                         event_type: "usage",
                         text: LlmDebugText {
                             raw: None,
@@ -794,7 +781,7 @@ pub(in crate::runtime) fn llm_response_has_content(response: &LlmResponse) -> bo
 /// Wait up to 2s for a late `Usage` event from the provider after an
 /// RLM stream-mask abort. The usage is returned on the response itself so
 /// sansio records it synchronously, which makes prompt-budget guidance
-/// available to the next iteration.
+/// available to the next mode iteration.
 async fn collect_trailing_usage_before_abort<T>(
     llm_task: &mut tokio::task::JoinHandle<T>,
     llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,

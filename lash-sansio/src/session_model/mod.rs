@@ -142,19 +142,19 @@ pub enum SessionEvent {
     Message { text: String, kind: String },
     #[serde(rename = "llm_request")]
     LlmRequest {
-        iteration: usize,
+        mode_iteration: usize,
         message_count: usize,
         tool_list: String,
     },
     #[serde(rename = "llm_response")]
     LlmResponse {
-        iteration: usize,
+        mode_iteration: usize,
         content: String,
         duration_ms: u64,
     },
     #[serde(rename = "token_usage")]
     TokenUsage {
-        iteration: usize,
+        mode_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
     },
@@ -163,7 +163,7 @@ pub enum SessionEvent {
         session_id: String,
         source: String,
         model: String,
-        iteration: usize,
+        mode_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
     },
@@ -441,13 +441,13 @@ impl TurnTerminationPolicyState {
 
     pub fn maybe_schedule_turn_limit_final(
         &mut self,
-        iteration: usize,
-        run_offset: usize,
+        mode_iteration: usize,
+        mode_run_offset: usize,
         max_turns: Option<usize>,
         msgs: &mut Vec<Message>,
     ) {
         let Some(max) = max_turns else { return };
-        if iteration < run_offset + max {
+        if mode_iteration < mode_run_offset + max {
             return;
         }
         let sys_id = fresh_message_id();

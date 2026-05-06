@@ -31,7 +31,8 @@ impl RuntimeTurnDriver {
             .apply_checkpoint(CheckpointHookContext {
                 session_id: self.session_id.clone(),
                 checkpoint,
-                state: self.checkpoint_state_view(machine.message_sequence(), machine.iteration()),
+                state: self
+                    .checkpoint_state_view(machine.message_sequence(), machine.mode_iteration()),
                 host: self.session_manager.clone(),
             })
             .await
@@ -123,7 +124,7 @@ impl RuntimeTurnDriver {
         &mut self,
         code: &str,
         messages: crate::MessageSequence,
-        iteration: usize,
+        mode_iteration: usize,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
         let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
@@ -173,7 +174,7 @@ impl RuntimeTurnDriver {
         });
         let manager = self.session_manager.clone();
         let mode_session = Arc::clone(self.session.plugins().mode_session());
-        let read_view = self.checkpoint_state_view(messages, iteration);
+        let read_view = self.checkpoint_state_view(messages, mode_iteration);
         let rlm_globals = read_view.shared_rlm_globals();
         let rlm_chronological_projection = read_view.shared_chronological_projection();
         let context = self.session.mode_execution_context(

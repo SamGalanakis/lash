@@ -71,7 +71,7 @@ struct SessionReadState {
 struct SessionReadMeta {
     session_id: String,
     policy: SessionPolicy,
-    iteration: usize,
+    turn_index: usize,
     token_usage: crate::TokenUsage,
     last_prompt_usage: Option<crate::runtime::PromptUsage>,
     mode_turn_options: crate::ModeTurnOptions,
@@ -82,7 +82,7 @@ impl SessionReadMeta {
         Self {
             session_id: state.session_id.clone(),
             policy: state.policy.clone(),
-            iteration: state.iteration,
+            turn_index: state.turn_index,
             token_usage: state.token_usage.clone(),
             last_prompt_usage: state.last_prompt_usage.clone(),
             mode_turn_options: state.mode_turn_options.clone(),
@@ -93,7 +93,7 @@ impl SessionReadMeta {
         Self {
             session_id: state.session_id,
             policy: state.policy,
-            iteration: state.iteration,
+            turn_index: state.turn_index,
             token_usage: state.token_usage,
             last_prompt_usage: state.last_prompt_usage,
             mode_turn_options: state.mode_turn_options,
@@ -104,7 +104,7 @@ impl SessionReadMeta {
         Self {
             session_id: state.session_id.clone(),
             policy: state.policy.clone(),
-            iteration: state.iteration,
+            turn_index: state.turn_index,
             token_usage: state.token_usage.clone(),
             last_prompt_usage: state.last_prompt_usage.clone(),
             mode_turn_options: state.mode_turn_options.clone(),
@@ -116,8 +116,8 @@ impl SessionReadMeta {
         self
     }
 
-    fn with_iteration(mut self, iteration: usize) -> Self {
-        self.iteration = iteration;
+    fn with_turn_index(mut self, turn_index: usize) -> Self {
+        self.turn_index = turn_index;
         self
     }
 
@@ -131,7 +131,7 @@ impl SessionReadMeta {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
             session_graph,
-            iteration: self.iteration,
+            turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
             mode_turn_options: self.mode_turn_options.clone(),
@@ -257,7 +257,7 @@ impl SessionReadView {
     pub(crate) fn derived_from_persisted_state(
         state: &PersistedSessionState,
         policy: SessionPolicy,
-        iteration: usize,
+        turn_index: usize,
         mode_turn_options: crate::ModeTurnOptions,
         base_graph: Arc<crate::SessionGraph>,
         messages: crate::MessageSequence,
@@ -266,7 +266,7 @@ impl SessionReadView {
         Self::from_graph_message_sequence_meta(
             SessionReadMeta::from_persisted_ref(state)
                 .with_policy(policy)
-                .with_iteration(iteration)
+                .with_turn_index(turn_index)
                 .with_mode_turn_options(mode_turn_options),
             base_graph,
             messages,
@@ -324,7 +324,7 @@ impl SessionReadView {
     }
 
     /// Borrow the read model's RLM globals for this view. Hot callers
-    /// (per-iteration prompt contributions like `bound_variables`) should use
+    /// Hot callers (such as prompt contributions that read bound variables) should use
     /// this instead of [`rlm_globals`] to avoid a deep map clone.
     pub fn shared_rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
         Arc::clone(&self.0.read_model.rlm_globals)
@@ -359,8 +359,8 @@ impl SessionReadView {
         self.session_graph().message_tree()
     }
 
-    pub fn iteration(&self) -> usize {
-        self.0.meta.iteration
+    pub fn turn_index(&self) -> usize {
+        self.0.meta.turn_index
     }
 
     pub fn token_usage(&self) -> &crate::TokenUsage {
@@ -437,7 +437,7 @@ mod tests {
     fn read_view_wraps_read_model_with_session_metadata_and_graph() {
         let mut state = SessionStateEnvelope {
             session_id: "session-read-view-test".to_string(),
-            iteration: 7,
+            turn_index: 7,
             mode_turn_options: crate::ModeTurnOptions::default(),
             ..SessionStateEnvelope::default()
         };
@@ -472,7 +472,7 @@ mod tests {
         let view = SessionReadView::from_exported_state(&state);
         assert_eq!(view.session_id(), "session-read-view-test");
         assert_eq!(view.policy().max_turns, Some(3));
-        assert_eq!(view.iteration(), 7);
+        assert_eq!(view.turn_index(), 7);
         assert_eq!(view.messages().len(), 2);
         assert_eq!(view.messages()[0].id, user.id);
         assert_eq!(view.messages()[1].id, assistant.id);
@@ -491,7 +491,7 @@ mod tests {
 
         let owned = view.to_owned_state();
         assert_eq!(owned.session_id, state.session_id);
-        assert_eq!(owned.iteration, state.iteration);
+        assert_eq!(owned.turn_index, state.turn_index);
         assert_eq!(
             owned.session_graph.nodes.len(),
             state.session_graph.nodes.len()
@@ -563,7 +563,7 @@ mod tests {
             .append_event(SessionEventRecord::Mode(ModeEvent::rlm(
                 RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
                     id: "rlm_step_1".to_string(),
-                    iteration: 1,
+                    mode_iteration: 1,
                     reasoning: "inspect".to_string(),
                     code: "lookup()".to_string(),
                     output: vec!["observed".to_string()],
@@ -659,7 +659,7 @@ mod tests {
             .append_event(SessionEventRecord::Mode(ModeEvent::rlm(
                 RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
                     id: "rlm_step_1".to_string(),
-                    iteration: 1,
+                    mode_iteration: 1,
                     reasoning: "inspect".to_string(),
                     code: "lookup()".to_string(),
                     output: vec!["observed".to_string()],

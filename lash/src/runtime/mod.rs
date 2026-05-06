@@ -129,6 +129,10 @@ pub struct TurnInput {
     /// Per-turn override for mode-owned turn options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_turn_options: Option<crate::ModeTurnOptions>,
+    /// Optional externally-stable trace turn id. Normal runtime callers leave
+    /// this empty and the runtime generates one per outer turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_turn_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
