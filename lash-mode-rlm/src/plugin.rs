@@ -15,6 +15,7 @@ use lash_rlm_types::RlmCreateExtras;
 
 use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
 use crate::executor::{RlmExecutionState, execute_code};
+use crate::projected_bindings::{RlmProjectedBindings, RlmProjectionExtension};
 use crate::rlm_support::BoundVariablesCache;
 #[cfg(test)]
 use crate::rlm_support::budget_prompt_contributions;
@@ -117,6 +118,12 @@ impl SessionPlugin for RlmModePlugin {
         });
         reg.prompt().contribute(bound_vars_hook);
 
+        let projected_session = mode_session.clone();
+        reg.prompt().contribute(Arc::new(move |_ctx| {
+            let session = projected_session.clone();
+            Box::pin(async move { Ok(session.projected_binding_prompt_contributions().await) })
+        }));
+
         // Per-turn `prompt_usage` is captured here and passed to the
         // projector via a shared cell so the budget line can ride in the
         // volatile turn-tail message instead of poisoning the cached
@@ -188,6 +195,7 @@ struct RlmModeSession {
     config: RlmModePluginConfig,
     warned_at_threshold: Mutex<bool>,
     execution: tokio::sync::Mutex<Option<RlmExecutionState>>,
+    session_projected_bindings: tokio::sync::Mutex<RlmProjectedBindings>,
 }
 
 impl RlmModeSession {
@@ -198,7 +206,13 @@ impl RlmModeSession {
             )?)),
             config,
             warned_at_threshold: Mutex::new(false),
+            session_projected_bindings: tokio::sync::Mutex::new(RlmProjectedBindings::new()),
         })
+    }
+
+    async fn projected_binding_prompt_contributions(&self) -> Vec<lash::PromptContribution> {
+        let bindings = self.session_projected_bindings.lock().await;
+        RlmProjectionExtension::prompt_contributions_for(&bindings)
     }
 
     fn soft_warn_directives(
@@ -299,12 +313,13 @@ impl ModeSessionPlugin for RlmModeSession {
         ctx: lash::ModeExecutionContext,
         request: lash::ExecRequest,
     ) -> Result<lash::ExecResponse, SessionError> {
+        let session_projected_bindings = self.session_projected_bindings.lock().await.clone();
         let mut guard = self.execution.lock().await;
         let state = guard
             .take()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
 
-        let result = execute_code(state, ctx, request).await;
+        let result = execute_code(state, ctx, request, session_projected_bindings).await;
         match result {
             Ok((state, response)) => {
                 *guard = Some(state);
@@ -317,6 +332,50 @@ impl ModeSessionPlugin for RlmModeSession {
                 Err(err)
             }
         }
+    }
+
+    async fn apply_session_extension(
+        &self,
+        extension: lash::ModeSessionExtensionHandle,
+    ) -> Result<(), SessionError> {
+        let extension = extension
+            .as_any()
+            .downcast_ref::<RlmProjectionExtension>()
+            .ok_or_else(|| {
+                SessionError::Protocol(
+                    "RLM mode received an unsupported session extension".to_string(),
+                )
+            })?;
+        reject_reserved_projected_binding_names(&extension.bindings)?;
+        let mut guard = self.session_projected_bindings.lock().await;
+        let merged = guard
+            .clone()
+            .merge(extension.bindings.clone())
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        *guard = merged;
+        Ok(())
+    }
+
+    async fn validate_turn_extension(
+        &self,
+        extension: &lash::ModeTurnExtensionHandle,
+    ) -> Result<(), SessionError> {
+        let extension = extension
+            .as_any()
+            .downcast_ref::<RlmProjectionExtension>()
+            .ok_or_else(|| {
+                SessionError::Protocol(
+                    "RLM mode received an unsupported turn extension".to_string(),
+                )
+            })?;
+        reject_reserved_projected_binding_names(&extension.bindings)?;
+        self.session_projected_bindings
+            .lock()
+            .await
+            .clone()
+            .merge(extension.bindings.clone())
+            .map(|_| ())
+            .map_err(|err| SessionError::Protocol(err.to_string()))
     }
 
     fn execution_state_dirty(&self) -> bool {
@@ -370,6 +429,17 @@ impl ModeSessionPlugin for RlmModeSession {
             ctx.set_mode_turn_options(options);
         }
     }
+}
+
+fn reject_reserved_projected_binding_names(
+    bindings: &RlmProjectedBindings,
+) -> Result<(), SessionError> {
+    if bindings.names().any(|name| name == "history") {
+        return Err(SessionError::Protocol(
+            "`history` is reserved as an RLM built-in binding".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -456,6 +526,51 @@ mod tests {
         assert!(!content.contains("Look for a clean handoff point"));
         assert!(!content.contains("Budget tight"));
         assert!(!content.contains("Past the handoff threshold"));
+    }
+
+    #[tokio::test]
+    async fn session_projection_extension_rejects_duplicate_names() {
+        let session =
+            RlmModeSession::new(RlmModePluginConfig::default()).expect("session should build");
+        session
+            .apply_session_extension(crate::rlm_session_projection_extension(
+                RlmProjectedBindings::new()
+                    .bind_json("current_query", serde_json::json!("first"))
+                    .expect("first bind"),
+            ))
+            .await
+            .expect("first projection");
+
+        let duplicate = session
+            .apply_session_extension(crate::rlm_session_projection_extension(
+                RlmProjectedBindings::new()
+                    .bind_json("current_query", serde_json::json!("second"))
+                    .expect("second bind"),
+            ))
+            .await;
+        let Err(err) = duplicate else {
+            panic!("duplicate session projection should fail");
+        };
+        assert!(err.to_string().contains("current_query"));
+    }
+
+    #[tokio::test]
+    async fn session_projection_prompt_contribution_lists_names() {
+        let session =
+            RlmModeSession::new(RlmModePluginConfig::default()).expect("session should build");
+        session
+            .apply_session_extension(crate::rlm_session_projection_extension(
+                RlmProjectedBindings::new()
+                    .bind_json("current_query", serde_json::json!("first"))
+                    .expect("bind"),
+            ))
+            .await
+            .expect("projection");
+
+        let contributions = session.projected_binding_prompt_contributions().await;
+        assert_eq!(contributions.len(), 1);
+        assert!(contributions[0].content.contains("`current_query`"));
+        assert!(contributions[0].content.contains("Readonly: true"));
     }
 
     #[test]

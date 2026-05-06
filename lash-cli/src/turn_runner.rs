@@ -24,6 +24,7 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
         mode: Some(RunMode::Normal),
         mode_turn_options: None,
         trace_turn_id: None,
+        mode_extension: None,
     }
 }
 

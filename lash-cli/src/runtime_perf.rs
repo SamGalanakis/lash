@@ -875,6 +875,7 @@ async fn run_once(
             mode: Some(RunMode::Normal),
             mode_turn_options: None,
             trace_turn_id: None,
+            mode_extension: None,
         };
         if matches!(scenario, RuntimePerfScenario::RlmGlobals) {
             turn_input =

@@ -1,7 +1,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use lash::{ModeTurnSidecar, ModeTurnSidecarHandle, PromptContribution, TurnInput};
+use lash::{
+    ModeSessionExtension, ModeTurnExtension, ModeTurnExtensionHandle, PromptContribution, TurnInput,
+};
 use lashlang::{
     ProjectedBindingError, ProjectedBindings, ProjectedHostValue, ProjectedValue,
     Value as FlowValue,
@@ -70,23 +72,19 @@ impl RlmProjectedBindings {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct RlmProjectionSidecar {
+pub(crate) struct RlmProjectionExtension {
     pub(crate) bindings: RlmProjectedBindings,
 }
 
-impl RlmProjectionSidecar {
+impl RlmProjectionExtension {
     pub(crate) fn new(bindings: RlmProjectedBindings) -> Self {
         Self { bindings }
     }
-}
 
-impl ModeTurnSidecar for RlmProjectionSidecar {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn prompt_contributions(&self) -> Vec<PromptContribution> {
-        let mut names = self.bindings.names().collect::<Vec<_>>();
+    pub(crate) fn prompt_contributions_for(
+        bindings: &RlmProjectedBindings,
+    ) -> Vec<PromptContribution> {
+        let mut names = bindings.names().collect::<Vec<_>>();
         if names.is_empty() {
             return Vec::new();
         }
@@ -108,6 +106,28 @@ impl ModeTurnSidecar for RlmProjectionSidecar {
     }
 }
 
+impl ModeTurnExtension for RlmProjectionExtension {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn prompt_contributions(&self) -> Vec<PromptContribution> {
+        Self::prompt_contributions_for(&self.bindings)
+    }
+}
+
+impl ModeSessionExtension for RlmProjectionExtension {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+pub fn rlm_session_projection_extension(
+    bindings: RlmProjectedBindings,
+) -> lash::ModeSessionExtensionHandle {
+    lash::ModeSessionExtensionHandle::new(RlmProjectionExtension::new(bindings))
+}
+
 pub trait RlmTurnInputExt {
     fn rlm_project(self, bindings: RlmProjectedBindings) -> Result<Self, ProjectedBindingError>
     where
@@ -119,17 +139,17 @@ impl RlmTurnInputExt for TurnInput {
         mut self,
         bindings: RlmProjectedBindings,
     ) -> Result<Self, ProjectedBindingError> {
-        let bindings = if let Some(existing) = self.mode_sidecar_handle().and_then(|sidecar| {
-            sidecar
+        let bindings = if let Some(existing) = self.mode_extension.as_ref().and_then(|extension| {
+            extension
                 .as_any()
-                .downcast_ref::<RlmProjectionSidecar>()
+                .downcast_ref::<RlmProjectionExtension>()
                 .cloned()
         }) {
             existing.bindings.clone().merge(bindings)?
         } else {
             bindings
         };
-        self.set_mode_sidecar(ModeTurnSidecarHandle::new(RlmProjectionSidecar::new(
+        self.mode_extension = Some(ModeTurnExtensionHandle::new(RlmProjectionExtension::new(
             bindings,
         )));
         Ok(self)
@@ -176,6 +196,7 @@ mod tests {
             mode: None,
             mode_turn_options: None,
             trace_turn_id: None,
+            mode_extension: None,
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -184,12 +205,91 @@ mod tests {
         )
         .expect("attach");
         let contribution = input
-            .mode_sidecar_handle()
-            .expect("sidecar")
+            .mode_extension
+            .expect("extension")
             .prompt_contributions()
             .pop()
             .expect("prompt contribution");
         assert!(contribution.content.contains("`current_file`"));
         assert!(contribution.content.contains("Readonly: true"));
+    }
+
+    #[test]
+    fn turn_input_extension_is_skipped_by_serde() {
+        let input = TurnInput {
+            items: Vec::new(),
+            image_blobs: Default::default(),
+            user_input: None,
+            mode: None,
+            mode_turn_options: None,
+            trace_turn_id: Some("stable".to_string()),
+            mode_extension: None,
+        }
+        .rlm_project(
+            RlmProjectedBindings::new()
+                .bind_json("current_file", serde_json::json!("src/lib.rs"))
+                .expect("bind"),
+        )
+        .expect("attach");
+
+        let encoded = serde_json::to_string(&input).expect("serialize");
+        assert!(!encoded.contains("mode_extension"));
+        assert!(!encoded.contains("current_file"));
+        let decoded: TurnInput = serde_json::from_str(&encoded).expect("deserialize");
+        assert!(decoded.mode_extension.is_none());
+        assert_eq!(decoded.trace_turn_id.as_deref(), Some("stable"));
+    }
+
+    #[test]
+    fn matching_trace_turn_ids_do_not_share_projection_extensions() {
+        let first = TurnInput {
+            items: Vec::new(),
+            image_blobs: Default::default(),
+            user_input: None,
+            mode: None,
+            mode_turn_options: None,
+            trace_turn_id: Some("same-trace".to_string()),
+            mode_extension: None,
+        }
+        .rlm_project(
+            RlmProjectedBindings::new()
+                .bind_json("first_name", serde_json::json!("first"))
+                .expect("bind"),
+        )
+        .expect("attach first");
+        let second = TurnInput {
+            items: Vec::new(),
+            image_blobs: Default::default(),
+            user_input: None,
+            mode: None,
+            mode_turn_options: None,
+            trace_turn_id: Some("same-trace".to_string()),
+            mode_extension: None,
+        }
+        .rlm_project(
+            RlmProjectedBindings::new()
+                .bind_json("second_name", serde_json::json!("second"))
+                .expect("bind"),
+        )
+        .expect("attach second");
+
+        let first_extension = first
+            .mode_extension
+            .as_ref()
+            .and_then(|extension| extension.as_any().downcast_ref::<RlmProjectionExtension>())
+            .expect("first extension");
+        let second_extension = second
+            .mode_extension
+            .as_ref()
+            .and_then(|extension| extension.as_any().downcast_ref::<RlmProjectionExtension>())
+            .expect("second extension");
+        assert_eq!(
+            first_extension.bindings.names().collect::<Vec<_>>(),
+            vec!["first_name".to_string()]
+        );
+        assert_eq!(
+            second_extension.bindings.names().collect::<Vec<_>>(),
+            vec!["second_name".to_string()]
+        );
     }
 }

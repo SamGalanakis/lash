@@ -433,7 +433,6 @@ impl SessionBuilder {
             runtime: Arc::new(Mutex::new(runtime)),
             mode,
             parent_session_id: self.parent_session_id,
-            rlm_projected_bindings: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -461,7 +460,6 @@ pub struct LashSession {
     runtime: Arc<Mutex<LashRuntime>>,
     mode: ModeId,
     parent_session_id: Option<String>,
-    rlm_projected_bindings: Arc<Mutex<Option<RlmProjectedBindings>>>,
 }
 
 impl LashSession {
@@ -478,15 +476,12 @@ impl LashSession {
     }
 
     pub async fn rlm_project(&self, bindings: RlmProjectedBindings) -> Result<()> {
-        let mut guard = self.rlm_projected_bindings.lock().await;
-        let merged = match guard.take() {
-            Some(existing) => existing
-                .merge(bindings)
-                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?,
-            None => bindings,
-        };
-        *guard = Some(merged);
-        Ok(())
+        self.runtime
+            .lock()
+            .await
+            .apply_mode_session_extension(lash_mode_rlm::rlm_session_projection_extension(bindings))
+            .await
+            .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))
     }
 
     pub fn turn(&self, input: Input) -> TurnBuilder<'_> {
@@ -544,26 +539,18 @@ impl<'a> TurnBuilder<'a> {
         let sink = ProjectingEventSink { sink: self.events };
         let mut input = self.input.into_turn_input();
         input.mode_turn_options = self.mode_turn_options;
-        let mut projected = self.session.rlm_projected_bindings.lock().await.clone();
         if let Some(turn_bindings) = self.rlm_projected_bindings {
-            projected = Some(match projected {
-                Some(session_bindings) => session_bindings
-                    .merge(turn_bindings)
-                    .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?,
-                None => turn_bindings,
-            });
-        }
-        if let Some(projected) = projected {
-            input = lash_mode_rlm::RlmTurnInputExt::rlm_project(input, projected)
+            input = lash_mode_rlm::RlmTurnInputExt::rlm_project(input, turn_bindings)
                 .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?;
         }
-        let turn = self
-            .session
-            .runtime
-            .lock()
-            .await
-            .stream_turn(input, &sink, self.cancel)
-            .await?;
+        let mut runtime = self.session.runtime.lock().await;
+        if let Some(extension) = input.mode_extension.as_ref() {
+            runtime
+                .validate_mode_turn_extension(extension)
+                .await
+                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?;
+        }
+        let turn = runtime.stream_turn(input, &sink, self.cancel).await?;
         Ok(TurnResult::from_assembled(turn))
     }
 }
@@ -602,6 +589,7 @@ impl Input {
             mode: None,
             mode_turn_options: None,
             trace_turn_id: None,
+            mode_extension: None,
         }
     }
 }
@@ -973,6 +961,41 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, EmbedError::ModeNotInstalled { mode } if mode == ModeId::standard()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rlm_session_and_turn_projection_duplicates_fail_before_run() -> Result<()> {
+        let core = LashCore::rlm()
+            .provider(mock_provider())
+            .model("mock-model")
+            .max_context_tokens(200_000)
+            .build()?;
+        let session = core.session("rlm").open().await?;
+        session
+            .rlm_project(
+                RlmProjectedBindings::new()
+                    .bind_json("current_query", serde_json::json!("session"))
+                    .expect("session bind"),
+            )
+            .await?;
+
+        let err = match session
+            .turn(Input::text("hello"))
+            .rlm_project(
+                RlmProjectedBindings::new()
+                    .bind_json("current_query", serde_json::json!("turn"))
+                    .expect("turn bind"),
+            )?
+            .run()
+            .await
+        {
+            Ok(_) => panic!("duplicate session and turn projection should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, EmbedError::RlmProjectedBinding(message) if message.contains("current_query"))
+        );
         Ok(())
     }
 

@@ -2,7 +2,7 @@
 
 Native Rust harness that runs [LongCoT](https://github.com/LongHorizonReasoning/longcot) — Motwani et al.'s long-horizon chain-of-thought benchmark (2,500 expert-designed problems across logic, cs, chemistry, chess, math) — through lash as an RLM-style reasoning system.
 
-The runner is a `bench-longcot` crate that builds directly against `lash` (no `lash-cli` subprocessing — each question runs inside its own `LashRuntime` in-process). Plugin stack, policy, and prompt template are configured to match the reference LongCoT writeup ([raw.works/longcot](https://raw.works/longcot-a-benchmark-worthy-of-a-rlms-attention/)) as closely as lash allows.
+The runner is a `bench-longcot` crate that builds directly against `lash` (no `lash-cli` subprocessing — each question runs inside its own `LashRuntime` in-process). Defaults mirror upstream's `oai_gpt52.yaml` reference config (gpt-5.2, reasoning effort `high`, `max_output_tokens=125000`) so scores sit on the same axis as the published [LongCoT leaderboard](https://longcot.ai). The [raw.works writeup](https://raw.works/longcot-a-benchmark-worthy-of-a-rlms-attention/) is the secondary RLM-style reproduction we cross-reference for prompt/strategy choices.
 
 All runtime artifacts live under ignored `.benchmarks/longcot/`.
 
@@ -10,13 +10,23 @@ All runtime artifacts live under ignored `.benchmarks/longcot/`.
 
 | Knob | Default | Reference |
 |---|---|---|
-| Model | `openai/gpt-5.2` | reference blog used `claude-sonnet-4.5` — change with `--model` |
+| Model | `openai/gpt-5.2` | matches upstream `src/configs/oai_gpt52.yaml` — change with `--model` |
 | Provider | `openai-compatible` (OpenRouter OAI-compat endpoint) | `--provider-id` |
 | Max turns | 50 | matches the reference RLM iteration cap |
-| Max output tokens | 64,000 | matches reference `max_tokens=64000`; plumbed through the openrouter adapter |
+| Max output tokens | 125,000 | matches upstream `oai_gpt52.yaml: max_output_tokens=125000`; plumbed via `LASH_MAX_OUTPUT_TOKENS` |
+| Reasoning variant | `high` | matches upstream `oai_gpt52.yaml: reasoning.effort=high` |
 | Max context tokens | 1,000,000 | — |
-| Execution mode | `rlm` (lashlang DSL) | the intentional delta vs the reference runtime |
-| Context approach | `rolling_history` | — |
+| Execution mode | `rlm` (lashlang DSL, fixed) | the intentional delta vs the upstream raw-LLM harness |
+
+## Tool surface
+
+The Rust runner registers an explicit RLM tool surface for benchmark hygiene, mirroring the continual-learning-bench setup:
+
+- **registered (model-visible):** `llm_query`, `spawn_agent` with `capability: "default"`, `continue_as`, `list_async_handles`
+- **inherited by `spawn_agent` children:** the same four tools (locked via `CapabilityToolSurface::Explicit`), so recursive descents stay inside the same surface
+- **not registered:** local shell, filesystem, search, web, editing, MCP, monitor, task-controls, AppWorld, and standard-mode context plugins (rolling-history / observational-memory)
+
+LongCoT prompts explicitly forbid external tool use; this stack honors that while keeping recursive decomposition (via `spawn_agent`) available.
 
 ## Quickstart
 
@@ -79,6 +89,8 @@ bench/longcot/run.sh --provider-id codex --model gpt-5.2
 bench/longcot/run.sh --variant xhigh
 ```
 
+> Execution mode is fixed to `rlm`; `--execution-mode` and `--standard-context-approach` are no longer accepted. Standard-mode context plugins (rolling-history / observational-memory) and the monitor / task-controls tool surface are intentionally left unregistered — see "Tool surface" above.
+
 ## Output layout
 
 ```
@@ -113,3 +125,22 @@ Any arguments after the run path are forwarded:
 ```bash
 bench/longcot/evaluate.sh .benchmarks/longcot/runs/<run-id> -- --judge-model gpt-4o
 ```
+
+The Gemini fallback judge (math/chemistry borderline cases) needs `GEMINI_API_KEY` or `GOOGLE_API_KEY` in `.env`. Pass `-- --no-fallback` to disable; scores tend to dip without it.
+
+## Submitting to the leaderboard
+
+Submissions are PRs against [LongHorizonReasoning/longcot](https://github.com/LongHorizonReasoning/longcot) with a JSON file shaped like:
+
+```json
+{
+  "model": "lash + gpt-5.2 (RLM)",
+  "provider": "your-org",
+  "type": "open",
+  "results": [
+    {"question_id": "Sudoku_easy_1", "response": "...", "correct": true}
+  ]
+}
+```
+
+To produce that from a run, walk `responses/<label>.jsonl` (one row per question) and pair each `question_id` + `response_text` with the `correct` flag from `run_eval.py`'s output. The `--harness` flag on `run.sh` (`restricted` | `open`) sets the manifest column for the eventual PR; we always run the same lash RLM stack regardless.

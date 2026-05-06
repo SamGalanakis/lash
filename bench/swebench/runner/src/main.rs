@@ -677,6 +677,7 @@ async fn run_instance(
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
+                mode_extension: None,
             },
             sink_trait.as_ref(),
             cancel,

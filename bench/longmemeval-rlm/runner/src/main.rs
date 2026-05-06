@@ -646,6 +646,7 @@ async fn run_question(
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
+                mode_extension: None,
             })
             .rlm_project(build_projected_bindings(&question)?)?,
             &sink,

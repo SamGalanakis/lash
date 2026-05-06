@@ -263,11 +263,23 @@ impl LashRuntime {
 
     async fn stream_turn_inner(
         &mut self,
-        mut input: TurnInput,
+        input: TurnInput,
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         self.refresh_session_graph_from_store().await;
+        if let Some(extension) = &input.mode_extension
+            && let Some(session) = self.session.as_ref()
+        {
+            let mode_session = std::sync::Arc::clone(session.plugins().mode_session());
+            mode_session
+                .validate_turn_extension(extension)
+                .await
+                .map_err(|err| RuntimeError {
+                    code: "mode_turn_extension".to_string(),
+                    message: err.to_string(),
+                })?;
+        }
         let previous_prompt_usage = self.state.last_prompt_usage.clone();
         let normalized = match self.normalize_input_items(&input.items, &input.image_blobs) {
             Ok(items) => items,
@@ -485,7 +497,7 @@ impl LashRuntime {
             messages,
             previous_prompt_usage,
             input.mode_turn_options.clone(),
-            input.take_mode_sidecar_handle(),
+            input.mode_extension.clone(),
             trace_turn_id,
             turn_index,
             events,
@@ -510,7 +522,7 @@ impl LashRuntime {
         messages: crate::MessageSequence,
         _previous_prompt_usage: Option<PromptUsage>,
         mode_turn_options: Option<crate::ModeTurnOptions>,
-        mode_sidecar: Option<crate::ModeTurnSidecarHandle>,
+        mode_extension: Option<crate::ModeTurnExtensionHandle>,
         trace_turn_id: String,
         turn_index: usize,
         events: &dyn EventSink,
@@ -675,7 +687,7 @@ impl LashRuntime {
             mode_turn_options: mode_turn_options
                 .clone()
                 .unwrap_or_else(|| self.mode_turn_options.clone()),
-            mode_sidecar,
+            mode_extension,
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let mode_run_offset = 0;
@@ -955,5 +967,6 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
         mode: None,
         mode_turn_options: None,
         trace_turn_id: None,
+        mode_extension: None,
     }
 }

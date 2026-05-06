@@ -8,29 +8,31 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
+use async_trait::async_trait;
 use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
-use lash::plugin::PluginFactory;
+use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
     EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
     PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot, PromptTemplate,
     PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
     RuntimePersistence, SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
-    diff_usage_reports,
+    TokioSessionTaskExecutor, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
-use lash_mode_rlm::RlmTurnInputExt;
-use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
-use lash_plugin_rolling_history::RollingHistoryPluginFactory;
+use lash_mode_rlm::{
+    BuiltinRlmModePluginFactory, RlmModePluginConfig, RlmPromptFeatures, RlmTurnInputExt,
+};
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_sqlite_store::Store;
 use lash_subagents::{
-    CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
-    TierExecutionMode,
+    CapabilityField, CapabilityOptionalField, CapabilityRecursion, CapabilityRegistry,
+    CapabilitySpec, CapabilityToolSurface, LocalSubagentHost, StaticCapability, SubagentHost,
+    SubagentsPluginFactory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -64,9 +66,17 @@ const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 125_000;
 const DEFAULT_MAX_CONTEXT_TOKENS: usize = 1_000_000;
 const DEFAULT_BATCH_SIZE: usize = 4;
-const DEFAULT_EXECUTION_MODE: &str = "rlm";
-const DEFAULT_CONTEXT_APPROACH: &str = "rolling_history";
 const DEFAULT_HARNESS: &str = "restricted";
+
+/// LongCoT runs are always in lashlang RLM mode. Standard mode is intentionally
+/// not wired in here; the benchmark forbids external tools, so the broader
+/// standard-mode plugin set (rolling history, observational memory, monitor,
+/// task controls) would only inflate the prompt without adding capability.
+const EXECUTION_MODE_LABEL: &str = "rlm";
+
+/// Capability the model can pass to `spawn_agent`. Children inherit the root
+/// model/variant and the same locked-down longcot tool surface.
+const SUBAGENT_CAPABILITY: &str = "default";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "bench-longcot")]
@@ -133,12 +143,6 @@ struct Args {
     harness: String,
 
     // Session policy.
-    #[arg(long, default_value = DEFAULT_EXECUTION_MODE)]
-    execution_mode: String,
-
-    #[arg(long)]
-    standard_context_approach: Option<String>,
-
     #[arg(long, default_value_t = DEFAULT_MAX_TURNS)]
     max_turns: usize,
 
@@ -175,7 +179,6 @@ struct RunManifest {
     /// label differs.
     harness: String,
     execution_mode: String,
-    standard_context_approach: Option<String>,
     max_turns: usize,
     max_context_tokens: usize,
     max_output_tokens: u64,
@@ -212,8 +215,8 @@ impl Default for ReferenceSettings {
             reference_framework: "reference RLM runtime".to_string(),
             note:
                 "This harness runs LongCoT through lash's lashlang-backed RLM. The iteration cap \
-                 (50) and max-output cap (64k) match the reference writeup; the execution engine \
-                 is lash, not the reference runtime."
+                 (50) and max-output cap (125k) match upstream's oai_gpt52.yaml reference config; \
+                 the execution engine is lash, not the upstream raw-LLM harness."
                     .to_string(),
         }
     }
@@ -241,7 +244,6 @@ struct QuestionResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LashRunSnapshot {
     execution_mode: String,
-    standard_context_approach: Option<String>,
     variant: Option<String>,
     max_turns: usize,
     max_output_tokens: u64,
@@ -320,11 +322,7 @@ async fn main() -> anyhow::Result<()> {
     fs::create_dir_all(&responses_dir)
         .with_context(|| format!("create {}", responses_dir.display()))?;
 
-    let execution_mode = parse_execution_mode(&args.execution_mode)?;
-    let standard_context_approach = resolve_standard_context_approach(
-        &execution_mode,
-        args.standard_context_approach.as_deref(),
-    )?;
+    let execution_mode = ExecutionMode::new(EXECUTION_MODE_LABEL);
     let model_slug = args.model.replace(['/', ':'], "_");
     let domain_label = summarize_domain_selection(&args.domain);
     let diff_label = args.difficulty.clone().unwrap_or_else(|| "all".to_string());
@@ -341,11 +339,7 @@ async fn main() -> anyhow::Result<()> {
         variant: Some(args.variant.clone()),
         base_url: resolve_base_url(&args),
         harness: args.harness.clone(),
-        execution_mode: execution_mode_label(&execution_mode).to_string(),
-        standard_context_approach: standard_context_approach
-            .as_ref()
-            .map(standard_context_approach_label)
-            .map(str::to_string),
+        execution_mode: EXECUTION_MODE_LABEL.to_string(),
         max_turns: args.max_turns,
         max_context_tokens: args.max_context_tokens,
         max_output_tokens: args.max_output_tokens,
@@ -404,9 +398,6 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("  pending:          {}", pending.len());
     eprintln!("  model:            {}", args.model);
     eprintln!("  execution-mode:   {}", manifest.execution_mode);
-    if let Some(standard_context_approach) = &manifest.standard_context_approach {
-        eprintln!("  context-approach: {standard_context_approach}");
-    }
     eprintln!("  max_turns:        {}", args.max_turns);
     eprintln!("  max_output_tokens:{}", args.max_output_tokens);
     eprintln!("  batch_size:       {}", args.batch_size.max(1));
@@ -439,7 +430,6 @@ async fn main() -> anyhow::Result<()> {
         let args = args_shared.clone();
         let output_dir = output_dir_shared.clone();
         let responses_path = responses_path_shared.clone();
-        let standard_context_approach = standard_context_approach.clone();
         let execution_mode = execution_mode.clone();
         join_set.spawn(async move {
             let _permit = permit;
@@ -448,7 +438,6 @@ async fn main() -> anyhow::Result<()> {
                 provider.as_ref(),
                 args.as_ref(),
                 execution_mode,
-                standard_context_approach.as_ref(),
                 question,
             )
             .await;
@@ -594,7 +583,6 @@ async fn run_question(
     provider: &ProviderHandle,
     args: &Args,
     execution_mode: ExecutionMode,
-    standard_context_approach: Option<&StandardContextApproach>,
     question: LongCoTQuestion,
 ) -> anyhow::Result<QuestionResult> {
     let question_dir = output_dir.join("questions").join(&question.question_id);
@@ -615,17 +603,13 @@ async fn run_question(
         provider: provider.clone(),
         max_context_tokens: Some(args.max_context_tokens),
         execution_mode: execution_mode.clone(),
-        standard_context_approach: standard_context_approach.cloned(),
+        standard_context_approach: None,
         model_variant: Some(args.variant.clone()),
         max_turns: Some(args.max_turns),
         ..SessionPolicy::default()
     };
 
-    let plugin_session = build_plugin_session(
-        execution_mode.clone(),
-        standard_context_approach.cloned(),
-        &policy,
-    )?;
+    let plugin_session = build_plugin_session(execution_mode.clone(), &policy)?;
     let services = PersistentRuntimeServices::new_with_bridges(
         plugin_session,
         TurnInjectionBridge::new(),
@@ -668,6 +652,7 @@ async fn run_question(
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
+                mode_extension: None,
             })
             .rlm_project(build_projected_bindings(&question)?)?,
             sink_trait.as_ref(),
@@ -725,10 +710,7 @@ async fn run_question(
         done_reason,
         failure_reason,
         lash: LashRunSnapshot {
-            execution_mode: execution_mode_label(&execution_mode).to_string(),
-            standard_context_approach: standard_context_approach
-                .map(standard_context_approach_label)
-                .map(str::to_string),
+            execution_mode: EXECUTION_MODE_LABEL.to_string(),
             variant: Some(args.variant.clone()),
             max_turns: args.max_turns,
             max_output_tokens: args.max_output_tokens,
@@ -812,58 +794,117 @@ fn extract_text(content: Option<&Value>) -> String {
     }
 }
 
-/// Build a minimal plugin stack: rolling-history context, tool-result
-/// projection, and subagents (so RLM mode can spawn sub-agents for recursive
-/// decomposition — the closest analogue to the reference RLM setup). No benchmark-specific
-/// tools: LongCoT prompts explicitly forbid external tool use.
+/// Minimal RLM plugin stack matching the continual-learning-bench pattern.
+///
+/// Registered tools (model-visible): `llm_query`, `continue_as`,
+/// `list_async_handles`, `spawn_agent` (capability `default`).
+///
+/// Deliberately not registered:
+/// - `monitor`, `tasks_list`, `tasks_stop` — there is no shell or background
+///   work to watch in a pure-reasoning bench.
+/// - Standard mode + rolling-history / observational-memory plugins — RLM is
+///   the only execution path here; standard-mode contributions would only
+///   inflate the prompt without adding capability.
+/// - Filesystem, shell, search, web, editing, and MCP tools — LongCoT
+///   explicitly forbids external tool use.
+///
+/// Children spawned via `spawn_agent` inherit the same explicit tool surface
+/// (via `CapabilityToolSurface::Explicit`), so recursive descents stay inside
+/// the locked-down set instead of accidentally picking up whatever happens to
+/// be registered at the root.
 fn build_plugin_session(
     execution_mode: ExecutionMode,
-    standard_context_approach: Option<StandardContextApproach>,
     policy: &SessionPolicy,
 ) -> anyhow::Result<Arc<lash::PluginSession>> {
-    let mut factories: Vec<Arc<dyn PluginFactory>> =
-        vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
-    if let Some(standard_context_approach) = &standard_context_approach {
-        match standard_context_approach {
-            StandardContextApproach::RollingHistory(_) => {
-                factories.push(Arc::new(RollingHistoryPluginFactory::default()));
-            }
-            StandardContextApproach::ObservationalMemory(_) => {
-                factories.push(Arc::new(ObservationalMemoryPluginFactory));
-            }
-        }
-    }
-    // The RLM runtime refuses to start without mode-session plugins
-    // registered, so wire up both built-ins the same way lash-cli does.
-    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
-    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
-    factories.push(Arc::new(
-        lash_mode_standard::BuiltinStandardModePluginFactory,
-    ));
-    factories.push(Arc::new(
-        lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
-    ));
-    factories.push(Arc::new(LlmToolsPluginFactory));
-    // Single capability `default` that inherits the root session's
-    // model, variant, and execution mode. We deliberately drop the
-    // standard `explore` / `peer` tiers: the benchmark should only use
-    // one model so subagent fanout is an amplification of the same
-    // frontier model, not a quality-tiered delegation. An empty model
-    // override on `TierCapability` falls back to the parent policy's
-    // model via `pick_tier_model`.
-    let registry = std::sync::Arc::new(CapabilityRegistry::new().with(Arc::new(
-        TierCapability::new("default", None, TierExecutionMode::Inherit),
-    )));
-    let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
-    factories.push(Arc::new(SubagentsPluginFactory::new(
-        policy.clone(),
-        registry,
-        subagent_host,
-    )));
-    let plugin_host = PluginHost::new(factories);
-    plugin_host
-        .build_session("root", execution_mode, standard_context_approach, None)
+    let longcot_tools = longcot_tool_definitions();
+    let factories: Vec<Arc<dyn PluginFactory>> = vec![
+        Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
+        Arc::new(BuiltinRlmModePluginFactory::new(RlmModePluginConfig {
+            prompt_features: RlmPromptFeatures {
+                images: false,
+                ..RlmPromptFeatures::default()
+            },
+            ..RlmModePluginConfig::default()
+        })),
+        Arc::new(LlmToolsPluginFactory),
+        Arc::new(StaticPluginFactory::new(
+            "longcot_async_handles",
+            PluginSpec::new().with_tool_provider(Arc::new(LongCoTAsyncHandlesTool)),
+        )),
+        Arc::new(SubagentsPluginFactory::new(
+            policy.clone(),
+            Arc::new(
+                CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
+                    SUBAGENT_CAPABILITY,
+                    CapabilitySpec {
+                        model: CapabilityField::Inherit,
+                        model_variant: CapabilityOptionalField::Inherit,
+                        execution_mode: CapabilityField::Inherit,
+                        tool_surface: CapabilityToolSurface::Explicit(longcot_tools.clone()),
+                        recursion: CapabilityRecursion::Inherit,
+                    },
+                ))),
+            ),
+            Arc::new(LocalSubagentHost::default()) as Arc<dyn SubagentHost>,
+        )),
+    ];
+    PluginHost::new(factories)
+        .build_session(
+            "root",
+            execution_mode,
+            None::<StandardContextApproach>,
+            None,
+        )
         .context("build plugin session")
+}
+
+/// Locked-down tool surface visible to the model and inherited by every
+/// `spawn_agent` child. Mirrors continual-learning-bench's tool list.
+fn longcot_tool_definitions() -> Vec<ToolDefinition> {
+    let capabilities = vec![SUBAGENT_CAPABILITY.to_string()];
+    vec![
+        lash_llm_tools::llm_query_tool_definition(),
+        lash_mode_rlm::continue_as_tool_definition(),
+        longcot_list_async_handles_tool_definition(),
+        lash_subagents::spawn_agent_tool_definition(&capabilities),
+    ]
+}
+
+/// Custom `list_async_handles` registration so the tool shows up on the model's
+/// surface; the RLM session runtime intercepts the call and answers it without
+/// reaching this provider's `execute`.
+struct LongCoTAsyncHandlesTool;
+
+#[async_trait]
+impl ToolProvider for LongCoTAsyncHandlesTool {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![longcot_list_async_handles_tool_definition()]
+    }
+
+    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
+        ToolResult::err_fmt(format_args!(
+            "`{name}` is handled by the RLM session runtime and cannot run directly"
+        ))
+    }
+}
+
+fn longcot_list_async_handles_tool_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "list_async_handles",
+        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this to rediscover live `start call` handles after a long-running fan-out via `spawn_agent`.",
+        ToolDefinition::default_input_schema(),
+        json!({
+            "type": "object",
+            "properties": {
+                "monitor": { "type": "object" },
+                "subagent": { "type": "object" },
+                "tool": { "type": "object" }
+            },
+            "required": ["monitor", "subagent", "tool"]
+        }),
+    )
+    .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])
+    .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 /// Prompt template tuned for LongCoT. The benchmark problem is bound as
@@ -1005,48 +1046,6 @@ fn read_env_var(name: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-}
-
-fn parse_execution_mode(raw: &str) -> anyhow::Result<ExecutionMode> {
-    match raw {
-        "rlm" => Ok(ExecutionMode::new("rlm")),
-        "standard" => Ok(ExecutionMode::standard()),
-        _ => bail!("unsupported execution mode `{raw}`"),
-    }
-}
-
-fn parse_standard_context_approach(raw: &str) -> anyhow::Result<StandardContextApproach> {
-    match raw {
-        "rolling_history" => Ok(StandardContextApproach::RollingHistory(Default::default())),
-        "observational_memory" => Ok(StandardContextApproach::ObservationalMemory(
-            Default::default(),
-        )),
-        _ => bail!("unsupported context approach `{raw}`"),
-    }
-}
-
-fn resolve_standard_context_approach(
-    execution_mode: &ExecutionMode,
-    raw: Option<&str>,
-) -> anyhow::Result<Option<StandardContextApproach>> {
-    if *execution_mode == ExecutionMode::standard() {
-        return parse_standard_context_approach(raw.unwrap_or(DEFAULT_CONTEXT_APPROACH)).map(Some);
-    }
-    if raw.is_some() {
-        bail!("--context-approach only applies to --execution-mode standard");
-    }
-    Ok(None)
-}
-
-fn execution_mode_label(mode: &ExecutionMode) -> &str {
-    mode.plugin_id()
-}
-
-fn standard_context_approach_label(approach: &StandardContextApproach) -> &'static str {
-    match approach {
-        StandardContextApproach::RollingHistory(_) => "rolling_history",
-        StandardContextApproach::ObservationalMemory(_) => "observational_memory",
-    }
 }
 
 fn turn_completed(outcome: &lash::TurnOutcome) -> bool {

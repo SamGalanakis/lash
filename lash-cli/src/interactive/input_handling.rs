@@ -305,6 +305,7 @@ pub(super) async fn process_pending_monitor_wakes(
         mode: Some(RunMode::Normal),
         mode_turn_options: None,
         trace_turn_id: None,
+        mode_extension: None,
     };
     send_user_message(
         prepared_turn,
