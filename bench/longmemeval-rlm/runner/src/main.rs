@@ -15,19 +15,18 @@ use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::{
-    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
+    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
+    EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
     PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, ProviderHandle, RuntimeCoreConfig, RuntimePersistence,
-    SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
-    diff_usage_reports,
+    PromptTemplateSection, ProviderHandle, RuntimeCoreConfig, RuntimePersistence, SessionEvent,
+    SessionPolicy, SessionUsageReport, StandardContextApproach, TokioSessionTaskExecutor,
+    TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
+use lash_mode_rlm::RlmTurnInputExt;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
-use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
 use lash_sqlite_store::Store;
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory};
 use reqwest::Client;
@@ -630,18 +629,6 @@ async fn run_question(
     )
     .await?;
 
-    runtime
-        .append_session_nodes(AppendSessionNodesRequest {
-            nodes: vec![SessionAppendNode::event(lash::SessionEventRecord::Mode(
-                lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(build_globals_patch(
-                    &question,
-                ))),
-            ))],
-            requires_ancestor_node_id: None,
-        })
-        .await
-        .context("append benchmark globals patch")?;
-
     let before_usage = runtime.usage_report();
     let cancel = tokio_util::sync::CancellationToken::new();
     let sink = JsonlEventSink::new(
@@ -652,14 +639,15 @@ async fn run_question(
     let started_at = std::time::Instant::now();
     let turn = runtime
         .stream_turn(
-            TurnInput {
+            (TurnInput {
                 items: vec![InputItem::Text { text: prompt }],
                 image_blobs: Default::default(),
                 user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
-            },
+            })
+            .rlm_project(build_projected_bindings(&question)?)?,
             &sink,
             cancel,
         )
@@ -792,33 +780,30 @@ fn build_plugin_session(
         .context("build plugin session")
 }
 
-fn build_globals_patch(question: &LongMemEvalQuestion) -> RlmGlobalsPatchPluginBody {
-    let mut set = serde_json::Map::new();
-    set.insert(
-        "benchmark".to_string(),
-        json!({
-            "name": "LongMemEval",
-            "question_id": question.question_id,
-            "question_type": question.question_type,
-            "question_date": question.question_date,
-        }),
-    );
-    set.insert(
-        "input".to_string(),
-        json!({
-            "question": question.question,
-            "question_type": question.question_type,
-            "question_date": question.question_date,
-            "haystack_dates": question.haystack_dates,
-            "haystack_session_ids": question.haystack_session_ids,
-            "haystack_sessions": question.haystack_sessions,
-        }),
-    );
-    RlmGlobalsPatchPluginBody {
-        set,
-        set_default: serde_json::Map::new(),
-        unset: Vec::new(),
-    }
+fn build_projected_bindings(
+    question: &LongMemEvalQuestion,
+) -> anyhow::Result<lash_mode_rlm::RlmProjectedBindings> {
+    Ok(lash_mode_rlm::RlmProjectedBindings::new()
+        .bind_json(
+            "benchmark",
+            json!({
+                "name": "LongMemEval",
+                "question_id": question.question_id,
+                "question_type": question.question_type,
+                "question_date": question.question_date,
+            }),
+        )?
+        .bind_json(
+            "input",
+            json!({
+                "question": question.question,
+                "question_type": question.question_type,
+                "question_date": question.question_date,
+                "haystack_dates": question.haystack_dates,
+                "haystack_session_ids": question.haystack_session_ids,
+                "haystack_sessions": question.haystack_sessions,
+            }),
+        )?)
 }
 
 fn build_prompt(

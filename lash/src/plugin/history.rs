@@ -462,12 +462,7 @@ mod tests {
             .session_graph
             .append_event(SessionEventRecord::Mode(ModeEvent::rlm(
                 RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
-                    set: serde_json::Map::from_iter([(
-                        "answer".to_string(),
-                        serde_json::json!(42),
-                    )]),
                     set_default: serde_json::Map::new(),
-                    unset: Vec::new(),
                 }),
             )));
 
@@ -481,10 +476,7 @@ mod tests {
         assert_eq!(view.tool_calls().len(), 1);
         assert_eq!(view.tool_calls()[0].call_id, tool_call.call_id);
         assert_eq!(view.active_events().len(), 4);
-        assert_eq!(
-            view.shared_rlm_globals().get("answer"),
-            Some(&serde_json::json!(42))
-        );
+        assert!(view.shared_rlm_globals().is_empty());
         assert_eq!(view.read_model().messages.len(), 2);
         assert_eq!(
             view.materialized_session_graph().nodes.len(),

@@ -15,6 +15,8 @@ use lashlang::{
 };
 use serde_json::{Value, json};
 
+use crate::projected_bindings::RlmProjectionSidecar;
+
 const RLM_SNAPSHOT_VERSION: u32 = 3;
 
 pub struct RlmExecutionState {
@@ -100,10 +102,6 @@ impl RlmExecutionState {
         prune_projected_bindings(&mut self.rlm, projected_globals);
     }
 
-    pub fn prune_projected_names<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
-        prune_projected_binding_names(&mut self.rlm, names);
-    }
-
     pub fn patch_globals(
         &mut self,
         patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
@@ -168,8 +166,24 @@ async fn execute_code_inner(
         }
     };
 
-    let projected = projected_bindings(&ctx);
-    prune_projected_bindings(&mut state.rlm, ctx.rlm_globals().as_ref());
+    let projected = match projected_bindings(&ctx) {
+        Ok(projected) => projected,
+        Err(err) => {
+            return ExecResponse {
+                output: String::new(),
+                observations: Vec::new(),
+                observation_truncation: Vec::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                printed_images: Vec::new(),
+                error: Some(err),
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            };
+        }
+    };
+    let projected_names = projected.names().collect::<Vec<_>>();
+    prune_projected_binding_names(&mut state.rlm, projected_names.iter().map(String::as_str));
     let host = HostBridge {
         ctx,
         observe_projection: state.observe_projection.clone(),
@@ -225,24 +239,34 @@ async fn execute_code_inner(
     }
 }
 
-fn projected_bindings(ctx: &ModeExecutionContext) -> ProjectedBindings {
+fn projected_bindings(ctx: &ModeExecutionContext) -> Result<ProjectedBindings, String> {
     let mut bindings = ProjectedBindings::new();
-    for (name, value) in ctx.rlm_globals().iter() {
-        bindings.insert(
-            name.clone(),
-            ProjectedValue::scalar(name.clone(), json_to_flow_value(value.clone())),
-        );
+    if let Some(sidecar) = ctx.mode_sidecar::<RlmProjectionSidecar>() {
+        let host_bindings = sidecar.bindings.clone().into_projected_bindings();
+        for name in host_bindings.names().collect::<Vec<_>>() {
+            let value = host_bindings
+                .get(&name)
+                .expect("name came from projected bindings");
+            bindings.try_insert(name, value).map_err(|err| {
+                format!(
+                    "`{}` is already bound as an RLM projected binding",
+                    err.name()
+                )
+            })?;
+        }
     }
-    bindings.insert(
-        "history",
-        ProjectedValue::custom(
-            "history",
-            Arc::new(HistoryProjectedValue {
-                projection: ctx.rlm_chronological_projection(),
-            }),
-        ),
-    );
     bindings
+        .try_insert(
+            "history",
+            ProjectedValue::custom(
+                "history",
+                Arc::new(HistoryProjectedValue {
+                    projection: ctx.rlm_chronological_projection(),
+                }),
+            ),
+        )
+        .map_err(|err| format!("`{}` is reserved as an RLM built-in binding", err.name()))?;
+    Ok(bindings)
 }
 
 struct HistoryProjectedValue {
@@ -658,13 +682,9 @@ fn apply_global_defaults(
     }
     let mut snapshot = rlm.snapshot();
     for (key, value) in &patch.set_default {
-        if is_reserved_projected_binding(key)
-            || projected_globals.contains_key(key)
-            || patch.set.contains_key(key)
-            || patch.unset.iter().any(|unset| unset == key)
-        {
+        if is_reserved_projected_binding(key) || projected_globals.contains_key(key) {
             return Err(format!(
-                "`{key}` is a read-only projected host binding; use `set` for host-projected values or choose a different Lashlang variable name for `set_default`"
+                "`{key}` is a read-only projected host binding; choose a different Lashlang variable name for `set_default`"
             ));
         }
         if snapshot.globals.get(key).is_none() {
@@ -971,11 +991,7 @@ mod tests {
             set_default.insert("diary".to_string(), serde_json::json!(["kept"]));
             state
                 .patch_globals(
-                    &lash_rlm_types::RlmGlobalsPatchPluginBody {
-                        set: serde_json::Map::new(),
-                        set_default,
-                        unset: Vec::new(),
-                    },
+                    &lash_rlm_types::RlmGlobalsPatchPluginBody { set_default },
                     &serde_json::Map::new(),
                 )
                 .expect("patch diary");
@@ -1027,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn set_default_initializes_once_and_set_does_not_mutate_executor_globals() {
+    fn set_default_initializes_once_and_does_not_mutate_projected_globals() {
         let mut state =
             RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
         let mut projected = serde_json::Map::new();
@@ -1036,15 +1052,10 @@ mod tests {
         state
             .patch_globals(
                 &lash_rlm_types::RlmGlobalsPatchPluginBody {
-                    set: serde_json::Map::from_iter([(
-                        "current_query".to_string(),
-                        serde_json::json!("projected"),
-                    )]),
                     set_default: serde_json::Map::from_iter([(
                         "diary".to_string(),
                         serde_json::json!(["initial"]),
                     )]),
-                    unset: Vec::new(),
                 },
                 &projected,
             )
@@ -1060,12 +1071,10 @@ mod tests {
         state
             .patch_globals(
                 &lash_rlm_types::RlmGlobalsPatchPluginBody {
-                    set: serde_json::Map::new(),
                     set_default: serde_json::Map::from_iter([(
                         "diary".to_string(),
                         serde_json::json!(["clobber"]),
                     )]),
-                    unset: Vec::new(),
                 },
                 &projected,
             )
@@ -1088,12 +1097,10 @@ mod tests {
         let err = state
             .patch_globals(
                 &lash_rlm_types::RlmGlobalsPatchPluginBody {
-                    set: serde_json::Map::new(),
                     set_default: serde_json::Map::from_iter([(
                         "current_query".to_string(),
                         serde_json::json!("bad"),
                     )]),
-                    unset: Vec::new(),
                 },
                 &projected,
             )
@@ -1103,12 +1110,10 @@ mod tests {
         let err = state
             .patch_globals(
                 &lash_rlm_types::RlmGlobalsPatchPluginBody {
-                    set: serde_json::Map::new(),
                     set_default: serde_json::Map::from_iter([(
                         "history".to_string(),
                         serde_json::json!([]),
                     )]),
-                    unset: Vec::new(),
                 },
                 &serde_json::Map::new(),
             )

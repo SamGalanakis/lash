@@ -57,10 +57,8 @@ pub(crate) fn budget_prompt_contributions(
 }
 
 /// Memoizes the rendered "Bound Variables" `PromptContribution`. The
-/// cache hits when the projected-globals `Arc` identity is unchanged
-/// between LLM iterations — common during a single turn since the
-/// `SessionGraphCache` only mints a new globals `Arc` when a
-/// `RlmGlobalsPatch` is applied. Saves the JSON-shape inference + the
+/// cache hits when the defaults `Arc` identity is unchanged between LLM
+/// iterations. Saves the JSON-shape inference + the
 /// `format!()`/`String::push_str` walk per iteration.
 #[derive(Default)]
 pub struct BoundVariablesCache {

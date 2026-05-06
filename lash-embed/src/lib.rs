@@ -25,6 +25,7 @@ pub use lash::{
     SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, StandardContextApproach,
     TerminationPolicy, TokenUsage, ToolCallRecord, ToolProvider, TurnIssue, TurnOutcome,
 };
+pub use lash_mode_rlm::RlmProjectedBindings;
 pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
 /// Stable mode identifier exposed by the embedding facade.
@@ -103,6 +104,8 @@ pub enum EmbedError {
     MissingMaxContextTokens,
     #[error("failed to create store for session `{session_id}`: {message}")]
     StoreFactory { session_id: String, message: String },
+    #[error("RLM projected binding error: {0}")]
+    RlmProjectedBinding(String),
     #[error("runtime session error: {0}")]
     Session(#[from] SessionError),
     #[error("runtime turn error: {0}")]
@@ -430,6 +433,7 @@ impl SessionBuilder {
             runtime: Arc::new(Mutex::new(runtime)),
             mode,
             parent_session_id: self.parent_session_id,
+            rlm_projected_bindings: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -457,6 +461,7 @@ pub struct LashSession {
     runtime: Arc<Mutex<LashRuntime>>,
     mode: ModeId,
     parent_session_id: Option<String>,
+    rlm_projected_bindings: Arc<Mutex<Option<RlmProjectedBindings>>>,
 }
 
 impl LashSession {
@@ -472,6 +477,18 @@ impl LashSession {
         self.turn(input).run().await
     }
 
+    pub async fn rlm_project(&self, bindings: RlmProjectedBindings) -> Result<()> {
+        let mut guard = self.rlm_projected_bindings.lock().await;
+        let merged = match guard.take() {
+            Some(existing) => existing
+                .merge(bindings)
+                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?,
+            None => bindings,
+        };
+        *guard = Some(merged);
+        Ok(())
+    }
+
     pub fn turn(&self, input: Input) -> TurnBuilder<'_> {
         TurnBuilder {
             session: self,
@@ -479,6 +496,7 @@ impl LashSession {
             events: None,
             cancel: CancellationToken::new(),
             mode_turn_options: None,
+            rlm_projected_bindings: None,
         }
     }
 
@@ -493,6 +511,7 @@ pub struct TurnBuilder<'a> {
     events: Option<&'a dyn TurnEventSink>,
     cancel: CancellationToken,
     mode_turn_options: Option<ModeTurnOptions>,
+    rlm_projected_bindings: Option<RlmProjectedBindings>,
 }
 
 impl<'a> TurnBuilder<'a> {
@@ -511,10 +530,33 @@ impl<'a> TurnBuilder<'a> {
         self
     }
 
+    pub fn rlm_project(mut self, bindings: RlmProjectedBindings) -> Result<Self> {
+        self.rlm_projected_bindings = Some(match self.rlm_projected_bindings.take() {
+            Some(existing) => existing
+                .merge(bindings)
+                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?,
+            None => bindings,
+        });
+        Ok(self)
+    }
+
     pub async fn run(self) -> Result<TurnResult> {
         let sink = ProjectingEventSink { sink: self.events };
         let mut input = self.input.into_turn_input();
         input.mode_turn_options = self.mode_turn_options;
+        let mut projected = self.session.rlm_projected_bindings.lock().await.clone();
+        if let Some(turn_bindings) = self.rlm_projected_bindings {
+            projected = Some(match projected {
+                Some(session_bindings) => session_bindings
+                    .merge(turn_bindings)
+                    .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?,
+                None => turn_bindings,
+            });
+        }
+        if let Some(projected) = projected {
+            input = lash_mode_rlm::RlmTurnInputExt::rlm_project(input, projected)
+                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?;
+        }
         let turn = self
             .session
             .runtime

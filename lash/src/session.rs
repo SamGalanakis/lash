@@ -234,6 +234,7 @@ pub struct ModeExecutionContext {
     attachment_store: Arc<dyn crate::AttachmentStore>,
     rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
     rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
+    mode_sidecar: Option<crate::ModeTurnSidecarHandle>,
 }
 
 impl ModeExecutionContext {
@@ -255,6 +256,12 @@ impl ModeExecutionContext {
 
     pub fn rlm_chronological_projection(&self) -> Arc<crate::ChronologicalProjection> {
         Arc::clone(&self.rlm_chronological_projection)
+    }
+
+    pub fn mode_sidecar<T: 'static>(&self) -> Option<&T> {
+        self.mode_sidecar
+            .as_ref()
+            .and_then(|sidecar| sidecar.as_any().downcast_ref::<T>())
     }
 
     pub async fn call_tool(
@@ -1131,6 +1138,7 @@ impl Session {
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
         rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
+        mode_sidecar: Option<crate::ModeTurnSidecarHandle>,
     ) -> ModeExecutionContext {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
@@ -1151,6 +1159,7 @@ impl Session {
             attachment_store: Arc::clone(&self.services.attachment_store),
             rlm_globals,
             rlm_chronological_projection,
+            mode_sidecar,
         }
     }
 

@@ -27,6 +27,7 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) session_manager: Arc<dyn RuntimeSessionHost>,
     pub(super) prompt_bridge: HostPromptBridge,
     pub(super) mode_turn_options: crate::ModeTurnOptions,
+    pub(super) mode_sidecar: Option<crate::ModeTurnSidecarHandle>,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }
 
@@ -637,6 +638,9 @@ impl RuntimeTurnDriver {
             .await?;
         let mut prompt_contributions = self.session.context_prompt_contributions().to_vec();
         prompt_contributions.extend(plugin_prompt_contributions);
+        if let Some(sidecar) = &self.mode_sidecar {
+            prompt_contributions.extend(sidecar.prompt_contributions());
+        }
         Ok(PreparedExecutionSurface {
             execution_mode,
             tool_surface,

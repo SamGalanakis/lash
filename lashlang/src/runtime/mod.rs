@@ -176,6 +176,29 @@ pub struct ProjectedBindings {
     bindings: FxHashMap<Symbol, ProjectedValue>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectedBindingError {
+    name: String,
+}
+
+impl ProjectedBindingError {
+    pub fn duplicate(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for ProjectedBindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "projected binding `{}` is already bound", self.name)
+    }
+}
+
+impl std::error::Error for ProjectedBindingError {}
+
 impl ProjectedBindings {
     pub fn new() -> Self {
         Self::default()
@@ -183,11 +206,30 @@ impl ProjectedBindings {
 
     pub fn insert(&mut self, name: impl Into<String>, value: ProjectedValue) {
         let name = name.into();
+        self.try_insert(name, value)
+            .expect("projected binding should not be inserted twice");
+    }
+
+    pub fn try_insert(
+        &mut self,
+        name: impl Into<String>,
+        value: ProjectedValue,
+    ) -> Result<(), ProjectedBindingError> {
+        let name = name.into();
+        let symbol = intern_symbol(&name);
+        if self.bindings.contains_key(&symbol) {
+            return Err(ProjectedBindingError::duplicate(name));
+        }
         self.bindings.insert(intern_symbol(&name), value);
+        Ok(())
     }
 
     fn get_symbol(&self, symbol: Symbol) -> Option<ProjectedValue> {
         self.bindings.get(&symbol).cloned()
+    }
+
+    pub fn get(&self, name: &str) -> Option<ProjectedValue> {
+        self.bindings.get(&intern_symbol(name)).cloned()
     }
 
     pub fn names(&self) -> impl Iterator<Item = String> + '_ {
@@ -6295,7 +6337,7 @@ fn image_to_json(image: &ImageValue) -> serde_json::Value {
     serde_json::Value::Object(object)
 }
 
-fn from_json(value: serde_json::Value) -> Value {
+pub fn from_json(value: serde_json::Value) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(value) => Value::Bool(value),

@@ -1567,12 +1567,7 @@ mod tests {
         );
         graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
             RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
-                set: serde_json::Map::from_iter([(
-                    "topic".to_string(),
-                    serde_json::json!("read-model"),
-                )]),
                 set_default: serde_json::Map::new(),
-                unset: Vec::new(),
             }),
         )));
 
@@ -1592,10 +1587,7 @@ mod tests {
             vec![user.id.as_str(), assistant.id.as_str()]
         );
         assert_eq!(first.tool_calls.as_slice(), &[tool_call]);
-        assert_eq!(
-            first.rlm_globals.get("topic"),
-            Some(&serde_json::json!("read-model"))
-        );
+        assert!(first.rlm_globals.is_empty());
 
         graph.append_message(text_message("m3", MessageRole::User, "again"));
         let updated = graph.read_model();
@@ -1645,12 +1637,7 @@ mod tests {
         }));
         graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
             RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
-                set: serde_json::Map::from_iter([(
-                    "topic".to_string(),
-                    serde_json::json!("chronology"),
-                )]),
                 set_default: serde_json::Map::new(),
-                unset: Vec::new(),
             }),
         )));
         graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
@@ -1717,10 +1704,7 @@ mod tests {
             }
             other => panic!("expected first history item to be a message, got {other:?}"),
         }
-        assert_eq!(
-            read_model.rlm_globals.get("topic"),
-            Some(&serde_json::json!("chronology"))
-        );
+        assert!(read_model.rlm_globals.is_empty());
         assert!(read_model.rlm_globals.get("history").is_none());
         assert!(!labels.iter().any(|label| label.contains("inactive")));
         assert!(!labels.iter().any(|label| label.contains("transient")));

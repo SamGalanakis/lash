@@ -183,6 +183,7 @@ impl RuntimeTurnDriver {
             session_event_tx.clone(),
             rlm_globals,
             rlm_chronological_projection,
+            self.mode_sidecar.clone(),
         );
         let result = mode_session
             .execute_code(

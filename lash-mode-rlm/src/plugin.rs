@@ -265,13 +265,6 @@ impl ModeSessionPlugin for RlmModeSession {
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
                     event.rlm_event()
             {
-                execution.prune_projected_names(
-                    patch
-                        .set
-                        .keys()
-                        .map(String::as_str)
-                        .chain(patch.unset.iter().map(String::as_str)),
-                );
                 execution.patch_globals(&patch, projected_globals.as_ref())?;
             }
         }
@@ -295,13 +288,6 @@ impl ModeSessionPlugin for RlmModeSession {
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
                     event.rlm_event()
             {
-                execution.prune_projected_names(
-                    patch
-                        .set
-                        .keys()
-                        .map(String::as_str)
-                        .chain(patch.unset.iter().map(String::as_str)),
-                );
                 execution.patch_globals(&patch, ctx.projected_rlm_globals())?;
             }
         }

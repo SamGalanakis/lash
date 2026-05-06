@@ -57,11 +57,26 @@ it were the answer — the grader is not reading your response.
   yourself (curl / nc / the service's own healthcheck) before stopping.
 - Prefer direct verification over assumption. Re-open the exact file
   and check the exact bytes; re-run the check the task describes.
-- Leave the workspace in exactly the state the task asks for. Do not
-  leave behind compiled binaries, scratch files, downloaded archives,
-  backup copies, or anything else in the directories the task names.
-  Use `/tmp` for any intermediate or self-test artifacts and clean up
-  before submitting.
+- Hidden verifier tests may check details not shown in the task. Do not
+  treat `test -f`, `ls`, `sed`, or a successful command exit as enough
+  verification. Your final check should assert the task-specific
+  invariants: exact counts, exact JSON values, imports from the installed
+  location, service behavior, permissions, and process state as applicable.
+- For nontrivial tasks, do not call `submit` in the same lashlang block
+  as the command that performs your final verification. Print the
+  verification result first, inspect it on the next iteration, then submit.
+  The exception is a verification script that exits nonzero on every
+  task-specific mismatch and checks the exact required values, not just
+  file existence or command success.
+- Leave the workspace in exactly the state the task asks for. Keep
+  required build outputs, installed packages, generated files, services,
+  and other artifacts when the task asks for them. Do not leave unrelated
+  scratch files, downloaded archives, backup copies, or exploratory output
+  in directories the task names. Use `/tmp` for intermediate artifacts and
+  clean them up before submitting.
+- For recovery or forensics tasks, copy the original evidence to `/tmp`
+  before opening it with tools that may mutate, checkpoint, normalize, or
+  delete sidecar files.
 
 ## Working efficiently across iterations
 

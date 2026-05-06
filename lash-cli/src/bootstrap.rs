@@ -12,7 +12,7 @@ use lash_plugin_ui_activity::UiActivityPluginFactory;
 use lash_provider_openai::OpenAiGenericProvider;
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::Value as JsonValue;
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::interactive::run_app;
@@ -152,10 +152,11 @@ fn parse_rlm_var_arg(raw: &str) -> Result<(String, JsonValue), String> {
     Ok((name.to_string(), value))
 }
 
-fn resolve_rlm_globals_patch(
+fn resolve_rlm_projected_bindings(
     args: &Args,
-) -> Result<Option<lash_rlm_types::RlmGlobalsPatchPluginBody>, String> {
-    let mut set = JsonMap::new();
+) -> Result<Option<lash_mode_rlm::RlmProjectedBindings>, String> {
+    let mut bindings = lash_mode_rlm::RlmProjectedBindings::new();
+    let mut has_bindings = false;
     if let Some(path) = &args.rlm_vars_file {
         let raw = std::fs::read_to_string(path)
             .map_err(|err| format!("Could not read `--rlm-vars-file {}`: {err}", path.display()))?;
@@ -171,30 +172,25 @@ fn resolve_rlm_globals_patch(
                 path.display()
             )
         })?;
-        set.extend(object.clone());
+        for (name, value) in object {
+            bindings = bindings
+                .bind_json(name.clone(), value.clone())
+                .map_err(|err| err.to_string())?;
+            has_bindings = true;
+        }
     }
     for raw in &args.rlm_var {
         let (name, value) = parse_rlm_var_arg(raw)?;
-        set.insert(name, value);
+        bindings = bindings
+            .bind_json(name, value)
+            .map_err(|err| err.to_string())?;
+        has_bindings = true;
     }
 
-    let unset = args
-        .rlm_unset
-        .iter()
-        .map(|name| name.trim())
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-
-    let patch = lash_rlm_types::RlmGlobalsPatchPluginBody {
-        set,
-        set_default: serde_json::Map::new(),
-        unset,
-    };
-    if patch.is_empty() {
+    if !has_bindings {
         return Ok(None);
     }
-    Ok(Some(patch))
+    Ok(Some(bindings))
 }
 
 fn cli_prompt_config(
@@ -544,11 +540,12 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     } else {
         None
     };
-    let rlm_globals_patch = resolve_rlm_globals_patch(&args).map_err(anyhow::Error::msg)?;
+    let rlm_projected_bindings =
+        resolve_rlm_projected_bindings(&args).map_err(anyhow::Error::msg)?;
     let rlm_globals_supported = execution_mode == ExecutionMode::new("rlm");
-    if rlm_globals_patch.is_some() && !rlm_globals_supported {
+    if rlm_projected_bindings.is_some() && !rlm_globals_supported {
         return Err(anyhow::anyhow!(
-            "`--rlm-var`, `--rlm-vars-file`, and `--rlm-unset` require `--execution-mode rlm`."
+            "`--rlm-var` and `--rlm-vars-file` require `--execution-mode rlm`."
         ));
     }
     let instruction_source: Arc<dyn InstructionSource> =
@@ -654,18 +651,10 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let mut logger = opened_session.logger;
     let mut runtime = opened_session.runtime;
     runtime.refresh_session_tool_surface().await?;
-    if let Some(patch) = rlm_globals_patch {
-        runtime
-            .append_session_nodes(lash::AppendSessionNodesRequest {
-                nodes: vec![lash::SessionAppendNode::event(
-                    lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
-                        lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch),
-                    )),
-                )],
-                requires_ancestor_node_id: None,
-            })
-            .await
-            .map_err(|err| anyhow::anyhow!("failed to apply RLM globals patch: {err}"))?;
+    if rlm_projected_bindings.is_some() && args.print_prompt.is_none() {
+        return Err(anyhow::anyhow!(
+            "`--rlm-var` and `--rlm-vars-file` are currently supported for autonomous `--print-prompt` turns; interactive hosts should use the RLM projection API."
+        ));
     }
 
     // ── Autonomous preset: skip TUI, run session, print response to stdout ──
@@ -678,6 +667,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
                 await_background_work: args.await_background_work,
                 turn_usage_json: args.turn_usage_json.clone(),
             },
+            rlm_projected_bindings,
         )
         .await;
     }

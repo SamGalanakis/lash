@@ -194,17 +194,13 @@ struct Args {
     #[arg(long = "om-reflection-block-after-tokens", value_name = "TOKENS")]
     om_reflection_block_after_tokens: Option<usize>,
 
-    /// RLM modes only: upsert a bound variable from JSON, for example `--rlm-var input='{\"path\":\"src\"}'`
+    /// RLM modes only: project a read-only bound variable from JSON for the autonomous turn, for example `--rlm-var input='{\"path\":\"src\"}'`
     #[arg(long = "rlm-var", value_name = "NAME=JSON")]
     rlm_var: Vec<String>,
 
-    /// RLM modes only: load a JSON object of bound variables from a file and upsert them before the next turn
+    /// RLM modes only: load JSON object read-only projections for the autonomous turn
     #[arg(long = "rlm-vars-file", value_name = "PATH")]
     rlm_vars_file: Option<std::path::PathBuf>,
-
-    /// RLM modes only: remove a previously bound variable before the next turn
-    #[arg(long = "rlm-unset", value_name = "NAME")]
-    rlm_unset: Vec<String>,
 
     /// Base URL for the LLM API
     #[arg(long, default_value = "")]

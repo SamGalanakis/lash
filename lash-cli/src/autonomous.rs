@@ -309,11 +309,15 @@ pub(crate) async fn run_autonomous(
     prompt: String,
     skills: SkillCatalog,
     persistence: AutonomousPersistenceContext,
+    rlm_projected_bindings: Option<lash_mode_rlm::RlmProjectedBindings>,
 ) -> anyhow::Result<()> {
     let before_usage = runtime.usage_report();
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
     let mut runtime = runtime;
     let mut turn_input = make_turn_input(&prepared);
+    if let Some(bindings) = rlm_projected_bindings {
+        turn_input = lash_mode_rlm::RlmTurnInputExt::rlm_project(turn_input, bindings)?;
+    }
     let mut renderer = AutonomousRenderer::new();
     let mut stream_id = 1;
     let (mut done, cancel) = loop {

@@ -13,20 +13,20 @@ use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::plugin::PluginFactory;
 use lash::{
-    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    EmbeddedRuntimeHost, EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
+    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
+    EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
     PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot, PromptTemplate,
     PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
-    RuntimePersistence, SessionAppendNode, SessionEvent, SessionPolicy, SessionUsageReport,
-    StandardContextApproach, TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput,
-    TurnInputInjectionBridge, diff_usage_reports,
+    RuntimePersistence, SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
+    diff_usage_reports,
 };
 use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
+use lash_mode_rlm::RlmTurnInputExt;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
-use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
 use lash_sqlite_store::Store;
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
@@ -652,23 +652,6 @@ async fn run_question(
     )
     .await?;
 
-    // Bind the problem as an RLM global so it sits in structured state rather
-    // than the message body. The model sees an `input = { prompt, ... }` entry
-    // in its Bound Variables preamble and can `observe input.prompt` from
-    // inside a lashlang block, which is the lash analog of the benchmark
-    // prompt input field.
-    runtime
-        .append_session_nodes(AppendSessionNodesRequest {
-            nodes: vec![SessionAppendNode::event(lash::SessionEventRecord::Mode(
-                lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(build_globals_patch(
-                    &question,
-                ))),
-            ))],
-            requires_ancestor_node_id: None,
-        })
-        .await
-        .context("bind longcot input globals")?;
-
     let before_usage = runtime.usage_report();
     let started = std::time::Instant::now();
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -676,7 +659,7 @@ async fn run_question(
     let sink_trait: Arc<dyn EventSink> = sink.clone();
     let turn = runtime
         .stream_turn(
-            TurnInput {
+            (TurnInput {
                 items: vec![InputItem::Text {
                     text: LONGCOT_USER_DIRECTIVE.to_string(),
                 }],
@@ -685,7 +668,8 @@ async fn run_question(
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
-            },
+            })
+            .rlm_project(build_projected_bindings(&question)?)?,
             sink_trait.as_ref(),
             cancel,
         )
@@ -955,33 +939,30 @@ Budget discipline: you have a 50-iteration root turn limit. One monolithic try t
 /// then surfaces an `Input` record type and a "Bound Variables" entry so the
 /// model knows what's available without the prompt being duplicated in the
 /// user message.
-fn build_globals_patch(question: &LongCoTQuestion) -> RlmGlobalsPatchPluginBody {
-    let mut set = serde_json::Map::new();
-    set.insert(
-        "benchmark".to_string(),
-        json!({
-            "name": "LongCoT",
-            "question_id": question.question_id,
-            "domain": question.domain,
-            "difficulty": question.difficulty,
-            "template": question.template,
-        }),
-    );
-    set.insert(
-        "input".to_string(),
-        json!({
-            "prompt": question.prompt,
-            "question_id": question.question_id,
-            "domain": question.domain,
-            "difficulty": question.difficulty,
-            "template": question.template,
-        }),
-    );
-    RlmGlobalsPatchPluginBody {
-        set,
-        set_default: serde_json::Map::new(),
-        unset: Vec::new(),
-    }
+fn build_projected_bindings(
+    question: &LongCoTQuestion,
+) -> anyhow::Result<lash_mode_rlm::RlmProjectedBindings> {
+    Ok(lash_mode_rlm::RlmProjectedBindings::new()
+        .bind_json(
+            "benchmark",
+            json!({
+                "name": "LongCoT",
+                "question_id": question.question_id,
+                "domain": question.domain,
+                "difficulty": question.difficulty,
+                "template": question.template,
+            }),
+        )?
+        .bind_json(
+            "input",
+            json!({
+                "prompt": question.prompt,
+                "question_id": question.question_id,
+                "domain": question.domain,
+                "difficulty": question.difficulty,
+                "template": question.template,
+            }),
+        )?)
 }
 
 fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
