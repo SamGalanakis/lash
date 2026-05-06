@@ -57,42 +57,13 @@ pub use json::from_json;
 // from `vm.rs` / `compiler.rs`. These look "unused" from mod.rs's POV but
 // are load-bearing for the rest of the runtime crate.
 #[allow(unused_imports)]
-pub(crate) use access::{
-    add_assign_index_number, add_assign_value_number, assign_path, descend_index,
-    descend_record_field, is_async_handle_record, read_field, read_field_direct,
-    read_field_blocking, read_field_ref_direct, read_image_field, read_index, read_index_direct,
-    read_index_ref_direct, read_index_blocking, resolve_existing_list_assignment_index,
-    resolve_index, unwrap_tool_result,
-};
+pub(crate) use access::*;
 #[allow(unused_imports)]
-pub(crate) use format::{
-    append_stringified_value_async, append_stringified_value_direct, apply_format_async,
-    clamp_slice_bounds, compile_format_template, execute_compiled_format,
-    execute_compiled_format_blocking, execute_compiled_format_direct, normalize_slice_bound,
-    parse_format_template, push_format_literal, slice_string, stringify_value_async,
-    stringify_value_blocking, stringify_value_direct, write_number,
-};
-#[cfg(test)]
+pub(crate) use format::*;
 #[allow(unused_imports)]
-pub(crate) use format::{append_stringified_value, apply_format, stringify_value};
+pub(crate) use json::*;
 #[allow(unused_imports)]
-pub(crate) use json::{
-    image_from_json_map, image_to_json, json_number, optional_u32_field, to_json, to_json_async,
-    to_json_blocking, to_json_direct,
-};
-#[allow(unused_imports)]
-pub(crate) use ops::{
-    add_values, as_number, as_offset, as_range_bound, as_slice_bound, build_range, coerce_string,
-    compare_numbers, compare_ordered, error_value, eval_binary_values, eval_binary_values_async,
-    eval_compare_values, eval_compare_values_async, eval_number_binary_values,
-    eval_number_compare_values, eval_number_numeric_binary_value, eval_pure_expr,
-    execute_builtin, execute_builtin_blocking, execute_contains_builtin, execute_contains_direct,
-    execute_join_builtin, execute_len_builtin, execute_len_direct, execute_push_builtin,
-    execute_range_builtin, expect_arg_count, expect_bool_value, is_comparison_binary_op,
-    is_numeric_binary_op, is_truthy, is_truthy_async, iterable_values, materialize_projected_async,
-    materialize_value, numeric_binary_values, range_bounds, success, validate_range_len,
-    value_contains_projected, value_len, value_type_name,
-};
+pub(crate) use ops::*;
 pub use state::{Snapshot, State};
 use vm::IterState;
 pub use value::{

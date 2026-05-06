@@ -1444,7 +1444,7 @@ fn assign_target_contains_type_literal(target: &AssignTarget) -> bool {
 /// [`TypeExpr`]. Returns `None` when the expression contains a [`TypeExpr::Ref`]
 /// (or a nested composite that contains one) — those must be resolved at
 /// runtime via [`Instruction::ResolveTypeRef`].
-pub(crate) fn fold_type(ty: &TypeExpr) -> Option<Value> {
+fn fold_type(ty: &TypeExpr) -> Option<Value> {
     match ty {
         TypeExpr::Any => Some(interned_scalar_schema(ScalarSchemaKind::Any)),
         TypeExpr::Str => Some(interned_scalar_schema(ScalarSchemaKind::Str)),
@@ -1495,7 +1495,7 @@ pub(crate) fn fold_type(ty: &TypeExpr) -> Option<Value> {
     }
 }
 
-pub(crate) fn wrap_type_schema_value(schema: Value) -> Value {
+fn wrap_type_schema_value(schema: Value) -> Value {
     let mut wrapper = record_with_capacity(1);
     wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
     Value::Record(Arc::new(wrapper))
