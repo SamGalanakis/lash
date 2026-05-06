@@ -1091,6 +1091,18 @@ fn projected_list_bindings(name: &str, list: Arc<TestProjectedValue>) -> Project
     projected
 }
 
+#[test]
+fn projected_bindings_reject_duplicate_checked_insertions() {
+    let mut projected = ProjectedBindings::new();
+    projected
+        .try_insert("history", ProjectedValue::scalar("history", Value::Null))
+        .expect("first binding should succeed");
+    let err = projected
+        .try_insert("history", ProjectedValue::scalar("history", Value::Null))
+        .expect_err("duplicate binding should fail");
+    assert_eq!(err.name(), "history");
+}
+
 async fn exec_with_projected(
     source: &str,
     projected: &ProjectedBindings,

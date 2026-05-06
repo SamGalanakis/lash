@@ -53,8 +53,7 @@ impl RlmControlToolsProvider {
             .session_id
             .clone()
             .expect("fresh successor request sets session id");
-        request.initial_nodes =
-            rlm_seed_initial_nodes(current_snapshot.read_view().rlm_globals(), seed);
+        request.initial_nodes = rlm_seed_initial_nodes(seed);
         request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task.clone()));
         context
             .host
@@ -169,20 +168,13 @@ fn fresh_successor_request(
     }
 }
 
-fn rlm_seed_initial_nodes(
-    projected_globals: serde_json::Map<String, Value>,
-    seed: serde_json::Map<String, Value>,
-) -> Vec<SessionAppendNode> {
-    if projected_globals.is_empty() && seed.is_empty() {
+fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<SessionAppendNode> {
+    if seed.is_empty() {
         return Vec::new();
     }
     vec![SessionAppendNode::event(SessionEventRecord::Mode(
         ModeEvent::rlm(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(
-            lash_rlm_types::RlmGlobalsPatchPluginBody {
-                set: projected_globals,
-                set_default: seed,
-                unset: Vec::new(),
-            },
+            lash_rlm_types::RlmGlobalsPatchPluginBody { set_default: seed },
         )),
     ))]
 }
@@ -320,12 +312,7 @@ mod tests {
         let mut session_graph = lash::SessionGraph::default();
         session_graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
             RlmModeEvent::RlmGlobalsPatch(lash_rlm_types::RlmGlobalsPatchPluginBody {
-                set: serde_json::Map::from_iter([
-                    ("current_query".to_string(), json!("benchmark prompt")),
-                    ("iteration".to_string(), json!(27)),
-                ]),
                 set_default: serde_json::Map::from_iter([("diary".to_string(), json!([]))]),
-                unset: Vec::new(),
             }),
         )));
         let manager = Arc::new(BatonManager {
@@ -413,8 +400,6 @@ mod tests {
         let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = mode_event.rlm_event() else {
             panic!("expected RlmGlobalsPatch");
         };
-        assert_eq!(seed.set["current_query"], json!("benchmark prompt"));
-        assert_eq!(seed.set["iteration"], json!(27));
         assert_eq!(seed.set_default["x"], json!(1));
         assert_eq!(seed.set_default["query"], json!("original"));
         let extras = request

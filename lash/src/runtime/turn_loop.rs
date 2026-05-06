@@ -263,7 +263,7 @@ impl LashRuntime {
 
     async fn stream_turn_inner(
         &mut self,
-        input: TurnInput,
+        mut input: TurnInput,
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
@@ -333,7 +333,7 @@ impl LashRuntime {
         let base_messages = base_read_model.messages;
         let base_render_cache = base_read_model.prompt_render_cache;
         let mut turn_delta = Vec::new();
-        let mode = input.mode.unwrap_or(RunMode::Normal);
+        let mode = input.mode.clone().unwrap_or(RunMode::Normal);
         let mode_msg = match mode {
             RunMode::Normal => None,
         };
@@ -485,6 +485,7 @@ impl LashRuntime {
             messages,
             previous_prompt_usage,
             input.mode_turn_options.clone(),
+            input.take_mode_sidecar_handle(),
             trace_turn_id,
             turn_index,
             events,
@@ -509,6 +510,7 @@ impl LashRuntime {
         messages: crate::MessageSequence,
         _previous_prompt_usage: Option<PromptUsage>,
         mode_turn_options: Option<crate::ModeTurnOptions>,
+        mode_sidecar: Option<crate::ModeTurnSidecarHandle>,
         trace_turn_id: String,
         turn_index: usize,
         events: &dyn EventSink,
@@ -673,6 +675,7 @@ impl LashRuntime {
             mode_turn_options: mode_turn_options
                 .clone()
                 .unwrap_or_else(|| self.mode_turn_options.clone()),
+            mode_sidecar,
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let mode_run_offset = 0;

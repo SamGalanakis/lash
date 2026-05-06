@@ -337,6 +337,7 @@ dependencies = [
  "dotenvy",
  "lash",
  "lash-llm-tools",
+ "lash-mode-rlm",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
  "lash-provider-openai",

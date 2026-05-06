@@ -100,30 +100,20 @@ pub enum RlmHistoryItem {
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct RlmGlobalsPatchPluginBody {
-    #[serde(default)]
-    pub set: serde_json::Map<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub set_default: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub unset: Vec<String>,
 }
 
 impl RlmGlobalsPatchPluginBody {
     pub fn is_empty(&self) -> bool {
-        self.set.is_empty() && self.set_default.is_empty() && self.unset.is_empty()
+        self.set_default.is_empty()
     }
 }
 
 pub fn apply_globals_patch(
-    globals: &mut serde_json::Map<String, serde_json::Value>,
-    patch: &RlmGlobalsPatchPluginBody,
+    _globals: &mut serde_json::Map<String, serde_json::Value>,
+    _patch: &RlmGlobalsPatchPluginBody,
 ) {
-    for key in &patch.unset {
-        globals.remove(key);
-    }
-    for (key, value) in &patch.set {
-        globals.insert(key.clone(), value.clone());
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -228,22 +218,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projection_derives_globals_and_trajectory_from_mode_events() {
+    fn projection_ignores_executor_defaults_and_derives_trajectory_from_mode_events() {
         let first = RlmGlobalsPatchPluginBody {
-            set: serde_json::Map::from_iter([
-                ("alpha".to_string(), serde_json::json!(1)),
-                ("beta".to_string(), serde_json::json!("old")),
-            ]),
-            set_default: serde_json::Map::new(),
-            unset: Vec::new(),
-        };
-        let second = RlmGlobalsPatchPluginBody {
-            set: serde_json::Map::from_iter([("beta".to_string(), serde_json::json!("new"))]),
             set_default: serde_json::Map::from_iter([(
                 "executor_only".to_string(),
                 serde_json::json!("ignored by projection"),
             )]),
-            unset: vec!["alpha".to_string()],
+        };
+        let second = RlmGlobalsPatchPluginBody {
+            set_default: serde_json::Map::from_iter([(
+                "diary".to_string(),
+                serde_json::json!("ignored by projection"),
+            )]),
         };
         let entry = RlmTrajectoryEntry {
             id: "step-1".to_string(),
@@ -258,11 +244,7 @@ mod tests {
             RlmModeEvent::RlmGlobalsPatch(second),
         ]);
 
-        assert_eq!(projection.globals.get("alpha"), None);
-        assert_eq!(
-            projection.globals.get("beta"),
-            Some(&serde_json::json!("new"))
-        );
+        assert!(projection.globals.is_empty());
         assert_eq!(projection.trajectory, vec![entry]);
     }
 }

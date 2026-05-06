@@ -18,11 +18,13 @@ mod turn_loop;
 mod turn_progress;
 mod usage;
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -133,6 +135,74 @@ pub struct TurnInput {
     /// this empty and the runtime generates one per outer turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_turn_id: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ModeTurnSidecarHandle(Arc<dyn ModeTurnSidecar>);
+
+impl ModeTurnSidecarHandle {
+    pub fn new(sidecar: impl ModeTurnSidecar + 'static) -> Self {
+        Self(Arc::new(sidecar))
+    }
+
+    pub fn as_any(&self) -> &dyn Any {
+        self.0.as_any()
+    }
+
+    pub fn prompt_contributions(&self) -> Vec<crate::PromptContribution> {
+        self.0.prompt_contributions()
+    }
+}
+
+impl fmt::Debug for ModeTurnSidecarHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ModeTurnSidecarHandle(..)")
+    }
+}
+
+pub trait ModeTurnSidecar: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+
+    fn prompt_contributions(&self) -> Vec<crate::PromptContribution> {
+        Vec::new()
+    }
+}
+
+static MODE_TURN_SIDECARS: OnceLock<StdMutex<HashMap<String, ModeTurnSidecarHandle>>> =
+    OnceLock::new();
+
+fn mode_turn_sidecars() -> &'static StdMutex<HashMap<String, ModeTurnSidecarHandle>> {
+    MODE_TURN_SIDECARS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+impl TurnInput {
+    pub fn set_mode_sidecar(&mut self, sidecar: ModeTurnSidecarHandle) {
+        let turn_id = self
+            .trace_turn_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone();
+        if let Ok(mut sidecars) = mode_turn_sidecars().lock() {
+            sidecars.insert(turn_id, sidecar);
+        }
+    }
+
+    pub fn mode_sidecar_handle(&self) -> Option<ModeTurnSidecarHandle> {
+        self.trace_turn_id.as_ref().and_then(|turn_id| {
+            mode_turn_sidecars()
+                .lock()
+                .ok()
+                .and_then(|sidecars| sidecars.get(turn_id).cloned())
+        })
+    }
+
+    pub(crate) fn take_mode_sidecar_handle(&mut self) -> Option<ModeTurnSidecarHandle> {
+        self.trace_turn_id.as_ref().and_then(|turn_id| {
+            mode_turn_sidecars()
+                .lock()
+                .ok()
+                .and_then(|mut sidecars| sidecars.remove(turn_id))
+        })
+    }
 }
 
 #[derive(Clone, Debug)]

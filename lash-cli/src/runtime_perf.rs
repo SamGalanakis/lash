@@ -15,8 +15,8 @@ use lash::*;
 use lash_default_tools::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
+use lash_mode_rlm::RlmTurnInputExt;
 use lash_provider_openai::OpenAiGenericProvider;
-use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent};
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -866,20 +866,22 @@ async fn run_once(
         let turn_before_alloc = allocator_stats();
         let turn_before_memory = process_memory_sample();
         let turn_started = Instant::now();
+        let mut turn_input = TurnInput {
+            items: vec![InputItem::Text {
+                text: benchmark_prompt(scenario, turn_index),
+            }],
+            image_blobs: Default::default(),
+            user_input: None,
+            mode: Some(RunMode::Normal),
+            mode_turn_options: None,
+            trace_turn_id: None,
+        };
+        if matches!(scenario, RuntimePerfScenario::RlmGlobals) {
+            turn_input =
+                turn_input.rlm_project(rlm_perf_projected_bindings(scenario, turn_index)?)?;
+        }
         let turn = runtime
-            .run_turn_assembled(
-                TurnInput {
-                    items: vec![InputItem::Text {
-                        text: benchmark_prompt(scenario, turn_index),
-                    }],
-                    image_blobs: Default::default(),
-                    user_input: None,
-                    mode: Some(RunMode::Normal),
-                    mode_turn_options: None,
-                    trace_turn_id: None,
-                },
-                CancellationToken::new(),
-            )
+            .run_turn_assembled(turn_input, CancellationToken::new())
             .await
             .with_context(|| {
                 format!(
@@ -1236,39 +1238,6 @@ async fn seed_runtime_state(
         .await
         .map_err(|err| anyhow::anyhow!("seed historical messages: {err}"))?;
 
-    if matches!(scenario, RuntimePerfScenario::RlmGlobals) {
-        let mut set = serde_json::Map::new();
-        set.insert(
-            "benchmark".to_string(),
-            serde_json::json!({
-                "name": "runtime_perf",
-                "scenario": scenario.name(),
-            }),
-        );
-        set.insert(
-            "input".to_string(),
-            serde_json::json!({
-                "goal": "measure runtime overhead",
-                "path": "lash/src/runtime",
-            }),
-        );
-        runtime
-            .append_session_nodes(AppendSessionNodesRequest {
-                nodes: vec![SessionAppendNode::event(SessionEventRecord::Mode(
-                    lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(
-                        RlmGlobalsPatchPluginBody {
-                            set,
-                            set_default: serde_json::Map::new(),
-                            unset: Vec::new(),
-                        },
-                    )),
-                ))],
-                requires_ancestor_node_id: None,
-            })
-            .await
-            .map_err(|err| anyhow::anyhow!("seed RLM globals patch: {err}"))?;
-    }
-
     if matches!(scenario, RuntimePerfScenario::ObservationalMemory) {
         let observed_through_message_id = runtime
             .read_view()
@@ -1305,42 +1274,39 @@ async fn prepare_turn(
         return Ok(());
     }
 
-    let mut set = serde_json::Map::new();
-    set.insert(
-        "input".to_string(),
-        serde_json::json!({
-            "turn": turn_index + 1,
-            "goal": "measure runtime overhead across a longer same-session chat",
-            "focus": [
-                "checkpoint reuse",
-                "persist_turn allocation churn",
-                "steady-state graph growth"
-            ],
-        }),
-    );
-    set.insert(
-        "chat".to_string(),
-        serde_json::json!({
-            "turn_count": turn_index + 1,
-            "scenario": scenario.name(),
-            "mode": "runtime_perf",
-        }),
-    );
+    let _ = runtime;
+    let _ = turn_index;
+    Ok(())
+}
 
-    runtime
-        .append_session_nodes(AppendSessionNodesRequest {
-            nodes: vec![SessionAppendNode::event(SessionEventRecord::Mode(
-                lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
-                    set,
-                    set_default: serde_json::Map::new(),
-                    unset: Vec::new(),
-                })),
-            ))],
-            requires_ancestor_node_id: None,
-        })
-        .await
-        .map(|_| ())
-        .map_err(|err| anyhow::anyhow!("seed RLM globals patch for turn {}: {err}", turn_index + 1))
+fn rlm_perf_projected_bindings(
+    scenario: RuntimePerfScenario,
+    turn_index: usize,
+) -> anyhow::Result<lash_mode_rlm::RlmProjectedBindings> {
+    Ok(lash_mode_rlm::RlmProjectedBindings::new()
+        .bind_json(
+            "benchmark",
+            serde_json::json!({
+                "name": "runtime_perf",
+                "scenario": scenario.name(),
+            }),
+        )?
+        .bind_json(
+            "input",
+            serde_json::json!({
+                "turn": turn_index + 1,
+                "goal": "measure runtime overhead across a longer same-session chat",
+                "path": "lash/src/runtime",
+            }),
+        )?
+        .bind_json(
+            "chat",
+            serde_json::json!({
+                "turn_count": turn_index + 1,
+                "scenario": scenario.name(),
+                "mode": "runtime_perf",
+            }),
+        )?)
 }
 
 fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize) -> String {

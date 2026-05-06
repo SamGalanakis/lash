@@ -18,6 +18,7 @@ use lash::{
 };
 use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
+use lash_mode_rlm::RlmTurnInputExt;
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination};
 use lash_sqlite_store::Store;
 use lash_subagents::{
@@ -143,20 +144,22 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         .await
         .context("open runtime")?;
 
-    runtime
-        .append_session_nodes(AppendSessionNodesRequest {
-            nodes: vec![SessionAppendNode::event(SessionEventRecord::Mode(
-                lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(build_globals_patch(&request))),
-            ))],
-            requires_ancestor_node_id: None,
-        })
-        .await
-        .context("bind clbench globals")?;
+    if let Some(defaults) = build_globals_patch(&request) {
+        runtime
+            .append_session_nodes(AppendSessionNodesRequest {
+                nodes: vec![SessionAppendNode::event(SessionEventRecord::Mode(
+                    lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(defaults)),
+                ))],
+                requires_ancestor_node_id: None,
+            })
+            .await
+            .context("bind clbench defaults")?;
+    }
 
     let sink = NoopEventSink;
     let followed = runtime
         .stream_turn_following_handoffs(
-            TurnInput {
+            (TurnInput {
                 items: vec![InputItem::Text {
                     text: clbench_turn_text(&request),
                 }],
@@ -171,7 +174,8 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                     },
                 )?),
                 trace_turn_id: Some(format!("clbench-turn-{:04}", request.iteration)),
-            },
+            })
+            .rlm_project(build_projected_bindings(&request)?)?,
             &sink as &dyn EventSink,
             tokio_util::sync::CancellationToken::new(),
         )
@@ -331,27 +335,28 @@ fn clbench_list_async_handles_tool_definition() -> ToolDefinition {
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
-fn build_globals_patch(request: &RunnerRequest) -> RlmGlobalsPatchPluginBody {
-    let mut set = serde_json::Map::new();
+fn build_globals_patch(request: &RunnerRequest) -> Option<RlmGlobalsPatchPluginBody> {
     let mut set_default = serde_json::Map::new();
     if request.init_diary {
         set_default.insert("diary".to_string(), Value::Array(Vec::new()));
     }
-    set.insert("iteration".to_string(), json!(request.iteration));
-    set.insert("current_query".to_string(), json!(request.prompt));
-    set.insert(
-        "current_feedback".to_string(),
-        request
-            .feedback
-            .as_ref()
-            .map(|feedback| json!(feedback))
-            .unwrap_or(Value::Null),
-    );
-    RlmGlobalsPatchPluginBody {
-        set,
-        set_default,
-        unset: Vec::new(),
-    }
+    (!set_default.is_empty()).then_some(RlmGlobalsPatchPluginBody { set_default })
+}
+
+fn build_projected_bindings(
+    request: &RunnerRequest,
+) -> anyhow::Result<lash_mode_rlm::RlmProjectedBindings> {
+    Ok(lash_mode_rlm::RlmProjectedBindings::new()
+        .bind_json("iteration", json!(request.iteration))?
+        .bind_json("current_query", json!(request.prompt))?
+        .bind_json(
+            "current_feedback".to_string(),
+            request
+                .feedback
+                .as_ref()
+                .map(|feedback| json!(feedback))
+                .unwrap_or(Value::Null),
+        )?)
 }
 
 fn resolve_provider(provider_id: Option<&str>) -> Result<ProviderHandle> {

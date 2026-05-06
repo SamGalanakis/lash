@@ -7,6 +7,7 @@ mod control_tools;
 mod driver;
 mod executor;
 mod plugin;
+mod projected_bindings;
 mod protocol;
 mod rlm_support;
 mod stream_mask;
@@ -14,6 +15,7 @@ mod stream_mask;
 pub use control_tools::continue_as_tool_definition;
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
+pub use projected_bindings::{RlmProjectedBindings, RlmTurnInputExt};
 pub use protocol::{
     RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section,
     rlm_execution_section_with_features,
